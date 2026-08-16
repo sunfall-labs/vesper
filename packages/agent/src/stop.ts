@@ -1,0 +1,124 @@
+import { Effect, Schema } from 'effect';
+import type { Response, Tool } from 'effect/unstable/ai';
+
+// When to stop looping. Kept as a first-class value rather than a boolean
+// option because the interesting policies are compositions: "stop when the
+// model stops calling tools, OR after 20 steps, OR when a terminal tool has
+// been called".
+//
+// A stop condition is an Effect so a policy can consult a service — a budget
+// tracker, a deadline, an approval queue — without the loop needing to know
+// which.
+
+export interface State<Tools extends Record<string, Tool.Any>> {
+  /** 1 for the first model call. */
+  readonly step: number;
+  /** Tool calls the turn just requested. */
+  readonly toolCalls: ReadonlyArray<Response.ToolCallPartEncoded>;
+  /** Cumulative token usage across every step of this run. */
+  readonly usage: Usage;
+  readonly _tools?: Tools;
+}
+
+/**
+ * Cumulative token usage for a run.
+ *
+ * A `Schema` rather than a plain interface because it crosses boundaries —
+ * it rides on `Completed` events, and a persisted or transported run needs
+ * to decode it. The same-name interface keeps call sites reading naturally.
+ */
+export const Usage = Schema.Struct({
+  input: Schema.Number,
+  output: Schema.Number,
+});
+export interface Usage extends Schema.Struct.Type<typeof Usage.fields> {}
+
+export type StopCondition<Tools extends Record<string, Tool.Any>> = (
+  state: State<Tools>,
+) => Effect.Effect<boolean>;
+
+/**
+ * The default: stop as soon as a turn requests no tools.
+ *
+ * A turn with no tool calls is the model saying it is finished; continuing
+ * would prompt it to talk to itself.
+ */
+export const noToolCalls =
+  <Tools extends Record<string, Tool.Any>>(): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed(state.toolCalls.length === 0);
+
+/**
+ * Hard step ceiling.
+ *
+ * Always compose this with a real condition. A loop bounded only by step
+ * count will happily burn the whole budget on a model stuck in a two-tool
+ * cycle, and a loop with no ceiling at all will do it forever.
+ */
+export const maxSteps =
+  <Tools extends Record<string, Tool.Any>>(
+    limit: number,
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed(state.step >= limit);
+
+/** Stop once cumulative output tokens cross a budget. */
+export const maxOutputTokens =
+  <Tools extends Record<string, Tool.Any>>(
+    limit: number,
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed(state.usage.output >= limit);
+
+/**
+ * Stop as soon as a named tool has been called — the "terminal tool" pattern.
+ *
+ * The name is keyed to the toolkit rather than taken as a bare `string`, so a
+ * condition naming a tool the agent does not have is a compile error. That is
+ * worth the extra machinery: the failure it prevents is silent. A misspelled
+ * terminal tool never matches, the condition never fires, and the run stops
+ * only when some other clause in the composition happens to — which looks
+ * like a model behaving oddly, not like a typo.
+ */
+export const toolCalled =
+  <Tools extends Record<string, Tool.Any>>(
+    name: keyof Tools & string,
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed(state.toolCalls.some((call) => call.name === name));
+
+/** Stop when any condition holds. */
+export const any =
+  <Tools extends Record<string, Tool.Any>>(
+    ...conditions: ReadonlyArray<StopCondition<Tools>>
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.reduce(
+      conditions,
+      () => false,
+      (stop, condition) => (stop ? Effect.succeed(true) : condition(state)),
+    );
+
+/** Stop only when every condition holds. */
+export const all =
+  <Tools extends Record<string, Tool.Any>>(
+    ...conditions: ReadonlyArray<StopCondition<Tools>>
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.reduce(
+      conditions,
+      () => true,
+      (stop, condition) => (stop ? condition(state) : Effect.succeed(false)),
+    );
+
+/**
+ * What an agent uses when none is configured.
+ *
+ * The step ceiling is not a tuning parameter so much as a circuit breaker:
+ * a model in a tool-call loop with no ceiling is an unbounded bill.
+ */
+export const defaultCondition = <
+  Tools extends Record<string, Tool.Any>,
+>(): StopCondition<Tools> => any(noToolCalls<Tools>(), maxSteps<Tools>(32));
+
+export * as Stop from './stop.js';

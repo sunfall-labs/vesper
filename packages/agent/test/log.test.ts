@@ -1,0 +1,403 @@
+import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
+import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
+import {
+  LanguageModel,
+  type Response,
+  Tool,
+  Toolkit,
+} from 'effect/unstable/ai';
+import { describe, expect, it } from 'vitest';
+
+import { Agent } from '../src/agent.js';
+import { AgentLog } from '../src/log.js';
+
+// What these have to prove, beyond "records appear":
+//
+//   - text is coalesced, so the row count is a function of the conversation
+//     and not of the provider's chunking;
+//   - the append lands *before* the consumer sees the event it describes;
+//   - an agent with no `LogStore` is unchanged, at the type level as well as
+//     at runtime;
+//   - `streamFrom` follows live rather than only replaying history.
+//
+// Each of those is mutation-checked; the mutations are named in the report
+// for this change.
+
+const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
+  type: 'finish' as const,
+  reason,
+  usage: {
+    inputTokens: { total: 10, uncached: 10, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 4 },
+  },
+});
+
+const text = (
+  id: string,
+  deltas: ReadonlyArray<string>,
+): Response.StreamPartEncoded[] => [
+  { type: 'text-start' as const, id },
+  ...deltas.map((delta) => ({ type: 'text-delta' as const, id, delta })),
+  { type: 'text-end' as const, id },
+];
+
+/** Turn one: three deltas of one sentence, then a tool call. */
+const callingTurn: Response.StreamPartEncoded[] = [
+  ...text('a', ['he', 'l', 'lo']),
+  {
+    type: 'tool-call' as const,
+    id: 'call-1',
+    name: 'lookup',
+    params: { id: '42' },
+  },
+  finish('tool-calls'),
+];
+
+/** Turn two: an answer and nothing else, which is what stops the loop. */
+const answeringTurn: Response.StreamPartEncoded[] = [
+  ...text('b', ['do', 'ne']),
+  finish(),
+];
+
+const scripted = (
+  turns: ReadonlyArray<ReadonlyArray<Response.StreamPartEncoded>>,
+) =>
+  Layer.effect(
+    LanguageModel.LanguageModel,
+    Effect.gen(function* () {
+      const calls = yield* Ref.make(0);
+      return yield* LanguageModel.make({
+        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+        streamText: () =>
+          Stream.unwrap(
+            Effect.gen(function* () {
+              const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
+              return Stream.fromIterable(
+                turns[Math.min(index, turns.length - 1)]!,
+              );
+            }),
+          ),
+      });
+    }),
+  );
+
+const lookup = Tool.make('lookup', {
+  description: 'look an order up',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ status: Schema.String }),
+});
+
+const agent = Agent.make({
+  name: 'test',
+  instructions: 'be terse',
+  toolkit: Toolkit.make(lookup),
+}).withHandlers({
+  lookup: ({ id }) => Effect.succeed({ status: `shipped:${id}` }),
+});
+
+const CONVERSATION = 'conversation-1';
+const PATH = AgentLog.pathFor(CONVERSATION);
+
+/** Defects fail the test with their real cause rather than a cast. */
+const run = <A, E>(
+  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+): Promise<A> =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.orDie,
+      Effect.provide(scripted([callingTurn, answeringTurn])),
+      Effect.provide(LogStoreMemory.layer),
+      Effect.scoped,
+    ),
+  );
+
+const readAll = Effect.fn('test.readAll')(function* (path = PATH) {
+  const store = yield* LogStore.Service;
+  const page = yield* store.read(path, { limit: 1000 });
+  return page.records;
+});
+
+const tags = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
+  records.map((envelope) => envelope.record._tag);
+
+const textsOf = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
+  records.flatMap((envelope) =>
+    envelope.record._tag === 'Text' ? [envelope.record] : [],
+  );
+
+describe('recording a run', () => {
+  it('writes one record per thing that happened, in order', async () => {
+    const written = await run(
+      Effect.gen(function* () {
+        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        return yield* readAll();
+      }),
+    );
+
+    expect(tags(written)).toEqual([
+      'RunStarted',
+      'Text',
+      'ToolCall',
+      'ToolOutcome',
+      'TurnFinished',
+      'Text',
+      'TurnFinished',
+      'Completed',
+      'RunSettled',
+    ]);
+  });
+
+  // The coalescing claim, stated as a number. Three deltas arrived; one row
+  // was written. Appending per delta makes this eight rows of text.
+  it('coalesces contiguous deltas into one Text record', async () => {
+    const written = await run(
+      Effect.gen(function* () {
+        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        return yield* readAll();
+      }),
+    );
+
+    expect(textsOf(written)).toEqual([
+      { _tag: 'Text', step: 1, text: 'hello' },
+      { _tag: 'Text', step: 2, text: 'done' },
+    ]);
+  });
+
+  it('records what the tool was asked and what it answered', async () => {
+    const written = await run(
+      Effect.gen(function* () {
+        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        return yield* readAll();
+      }),
+    );
+
+    expect(written.map((envelope) => envelope.record)).toContainEqual({
+      _tag: 'ToolCall',
+      step: 1,
+      id: 'call-1',
+      name: 'lookup',
+      params: { id: '42' },
+    });
+    expect(written.map((envelope) => envelope.record)).toContainEqual({
+      _tag: 'ToolOutcome',
+      step: 1,
+      id: 'call-1',
+      name: 'lookup',
+      outcome: 'success',
+      result: { status: 'shipped:42' },
+    });
+  });
+
+  it('records the run’s input and the result the caller got', async () => {
+    const observed = await run(
+      Effect.gen(function* () {
+        const result = yield* agent
+          .recordingTo(CONVERSATION)
+          .run('where is order 42?')
+          .pipe(Effect.orDie);
+        return { result, written: yield* readAll() };
+      }),
+    );
+
+    expect(observed.written[0]?.record).toMatchObject({
+      _tag: 'RunStarted',
+      agent: 'test',
+    });
+    expect(observed.written.map((envelope) => envelope.record)).toContainEqual(
+      expect.objectContaining({
+        _tag: 'Completed',
+        text: observed.result.text,
+        steps: observed.result.steps,
+        usage: observed.result.usage,
+      }),
+    );
+  });
+
+  // The ordering rule that replaced `@sunfall/vesper-durable`'s "withhold `finish`
+  // until the checkpoint is durable": a consumer must never act on something
+  // the durable record does not yet contain. Forking the append, or moving it
+  // after the emit, breaks exactly this.
+  it('has already written the record when the consumer sees the event', async () => {
+    const atToolCall = await run(
+      Effect.gen(function* () {
+        const store = yield* LogStore.Service;
+        const seen: string[] = [];
+
+        yield* agent
+          .recordingTo(CONVERSATION)
+          .stream('hi')
+          .pipe(
+            Stream.runForEach((event) =>
+              event._tag === 'Part' &&
+              (event.part as Response.StreamPartEncoded).type === 'tool-call'
+                ? Effect.gen(function* () {
+                    const page = yield* store.read(PATH, { limit: 1000 });
+                    seen.push(...tags(page.records));
+                  })
+                : Effect.void,
+            ),
+            Effect.orDie,
+          );
+
+        return seen;
+      }),
+    );
+
+    expect(atToolCall).toEqual(['RunStarted', 'Text', 'ToolCall']);
+  });
+});
+
+describe('logging is optional', () => {
+  it('runs an unrecorded agent with no LogStore in context', async () => {
+    // No `LogStoreMemory.layer` anywhere in this pipeline. If `run` required
+    // a `LogStore`, this would not compile — which is the assertion.
+    const result = await Effect.runPromise(
+      agent
+        .run('hi')
+        .pipe(
+          Effect.orDie,
+          Effect.provide(scripted([callingTurn, answeringTurn])),
+        ),
+    );
+
+    expect(result.text).toBe('done');
+  });
+
+  it('writes nothing for a run that was never told where to write', async () => {
+    const written = await run(
+      Effect.gen(function* () {
+        yield* agent.run('hi').pipe(Effect.orDie);
+        const store = yield* LogStore.Service;
+        return yield* store.meta(PATH);
+      }),
+    );
+
+    // Not "an empty stream" — no stream at all. A `LogStore` being reachable
+    // is not consent to write to it.
+    expect(written._tag).toBe('None');
+  });
+
+  it('puts LogStore in the type only after recordingTo', () => {
+    type Plain = Agent.Requires<typeof agent>;
+    type Recording = Agent.Requires<ReturnType<typeof agent.recordingTo>>;
+
+    // Both fail to compile if `recordingTo` stops changing the requirement
+    // channel, which is what keeps this from being a comment.
+    const plainIsFree: LogStore.Service extends Plain ? false : true = true;
+    const recordingNeedsIt: LogStore.Service extends Recording ? true : false =
+      true;
+
+    expect([plainIsFree, recordingNeedsIt]).toEqual([true, true]);
+  });
+});
+
+describe('Agent.streamFrom', () => {
+  it('replays what was recorded, oldest first', async () => {
+    const replayed = await run(
+      Effect.gen(function* () {
+        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+
+        return yield* Agent.streamFrom(CONVERSATION).pipe(
+          Stream.take(8),
+          Stream.runCollect,
+          Effect.orDie,
+        );
+      }),
+    );
+
+    expect(tags(replayed)).toEqual([
+      'RunStarted',
+      'Text',
+      'ToolCall',
+      'ToolOutcome',
+      'TurnFinished',
+      'Text',
+      'TurnFinished',
+      'Completed',
+    ]);
+  });
+
+  it('resumes after an offset rather than from the beginning', async () => {
+    const replayed = await run(
+      Effect.gen(function* () {
+        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        const written = yield* readAll();
+
+        return yield* Agent.streamFrom(CONVERSATION, written[2]!.offset).pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.orDie,
+        );
+      }),
+    );
+
+    expect(tags(replayed)).toEqual(['ToolOutcome']);
+  });
+
+  // The half that makes it a tail and not a query. The reader is held open
+  // until it has drained every historical record, and only then is a new one
+  // appended — so this record cannot reach it through catch-up.
+  it('follows records appended after the reader caught up', async () => {
+    const late = await run(
+      Effect.gen(function* () {
+        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        const store = yield* LogStore.Service;
+        const historical = (yield* readAll()).length;
+
+        const caughtUp = yield* Deferred.make<void>();
+        const seen = yield* Ref.make(0);
+
+        const reader = yield* Agent.streamFrom(CONVERSATION).pipe(
+          Stream.tap(() =>
+            Effect.gen(function* () {
+              const count = yield* Ref.updateAndGet(seen, (n) => n + 1);
+              if (count === historical) {
+                yield* Deferred.succeed(caughtUp, undefined);
+              }
+            }),
+          ),
+          Stream.take(historical + 1),
+          Stream.runCollect,
+          Effect.orDie,
+          Effect.forkChild,
+        );
+
+        yield* Deferred.await(caughtUp);
+
+        const claim = yield* store
+          .acquire(PATH, 'late-producer')
+          .pipe(Effect.orDie);
+        yield* store
+          .append({
+            path: PATH,
+            producerId: claim.producerId,
+            epoch: claim.epoch,
+            sequence: claim.nextSequence,
+            records: [
+              {
+                conversationId: CONVERSATION,
+                timestamp: 1_700_000_000_000,
+                record: { _tag: 'Text', step: 3, text: 'appended later' },
+              },
+            ],
+          })
+          .pipe(Effect.orDie);
+
+        return yield* Fiber.join(reader);
+      }),
+    );
+
+    expect(late[late.length - 1]?.record).toMatchObject({
+      text: 'appended later',
+    });
+  });
+
+  it('starts from the beginning by default', () => {
+    // The default is the sentinel, not offset zero: `after` is exclusive, so
+    // starting at a real offset would skip the first record.
+    expect(LogOffset.START).toBe('-1');
+  });
+});

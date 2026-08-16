@@ -1,0 +1,69 @@
+{
+  "name": "@sunfall/vesper-workspace",
+  "version": "0.1.0-alpha.1",
+  "description": "Files and a shell behind one swappable driver, with a ready-made agent toolkit over it.",
+  "keywords": [
+    "agent",
+    "effect",
+    "filesystem",
+    "sandbox",
+    "tools"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/workspace"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./driver": {
+      "types": "./dist/driver.d.ts",
+      "default": "./dist/driver.js"
+    },
+    "./glob": {
+      "types": "./dist/glob.d.ts",
+      "default": "./dist/glob.js"
+    },
+    "./layer-local": {
+      "types": "./dist/layer-local.d.ts",
+      "default": "./dist/layer-local.js"
+    },
+    "./output": {
+      "types": "./dist/output.d.ts",
+      "default": "./dist/output.js"
+    },
+    "./path": {
+      "types": "./dist/path.d.ts",
+      "default": "./dist/path.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "default": "./dist/tools.js"
+    },
+    "./workspace-contract": {
+      "types": "./dist/workspace-contract.d.ts",
+      "default": "./dist/workspace-contract.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.103"
+  }
+}

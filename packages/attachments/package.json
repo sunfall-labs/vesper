@@ -1,0 +1,57 @@
+{
+  "name": "@sunfall/vesper-attachments",
+  "version": "0.1.0-alpha.1",
+  "description": "Content-addressed blob storage for agent conversations, verified on read.",
+  "keywords": [
+    "attachments",
+    "content-addressed",
+    "effect",
+    "storage",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/attachments"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./ref": {
+      "types": "./dist/ref.d.ts",
+      "default": "./dist/ref.js"
+    },
+    "./attachment-store": {
+      "types": "./dist/attachment-store.d.ts",
+      "default": "./dist/attachment-store.js"
+    },
+    "./layer-memory": {
+      "types": "./dist/layer-memory.d.ts",
+      "default": "./dist/layer-memory.js"
+    },
+    "./attachment-store-contract": {
+      "types": "./dist/attachment-store-contract.d.ts",
+      "default": "./dist/attachment-store-contract.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.103"
+  }
+}

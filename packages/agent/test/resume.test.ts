@@ -1,0 +1,576 @@
+import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
+import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { Effect, Layer, Ref, Schema, Stream } from 'effect';
+import {
+  type LanguageModel as LanguageModelNamespace,
+  LanguageModel,
+  Prompt,
+  type Response,
+  Tool,
+  Toolkit,
+} from 'effect/unstable/ai';
+import { beforeEach, describe, expect, it } from 'vitest';
+
+import { Agent } from '../src/agent.js';
+import { AgentEvents } from '../src/event.js';
+import { AgentHistory } from '../src/history.js';
+import { AgentLog } from '../src/log.js';
+
+// Resumption from the log — the writer half, and the parity evidence for
+// deleting `@sunfall/vesper-durable`'s checkpointer.
+//
+// The claim being tested is the one the roadmap rests the whole prune on: a
+// conversation resumed from records does not re-pay the provider for turns it
+// already completed, and does not re-run the tool calls those turns made.
+// Checkpointing could offer the first of those, and only by replaying the loop
+// from turn one to get there; it never offered the second, because tools run
+// past the checkpoint boundary.
+//
+// Two things make these assertions non-vacuous rather than a restatement of
+// the implementation:
+//
+//   - the provider counts the prompts it is handed, so "was not re-asked" is a
+//     number, not an absence;
+//   - the tool handler counts its own invocations, so "was not re-run" is too.
+//
+// Mutation-checked: making `AgentHistory.messagesFrom` return `Prompt.empty`
+// fails `continues from what the crashed run left`, `carries the conversation
+// into the next turn`, and every reconstruction case below.
+
+const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
+  type: 'finish' as const,
+  reason,
+  usage: {
+    inputTokens: { total: 10, uncached: 10, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 4 },
+  },
+});
+
+const text = (
+  id: string,
+  deltas: ReadonlyArray<string>,
+): Response.StreamPartEncoded[] => [
+  { type: 'text-start' as const, id },
+  ...deltas.map((delta) => ({ type: 'text-delta' as const, id, delta })),
+  { type: 'text-end' as const, id },
+];
+
+/** Turn one: a sentence, then a tool call. */
+const callingTurn: Response.StreamPartEncoded[] = [
+  ...text('a', ['he', 'l', 'lo']),
+  {
+    type: 'tool-call' as const,
+    id: 'call-1',
+    name: 'lookup',
+    params: { id: '42' },
+  },
+  finish('tool-calls'),
+];
+
+/** Turn two: an answer and nothing else, which is what stops the loop. */
+const answeringTurn: Response.StreamPartEncoded[] = [
+  ...text('b', ['do', 'ne']),
+  finish(),
+];
+
+/** Turn three, so a third model call is distinguishable from a replayed one. */
+const laterTurn: Response.StreamPartEncoded[] = [
+  ...text('c', ['again']),
+  finish(),
+];
+
+/**
+ * A scripted provider that keeps every prompt it was handed.
+ *
+ * The prompts are the evidence. "Did not re-ask for turn one" is
+ * `asked.length`, and "resumed with the conversation" is what is in the last
+ * one — neither of which can be read off the agent's own result.
+ */
+const provider = (
+  turns: ReadonlyArray<ReadonlyArray<Response.StreamPartEncoded>>,
+) => {
+  const asked: Array<Prompt.Prompt> = [];
+
+  const layer = Layer.effect(
+    LanguageModel.LanguageModel,
+    Effect.gen(function* () {
+      const calls = yield* Ref.make(0);
+      return yield* LanguageModel.make({
+        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+        streamText: (options: LanguageModelNamespace.ProviderOptions) =>
+          Stream.unwrap(
+            Effect.gen(function* () {
+              asked.push(options.prompt);
+              const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
+              return Stream.fromIterable(
+                turns[Math.min(index, turns.length - 1)]!,
+              );
+            }),
+          ),
+      });
+    }),
+  );
+
+  return { asked, layer };
+};
+
+const lookup = Tool.make('lookup', {
+  description: 'look an order up',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ status: Schema.String }),
+});
+
+/** Counts handler invocations, so "the tool did not run again" is a number. */
+const dispatched = { count: 0 };
+
+const agent = Agent.make({
+  name: 'test',
+  instructions: 'be terse',
+  toolkit: Toolkit.make(lookup),
+}).withHandlers({
+  lookup: ({ id }) =>
+    Effect.sync(() => {
+      dispatched.count += 1;
+      return { status: `shipped:${id}` };
+    }),
+});
+
+const CONVERSATION = 'conversation-1';
+const PATH = AgentLog.pathFor(CONVERSATION);
+
+beforeEach(() => {
+  dispatched.count = 0;
+});
+
+const run = <A, E>(
+  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  models: Layer.Layer<LanguageModel.LanguageModel>,
+): Promise<A> =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.orDie,
+      Effect.provide(models),
+      Effect.provide(LogStoreMemory.layer),
+      Effect.scoped,
+    ),
+  );
+
+const rolesOf = (prompt: Prompt.Prompt) =>
+  prompt.content.map((message) => message.role);
+
+/** Every text fragment in a prompt, whatever role or part carries it. */
+const textIn = (prompt: Prompt.Prompt): string =>
+  JSON.stringify(prompt.content);
+
+const readAll = Effect.fn('test.readAll')(function* (path = PATH) {
+  const store = yield* LogStore.Service;
+  const page = yield* store.read(path, { limit: 1000 });
+  return page.records;
+});
+
+const envelopes = (
+  records: ReadonlyArray<ConversationRecord.Record>,
+): ReadonlyArray<ConversationRecord.Envelope> =>
+  records.map((record, index) => ({
+    offset: LogOffset.Offset.make(String(index)),
+    conversationId: CONVERSATION,
+    timestamp: 0,
+    record,
+  }));
+
+describe('resuming a crashed run', () => {
+  // The parity test. A run is abandoned after its tool call settles — the
+  // consumer walks away mid-conversation, which is what a crash looks like
+  // from the log's side — and the conversation is then resumed.
+  it('continues from what the crashed run left, without re-asking or re-running it', async () => {
+    const models = provider([callingTurn, answeringTurn, laterTurn]);
+
+    const observed = await run(
+      Effect.gen(function* () {
+        // Run one, abandoned the moment the tool result arrives.
+        yield* agent
+          .recordingTo(CONVERSATION)
+          .stream('where is order 42?')
+          .pipe(
+            Stream.takeUntil(
+              (event) =>
+                AgentEvents.isPart(event) &&
+                (event.part as Response.StreamPartEncoded).type ===
+                  'tool-result',
+            ),
+            Stream.runDrain,
+            Effect.orDie,
+          );
+
+        const afterCrash = yield* readAll();
+        const askedDuringCrash = models.asked.length;
+        const dispatchedDuringCrash = dispatched.count;
+
+        // Run two: the same conversation, picked back up.
+        const result = yield* agent
+          .resume(CONVERSATION, 'and then?')
+          .pipe(Effect.orDie);
+
+        return {
+          afterCrash: afterCrash.map((envelope) => envelope.record._tag),
+          askedDuringCrash,
+          dispatchedDuringCrash,
+          asked: models.asked,
+          dispatchedTotal: dispatched.count,
+          result,
+        };
+      }),
+      models.layer,
+    );
+
+    // The crashed run got one turn's worth of records and no `Completed`.
+    expect(observed.afterCrash).toEqual([
+      'RunStarted',
+      'Text',
+      'ToolCall',
+      'ToolOutcome',
+      'RunSettled',
+    ]);
+    expect(observed.askedDuringCrash).toBe(1);
+    expect(observed.dispatchedDuringCrash).toBe(1);
+
+    // One further provider call, for the turn that had not happened yet. The
+    // completed turn was not re-asked — under replay-from-checkpoint recovery
+    // this number is two, because recovery re-runs the loop from turn one.
+    expect(observed.asked).toHaveLength(2);
+
+    // And the tool that already ran did not run again. Checkpointing never
+    // covered this at all: tool execution happens past the provider seam.
+    expect(observed.dispatchedTotal).toBe(1);
+
+    // The resumed call was given the conversation, not a fresh start.
+    const resumed = observed.asked[1]!;
+    expect(rolesOf(resumed)).toEqual([
+      'system',
+      'user',
+      'assistant',
+      'tool',
+      'user',
+    ]);
+    expect(textIn(resumed)).toContain('where is order 42?');
+    expect(textIn(resumed)).toContain('hello');
+    expect(textIn(resumed)).toContain('call-1');
+    expect(textIn(resumed)).toContain('shipped:42');
+    expect(textIn(resumed)).toContain('and then?');
+
+    expect(observed.result.text).toBe('done');
+  });
+
+  // The resumed run is an ordinary recorded run: it appends to the same
+  // conversation rather than starting a second history beside it.
+  it('records the resumed run into the same conversation', async () => {
+    const models = provider([callingTurn, answeringTurn, laterTurn]);
+
+    const tags = await run(
+      Effect.gen(function* () {
+        yield* agent
+          .recordingTo(CONVERSATION)
+          .stream('hi')
+          .pipe(
+            Stream.takeUntil(
+              (event) =>
+                AgentEvents.isPart(event) &&
+                (event.part as Response.StreamPartEncoded).type ===
+                  'tool-result',
+            ),
+            Stream.runDrain,
+            Effect.orDie,
+          );
+
+        yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
+        return (yield* readAll()).map((envelope) => envelope.record._tag);
+      }),
+      models.layer,
+    );
+
+    expect(tags).toEqual([
+      'RunStarted',
+      'Text',
+      'ToolCall',
+      'ToolOutcome',
+      'RunSettled',
+      'RunStarted',
+      'Text',
+      'TurnFinished',
+      'Completed',
+      'RunSettled',
+    ]);
+  });
+});
+
+describe('resuming an ordinary conversation', () => {
+  it('starts a new conversation when there is nothing to resume', async () => {
+    const models = provider([answeringTurn]);
+
+    const asked = await run(
+      Effect.gen(function* () {
+        yield* agent.resume('fresh', 'hello').pipe(Effect.orDie);
+        return models.asked;
+      }),
+      models.layer,
+    );
+
+    expect(rolesOf(asked[0]!)).toEqual(['system', 'user']);
+    expect(textIn(asked[0]!)).toContain('be terse');
+  });
+
+  // The property that makes this a conversation rather than a series of
+  // unrelated runs.
+  it('carries the conversation into the next turn', async () => {
+    const models = provider([answeringTurn, laterTurn]);
+
+    const asked = await run(
+      Effect.gen(function* () {
+        yield* agent.resume(CONVERSATION, 'first').pipe(Effect.orDie);
+        yield* agent.resume(CONVERSATION, 'second').pipe(Effect.orDie);
+        return models.asked;
+      }),
+      models.layer,
+    );
+
+    expect(rolesOf(asked[1]!)).toEqual(['system', 'user', 'assistant', 'user']);
+    expect(textIn(asked[1]!)).toContain('first');
+    expect(textIn(asked[1]!)).toContain('done');
+    expect(textIn(asked[1]!)).toContain('second');
+  });
+
+  it('keeps separate conversations separate', async () => {
+    const models = provider([answeringTurn, laterTurn]);
+
+    const asked = await run(
+      Effect.gen(function* () {
+        yield* agent.resume('conv-a', 'first').pipe(Effect.orDie);
+        yield* agent.resume('conv-b', 'first').pipe(Effect.orDie);
+        return models.asked;
+      }),
+      models.layer,
+    );
+
+    expect(rolesOf(asked[1]!)).toEqual(['system', 'user']);
+  });
+
+  // A resumed conversation that reset the count would under-report every turn
+  // after the first, which is the number anyone asking about cost wants.
+  it('accumulates usage across the life of the conversation', async () => {
+    const models = provider([answeringTurn, laterTurn]);
+
+    const totals = await run(
+      Effect.gen(function* () {
+        const first = yield* agent
+          .resume(CONVERSATION, 'first')
+          .pipe(Effect.orDie);
+        const second = yield* agent
+          .resume(CONVERSATION, 'second')
+          .pipe(Effect.orDie);
+        return { first: first.usage, second: second.usage };
+      }),
+      models.layer,
+    );
+
+    expect(totals.second.output).toBe(totals.first.output * 2);
+    expect(totals.second.input).toBe(totals.first.input * 2);
+  });
+});
+
+describe('rebuilding a prompt from records', () => {
+  it('groups a turn into an assistant message and its tool results', () => {
+    const rebuilt = AgentHistory.messagesFrom(
+      envelopes([
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          prompt: Prompt.make('hi').content,
+        },
+        { _tag: 'Text', step: 1, text: 'looking' },
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: 'call-1',
+          name: 'lookup',
+          params: { id: '42' },
+        },
+        {
+          _tag: 'ToolOutcome',
+          step: 1,
+          id: 'call-1',
+          name: 'lookup',
+          outcome: 'success',
+          result: { status: 'shipped:42' },
+        },
+        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
+      ]),
+    );
+
+    expect(rolesOf(rebuilt)).toEqual(['user', 'assistant', 'tool']);
+    expect(rebuilt.content[1]?.content).toMatchObject([
+      { type: 'text', text: 'looking' },
+      { type: 'tool-call', id: 'call-1', name: 'lookup' },
+    ]);
+    expect(rebuilt.content[2]?.content).toMatchObject([
+      { type: 'tool-result', id: 'call-1', isFailure: false },
+    ]);
+  });
+
+  // The mid-turn crash. An assistant tool call with no matching result is not
+  // a degraded prompt — providers reject the request outright — so it is
+  // dropped and the model may ask again.
+  it('drops a tool call whose outcome was never recorded', () => {
+    const rebuilt = AgentHistory.messagesFrom(
+      envelopes([
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          prompt: Prompt.make('hi').content,
+        },
+        { _tag: 'Text', step: 1, text: 'looking' },
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: 'call-1',
+          name: 'lookup',
+          params: { id: '42' },
+        },
+        {
+          _tag: 'ToolOutcome',
+          step: 1,
+          id: 'call-1',
+          name: 'lookup',
+          outcome: 'success',
+          result: { status: 'shipped:42' },
+        },
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: 'call-2',
+          name: 'lookup',
+          params: { id: '43' },
+        },
+      ]),
+    );
+
+    expect(rolesOf(rebuilt)).toEqual(['user', 'assistant', 'tool']);
+    expect(JSON.stringify(rebuilt.content)).toContain('call-1');
+    expect(JSON.stringify(rebuilt.content)).not.toContain('call-2');
+  });
+
+  // A steer became a user message on the next turn, so it belongs after the
+  // turn that consumed it — not before the model's own words, which is where
+  // record order alone would put it.
+  it('replays a steer as the user message it became', () => {
+    const rebuilt = AgentHistory.messagesFrom(
+      envelopes([
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          prompt: Prompt.make('hi').content,
+        },
+        { _tag: 'Text', step: 1, text: 'working' },
+        {
+          _tag: 'SignalReceived',
+          kind: 'steer',
+          text: 'also check the invoice',
+          source: 'operator',
+          step: 1,
+          at: LogOffset.Offset.make('1'),
+        },
+        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
+      ]),
+    );
+
+    expect(rolesOf(rebuilt)).toEqual(['user', 'assistant', 'user']);
+    expect(JSON.stringify(rebuilt.content[2])).toContain(
+      'also check the invoice',
+    );
+  });
+
+  it('ignores a cancel, which changed no prompt', () => {
+    const rebuilt = AgentHistory.messagesFrom(
+      envelopes([
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          prompt: Prompt.make('hi').content,
+        },
+        {
+          _tag: 'SignalReceived',
+          kind: 'cancel',
+          text: 'stop',
+          source: 'operator',
+          step: 1,
+          at: LogOffset.Offset.make('1'),
+        },
+      ]),
+    );
+
+    expect(rolesOf(rebuilt)).toEqual(['user']);
+  });
+
+  // `Completed.text` repeats the final turn's `Text` records. Reading both
+  // would say everything twice, which the model would read as a stutter.
+  it('does not repeat the final answer from Completed', () => {
+    const rebuilt = AgentHistory.messagesFrom(
+      envelopes([
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          prompt: Prompt.make('hi').content,
+        },
+        { _tag: 'Text', step: 1, text: 'done' },
+        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
+        {
+          _tag: 'Completed',
+          text: 'done',
+          steps: 1,
+          usage: { input: 1, output: 1 },
+        },
+        {
+          _tag: 'RunSettled',
+          outcome: 'success',
+          detail: '',
+          steps: 1,
+          usage: { input: 1, output: 1 },
+        },
+      ]),
+    );
+
+    expect(JSON.stringify(rebuilt.content).match(/done/g)).toHaveLength(1);
+  });
+
+  it('is empty for a conversation with no records', () => {
+    expect(AgentHistory.messagesFrom([]).content).toEqual([]);
+  });
+
+  it('sums usage across runs rather than reporting the last one', () => {
+    const usage = AgentHistory.usageFrom(
+      envelopes([
+        { _tag: 'RunStarted', agent: 'test', prompt: [] },
+        { _tag: 'TurnFinished', step: 1, usage: { input: 3, output: 1 } },
+        {
+          _tag: 'RunSettled',
+          outcome: 'success',
+          detail: '',
+          steps: 1,
+          usage: { input: 3, output: 1 },
+        },
+        { _tag: 'RunStarted', agent: 'test', prompt: [] },
+        { _tag: 'TurnFinished', step: 1, usage: { input: 5, output: 2 } },
+        {
+          _tag: 'RunSettled',
+          outcome: 'success',
+          detail: '',
+          steps: 1,
+          usage: { input: 5, output: 2 },
+        },
+      ]),
+    );
+
+    expect(usage).toEqual({ input: 8, output: 3 });
+  });
+});

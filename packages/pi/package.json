@@ -1,0 +1,71 @@
+{
+  "name": "@sunfall/vesper-pi",
+  "version": "0.1.0-alpha.1",
+  "description": "An Effect `LanguageModel` over Pi's provider set, plus retry, error classification, and compaction heuristics.",
+  "keywords": [
+    "ai",
+    "effect",
+    "language-model",
+    "provider",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/pi"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./compaction": {
+      "types": "./dist/compaction.d.ts",
+      "default": "./dist/compaction.js"
+    },
+    "./credentials": {
+      "types": "./dist/credentials.d.ts",
+      "default": "./dist/credentials.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "default": "./dist/errors.js"
+    },
+    "./model": {
+      "types": "./dist/model.d.ts",
+      "default": "./dist/model.js"
+    },
+    "./provider": {
+      "types": "./dist/provider.d.ts",
+      "default": "./dist/provider.js"
+    },
+    "./registry": {
+      "types": "./dist/registry.d.ts",
+      "default": "./dist/registry.js"
+    },
+    "./retry": {
+      "types": "./dist/retry.d.ts",
+      "default": "./dist/retry.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.2",
+    "@earendil-works/pi-ai": "0.80.2",
+    "effect": "^4.0.0-beta.103"
+  }
+}

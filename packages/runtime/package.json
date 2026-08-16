@@ -1,0 +1,48 @@
+{
+  "name": "@sunfall/vesper-runtime",
+  "version": "0.1.0-alpha.1",
+  "description": "Composition root for a Vesper agent: model, credentials, log, and usage anchors wired into one runtime.",
+  "keywords": [
+    "agent",
+    "composition",
+    "effect",
+    "runtime",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/runtime"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "default": "./dist/runtime.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@sunfall/vesper-agent": "workspace:*",
+    "@sunfall/vesper-log": "workspace:*",
+    "@sunfall/vesper-pi": "workspace:*",
+    "effect": "^4.0.0-beta.103"
+  }
+}

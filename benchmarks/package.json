@@ -1,0 +1,30 @@
+{
+  "name": "@sunfall/vesper-benchmarks",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "Timing and memory measurements for the Vesper agent loop and conversation log.",
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "benchmarks"
+  },
+  "type": "module",
+  "scripts": {
+    "bench": "node --experimental-strip-types src/main.ts",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.103",
+    "@earendil-works/pi-ai": "0.80.2",
+    "@sunfall/vesper-agent": "workspace:*",
+    "@sunfall/vesper-log": "workspace:*",
+    "@sunfall/vesper-pi": "workspace:*",
+    "@sunfall/vesper-runtime": "workspace:*"
+  }
+}

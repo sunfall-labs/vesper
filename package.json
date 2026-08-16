@@ -1,0 +1,49 @@
+{
+  "name": "sunfall-vesper-workspace",
+  "private": true,
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git"
+  },
+  "type": "module",
+  "scripts": {
+    "build": "pnpm -r --filter './packages/*' build",
+    "benchmark": "pnpm --filter @sunfall/vesper-benchmarks bench",
+    "example:compliance-relay": "pnpm --filter @sunfall/vesper-example-compliance-relay start",
+    "example:live-smoke": "pnpm --filter @sunfall/vesper-example-live-smoke start",
+    "test": "vitest run",
+    "typecheck": "tsgo -b tsconfig.json --pretty false && pnpm typecheck:types",
+    "typecheck:types": "tsgo -p tsconfig.type-tests.json --noEmit --pretty false",
+    "format": "oxfmt . --write",
+    "format:check": "oxfmt . --check",
+    "lint": "oxlint . --deny-warnings --no-error-on-unmatched-pattern",
+    "lint:fix": "oxlint . --fix --no-error-on-unmatched-pattern",
+    "publish:npm": "node scripts/publish-npm.mjs",
+    "verify": "node scripts/verify.mjs",
+    "verify:serial": "node scripts/verify.mjs --concurrency=1"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.103"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-agent-core": "0.80.2",
+    "@earendil-works/pi-ai": "0.80.2",
+    "@effect/platform-node": "4.0.0-beta.103",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@types/node": "^25.7.0",
+    "@types/pg": "^8.20.0",
+    "@typescript/native-preview": "7.0.0-dev.20260513.1",
+    "oxfmt": "0.55.0",
+    "oxlint": "1.75.0",
+    "pg": "8.20.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.9"
+  },
+  "packageManager": "pnpm@11.0.3"
+}

@@ -1,0 +1,164 @@
+import { Schema } from 'effect';
+import type { Response, Tool } from 'effect/unstable/ai';
+
+import type { Stop } from './stop.js';
+
+// What a caller observes while an agent runs.
+//
+// A bare stream of `Response.StreamPart` would lose the one thing a
+// multi-turn loop adds over a single call: turn boundaries. Without them a
+// consumer cannot tell the difference between one long answer and three
+// short ones, cannot attribute a tool call to the turn that requested it,
+// and cannot render "thinking… step 3 of N".
+//
+// Modelled as a tagged union rather than a callback bag so consumers can
+// exhaustively match, and so the whole event stream can be serialized —
+// which is what a transport (SSE, a Slack bridge, a durable stream) needs.
+
+export const Lifecycle = Schema.Union([
+  Schema.TaggedStruct('TurnStarted', {
+    step: Schema.Number,
+  }),
+  Schema.TaggedStruct('TurnFinished', {
+    step: Schema.Number,
+    usage: Schema.Struct({
+      input: Schema.Number,
+      output: Schema.Number,
+    }),
+  }),
+  Schema.TaggedStruct('Completed', {
+    text: Schema.String,
+    steps: Schema.Number,
+    usage: Schema.Struct({
+      input: Schema.Number,
+      output: Schema.Number,
+    }),
+  }),
+  /**
+   * An out-of-band instruction reached the run and was acted on.
+   *
+   * Emitted at the turn boundary that consumed it, before that turn's
+   * `TurnFinished`. A `cancel` is followed by `TurnFinished` and `Completed`
+   * like any other stopping turn — cancellation ends a run, it does not fail
+   * one, and a consumer that treated it as a failure would lose the work
+   * already done.
+   *
+   * This is an event and not a private detail of the log sink on purpose.
+   * Steering changes what the model is about to be asked, so a consumer
+   * rendering a conversation has to be able to show it; and the sink's
+   * ordering — text flushed, then the signal, then the turn boundary — falls
+   * out of it being in the stream at the right place rather than being
+   * arranged separately. Adding a case here is a public-API change: every
+   * exhaustive match over `Lifecycle` has to grow a branch, which is the
+   * point.
+   */
+  Schema.TaggedStruct('Signalled', {
+    step: Schema.Number,
+    kind: Schema.Literals(['steer', 'cancel']),
+    text: Schema.String,
+    source: Schema.String,
+    /**
+     * The signal's offset in the signal stream.
+     *
+     * A plain string rather than `LogOffset.Offset`: this module describes
+     * what a consumer observes and deliberately knows nothing about the log,
+     * so the brand is applied where the record is written instead.
+     */
+    at: Schema.String,
+  }),
+  /**
+   * History was summarized to fit the context window.
+   *
+   * Emitted between the turn that overflowed and its retry, so a consumer
+   * sees the rewrite in the position it happened and the log sink writes the
+   * `Compacted` record before anything the retried turn produces.
+   *
+   * This is the case that closed the reconstruction gap, and it had to be a
+   * public event rather than a private arrangement between the loop and the
+   * sink. Compaction is the only thing a run does that *replaces* history
+   * rather than extending it, so a consumer rendering a conversation has to
+   * be able to show it — and a resumed conversation that could not see it was
+   * rebuilt from records compaction had already thrown away, came back longer
+   * than the run it resumed, and compacted again on its first turn.
+   *
+   * Like `Signalled`, adding it is a public-API change: every exhaustive
+   * match over `Lifecycle` grows a branch, which is the point.
+   */
+  Schema.TaggedStruct('Compacted', {
+    /** The turn that overflowed and is about to be retried. */
+    step: Schema.Number,
+    /** The model's summary, unframed. `Compaction.summaryMessage` frames it. */
+    summary: Schema.String,
+    /**
+     * Messages replaced, and messages kept verbatim after the summary.
+     *
+     * `keptMessages` is how the sink locates the boundary in the log: the
+     * loop has no offsets — compaction runs against `Chat`'s in-memory
+     * history — so it reports the size of the tail it kept and the sink,
+     * which does have offsets, resolves that to the record the tail starts
+     * at.
+     */
+    summarizedMessages: Schema.Number,
+    keptMessages: Schema.Number,
+  }),
+]);
+
+/**
+ * The events that mark where a run is, rather than what it said.
+ *
+ * `Part` is kept out of the schema union: `Response.StreamPart` is already a
+ * codec that varies by toolkit, and re-declaring it here would duplicate a
+ * definition that has to stay in lockstep with the one the provider emits.
+ */
+export type Lifecycle = typeof Lifecycle.Type;
+
+export type Event<Tools extends Record<string, Tool.Any>> =
+  | Lifecycle
+  | {
+      readonly _tag: 'Part';
+      readonly step: number;
+      readonly part: Response.StreamPart<Tools>;
+    };
+
+export const turnStarted = (step: number): Lifecycle => ({
+  _tag: 'TurnStarted',
+  step,
+});
+
+export const turnFinished = (step: number, usage: Stop.Usage): Lifecycle => ({
+  _tag: 'TurnFinished',
+  step,
+  usage,
+});
+
+export const completed = (
+  text: string,
+  steps: number,
+  usage: Stop.Usage,
+): Lifecycle => ({ _tag: 'Completed', text, steps, usage });
+
+export const signalled = (
+  step: number,
+  signal: {
+    readonly kind: 'steer' | 'cancel';
+    readonly text: string;
+    readonly source: string;
+    readonly at: string;
+  },
+): Lifecycle => ({ _tag: 'Signalled', step, ...signal });
+
+export const compacted = (
+  step: number,
+  summarized: {
+    readonly summary: string;
+    readonly summarizedMessages: number;
+    readonly keptMessages: number;
+  },
+): Lifecycle => ({ _tag: 'Compacted', step, ...summarized });
+
+export const isPart = <Tools extends Record<string, Tool.Any>>(
+  event: Event<Tools>,
+): event is Extract<Event<Tools>, { readonly _tag: 'Part' }> =>
+  event._tag === 'Part';
+
+export * as AgentEvents from './event.js';

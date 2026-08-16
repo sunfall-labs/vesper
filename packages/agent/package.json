@@ -1,0 +1,94 @@
+{
+  "name": "@sunfall/vesper-agent",
+  "version": "0.1.0-alpha.1",
+  "description": "The agent loop: subagents, skills, stop conditions, tool-call interception, recording, and resumption.",
+  "keywords": [
+    "agent",
+    "effect",
+    "llm",
+    "tool-calling",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/agent"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./agent": {
+      "types": "./dist/agent.d.ts",
+      "default": "./dist/agent.js"
+    },
+    "./branch": {
+      "types": "./dist/branch.d.ts",
+      "default": "./dist/branch.js"
+    },
+    "./context-window": {
+      "types": "./dist/context-window.d.ts",
+      "default": "./dist/context-window.js"
+    },
+    "./dispatch": {
+      "types": "./dist/dispatch.d.ts",
+      "default": "./dist/dispatch.js"
+    },
+    "./event": {
+      "types": "./dist/event.d.ts",
+      "default": "./dist/event.js"
+    },
+    "./history": {
+      "types": "./dist/history.d.ts",
+      "default": "./dist/history.js"
+    },
+    "./interception": {
+      "types": "./dist/interception.d.ts",
+      "default": "./dist/interception.js"
+    },
+    "./log": {
+      "types": "./dist/log.d.ts",
+      "default": "./dist/log.js"
+    },
+    "./signal": {
+      "types": "./dist/signal.d.ts",
+      "default": "./dist/signal.js"
+    },
+    "./stop": {
+      "types": "./dist/stop.d.ts",
+      "default": "./dist/stop.js"
+    },
+    "./subagent": {
+      "types": "./dist/subagent.d.ts",
+      "default": "./dist/subagent.js"
+    },
+    "./skill": {
+      "types": "./dist/skill.d.ts",
+      "default": "./dist/skill.js"
+    },
+    "./compaction": {
+      "types": "./dist/compaction.d.ts",
+      "default": "./dist/compaction.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@sunfall/vesper-log": "workspace:*",
+    "effect": "^4.0.0-beta.103"
+  }
+}

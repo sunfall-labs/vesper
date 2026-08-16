@@ -1,0 +1,82 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    "types": ["node"],
+    "paths": {
+      "@sunfall/vesper-agent/agent": ["./packages/agent/src/agent.ts"],
+      "@sunfall/vesper-agent/branch": ["./packages/agent/src/branch.ts"],
+      "@sunfall/vesper-agent/context-window": [
+        "./packages/agent/src/context-window.ts"
+      ],
+      "@sunfall/vesper-agent/dispatch": ["./packages/agent/src/dispatch.ts"],
+      "@sunfall/vesper-agent/event": ["./packages/agent/src/event.ts"],
+      "@sunfall/vesper-agent/history": ["./packages/agent/src/history.ts"],
+      "@sunfall/vesper-agent/interception": [
+        "./packages/agent/src/interception.ts"
+      ],
+      "@sunfall/vesper-agent/log": ["./packages/agent/src/log.ts"],
+      "@sunfall/vesper-agent/signal": ["./packages/agent/src/signal.ts"],
+      "@sunfall/vesper-agent/stop": ["./packages/agent/src/stop.ts"],
+      "@sunfall/vesper-agent/subagent": ["./packages/agent/src/subagent.ts"],
+      "@sunfall/vesper-agent/skill": ["./packages/agent/src/skill.ts"],
+      "@sunfall/vesper-agent/compaction": [
+        "./packages/agent/src/compaction.ts"
+      ],
+      "@sunfall/vesper-log/offset": ["./packages/log/src/offset.ts"],
+      "@sunfall/vesper-log/record": ["./packages/log/src/record.ts"],
+      "@sunfall/vesper-log/log-store": ["./packages/log/src/log-store.ts"],
+      "@sunfall/vesper-log/tail": ["./packages/log/src/tail.ts"],
+      "@sunfall/vesper-log/layer-memory": [
+        "./packages/log/src/layer-memory.ts"
+      ],
+      "@sunfall/vesper-log/log-store-contract": [
+        "./packages/log/src/log-store-contract.ts"
+      ],
+      "@sunfall/vesper-log/layer-pg": ["./packages/log/src/layer-pg.ts"],
+      "@sunfall/vesper-pi/compaction": ["./packages/pi/src/compaction.ts"],
+      "@sunfall/vesper-pi/credentials": ["./packages/pi/src/credentials.ts"],
+      "@sunfall/vesper-pi/errors": ["./packages/pi/src/errors.ts"],
+      "@sunfall/vesper-pi/model": ["./packages/pi/src/model.ts"],
+      "@sunfall/vesper-pi/provider": ["./packages/pi/src/provider.ts"],
+      "@sunfall/vesper-pi/registry": ["./packages/pi/src/registry.ts"],
+      "@sunfall/vesper-pi/retry": ["./packages/pi/src/retry.ts"],
+      "@sunfall/vesper-runtime/runtime": ["./packages/runtime/src/runtime.ts"],
+      "@sunfall/vesper-workspace/driver": [
+        "./packages/workspace/src/driver.ts"
+      ],
+      "@sunfall/vesper-workspace/glob": ["./packages/workspace/src/glob.ts"],
+      "@sunfall/vesper-workspace/layer-local": [
+        "./packages/workspace/src/layer-local.ts"
+      ],
+      "@sunfall/vesper-workspace/output": [
+        "./packages/workspace/src/output.ts"
+      ],
+      "@sunfall/vesper-workspace/path": ["./packages/workspace/src/path.ts"],
+      "@sunfall/vesper-workspace/tools": ["./packages/workspace/src/tools.ts"],
+      "@sunfall/vesper-workspace/workspace-contract": [
+        "./packages/workspace/src/workspace-contract.ts"
+      ],
+      "@sunfall/vesper-attachments/ref": ["./packages/attachments/src/ref.ts"],
+      "@sunfall/vesper-attachments/attachment-store": [
+        "./packages/attachments/src/attachment-store.ts"
+      ],
+      "@sunfall/vesper-attachments/layer-memory": [
+        "./packages/attachments/src/layer-memory.ts"
+      ],
+      "@sunfall/vesper-attachments/attachment-store-contract": [
+        "./packages/attachments/src/attachment-store-contract.ts"
+      ]
+    }
+  }
+}

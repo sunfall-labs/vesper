@@ -1,0 +1,96 @@
+name: Publish npm packages
+
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+    inputs:
+      dist-tag:
+        description: npm dist-tag to publish
+        required: true
+        default: alpha
+        type: choice
+        options:
+          - alpha
+          - beta
+          - next
+          - latest
+      dry-run:
+        description: Run npm publish --dry-run only
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  RELEASE_DIST_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.dist-tag || (contains(github.ref_name, '-alpha') && 'alpha' || contains(github.ref_name, '-beta') && 'beta' || contains(github.ref_name, '-rc') && 'next' || 'latest') }}
+  RELEASE_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry-run || false }}
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish npm packages
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: npm-publish
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.3
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 25
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Install npm with trusted publishing support
+        run: npm install -g npm@^11.10.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify
+        run: pnpm verify
+
+      - name: Publish preflight
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" != "true" ]; then
+            case "$GITHUB_REF" in
+              refs/heads/main | refs/tags/v*) ;;
+              *)
+                echo "::error::Real npm publishes must run from refs/heads/main or refs/tags/v*, not $GITHUB_REF."
+                exit 1
+                ;;
+            esac
+          fi
+        env:
+          DRY_RUN: ${{ env.RELEASE_DRY_RUN }}
+
+      - name: Publish
+        run: |
+          set -euo pipefail
+          if [ "$DRY_RUN" = "true" ]; then
+            pnpm publish:npm -- --tag "$DIST_TAG" --dry-run
+          else
+            pnpm publish:npm -- --tag "$DIST_TAG"
+          fi
+        env:
+          DIST_TAG: ${{ env.RELEASE_DIST_TAG }}
+          DRY_RUN: ${{ env.RELEASE_DRY_RUN }}

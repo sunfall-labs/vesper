@@ -1,0 +1,15 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "packages/*/test/**/*.ts",
+    "benchmarks/**/*.ts",
+    "examples/*/src/**/*.ts"
+  ]
+}

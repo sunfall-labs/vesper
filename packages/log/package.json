@@ -1,0 +1,69 @@
+{
+  "name": "@sunfall/vesper-log",
+  "version": "0.1.0-alpha.1",
+  "description": "An append-only conversation log with per-record offsets, producer fencing, tailing, and memory + Postgres backends.",
+  "keywords": [
+    "append-only",
+    "effect",
+    "event-sourcing",
+    "postgres",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/log"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./offset": {
+      "types": "./dist/offset.d.ts",
+      "default": "./dist/offset.js"
+    },
+    "./record": {
+      "types": "./dist/record.d.ts",
+      "default": "./dist/record.js"
+    },
+    "./log-store": {
+      "types": "./dist/log-store.d.ts",
+      "default": "./dist/log-store.js"
+    },
+    "./tail": {
+      "types": "./dist/tail.d.ts",
+      "default": "./dist/tail.js"
+    },
+    "./layer-memory": {
+      "types": "./dist/layer-memory.d.ts",
+      "default": "./dist/layer-memory.js"
+    },
+    "./log-store-contract": {
+      "types": "./dist/log-store-contract.d.ts",
+      "default": "./dist/log-store-contract.js"
+    },
+    "./layer-pg": {
+      "types": "./dist/layer-pg.d.ts",
+      "default": "./dist/layer-pg.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.103"
+  }
+}
