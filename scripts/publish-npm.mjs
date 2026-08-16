@@ -21,8 +21,8 @@ const packagesDir = join(workspaceRoot, 'packages');
 const DEFAULT_DIST_TAG = 'alpha';
 
 const usage = `USAGE
-  pnpm publish:npm -- [--tag <dist-tag>] [--dry-run] [--package <name>]
-                      [--no-skip-existing] [--no-provenance]
+  nub run publish:npm -- [--tag <dist-tag>] [--dry-run] [--package <name>]
+                         [--no-skip-existing] [--no-provenance]
 
 Options:
   --tag <dist-tag>     npm dist-tag to attach. Defaults to ${DEFAULT_DIST_TAG}.
@@ -130,7 +130,7 @@ try {
       readdirSync(join(target.directory, 'dist'));
     } catch {
       throw new Error(
-        `${target.manifest.name} has no dist/. Run \`pnpm build\` first.`,
+        `${target.manifest.name} has no dist/. Run \`nub run build\` first.`,
       );
     }
   }

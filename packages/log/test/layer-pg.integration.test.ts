@@ -26,7 +26,7 @@ import { Tail } from '../src/tail.js';
 // suite that silently needs Docker is a suite that fails for a contributor who
 // has not been told:
 //
-//   RUN_POSTGRES_INTEGRATION=1 pnpm test
+//   RUN_POSTGRES_INTEGRATION=1 nub run test
 //
 // Podman works too; point `DOCKER_HOST` at its socket first.
 

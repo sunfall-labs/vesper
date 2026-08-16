@@ -64,8 +64,8 @@ import { AiRuntime } from '@sunfall/vesper-runtime/runtime';
 //
 // It costs real money and needs a real API key:
 //
-//   ANTHROPIC_API_KEY=... pnpm example:live-smoke -- --phase all
-//   ANTHROPIC_API_KEY=... pnpm example:live-smoke -- --phase compaction-reactive
+//   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase all
+//   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase compaction-reactive
 //
 // `retry: false` by default, for the reason `compliance-demo.ts` gives: this
 // exists to show what the provider actually did, and a silently absorbed 429 is

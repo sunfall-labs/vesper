@@ -8,29 +8,38 @@ on:
 
 jobs:
   verify:
-    name: pnpm verify
+    name: nub verify
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.0.3
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 25
-          cache: pnpm
+
+      # The version comes from devDependencies so the bootstrap nub and the
+      # pinned one are the same by construction; a bump is one edit, not two.
+      - name: Setup nub
+        run: |
+          set -euo pipefail
+          npm install -g "@nubjs/nub@$(node -p "require('./package.json').devDependencies['@nubjs/nub']")"
+          nub --version
+
+      - name: Cache the nub store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/nub/store
+          key: nub-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: nub-store-${{ runner.os }}-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: nub install --frozen-lockfile
 
       - name: Verify
-        run: pnpm verify
+        run: nub run verify
 
   postgres:
     name: Postgres integration tests
@@ -40,24 +49,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 11.0.3
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 25
-          cache: pnpm
+
+      - name: Setup nub
+        run: |
+          set -euo pipefail
+          npm install -g "@nubjs/nub@$(node -p "require('./package.json').devDependencies['@nubjs/nub']")"
+          nub --version
+
+      - name: Cache the nub store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/nub/store
+          key: nub-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: nub-store-${{ runner.os }}-
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: nub install --frozen-lockfile
 
-      # Skipped by default in `pnpm test` because they need a container
+      # Skipped by default in `nub run test` because they need a container
       # runtime. They are the only thing that proves the Postgres backend
       # queries the schema it documents, so they run here rather than nowhere.
       - name: Run the Postgres suite
-        run: pnpm test
+        run: nub run test
         env:
           RUN_POSTGRES_INTEGRATION: '1'

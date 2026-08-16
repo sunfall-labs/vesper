@@ -1,8 +1,22 @@
+# Nub reads this file — packages, overrides, allowBuilds, and the rest — only
+# while the project does not claim a package-manager identity in
+# `package.json`. Adding `packageManager: nub@x` or a `devEngines.packageManager`
+# named `nub` flips it into "nub identity", where this file is ignored, the
+# workspace collapses to the root package, and `nub install` rewrites
+# `pnpm-lock.yaml` with every importer and every override dropped — with no
+# error. The version pin therefore lives in `devDependencies`, not in
+# `packageManager`. See `docs/contributing.md`.
 packages:
   - 'packages/*'
   - 'examples/*'
   - 'benchmarks'
+
+# `@nubjs/nub`'s postinstall only sets the execute bit on the platform binary
+# and refreshes `~/.nub/shims`; the launcher does the same chmod at run time
+# when it is skipped. Declared `false` rather than left undecided so a clean
+# install has nothing to review.
 allowBuilds:
+  '@nubjs/nub': false
   '@google/genai': set this to true or false
   cpu-features: set this to true or false
   msgpackr-extract: set this to true or false

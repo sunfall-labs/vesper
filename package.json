@@ -13,12 +13,12 @@
   },
   "type": "module",
   "scripts": {
-    "build": "pnpm -r --filter './packages/*' build",
-    "benchmark": "pnpm --filter @sunfall/vesper-benchmarks bench",
-    "example:compliance-relay": "pnpm --filter @sunfall/vesper-example-compliance-relay start",
-    "example:live-smoke": "pnpm --filter @sunfall/vesper-example-live-smoke start",
+    "build": "nub run -r --filter './packages/*' build",
+    "benchmark": "nub run --filter @sunfall/vesper-benchmarks bench",
+    "example:compliance-relay": "nub run --filter @sunfall/vesper-example-compliance-relay start",
+    "example:live-smoke": "nub run --filter @sunfall/vesper-example-live-smoke start",
     "test": "vitest run",
-    "typecheck": "tsgo -b tsconfig.json --pretty false && pnpm typecheck:types",
+    "typecheck": "tsgo -b tsconfig.json --pretty false && nub run typecheck:types",
     "typecheck:types": "tsgo -p tsconfig.type-tests.json --noEmit --pretty false",
     "format": "oxfmt . --write",
     "format:check": "oxfmt . --check",
@@ -35,6 +35,7 @@
     "@earendil-works/pi-agent-core": "0.80.2",
     "@earendil-works/pi-ai": "0.80.2",
     "@effect/platform-node": "4.0.0-beta.103",
+    "@nubjs/nub": "0.7.5",
     "@testcontainers/postgresql": "^11.14.0",
     "@types/node": "^25.7.0",
     "@types/pg": "^8.20.0",
@@ -44,6 +45,5 @@
     "pg": "8.20.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.9"
-  },
-  "packageManager": "pnpm@11.0.3"
+  }
 }

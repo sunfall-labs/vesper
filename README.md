@@ -37,8 +37,8 @@ tested, and they are not yet wired to anything.
 ## Install
 
 ```bash
-pnpm add @sunfall/vesper-runtime @sunfall/vesper-agent @sunfall/vesper-pi \
-         @earendil-works/pi-ai effect
+npm install @sunfall/vesper-runtime @sunfall/vesper-agent @sunfall/vesper-pi \
+            @earendil-works/pi-ai effect
 ```
 
 `effect` is `4.0.0-beta.103` and both Pi packages are pinned to `0.80.2`.
@@ -502,7 +502,7 @@ call, so `beforeToolCall` sees `task_<child>` like anything else.
 ## Trying it against a real model
 
 ```bash
-ANTHROPIC_API_KEY=... pnpm example:compliance-relay
+ANTHROPIC_API_KEY=... nub run example:compliance-relay
 ```
 
 `examples/compliance-relay` streams an answer from one agent through a second
@@ -531,15 +531,18 @@ mechanisms were pruned to one.
 ## Development
 
 ```bash
-pnpm install
-pnpm verify     # build, then format + lint + typecheck, then tests
+npx @nubjs/nub@0.7.5 install   # bootstraps the pinned nub, then installs
+nub run verify                 # build, then format + lint + typecheck, then tests
 ```
 
-Individually: `pnpm build`, `pnpm test`, `pnpm typecheck`, `pnpm lint`,
-`pnpm format`. Tests live in `packages/<name>/test/` and run from the
-repository root. The Postgres integration suite is skipped unless
-`RUN_POSTGRES_INTEGRATION=1` and a container runtime is available.
-`pnpm benchmark` runs the timing and memory harness in `benchmarks/`.
+The toolchain is [nub](https://nubjs.com), pinned as the `@nubjs/nub`
+devDependency; `npm install -g @nubjs/nub@0.7.5` afterwards puts it on `PATH`
+for daily use. Individually: `nub run build`, `nub run test`,
+`nub run typecheck`, `nub run lint`, `nub run format`. Tests live in
+`packages/<name>/test/` and run from the repository root. The Postgres
+integration suite is skipped unless `RUN_POSTGRES_INTEGRATION=1` and a
+container runtime is available. `nub run benchmark` runs the timing and memory
+harness in `benchmarks/`.
 
 See [`docs/contributing.md`](docs/contributing.md) for the layering rules
 between packages, which are the one thing worth reading before changing

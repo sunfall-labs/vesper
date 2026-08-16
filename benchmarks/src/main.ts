@@ -1,5 +1,5 @@
-// Benchmark entry point. Not a test: nothing here runs under `pnpm test` or
-// `pnpm verify`, and it is invoked deliberately with `pnpm benchmark`.
+// Benchmark entry point. Not a test: nothing here runs under `nub run test`
+// or `nub run verify`, and it is invoked deliberately with `nub run benchmark`.
 //
 // Each (side, scenario) pair runs in its own child process. That is not
 // tidiness — it is the measurement. Two configurations loaded into one process

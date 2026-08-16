@@ -8,11 +8,11 @@ the vocabulary.
 ## The gate
 
 ```bash
-pnpm install
-pnpm verify
+npx @nubjs/nub@0.7.5 install   # first time; see "Getting nub" below
+nub run verify
 ```
 
-`pnpm verify` is what CI runs and what to run before opening a pull request.
+`nub run verify` is what CI runs and what to run before opening a pull request.
 The build goes first, because the static gates after it resolve cross-package
 imports against built declarations; format, lint, and typecheck then run
 concurrently, because they are independent and a contributor waiting on three
@@ -23,33 +23,61 @@ shorter command — which the gate prints alongside it. A lane's output is
 buffered and flushed with a prefix when the lane ends, since three compilers
 writing to one terminal at once is unreadable, and lane failures are collected
 rather than thrown, since a lint failure and a typecheck failure are usually
-one edit apart. Four lanes run at once by default; `pnpm verify:serial`,
+one edit apart. Four lanes run at once by default; `nub run verify:serial`,
 `--concurrency=N`, or `VESPER_VERIFY_CONCURRENCY` change that.
 
-| Command                             | What it runs                        |
-| ----------------------------------- | ----------------------------------- |
-| `pnpm build`                        | `tsgo` per package, `src` to `dist` |
-| `pnpm test`                         | `vitest run` over every `test/`     |
-| `pnpm typecheck`                    | `tsgo -b` over the project graph    |
-| `pnpm typecheck:types`              | tests, benchmarks, and examples     |
-| `pnpm lint` / `pnpm lint:fix`       | `oxlint`, warnings denied           |
-| `pnpm format` / `pnpm format:check` | `oxfmt`                             |
-| `pnpm benchmark`                    | the suite in `benchmarks/`          |
+| Command                                   | What it runs                        |
+| ----------------------------------------- | ----------------------------------- |
+| `nub run build`                           | `tsgo` per package, `src` to `dist` |
+| `nub run test`                            | `vitest run` over every `test/`     |
+| `nub run typecheck`                       | `tsgo -b` over the project graph    |
+| `nub run typecheck:types`                 | tests, benchmarks, and examples     |
+| `nub run lint` / `nub run lint:fix`       | `oxlint`, warnings denied           |
+| `nub run format` / `nub run format:check` | `oxfmt`                             |
+| `nub run benchmark`                       | the suite in `benchmarks/`          |
 
-`pnpm example:compliance-relay` and `pnpm example:live-smoke` run the two
+`nub run example:compliance-relay` and `nub run example:live-smoke` run the two
 programs under `examples/`. Both reach a real provider and need an API key in
 the environment; nothing else does, and every test runs against Pi's faux one.
 
-`pnpm typecheck` uses `tsgo -b` rather than a per-package `--noEmit` pass
+`nub run typecheck` uses `tsgo -b` rather than a per-package `--noEmit` pass
 because the packages are TypeScript project references: `agent` resolves
 `@sunfall/vesper-log` through the declarations `log` emits, so a clean clone
 has nothing to typecheck against until those exist. `-b` builds what it needs
 and is incremental afterwards. The per-package `typecheck` scripts still work
 once `dist` is present, and are the faster loop while editing one package.
 
-The pnpm version is pinned by `packageManager`, so
-[corepack](https://nodejs.org/api/corepack.html) or a matching install is
-enough. CI runs Node 25.
+### Getting nub
+
+Nub is pinned as an ordinary devDependency, `@nubjs/nub` at **0.7.5**, so the
+lockfile records the exact version and every nested `nub` a script invokes is
+that one. Bootstrapping needs one command that does not depend on having nub
+yet:
+
+```bash
+npx @nubjs/nub@0.7.5 install
+```
+
+After that `node_modules/.bin/nub` exists, and `npm install -g @nubjs/nub@0.7.5`
+(or [nubjs.com/install.sh](https://nubjs.com/install.sh)) is the convenience of
+having `nub` on `PATH` for daily use. CI does exactly this, reading the version
+out of `devDependencies` so the bootstrap and the pin cannot drift apart.
+
+The version is deliberately **not** declared in `package.json#packageManager`.
+Nub reads `pnpm-workspace.yaml` — the workspace globs, `overrides`,
+`onlyBuiltDependencies`, `allowBuilds` — only while the project claims no
+package-manager identity. Setting `packageManager: nub@x`, or a
+`devEngines.packageManager` named `nub`, flips it into "nub identity": the file
+is ignored, the workspace collapses to the root package alone, and `nub install`
+rewrites `pnpm-lock.yaml` with every importer and every override silently
+dropped. `nub pm use nub` performs that migration properly — moving the globs to
+`package.json#workspaces` and renaming the lockfile to `nub.lock` — but the
+rename buys nothing: `nub.lock` is byte-for-byte the same pnpm-v9 format, and
+adopting it makes real pnpm refuse to run and stops update bots from
+regenerating the lockfile. So the pnpm file names stay, and the pin lives in
+`devDependencies`.
+
+CI runs Node 25.
 
 ## Module organization
 
@@ -68,7 +96,7 @@ enough. CI runs Node 25.
 
 ## Tests
 
-`pnpm test` runs every package's `test/` directory as a single vitest project,
+`nub run test` runs every package's `test/` directory as a single vitest project,
 from the repository root. There is no per-package `test` script, and running
 vitest from inside a package is not a supported shortcut.
 
@@ -81,9 +109,9 @@ the package's `exports`, the alias map, and `paths`.
 
 Type-level assertions are load-bearing here — several tools pin their service
 requirements as assertions that fail at compile rather than at run time — and
-`vitest run` does not check them. `pnpm typecheck:types` is what compiles
+`vitest run` does not check them. `nub run typecheck:types` is what compiles
 `packages/*/test`, `benchmarks/`, and `examples/*/src`. A test that only
-asserts a type will pass `pnpm test` while failing the gate.
+asserts a type will pass `nub run test` while failing the gate.
 
 ### The Postgres suite
 
@@ -99,7 +127,7 @@ container runtime is a suite that fails for a contributor who has not been
 told:
 
 ```bash
-RUN_POSTGRES_INTEGRATION=1 pnpm test
+RUN_POSTGRES_INTEGRATION=1 nub run test
 ```
 
 It provisions and drops a database through testcontainers, so a container
@@ -115,7 +143,7 @@ Each package builds with `tsgo -p tsconfig.json` after deleting `dist` and
 and `./dist/*.d.ts`: sources are not published, and a module absent from
 `exports` is unreachable to a consumer however it got into `dist`.
 
-`pnpm publish:npm` publishes from there. It defaults to the `alpha` dist-tag,
+`nub run publish:npm` publishes from there. It defaults to the `alpha` dist-tag,
 takes `--dry-run` and `--package <name>`, and is idempotent — a version
 already on the registry is skipped rather than failed, so re-running a
 half-finished release finishes it.
