@@ -1,148 +1,31 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
 import { defineConfig } from 'vitest/config';
 
 // Tests run from the repository root against package **sources**, not against
-// built output, so a failing test points at the file you would edit. The map
-// below mirrors every subpath each package declares in its `exports`; the same
-// list appears as `paths` in `tsconfig.base.json`, which is what typechecks
-// them.
-const alias = {
-  '@sunfall/vesper-agent/agent': new URL(
-    './packages/agent/src/agent.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/branch': new URL(
-    './packages/agent/src/branch.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/context-window': new URL(
-    './packages/agent/src/context-window.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/event': new URL(
-    './packages/agent/src/event.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/history': new URL(
-    './packages/agent/src/history.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/interception': new URL(
-    './packages/agent/src/interception.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/log': new URL(
-    './packages/agent/src/log.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/recording-policy': new URL(
-    './packages/agent/src/recording-policy.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/run-policy': new URL(
-    './packages/agent/src/run-policy.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/signal': new URL(
-    './packages/agent/src/signal.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/stop': new URL(
-    './packages/agent/src/stop.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/subagent': new URL(
-    './packages/agent/src/subagent.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/skill': new URL(
-    './packages/agent/src/skill.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/compaction': new URL(
-    './packages/agent/src/compaction.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-agent/workflow': new URL(
-    './packages/agent/src/workflow.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/offset': new URL(
-    './packages/log/src/offset.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/record': new URL(
-    './packages/log/src/record.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/log-store': new URL(
-    './packages/log/src/log-store.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/tail': new URL(
-    './packages/log/src/tail.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/layer-memory': new URL(
-    './packages/log/src/layer-memory.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/log-store-contract': new URL(
-    './packages/log/src/log-store-contract.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-log/layer-pg': new URL(
-    './packages/log/src/layer-pg.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/driver': new URL(
-    './packages/workspace/src/driver.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/agent': new URL(
-    './packages/workspace/src/agent.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/glob': new URL(
-    './packages/workspace/src/glob.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/layer-local': new URL(
-    './packages/workspace/src/layer-local.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/output': new URL(
-    './packages/workspace/src/output.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/path': new URL(
-    './packages/workspace/src/path.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/tools': new URL(
-    './packages/workspace/src/tools.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-workspace/workspace-contract': new URL(
-    './packages/workspace/src/workspace-contract.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-attachments/ref': new URL(
-    './packages/attachments/src/ref.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-attachments/attachment-store': new URL(
-    './packages/attachments/src/attachment-store.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-attachments/layer-memory': new URL(
-    './packages/attachments/src/layer-memory.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-attachments/attachment-store-contract': new URL(
-    './packages/attachments/src/attachment-store-contract.ts',
-    import.meta.url,
-  ).pathname,
+// built output, so a failing test points at the file you would edit. The
+// TypeScript paths are the canonical public source map; Vitest inherits it so
+// this config cannot drift into a second list of aliases.
+const tsconfig = JSON.parse(
+  readFileSync(new URL('./tsconfig.base.json', import.meta.url), 'utf8'),
+) as {
+  readonly compilerOptions?: {
+    readonly paths?: Readonly<Record<string, ReadonlyArray<string>>>;
+  };
 };
+
+const alias = Object.fromEntries(
+  Object.entries(tsconfig.compilerOptions?.paths ?? {})
+    .filter(([specifier]) => specifier.startsWith('@sunfall/vesper-'))
+    .map(([specifier, targets]) => {
+      const source = targets[0];
+      if (source === undefined) {
+        throw new Error(`Missing source target for ${specifier}`);
+      }
+      return [specifier, fileURLToPath(new URL(source, import.meta.url))];
+    }),
+);
 
 export default defineConfig({
   resolve: { alias },

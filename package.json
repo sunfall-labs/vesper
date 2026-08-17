@@ -16,38 +16,40 @@
     "node": ">=22"
   },
   "scripts": {
-    "build": "nub run -r --filter './packages/*' build",
+    "build": "tsdown",
     "benchmark": "nub run --filter @sunfall/vesper-benchmarks bench",
     "example:compliance-relay": "nub run --filter @sunfall/vesper-example-compliance-relay start",
     "example:live-smoke": "nub run --filter @sunfall/vesper-example-live-smoke start",
     "test": "vitest run",
-    "typecheck": "tsgo -b tsconfig.json --pretty false && nub run typecheck:types",
+    "typecheck": "nub run -r --filter './packages/*' typecheck && nub run typecheck:types",
     "typecheck:types": "tsgo -p tsconfig.type-tests.json --noEmit --pretty false",
     "format": "oxfmt . --write",
     "format:check": "oxfmt . --check",
+    "knip": "knip",
     "lint": "oxlint . --deny-warnings --no-error-on-unmatched-pattern",
     "lint:fix": "oxlint . --fix --no-error-on-unmatched-pattern",
-    "publish:npm": "node scripts/publish-npm.mjs",
-    "preflight:pack": "node scripts/preflight-packages.mjs",
-    "preflight:pack:built": "node scripts/preflight-packages.mjs --skip-build",
-    "verify": "node scripts/verify.mjs",
-    "verify:serial": "node scripts/verify.mjs --concurrency=1"
+    "publish:npm": "nub publish --filter \"@sunfall/vesper-*\" --access public --provenance --tag alpha",
+    "publish:npm:dry-run": "nub publish --filter \"@sunfall/vesper-*\" --access public --tag alpha --dry-run --no-git-checks",
+    "verify": "nub run build && nub run verify:static && nub run test",
+    "verify:serial": "nub run build && nub run verify:static --max-processes 1 && nub run test",
+    "verify:static": "concurrently --group --timings --names format,lint,typecheck,knip \"nub run format:check\" \"nub run lint\" \"nub run typecheck\" \"nub run knip\""
   },
   "devDependencies": {
-    "@effect/ai-anthropic": "4.0.0-rc.109",
-    "@effect/ai-openai": "4.0.0-rc.109",
-    "@effect/platform-node": "4.0.0-rc.109",
-    "@effect/sql-pg": "4.0.0-rc.109",
-    "@effect/vitest": "4.0.0-rc.109",
+    "@arethetypeswrong/core": "0.18.5",
+    "@effect/ai-anthropic": "catalog:",
+    "@effect/ai-openai": "catalog:",
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
     "@nubjs/nub": "0.7.5",
-    "@testcontainers/postgresql": "^11.14.0",
     "@types/node": "^24.0.0",
-    "@types/pg": "^8.20.0",
     "@typescript/native-preview": "7.0.0-dev.20260513.1",
-    "effect": "4.0.0-rc.109",
+    "concurrently": "10.0.5",
+    "effect": "catalog:",
+    "knip": "6.32.2",
     "oxfmt": "0.55.0",
     "oxlint": "1.75.0",
-    "pg": "8.20.0",
+    "publint": "0.3.23",
+    "tsdown": "0.22.14",
     "typescript": "^5.9.3",
     "vitest": "^4.1.9"
   },
@@ -58,16 +60,25 @@
       "onFail": "ignore"
     }
   },
-  "workspaces": [
-    "packages/*",
-    "examples/*",
-    "benchmarks"
-  ],
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "examples/*",
+      "benchmarks"
+    ],
+    "catalog": {
+      "@effect/ai-anthropic": "4.0.0-rc.109",
+      "@effect/ai-openai": "4.0.0-rc.109",
+      "@effect/platform-node": "4.0.0-rc.109",
+      "@effect/vitest": "4.0.0-rc.109",
+      "effect": "4.0.0-rc.109"
+    }
+  },
   "overrides": {
     "@effect/platform-node": {
       "@effect/platform-node-shared": "4.0.0-rc.109"
     },
-    "effect": "4.0.0-rc.109"
+    "effect": "catalog:"
   },
   "allowBuilds": {
     "esbuild": true,

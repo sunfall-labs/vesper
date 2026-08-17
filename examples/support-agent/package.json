@@ -10,6 +10,6 @@
   },
   "dependencies": {
     "@sunfall/vesper-agent": "workspace:*",
-    "effect": "4.0.0-rc.109"
+    "effect": "catalog:"
   }
 }

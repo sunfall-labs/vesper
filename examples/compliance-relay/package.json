@@ -20,9 +20,9 @@
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
-    "effect": "4.0.0-rc.109",
-    "@effect/ai-anthropic": "4.0.0-rc.109",
-    "@effect/platform-node": "4.0.0-rc.109",
+    "effect": "catalog:",
+    "@effect/ai-anthropic": "catalog:",
+    "@effect/platform-node": "catalog:",
     "@sunfall/vesper-agent": "workspace:*"
   }
 }

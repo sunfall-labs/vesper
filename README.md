@@ -30,7 +30,12 @@ Vesper publishes four packages:
 | [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                        |
 
 `workspace` and `attachments` are standalone: nothing in `agent` composes
-them. Applications opt into either package directly.
+them implicitly. Applications opt into either package directly.
+`WorkspaceAgent.standard` exposes the standard workspace toolkit, and
+`WorkspaceAgent.compose(applicationToolkit)` adds those tools to an application
+toolkit without hiding the required layers. `WorkspaceTools` remains the
+advanced lower-level interface for custom handler, root, and command-policy
+wiring; see the [workspace guide](docs/workspace.md).
 
 `@sunfall/vesper-agent/workflow` optionally binds a recorded agent to Effect's
 native `Workflow`: Effect Workflow or Cluster owns durable execution and
@@ -637,9 +642,10 @@ input)` is the other trade: it seeds a **new** conversation from the same
   one — and it leaves the ancestor untouched, so the relationship is not
   navigable from the ancestor's side.
 
-- **No default harness toolkit or prompt templates.** Nothing here ships shell,
-  read, or edit tools to an agent by default. `@sunfall/vesper-workspace` is the
-  seam such tools sit behind, and nothing in `agent` composes it yet.
+- **No implicit harness toolkit or prompt templates.** Nothing installs shell,
+  read, or edit tools on every agent by default. Applications explicitly opt in
+  through `WorkspaceAgent.standard` or `WorkspaceAgent.compose` from
+  `@sunfall/vesper-workspace/agent`.
 - **The proactive compaction path is exercised only by tests.**
   `Compaction.Policy.contextWindow` is opt-in and nothing in this repository
   sets it, so in practice only the reactive overflow path runs.

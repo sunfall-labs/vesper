@@ -1,0 +1,108 @@
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
+
+import { AgentBranch } from './branch.js';
+import type { Stop } from './stop.js';
+
+export interface Completed {
+  readonly text: string;
+  readonly outcome: 'success' | 'cancelled';
+  readonly steps: number;
+  readonly usage: Stop.Usage;
+}
+
+export interface Active {
+  readonly completed: Completed | undefined;
+  readonly latestTurnUsage: Stop.Usage | undefined;
+  readonly previousTurnUsage: Stop.Usage;
+  readonly compactedSinceTurn: boolean;
+}
+
+export const empty = (): Active => ({
+  completed: undefined,
+  latestTurnUsage: undefined,
+  previousTurnUsage: { input: 0, output: 0 },
+  compactedSinceTurn: false,
+});
+
+/** Fold one active-path record into the bounded state written at settlement. */
+export const update = (
+  current: Active,
+  record: ConversationRecord.Record,
+): Active => {
+  switch (record._tag) {
+    case 'RunStarted':
+      return {
+        ...current,
+        completed: undefined,
+        previousTurnUsage: { input: 0, output: 0 },
+      };
+    case 'Completed':
+      return {
+        ...current,
+        completed: { ...record, outcome: record.outcome ?? 'success' },
+      };
+    case 'Compacted':
+      return { ...current, compactedSinceTurn: true };
+    case 'TurnFinished':
+      return {
+        ...current,
+        latestTurnUsage: current.compactedSinceTurn
+          ? undefined
+          : {
+              input: record.usage.input - current.previousTurnUsage.input,
+              output: record.usage.output - current.previousTurnUsage.output,
+            },
+        previousTurnUsage: record.usage,
+        compactedSinceTurn: false,
+      };
+    case 'RunSettled':
+      return record.resume === undefined
+        ? current
+        : {
+            ...current,
+            completed:
+              record.resume.completed === undefined
+                ? undefined
+                : {
+                    ...record.resume.completed,
+                    outcome: record.resume.completed.outcome ?? 'success',
+                  },
+            latestTurnUsage: record.resume.latestTurnUsage,
+          };
+    default:
+      return current;
+  }
+};
+
+/** Project the branch-aware conversation facts used to continue a run. */
+export const activeFrom = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+): Active =>
+  AgentBranch.activePath(records).reduce(
+    (current, { record }) => update(current, record),
+    empty(),
+  );
+
+export type State = ConversationRecord.RecordOf<'StateCheckpoint'> | undefined;
+
+/** Fold one record into the durable State checkpoint projection. */
+export const updateState = (
+  current: State,
+  record: ConversationRecord.Record,
+): State => {
+  if (record._tag === 'StateCheckpoint') return record;
+  return record._tag === 'RunSettled' && record.resume?.state !== undefined
+    ? { _tag: 'StateCheckpoint', ...record.resume.state }
+    : current;
+};
+
+/** Select the latest durable State checkpoint on the active branch. */
+export const stateFrom = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+): State =>
+  AgentBranch.activePath(records).reduce<State>(
+    (current, { record }) => updateState(current, record),
+    undefined,
+  );
+
+export * as ResumeProjection from './resume-projection.js';

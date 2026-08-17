@@ -1,0 +1,12 @@
+version: 2
+# Dependabot does not recognize Nub's `nub.lock`; npm updates would change the
+# manifests without refreshing the lockfile and fail the frozen CI install.
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - '*'

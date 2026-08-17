@@ -3,7 +3,6 @@ import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
-  Cause,
   Clock,
   Effect,
   Exit,
@@ -13,66 +12,17 @@ import {
   Semaphore,
   Stream,
 } from 'effect';
-import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
+import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
-import type { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
 import { PromptTransport } from './prompt-transport.js';
+import * as RecoveryState from './recovery.js';
+import { ResumeProjection } from './resume-projection.js';
 import { AgentSignals } from './signal.js';
 import type { Stop } from './stop.js';
-import { RecordingPolicy } from './recording-policy.js';
-
-// The sink that turns a run into records, and the handle it writes through.
-//
-// The loop already emits everything the log needs, so this is a sink and not
-// new bookkeeping: `AgentEvents.Event` in, the same events out, records
-// written on the way past. It is reached by `agent.recordingTo(id)` and by the
-// internal delegation protocol opening a child session. An agent that does
-// neither never opens a {@link Session} and never touches this file.
-//
-// ## Two ordering properties, both load-bearing
-//
-// Records are appended with `Stream.tap`, so the append completes *before*
-// the event it describes reaches the consumer. That is the same rule
-// `@sunfall/vesper-durable` states as "deltas stream live, but `finish` is withheld
-// until the checkpoint is durable": a consumer must never act on something
-// the durable record does not yet contain. Here the consumer is whatever runs
-// tool calls in reaction to a turn, or a UI that will resume from an offset.
-//
-// And a batch is one append, so the text that preceded a tool call and the
-// tool call itself land atomically or not at all. A reader cannot observe a
-// `ToolCall` whose preceding assistant text was lost.
-//
-// ## Where text is cut
-//
-// Coalescing boundaries are **semantic**: one `Text` record per contiguous
-// run of assistant text within a turn, flushed when the model does something
-// other than talk — a tool call, a tool result, a signal, the end of a turn,
-// the end of the run.
-//
-// The alternatives are a fixed character count or sentence detection, and
-// both are worse for the same reason. The log exists to rebuild a
-// conversation, and what it rebuilds a `Prompt` message from is exactly "what
-// the model said before it did something else". A 512-character cut splits
-// that in a place with no meaning, mid-word and mid-JSON, and makes the row
-// count a function of a constant nobody can justify. Sentence detection is
-// worse still: it is locale- and content-sensitive, it mangles code blocks,
-// and it buys nothing a reader wants — nobody resumes a conversation at a
-// sentence.
-//
-// The cost of the semantic boundary is that one very long uninterrupted
-// answer is one large row. That is bounded by the model's max output tokens,
-// which is the same bound the provider already imposes on a single turn.
-//
-// ## One producer per run, shared by everything the run writes
-//
-// A {@link Session} is that producer. The sink writes through it, the loop
-// writes signal deliveries through it, delegation opens children through it.
-// They have to be one producer and not several: the store's fencing gives a
-// stream exactly one writer, so a second `acquire` for the same conversation
-// would fence the first, and a run that recorded its signals through a
-// separate claim would kill its own event sink on the next append.
+import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
+import * as RecordingSink from './recording-sink.js';
 
 /**
  * Where a conversation's stream lives.
@@ -108,25 +58,14 @@ export const childIdFor = (
     `child-v1:${parentConversationId.length}:${parentConversationId}${toolCallId}`,
   );
 
+// Recovery types live in the private recovery module and are re-exported below
+// so AgentLog's public type shape remains stable without exposing the Module.
 /** How a tool call ended, as a previous run recorded it. */
-export interface Settled {
-  readonly outcome: 'success' | 'failure';
-  /** The encoded result, in the form the provider was shown it. */
-  readonly result: unknown;
-}
-
+export type Settled = RecoveryState.Settled;
 /** What an orphaned run durably established about a tool call. */
-export type Recovery =
-  | { readonly _tag: 'Indeterminate' }
-  | ({ readonly _tag: 'Settled' } & Settled);
-
+export type Recovery = RecoveryState.Recovery;
 /** An orphaned handler start and the provider call that originally caused it. */
-export interface IndeterminateToolCall {
-  readonly step: number;
-  readonly name: string;
-  readonly toolCallId: LogVocabulary.ToolCallId;
-  readonly params: unknown;
-}
+export type IndeterminateToolCall = RecoveryState.IndeterminateToolCall;
 
 /** A signal this run has taken delivery of. */
 export interface Delivered {
@@ -271,7 +210,7 @@ export interface Session {
   readonly settlementTimeoutMillis: number;
 
   /** @internal Persistence-only filtering inherited by child sessions. */
-  readonly recordingPolicy: RecordingPolicy.Runtime;
+  readonly recordingPolicy: RecordingPolicyRuntime.Runtime;
 
   /**
    * The records required to rebuild the live prompt when this run claimed it.
@@ -291,6 +230,9 @@ export interface Session {
    */
   /** @internal Raw recovery snapshot used to rebuild the prompt. */
   readonly history: ReadonlyArray<ConversationRecord.Envelope>;
+
+  /** @internal Bounded aggregate suffix used to restore durable state. */
+  readonly stateHistory: ReadonlyArray<ConversationRecord.Envelope>;
 
   /**
    * The active records required to rebuild the conversation **now**, including
@@ -415,7 +357,7 @@ export interface Session {
  * branching exists.
  *
  * Doing it any later would be wrong in a way that is quiet. A marker appended
- * after `unsettledTools` ran would leave the crashed run the user branched
+ * after the recovery fold ran would leave the crashed run the user branched
  * *away from* still holding the recovery index, and the new run would be
  * served tool results answering calls that are no longer in its prompt.
  */
@@ -677,18 +619,8 @@ const openWith = (
     // and serving those back would answer questions the resumed run never
     // asked. The signal cursor immediately below is the opposite case, and
     // `branch.ts` says why.
-    const recovered = unsettledTools(
-      AgentBranch.activePath(opened.aggregateSuffix),
-    );
-    const recoverable = recovered.recoveries;
-    const pendingToolCalls = yield* Ref.make(
-      new Set(
-        [...recoverable].flatMap(([key, recovery]) =>
-          recovery._tag === 'Indeterminate' ? [key] : [],
-        ),
-      ),
-    );
-    const toolSettled = new Map<string, Array<Effect.Effect<void>>>();
+    const recovered = RecoveryState.fold(opened.aggregateSuffix);
+    const toolRecovery = yield* RecoveryState.make(recovered);
     const signalCursor = yield* Ref.make(opened.signalCursor);
 
     const readSignalPage = (
@@ -804,80 +736,64 @@ const openWith = (
         })
       : { input: 0, output: 0 };
 
-    const completed = yield* Ref.make(AgentHistory.completedFrom(history));
-    const latestTurn = yield* Ref.make<Stop.Usage | undefined>(
-      AgentHistory.latestTurnUsageFrom(history),
+    const initialResume = ResumeProjection.activeFrom(history);
+    const resume = yield* Ref.make(initialResume);
+    const projectionHistory = mergeByOffset(opened.aggregateSuffix, history);
+    const state = yield* Ref.make(
+      ResumeProjection.stateFrom(projectionHistory),
     );
-    const previousTurn = yield* Ref.make<Stop.Usage>({ input: 0, output: 0 });
-    const compactedSinceTurn = yield* Ref.make(false);
+    const projectionLock = yield* Semaphore.make(1);
 
     const trackedAppend: Session['append'] = (records, timeoutMillis) =>
-      Effect.gen(function* () {
-        let persisted = records;
-        const settlement = records.find(
-          (record): record is ConversationRecord.RecordOf<'RunSettled'> =>
-            record._tag === 'RunSettled',
-        );
-        if (settlement !== undefined) {
-          const cursor = yield* Ref.get(signalCursor);
-          const state = resumeState(
-            options.compatibility,
-            addUsage(opened.usage, settlement.usage),
-            cursor,
-            yield* Ref.get(completed),
-            yield* Ref.get(latestTurn),
+      projectionLock.withPermits(1)(
+        Effect.gen(function* () {
+          let persisted = records;
+          const currentResume = yield* Ref.get(resume);
+          const currentState = yield* Ref.get(state);
+          const settlementIndex = records.findIndex(
+            (record) => record._tag === 'RunSettled',
           );
-          persisted = records.map((record) =>
-            record === settlement ? { ...settlement, resume: state } : record,
-          );
-        }
+          if (settlementIndex >= 0) {
+            const settlement = records[
+              settlementIndex
+            ] as ConversationRecord.RecordOf<'RunSettled'>;
+            const beforeSettlement = records.slice(0, settlementIndex);
+            const settlementResume = beforeSettlement.reduce(
+              ResumeProjection.update,
+              currentResume,
+            );
+            const settlementState = beforeSettlement.reduce(
+              ResumeProjection.updateState,
+              currentState,
+            );
+            const cursor = yield* Ref.get(signalCursor);
+            const resumeSnapshot = resumeState(
+              options.compatibility,
+              addUsage(opened.usage, settlement.usage),
+              cursor,
+              settlementResume.completed,
+              settlementResume.latestTurnUsage,
+              settlementState,
+            );
+            persisted = records.map((record, index) =>
+              index === settlementIndex
+                ? { ...settlement, resume: resumeSnapshot }
+                : record,
+            );
+          }
 
-        yield* append(persisted, timeoutMillis);
-        for (const record of records) {
-          if (record._tag === 'ToolStarted') {
-            recoverable.set(settledKey(record.name, record.id), {
-              _tag: 'Indeterminate',
-            });
-          } else if (record._tag === 'ToolOutcome') {
-            recoverable.set(settledKey(record.name, record.id), {
-              _tag: 'Settled',
-              outcome: record.outcome,
-              result: record.result,
-            });
-          }
-        }
-        yield* Effect.forEach(records, (record) =>
-          updateResumeState(
-            record,
-            completed,
-            latestTurn,
-            previousTurn,
-            compactedSinceTurn,
-          ),
-        );
-        yield* Effect.gen(function* () {
-          yield* Ref.update(pendingToolCalls, (current) => {
-            const next = new Set(current);
-            for (const record of records) {
-              if (record._tag === 'ToolStarted') {
-                next.add(settledKey(record.name, record.id));
-              } else if (record._tag === 'ToolOutcome') {
-                next.delete(settledKey(record.name, record.id));
-              }
-            }
-            return next;
-          });
-          for (const record of records) {
-            if (record._tag !== 'ToolOutcome') continue;
-            const key = settledKey(record.name, record.id);
-            const callbacks = toolSettled.get(key) ?? [];
-            toolSettled.delete(key);
-            yield* Effect.forEach(callbacks, (callback) => callback, {
-              discard: true,
-            });
-          }
-        });
-      });
+          yield* append(persisted, timeoutMillis);
+          yield* Ref.set(
+            state,
+            records.reduce(ResumeProjection.updateState, currentState),
+          );
+          yield* Ref.set(
+            resume,
+            records.reduce(ResumeProjection.update, currentResume),
+          );
+          yield* toolRecovery.track(records);
+        }),
+      );
 
     return {
       [SessionTypeId]: SessionTypeId,
@@ -885,25 +801,19 @@ const openWith = (
       compatibility: options.compatibility,
       inheritedUsage,
       usage: opened.usage,
-      latestTurnUsage: AgentHistory.latestTurnUsageFrom(history),
-      completed: AgentHistory.completedFrom(history),
+      latestTurnUsage: initialResume.latestTurnUsage,
+      completed: initialResume.completed,
       settlementTimeoutMillis: SETTLEMENT_TIMEOUT_MILLIS,
-      recordingPolicy: RecordingPolicy.raw,
+      recordingPolicy: RecordingPolicyRuntime.raw,
       history,
+      stateHistory: projectionHistory,
       recorded: readResumeHistory(store, path),
       append: trackedAppend,
-      recovery: (name, toolCallId) =>
-        Option.fromUndefinedOr(recoverable.get(settledKey(name, toolCallId))),
-      indeterminateToolCalls: recovered.indeterminate,
-      recoveryCorruption: recovered.corruption,
-      hasPendingToolCalls: Effect.map(
-        Ref.get(pendingToolCalls),
-        (pending) => pending.size > 0,
-      ),
-      onToolSettled: (name, toolCallId, effect) => {
-        const key = settledKey(name, toolCallId);
-        toolSettled.set(key, [...(toolSettled.get(key) ?? []), effect]);
-      },
+      recovery: toolRecovery.recovery,
+      indeterminateToolCalls: toolRecovery.indeterminateToolCalls,
+      recoveryCorruption: toolRecovery.recoveryCorruption,
+      hasPendingToolCalls: toolRecovery.hasPendingToolCalls,
+      onToolSettled: toolRecovery.onToolSettled,
       drainSignals: Effect.map(
         drainSignalsBounded(1_000),
         (page) => page.signals,
@@ -917,7 +827,7 @@ const openWith = (
 /** Attach a compiled persistence policy without changing the run's live values. */
 export const withRecordingPolicy = (
   session: Session,
-  recordingPolicy: RecordingPolicy.Runtime,
+  recordingPolicy: RecordingPolicyRuntime.Runtime,
 ): Session => {
   const append: Session['append'] = (records) =>
     Effect.forEach(records, recordingPolicy.filter).pipe(
@@ -1197,6 +1107,7 @@ const resumeState = (
   signalCursor: LogOffset.Offset,
   completed: ReturnType<typeof AgentHistory.completedFrom>,
   latestTurnUsage: Stop.Usage | undefined,
+  state: ConversationRecord.RecordOf<'StateCheckpoint'> | undefined,
 ) => ({
   formatVersion: FORMAT_VERSION,
   agent: compatibility.agent,
@@ -1205,55 +1116,15 @@ const resumeState = (
   signalCursor,
   ...(completed === undefined ? {} : { completed }),
   ...(latestTurnUsage === undefined ? {} : { latestTurnUsage }),
+  ...(state === undefined
+    ? {}
+    : { state: { id: state.id, version: state.version, value: state.value } }),
 });
 
 const addUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
   input: left.input + right.input,
   output: left.output + right.output,
 });
-
-const updateResumeState = (
-  record: ConversationRecord.Record,
-  completed: Ref.Ref<ReturnType<typeof AgentHistory.completedFrom>>,
-  latestTurn: Ref.Ref<Stop.Usage | undefined>,
-  previousTurn: Ref.Ref<Stop.Usage>,
-  compactedSinceTurn: Ref.Ref<boolean>,
-): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    switch (record._tag) {
-      case 'RunStarted':
-        yield* Ref.set(completed, undefined);
-        yield* Ref.set(previousTurn, { input: 0, output: 0 });
-        break;
-      case 'Completed':
-        yield* Ref.set(completed, {
-          ...record,
-          outcome: record.outcome ?? 'success',
-        });
-        break;
-      case 'Compacted':
-        yield* Ref.set(compactedSinceTurn, true);
-        break;
-      case 'TurnFinished': {
-        const previous = yield* Ref.get(previousTurn);
-        const compacted = yield* Ref.get(compactedSinceTurn);
-        yield* Ref.set(
-          latestTurn,
-          compacted
-            ? undefined
-            : {
-                input: record.usage.input - previous.input,
-                output: record.usage.output - previous.output,
-              },
-        );
-        yield* Ref.set(previousTurn, record.usage);
-        yield* Ref.set(compactedSinceTurn, false);
-        break;
-      }
-      default:
-        break;
-    }
-  });
 
 const FORK_IDENTITY_PREFIX = '@sunfall/vesper-agent/fork/v1:';
 
@@ -1443,6 +1314,7 @@ const reseat = (
     case 'ToolCall':
     case 'ToolStarted':
     case 'ToolOutcome':
+    case 'StateCheckpoint':
     case 'TurnFinished':
     case 'BranchedFrom':
     case 'Completed':
@@ -1455,127 +1327,6 @@ const reseat = (
       return unreachable;
     }
   }
-};
-
-/**
- * Map key for a tool outcome, keyed by tool name and call id together.
- *
- * The separator is U+001F UNIT SEPARATOR, the ASCII control character whose
- * defined meaning is exactly this: joining fields into one datum. It is used
- * rather than a printable character because it cannot occur in either
- * component, so no pair of distinct (name, id) can collide by containing the
- * separator itself.
- *
- * It is deliberately **not** U+0000. A NUL anywhere in a source file makes
- * every byte-oriented tool classify the file as binary: `file(1)` reports it
- * as `data`, and `grep` and `diff` silently produce no output for the whole
- * file — no error and no "binary file matches" line. A search for a symbol
- * that is plainly present comes back empty, which reads as absence.
- */
-const settledKey = (
-  name: string,
-  toolCallId: LogVocabulary.ToolCallId,
-): string => `${name}\u001f${toolCallId}`;
-
-/**
- * Tool states belonging to runs that started and never settled.
- *
- * The gate on resuming dispatch, and the reason `RunSettled` exists.
- * `RunSettled` clears the map. A later `RunStarted` does not: recovery attempts
- * may themselves crash before reconciling the earlier start, and forgetting it
- * would turn the next attempt into an implicit redispatch. A conversation whose
- * last run finished yields an empty map, and dispatch behaves as it always did.
- *
- * Given the **active path**, not the log. A crashed run the conversation has
- * since branched away from is not a run this one is recovering; its outcomes
- * belong to tool calls the new prompt does not contain, and offering them
- * would hand the model results for questions it never asked. The caller
- * filters rather than this function, so that the two full-log folds nearby are
- * visibly a different decision and not an omission.
- */
-const unsettledTools = (
-  history: ReadonlyArray<ConversationRecord.Envelope>,
-): {
-  readonly recoveries: Map<string, Recovery>;
-  readonly indeterminate: ReadonlyArray<IndeterminateToolCall>;
-  readonly corruption: string | undefined;
-} => {
-  const recoveries = new Map<string, Recovery>();
-  const calls = new Map<string, IndeterminateToolCall>();
-  const starts = new Map<
-    string,
-    { readonly name: string; readonly id: string }
-  >();
-  const order: string[] = [];
-  let running = false;
-
-  for (const { record } of history) {
-    switch (record._tag) {
-      case 'RunStarted':
-        running = true;
-        break;
-      case 'RunSettled':
-        recoveries.clear();
-        calls.clear();
-        starts.clear();
-        order.length = 0;
-        running = false;
-        break;
-      case 'ToolCall':
-        if (running) {
-          const key = settledKey(record.name, record.id);
-          if (!calls.has(key)) order.push(key);
-          calls.set(key, {
-            step: record.step,
-            name: record.name,
-            toolCallId: record.id,
-            params: record.params,
-          });
-        }
-        break;
-      case 'ToolStarted':
-        if (running) {
-          const key = settledKey(record.name, record.id);
-          recoveries.set(key, {
-            _tag: 'Indeterminate',
-          });
-          starts.set(key, { name: record.name, id: record.id });
-        }
-        break;
-      case 'ToolOutcome':
-        if (running) {
-          recoveries.set(settledKey(record.name, record.id), {
-            _tag: 'Settled',
-            outcome: record.outcome,
-            result: record.result,
-          });
-        }
-        break;
-      default:
-        break;
-    }
-  }
-
-  // Dispatch commits before entering the handler, while ToolCall arrives via
-  // the provider event stream. Either record can therefore win the append
-  // race. Diagnose corruption only after the complete orphan suffix is folded.
-  const unmatched = [...starts].find(
-    ([key]) => recoveries.get(key)?._tag === 'Indeterminate' && !calls.has(key),
-  )?.[1];
-
-  return {
-    recoveries,
-    corruption:
-      unmatched === undefined
-        ? undefined
-        : `Cannot recover indeterminate tool ${unmatched.name} (${unmatched.id}): ` +
-          'durable ToolStarted has no matching ToolCall',
-    indeterminate: order.flatMap((key) =>
-      recoveries.get(key)?._tag === 'Indeterminate' && calls.has(key)
-        ? [calls.get(key)!]
-        : [],
-    ),
-  };
 };
 
 /**
@@ -1635,337 +1386,9 @@ export const start = (
     },
   ]);
 
-/**
- * Record a run's events into the session's conversation.
- *
- * The returned stream emits exactly what it was given, and — unlike the
- * version this replaces — does not change its requirement channel either: the
- * session already holds the store. A log write that fails becomes a
- * **defect**, not a failure, which is the same decision `@sunfall/vesper-durable`
- * makes for a checkpoint write and for the same reason: this is
- * infrastructure, not something the model did, and no retry policy written
- * for provider errors should absorb it. Continuing past a failed append would
- * produce a run whose result exists and whose history does not.
- *
- * The one exception is the settlement record, which is written from a
- * finalizer and cannot report anything to anyone. See {@link settle}.
- */
-export const record = <Tools extends Record<string, Tool.Any>, E, R>(
-  session: Session,
-  events: Stream.Stream<AgentEvents.Event<Tools>, E, R>,
-): Stream.Stream<AgentEvents.Event<Tools>, E, R> =>
-  Stream.unwrap(
-    Effect.sync(() => {
-      const pending: Pending = {
-        step: 0,
-        text: '',
-        steps: 0,
-        usage: { input: 0, output: 0 },
-        completed: false,
-        cancelled: false,
-      };
-
-      return Stream.tap(events, (event) =>
-        // Compaction is the one event whose record cannot be built from the
-        // event alone: it names a position in the log, and only the log knows
-        // positions. Everything else is a pure function of the event and what
-        // the sink has seen.
-        event._tag === 'Compacted'
-          ? compaction(session, pending, event)
-          : session.append(recordsFor(pending, event)),
-      ).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
-    }),
-  );
-
-/**
- * Write down that history was replaced, and what it was replaced by.
- *
- * Two appends rather than one, in this order and for this reason: any text the
- * model had produced and not yet flushed is part of the history compaction
- * just summarized, so it has to be *in* the log before the boundary is
- * resolved against it. Resolving first would point `firstKept` at a log that
- * is one record short of the conversation the loop compacted.
- *
- * `keptMessages` arrives as a count because that is all the loop can supply —
- * compaction runs against `Chat`'s in-memory history, which carries no record
- * identity — and `AgentHistory.boundaryFor` is what turns it back into a
- * position. It has to be that function and not a private one here: the
- * boundary is only meaningful in terms of the messages `messagesFrom`
- * rebuilds, so the writer and the reader have to be reading the same
- * definition.
- */
-const compaction = (
-  session: Session,
-  pending: Pending,
-  event: Extract<AgentEvents.Lifecycle, { readonly _tag: 'Compacted' }>,
-): Effect.Effect<void> =>
-  Effect.gen(function* () {
-    yield* session.append(flush(pending));
-
-    const recorded = yield* session.recorded;
-
-    yield* session.append([
-      {
-        _tag: 'Compacted',
-        formatVersion: FORMAT_VERSION,
-        agent: session.compatibility.agent,
-        agentRevision: session.compatibility.revision,
-        step: event.step,
-        summary: event.summary,
-        firstKept: AgentHistory.boundaryFor(recorded, event.keptMessages),
-        summarizedMessages: event.summarizedMessages,
-        keptMessages: event.keptMessages,
-      },
-    ]);
-  });
-
-/** Maximum time run teardown waits for the settlement append. */
-export const SETTLEMENT_TIMEOUT_MILLIS = 5_000;
-
-/**
- * Write down how the run ended, including the ways that end no stream.
- *
- * Teardown is uninterruptible, but the backend operation and the wait for its
- * serialization permit are interruptible and bounded. Timing out
- * intentionally leaves the orphan shape below.
- *
- * Failures here are swallowed after being logged, which is the opposite of
- * every other write in this file and is the only defensible option. There is
- * no one left to fail to: the stream has ended, its consumer has its value or
- * its error, and turning a settle-time store failure into a defect would
- * replace whatever actually went wrong with a complaint about the log. What
- * it leaves behind is a `RunStarted` with no `RunSettled` — which is exactly
- * the orphan shape a reader is told to look for, and which the resuming
- * dispatch treats conservatively by serving completed outcomes and refusing
- * to guess about indeterminate starts.
- */
-const settle = (
-  session: Session,
-  pending: Pending,
-  exit: Exit.Exit<unknown, unknown>,
-): Effect.Effect<void> =>
-  Effect.suspend(() => {
-    const settlement: ConversationRecord.Record = {
-      _tag: 'RunSettled',
-      ...outcomeOf(pending, exit),
-      steps: pending.steps,
-      usage: pending.usage,
-    };
-
-    const write = Effect.flatMap(session.hasPendingToolCalls, (pending) =>
-      pending
-        ? Effect.logError(
-            `Conversation ${session.conversationId} has indeterminate tool execution; leaving the run orphaned`,
-          )
-        : session.append([settlement], session.settlementTimeoutMillis),
-    ).pipe(
-      Effect.catchCause((cause) =>
-        Effect.logError(
-          `Conversation ${session.conversationId} could not record how its run settled`,
-          cause,
-        ),
-      ),
-    );
-
-    return Effect.uninterruptibleMask((restore) =>
-      Effect.gen(function* () {
-        const completed = yield* restore(write).pipe(
-          Effect.timeoutOption(session.settlementTimeoutMillis),
-        );
-        if (Option.isNone(completed)) {
-          yield* Effect.logError(
-            `Conversation ${session.conversationId} settlement append timed out after ${session.settlementTimeoutMillis}ms; leaving the run orphaned`,
-          );
-        }
-      }),
-    );
-  });
-
-const outcomeOf = (
-  pending: Pending,
-  exit: Exit.Exit<unknown, unknown>,
-): { readonly outcome: SettledOutcome; readonly detail: string } => {
-  if (Exit.isFailure(exit)) {
-    return Cause.hasInterrupts(exit.cause)
-      ? { outcome: 'interrupted', detail: 'the run was interrupted' }
-      : { outcome: 'failure', detail: Cause.pretty(exit.cause) };
-  }
-  if (pending.cancelled) {
-    return { outcome: 'cancelled', detail: 'a cancel signal ended the run' };
-  }
-  if (pending.completed) {
-    return { outcome: 'success', detail: '' };
-  }
-  // The stream ended cleanly without a `Completed` event, which the loop
-  // never does on its own: a consumer took a fixed number of events and
-  // walked away. The run did not finish, and saying so is what stops the
-  // record from claiming a success nobody got.
-  return {
-    outcome: 'interrupted',
-    detail: 'the event stream was abandoned before the run completed',
-  };
-};
-
-type SettledOutcome = ConversationRecord.RecordOf<'RunSettled'>['outcome'];
-
-/** What the sink has seen so far: text awaiting a flush, and how it ended. */
-interface Pending {
-  step: number;
-  text: string;
-  steps: number;
-  usage: Stop.Usage;
-  completed: boolean;
-  cancelled: boolean;
-}
-
-const flush = (pending: Pending): ReadonlyArray<ConversationRecord.Record> => {
-  if (pending.text === '') return [];
-  const record: ConversationRecord.Record = {
-    _tag: 'Text',
-    step: pending.step,
-    text: pending.text,
-  };
-  pending.text = '';
-  return [record];
-};
-
-const signalOffset = (offset: string): LogOffset.Offset => {
-  try {
-    return LogOffset.Offset.make(offset);
-  } catch (cause) {
-    throw new Error(`Signal event carried an invalid log offset: ${offset}`, {
-      cause,
-    });
-  }
-};
-
-/**
- * What one event contributes to the log, coalescing text as it goes.
- *
- * Returns an empty array for the events that are not worth a row — turn
- * starts, text framing, reasoning, provider metadata — and `Stream.tap` skips
- * the append for those, so the common case (a text delta) costs a string
- * concatenation and nothing else.
- */
-const recordsFor = <Tools extends Record<string, Tool.Any>>(
-  pending: Pending,
-  event: AgentEvents.Event<Tools>,
-): ReadonlyArray<ConversationRecord.Record> => {
-  switch (event._tag) {
-    case 'TurnStarted':
-      return [];
-    case 'TurnFinished':
-      pending.steps = event.step;
-      pending.usage = event.usage;
-      return [
-        ...flush(pending),
-        { _tag: 'TurnFinished', step: event.step, usage: event.usage },
-      ];
-    case 'Signalled':
-      if (event.kind === 'cancel') pending.cancelled = true;
-      return [
-        // Flushed first, so a rebuilt prompt has the model's own words before
-        // the instruction that redirected it rather than after.
-        ...flush(pending),
-        {
-          _tag: 'SignalReceived',
-          kind: event.kind,
-          text: event.text,
-          source: event.source,
-          step: event.step,
-          at: signalOffset(event.at),
-        },
-      ];
-    case 'SignalRejected':
-      return [
-        ...flush(pending),
-        {
-          _tag: 'SignalReceived',
-          kind: event.kind,
-          text: event.text,
-          source: event.source,
-          step: event.step,
-          at: signalOffset(event.at),
-          disposition: 'rejected',
-          reason: event.reason,
-        },
-      ];
-    case 'SignalBacklog':
-      return [];
-    case 'Completed':
-      pending.completed = true;
-      pending.steps = event.steps;
-      pending.usage = event.usage;
-      return [
-        ...flush(pending),
-        {
-          _tag: 'Completed',
-          outcome: event.outcome,
-          text: event.text,
-          steps: event.steps,
-          usage: event.usage,
-        },
-      ];
-    case 'Compacted':
-      // Written by {@link compaction}, which needs the log's own offsets and
-      // therefore cannot be a pure function of the event. Listed here so the
-      // match stays exhaustive rather than defaulted — a new lifecycle case
-      // should fail this switch, which is the whole reason it has no
-      // `default`.
-      return [];
-    case 'Part':
-      return partRecords(pending, event.step, event.part);
-  }
-};
-
-// Read through the encoded shape, exactly as `agent.ts`'s `observe` does. The
-// stream carries decoded parts, whose *field names* are identical for
-// everything matched below except one: a decoded tool result carries both the
-// handler's value (`result`) and the toolkit's encoding of it
-// (`encodedResult`), and it is the latter that is written down. That is the
-// form `Prompt` puts in front of the model, so it is the only one a resuming
-// dispatch can serve back without changing what the model sees — and it is
-// already JSON, so a success type holding a `Date` no longer fails the append
-// on its way to storage.
-const partRecords = <Tools extends Record<string, Tool.Any>>(
-  pending: Pending,
-  step: number,
-  part: Response.StreamPart<Tools>,
-): ReadonlyArray<ConversationRecord.Record> => {
-  const encoded = part as Response.StreamPartEncoded;
-  switch (encoded.type) {
-    case 'text-delta':
-      pending.step = step;
-      pending.text += encoded.delta;
-      return [];
-    case 'tool-call':
-      return [
-        ...flush(pending),
-        {
-          _tag: 'ToolCall',
-          step,
-          id: LogVocabulary.ToolCallId.make(encoded.id),
-          name: encoded.name,
-          params: encoded.params,
-        },
-      ];
-    case 'tool-result':
-      return [
-        ...flush(pending),
-        {
-          _tag: 'ToolOutcome',
-          step,
-          id: LogVocabulary.ToolCallId.make(encoded.id),
-          name: encoded.name,
-          outcome: encoded.isFailure ? 'failure' : 'success',
-          result: (part as Response.ToolResultPart<string, unknown, unknown>)
-            .encodedResult,
-        },
-      ];
-    default:
-      return [];
-  }
-};
+export const record = RecordingSink.record;
+export const SETTLEMENT_TIMEOUT_MILLIS =
+  RecordingSink.SETTLEMENT_TIMEOUT_MILLIS;
 
 const orDie = <A, R>(
   effect: Effect.Effect<A, LogStore.LogStoreError, R>,

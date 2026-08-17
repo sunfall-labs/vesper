@@ -8,6 +8,7 @@ import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { Agent } from '../src/agent.js';
 import { AgentLog } from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
+import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
 
 const finish: Response.FinishPartEncoded = {
   type: 'finish',
@@ -90,7 +91,7 @@ describe('recording policy', () => {
       Effect.gen(function* () {
         const filtered = yield* Effect.gen(function* () {
           const context = yield* Effect.context<never>();
-          const runtime = RecordingPolicy.compile(
+          const runtime = RecordingPolicyRuntime.compile(
             {
               toolParameters: () => Effect.succeed({ redacted: 'params' }),
               toolResult: () => Effect.succeed({ redacted: 'result' }),

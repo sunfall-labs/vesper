@@ -1,13 +1,22 @@
-import type { Effect } from 'effect';
+import { Context, type Effect } from 'effect';
 import type { AiError, Prompt } from 'effect/unstable/ai';
 
 import type { AgentLog } from './log.js';
-import type { RunPolicy } from './run-policy.js';
+import type { RunPolicyRuntime } from './run-policy-runtime.js';
 import type { Agent } from './agent.js';
+
+export const Session = Context.Reference<AgentLog.Session | undefined>(
+  '@sunfall/vesper-agent/Session',
+  { defaultValue: () => undefined },
+);
+
+export const StateCleanup = Context.Reference<
+  Set<(session: AgentLog.Session) => Effect.Effect<void>> | undefined
+>('@sunfall/vesper-agent/StateCleanup', { defaultValue: () => undefined });
 
 interface AgentProtocol<Requires> {
   readonly run: (
-    runtime: RunPolicy.Runtime,
+    runtime: RunPolicyRuntime.Runtime,
     session: AgentLog.Session | undefined,
     input: Prompt.RawInput,
   ) => Effect.Effect<

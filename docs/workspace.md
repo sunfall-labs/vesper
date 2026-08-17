@@ -24,15 +24,63 @@ program.pipe(
 );
 ```
 
-The subpaths are `./driver`, `./layer-local`, `./tools`, `./output`, `./path`,
-`./glob`, and `./workspace-contract`. Each module also re-exports itself as a
-namespace (`WorkspaceDriver`, `WorkspaceLocal`, `WorkspaceTools`, and so on),
-which is the form used throughout this file.
+The subpaths are `./agent`, `./driver`, `./layer-local`, `./tools`, `./output`,
+`./path`, `./glob`, and `./workspace-contract`. Each module also re-exports
+itself as a namespace (`WorkspaceAgent`, `WorkspaceDriver`, `WorkspaceLocal`,
+`WorkspaceTools`, and so on), which is the form used throughout this file.
+
+## The agent adapter
+
+`WorkspaceAgent` is the explicit adapter between the standalone workspace
+package and an agent definition. Nothing in `@sunfall/vesper-agent` installs
+workspace access implicitly. Use `standard` for only the six workspace tools,
+or `compose` to preserve an application's tools while adding them:
+
+```ts
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { WorkspaceAgent } from '@sunfall/vesper-workspace/agent';
+import { WorkspaceLocal } from '@sunfall/vesper-workspace/layer-local';
+import { WorkspaceTools } from '@sunfall/vesper-workspace/tools';
+import * as NodeServices from '@effect/platform-node/NodeServices';
+import { Effect, Layer } from 'effect';
+import { Toolkit } from 'effect/unstable/ai';
+
+const workspace = WorkspaceAgent.compose(Toolkit.make(lookupIssue));
+// Use WorkspaceAgent.standard instead when there are no application tools.
+
+const agent = Agent.make({
+  name: 'worker',
+  revision: '1',
+  instructions: 'Work in the provided workspace.',
+  toolkit: workspace.toolkit,
+}).withHandlers({ lookup_issue: lookupIssueHandler });
+
+agent
+  .run('inspect issue 42')
+  .pipe(
+    Effect.provide(workspace.defaultLayer),
+    Effect.provide(WorkspaceTools.rootLayer('/work')),
+    Effect.provide(
+      WorkspaceLocal.layer.pipe(Layer.provide(NodeServices.layer)),
+    ),
+  );
+```
+
+The layers remain visible by design: `defaultLayer` supplies the standard tool
+handlers and default shell policy, `rootLayer` selects the workspace root, and
+the driver layer selects the execution substrate. Application handlers remain
+application-owned. Tool-name collisions are rejected rather than silently
+overridden.
 
 ## The toolkit
 
 `./tools` is a `Toolkit` of six tools — `read_file`, `write_file`,
 `edit_file`, `list_files`, `search_files`, `run_shell`.
+
+`WorkspaceTools` is the advanced lower-level interface for callers that need
+direct access to the toolkit, handler layer, root layer, or command policy. For
+agent definitions, prefer `WorkspaceAgent.standard` or `WorkspaceAgent.compose`
+so that adaptation is explicit without rebuilding this wiring.
 
 They are built on `WorkspaceDriver`, not beside it. Every byte read and every
 command run goes through the service, so the layer that decides _where_ the

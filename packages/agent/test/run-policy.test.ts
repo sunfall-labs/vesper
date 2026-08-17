@@ -9,6 +9,7 @@ import {
 
 import { Agent } from '../src/agent.js';
 import { RunPolicy } from '../src/run-policy.js';
+import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 import { Stop } from '../src/stop.js';
 
 const finish = (input = 3, output = 2): Response.FinishPartEncoded => ({
@@ -43,7 +44,9 @@ const failedWith = <A, E>(effect: Effect.Effect<A, E>) =>
 describe('hard run policy', () => {
   it.effect('does not let a steer override the shared turn ceiling', () =>
     Effect.gen(function* () {
-      const runtime = yield* RunPolicy.create(RunPolicy.make({ maxTurns: 1 }));
+      const runtime = yield* RunPolicyRuntime.create(
+        RunPolicy.make({ maxTurns: 1 }),
+      );
       yield* runtime.turn;
       const rendered = yield* failedWith(runtime.turn);
       expect(rendered).toContain('turns');
@@ -137,7 +140,7 @@ describe('hard run policy', () => {
 
   it.live('shares delegation counts and child concurrency across breadth', () =>
     Effect.gen(function* () {
-      const runtime = yield* RunPolicy.create(
+      const runtime = yield* RunPolicyRuntime.create(
         RunPolicy.make({
           maxDelegatedTasks: 2,
           maxConcurrentChildren: 1,
@@ -198,16 +201,16 @@ describe('hard run policy', () => {
   );
 
   it('clamps unbounded requested tool concurrency to application policy', () => {
-    expect(RunPolicy.clampConcurrency('unbounded', 3)).toBe(3);
-    expect(RunPolicy.clampConcurrency(12, 3)).toBe(3);
-    expect(RunPolicy.clampConcurrency(2, 3)).toBe(2);
+    expect(RunPolicyRuntime.clampConcurrency('unbounded', 3)).toBe(3);
+    expect(RunPolicyRuntime.clampConcurrency(12, 3)).toBe(3);
+    expect(RunPolicyRuntime.clampConcurrency(2, 3)).toBe(2);
   });
 
   it.live(
     'shares tool concurrency across every loop using the root runtime',
     () =>
       Effect.gen(function* () {
-        const runtime = yield* RunPolicy.create(
+        const runtime = yield* RunPolicyRuntime.create(
           RunPolicy.make({ maxToolConcurrency: 1 }),
         );
         const entered = yield* Deferred.make<void>();
@@ -337,7 +340,7 @@ describe('hard run policy', () => {
 
   it.live('releases a leaf permit after failure and interruption', () =>
     Effect.gen(function* () {
-      const runtime = yield* RunPolicy.create(
+      const runtime = yield* RunPolicyRuntime.create(
         RunPolicy.make({ maxToolConcurrency: 1 }),
       );
 
@@ -362,7 +365,7 @@ describe('hard run policy', () => {
 
   it.effect('preserves handler stream backpressure', () =>
     Effect.gen(function* () {
-      const runtime = yield* RunPolicy.create(
+      const runtime = yield* RunPolicyRuntime.create(
         RunPolicy.make({ maxToolConcurrency: 1 }),
       );
       const pulls = yield* Ref.make(0);
@@ -383,7 +386,7 @@ describe('hard run policy', () => {
     'bounds per-signal, per-boundary, and cumulative steer bytes explicitly',
     () =>
       Effect.gen(function* () {
-        const runtime = yield* RunPolicy.create(
+        const runtime = yield* RunPolicyRuntime.create(
           RunPolicy.make({
             maxSignalBytes: 4,
             maxSignalsPerBoundary: 1,

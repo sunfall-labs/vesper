@@ -5,6 +5,7 @@ import { Prompt } from 'effect/unstable/ai';
 import { AgentBranch } from './branch.js';
 import { Compaction } from './compaction.js';
 import { PromptTransport } from './prompt-transport.js';
+import { ResumeProjection } from './resume-projection.js';
 import type { Stop } from './stop.js';
 
 // Records back into a runnable conversation.
@@ -423,85 +424,18 @@ export const usageFrom = (
 /** Provider usage for the latest completed turn, excluding earlier turns. */
 export const latestTurnUsageFrom = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
-): Stop.Usage | undefined => {
-  let previous: Stop.Usage = { input: 0, output: 0 };
-  let latest: Stop.Usage | undefined;
-  let compacted = false;
-
-  for (const { record } of AgentBranch.activePath(records)) {
-    switch (record._tag) {
-      case 'RunStarted':
-        previous = { input: 0, output: 0 };
-        break;
-      case 'Compacted':
-        compacted = true;
-        break;
-      case 'RunSettled':
-        if (record.resume !== undefined) {
-          latest = record.resume.latestTurnUsage;
-        }
-        break;
-      case 'TurnFinished':
-        latest = compacted
-          ? undefined
-          : {
-              input: record.usage.input - previous.input,
-              output: record.usage.output - previous.output,
-            };
-        previous = record.usage;
-        compacted = false;
-        break;
-      default:
-        break;
-    }
-  }
-
-  return latest;
-};
+): Stop.Usage | undefined =>
+  ResumeProjection.activeFrom(records).latestTurnUsage;
 
 /** The latest durable result, when a child can return it without rerunning. */
 export const completedFrom = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
-):
-  | {
-      readonly text: string;
-      readonly outcome: 'success' | 'cancelled';
-      readonly steps: number;
-      readonly usage: Stop.Usage;
-    }
-  | undefined => {
-  let completed:
-    | {
-        readonly text: string;
-        readonly outcome: 'success' | 'cancelled';
-        readonly steps: number;
-        readonly usage: Stop.Usage;
-      }
-    | undefined;
-  for (const { record } of AgentBranch.activePath(records)) {
-    if (record._tag === 'RunStarted') {
-      completed = undefined;
-    }
-    if (record._tag === 'Completed') {
-      completed = { ...record, outcome: record.outcome ?? 'success' };
-    }
-    if (record._tag === 'RunSettled' && record.resume !== undefined) {
-      completed =
-        record.resume.completed === undefined
-          ? undefined
-          : {
-              ...record.resume.completed,
-              outcome: record.resume.completed.outcome ?? 'success',
-            };
-    }
-  }
-
+): ResumeProjection.Completed | undefined =>
   // `Completed` is appended before the event reaches the result fold. The
   // settlement finalizer is deliberately best-effort and may time out after
   // that, so requiring `RunSettled(success)` here would rerun a child whose
   // result and side effects are already durable.
-  return completed;
-};
+  ResumeProjection.activeFrom(records).completed;
 
 const add = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
   input: left.input + right.input,

@@ -19,11 +19,13 @@ import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
-import { hasProtocol, register } from './internal.js';
+import { hasProtocol, register, Session, StateCleanup } from './internal.js';
 import type { Interception } from './interception.js';
 import { AgentLog } from './log.js';
 import { RecordingPolicy } from './recording-policy.js';
+import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
 import { RunPolicy } from './run-policy.js';
+import { RunPolicyRuntime } from './run-policy-runtime.js';
 import { Skill } from './skill.js';
 import { Stop } from './stop.js';
 import { Subagent } from './subagent.js';
@@ -763,7 +765,8 @@ export const make = <
   WithOwnHandlers<Tools> | Subagent.Services<Children> | StopR,
   CompiledTools<Tools, Children, Skills>,
   WithOwnHandlers<Tools> | Subagent.Services<Children> | StopR,
-  never
+  never,
+  AiError.AiError
 > => {
   type RuntimeTools = CompiledTools<Tools, Children, Skills>;
   type BaseRequires =
@@ -966,7 +969,7 @@ export const make = <
                   duration: remaining,
                   orElse: () =>
                     Stream.fail(
-                      RunPolicy.error({
+                      RunPolicyRuntime.error({
                         limit: 'deadline',
                         used: runPolicy.wallClockMillis,
                         maximum: runPolicy.wallClockMillis,
@@ -1065,7 +1068,7 @@ export const make = <
           duration: remaining,
           orElse: () =>
             Effect.fail(
-              RunPolicy.error({
+              RunPolicyRuntime.error({
                 limit: 'deadline',
                 used: runPolicy.wallClockMillis,
                 maximum: runPolicy.wallClockMillis,
@@ -1272,7 +1275,7 @@ export const make = <
                       runtime?.limits.maxSignalsPerBoundary ??
                         runPolicy.maxSignalsPerBoundary,
                     );
-              type Decision = RunPolicy.SignalDecision & {
+              type Decision = RunPolicyRuntime.SignalDecision & {
                 readonly signal: AgentLog.Delivered;
               };
               const decisions = yield* Effect.forEach(
@@ -1386,7 +1389,7 @@ export const make = <
                     ),
                     Stream.filter(({ signal }) => signal.kind === 'cancel'),
                     Stream.filter(({ signal, index }) =>
-                      RunPolicy.acceptsCancel(
+                      RunPolicyRuntime.acceptsCancel(
                         runtime?.limits ?? runPolicy,
                         signal.text,
                         index,
@@ -1428,7 +1431,7 @@ export const make = <
       Stream.unwrap(
         Effect.gen(function* () {
           if (runtime === undefined) {
-            const root = yield* RunPolicy.create(runPolicy);
+            const root = yield* RunPolicyRuntime.create(runPolicy);
             return entryFor({ ...wiring, runtime: root }).streamIn(
               chat,
               input,
@@ -1513,7 +1516,11 @@ export const make = <
                 ),
                 Stream.filter(({ signal }) => signal.kind === 'cancel'),
                 Stream.filter(({ signal, index }) =>
-                  RunPolicy.acceptsCancel(runtime.limits, signal.text, index),
+                  RunPolicyRuntime.acceptsCancel(
+                    runtime.limits,
+                    signal.text,
+                    index,
+                  ),
                 ),
                 Stream.tap(() => Ref.set(cancelObserved, true)),
                 Stream.tap(() => arbitration.cancel),
@@ -1546,7 +1553,7 @@ export const make = <
                       duration: remaining,
                       orElse: () =>
                         Effect.fail(
-                          RunPolicy.error({
+                          RunPolicyRuntime.error({
                             limit: 'deadline',
                             used: runtime.limits.wallClockMillis,
                             maximum: runtime.limits.wallClockMillis,
@@ -1650,7 +1657,7 @@ export const make = <
               Effect.sleep(remaining).pipe(
                 Effect.andThen(
                   Effect.fail(
-                    RunPolicy.error({
+                    RunPolicyRuntime.error({
                       limit: 'deadline',
                       used: runPolicy.wallClockMillis,
                       maximum: runPolicy.wallClockMillis,
@@ -1673,15 +1680,6 @@ export const make = <
         }),
       );
 
-    const run = Effect.fn(`Agent.${definition.name}.run`)(
-      (input: Prompt.RawInput) => foldToResult(stream(input)),
-    );
-
-    const runIn = Effect.fn(`Agent.${definition.name}.runIn`)(
-      (chat: Chat.Service, input: Prompt.RawInput) =>
-        foldToResult(streamIn(chat, input)),
-    );
-
     // The agent provides its own handlers — subagent delegation and skill
     // loading — so a call site never has to provide them.
     //
@@ -1689,35 +1687,21 @@ export const make = <
     // keys from an intersected compiled record, so these boundary assertions
     // name the public requirement channel. Exact type tests pin all four.
 
-    return {
-      stream: (input: Prompt.RawInput) =>
-        Stream.provide(stream(input), layer) as Stream.Stream<
-          AgentEvents.Event<RuntimeTools>,
-          AiError.AiError,
-          BaseRequires
-        >,
-      run: (input: Prompt.RawInput) =>
-        Effect.provide(run(input), layer) as Effect.Effect<
-          Result,
-          AiError.AiError,
-          BaseRequires
-        >,
-      streamIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-        Stream.provide(streamIn(chat, input), layer) as Stream.Stream<
-          AgentEvents.Event<RuntimeTools>,
-          AiError.AiError,
-          BaseRequires
-        >,
-      runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-        Effect.provide(runIn(chat, input), layer) as Effect.Effect<
-          Result,
-          AiError.AiError,
-          BaseRequires
-        >,
-    };
+    return provideEntry({ stream, streamIn }, layer) as Entry<
+      RuntimeTools,
+      BaseRequires,
+      AiError.AiError
+    >;
   };
 
-  return fromParts<Name, Tools, RuntimeTools, BaseRequires, never>({
+  return fromParts<
+    Name,
+    Tools,
+    RuntimeTools,
+    BaseRequires,
+    never,
+    AiError.AiError
+  >({
     name: definition.name,
     revision,
     description: definition.description,
@@ -1853,7 +1837,7 @@ export const streamFrom = (
   );
 
 /**
- * The four entry points, for one session.
+ * The two primitive event streams for one session.
  *
  * Split out from {@link Parts} because they are the part that varies with the
  * session and the rest is not. `withHandlers` composes over an entry;
@@ -1863,18 +1847,31 @@ interface Entry<Tools extends Record<string, Tool.Any>, Requires, Error> {
   readonly stream: (
     input: Prompt.RawInput,
   ) => Stream.Stream<AgentEvents.Event<Tools>, Error, Requires>;
-  readonly run: (
-    input: Prompt.RawInput,
-  ) => Effect.Effect<Result, Error, Requires>;
   readonly streamIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
   ) => Stream.Stream<AgentEvents.Event<Tools>, Error, Requires>;
-  readonly runIn: (
-    chat: Chat.Service,
-    input: Prompt.RawInput,
-  ) => Effect.Effect<Result, Error, Requires>;
 }
+
+/** Provide one implementation layer across both primitive stream shapes. */
+const provideEntry = <
+  Tools extends Record<string, Tool.Any>,
+  Requires,
+  Error,
+  Provided,
+  LayerError,
+  LayerRequires,
+>(
+  entry: Entry<Tools, Requires, Error>,
+  layer: Layer.Layer<Provided, LayerError, LayerRequires>,
+): Entry<
+  Tools,
+  Exclude<Requires, Provided> | LayerRequires,
+  Error | LayerError
+> => ({
+  stream: (input) => Stream.provide(entry.stream(input), layer),
+  streamIn: (chat, input) => Stream.provide(entry.streamIn(chat, input), layer),
+});
 
 /**
  * What one run's loop is built around, beyond the definition.
@@ -1887,7 +1884,7 @@ interface Entry<Tools extends Record<string, Tool.Any>, Requires, Error> {
 interface Wiring {
   readonly session: AgentLog.Session | undefined;
   readonly interceptor: Interception.Interceptor | undefined;
-  readonly runtime?: RunPolicy.Runtime | undefined;
+  readonly runtime?: RunPolicyRuntime.Runtime | undefined;
   readonly startRun?:
     | ((input: Prompt.RawInput) => Effect.Effect<void>)
     | undefined;
@@ -1972,16 +1969,57 @@ const fromParts = <
     ...options,
   });
 
+  // Every public result fold crosses the same tracing seam. Keeping the span
+  // beside the fold means decorators can replace streams without quietly
+  // removing runs from telemetry.
+  const span = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    Effect.withSpan(effect, `Agent.${parts.name}.run`);
+
+  const withSession = <A, E, R>(
+    session: AgentLog.Session,
+    effect: Effect.Effect<A, E, R>,
+  ) => {
+    const cleanup = new Set<
+      (session: AgentLog.Session) => Effect.Effect<void>
+    >();
+    return effect.pipe(
+      Effect.provideService(Session, session),
+      Effect.provideService(StateCleanup, cleanup),
+      Effect.ensuring(
+        Effect.forEach(cleanup, (release) => release(session), {
+          discard: true,
+        }),
+      ),
+    );
+  };
+
+  const streamWithSession = <A, E, R>(
+    session: AgentLog.Session,
+    stream: Stream.Stream<A, E, R>,
+  ) => {
+    const cleanup = new Set<
+      (session: AgentLog.Session) => Effect.Effect<void>
+    >();
+    return stream.pipe(
+      Stream.provideService(Session, session),
+      Stream.provideService(StateCleanup, cleanup),
+      Stream.ensuring(
+        Effect.forEach(cleanup, (release) => release(session), {
+          discard: true,
+        }),
+      ),
+    );
+  };
+
   // The unrecorded entry, which is what the four public entry points are.
   // Built once rather than per call so an agent value stays cheap to hold.
   const plain = parts.entry(wiring(undefined));
-
-  // Re-applied wherever a fold bypasses `make`'s `Effect.fn`-wrapped `run`.
-  // Without it, turning recording on would quietly remove a run from tracing
-  // — a telemetry regression that shows up as an absence, which is the
-  // hardest kind to notice.
-  const span = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    Effect.withSpan(effect, `Agent.${parts.name}.run`);
+  const publicPlain = {
+    ...plain,
+    run: (input: Prompt.RawInput) => span(foldToResult(plain.stream(input))),
+    runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
+      span(foldToResult(plain.streamIn(chat, input))),
+  };
 
   // The writer half of the log, and the reason `@sunfall/vesper-durable`'s
   // checkpointer could be deleted rather than merely shrunk. Shared by `resume`
@@ -1998,7 +2036,7 @@ const fromParts = <
   const continuing = (
     session: AgentLog.Session,
     input: Prompt.RawInput,
-    runtime?: RunPolicy.Runtime,
+    runtime?: RunPolicyRuntime.Runtime,
   ) =>
     Effect.gen(function* () {
       // Read before the run writes anything. `session.history` is the scan
@@ -2023,30 +2061,27 @@ const fromParts = <
         ),
       );
 
-      const result = yield* foldToResult(
-        AgentLog.record(
-          session,
-          parts
-            .entry(
-              wiring(session, {
-                runtime,
-                startRun: (effective) =>
-                  AgentLog.start(session, {
-                    agent: parts.name,
-                    revision: parts.revision,
-                    input: effective,
-                  }),
-                lastTurn:
-                  latest === undefined
-                    ? undefined
-                    : {
-                        inputTokens: latest.input,
-                        outputTokens: latest.output,
-                      },
-              }),
-            )
-            .streamIn(chat, input),
-        ),
+      const entry = parts.entry(
+        wiring(session, {
+          runtime,
+          startRun: (effective) =>
+            AgentLog.start(session, {
+              agent: parts.name,
+              revision: parts.revision,
+              input: effective,
+            }),
+          lastTurn:
+            latest === undefined
+              ? undefined
+              : {
+                  inputTokens: latest.input,
+                  outputTokens: latest.output,
+                },
+        }),
+      );
+      const result = yield* withSession(
+        session,
+        foldToResult(AgentLog.record(session, entry.streamIn(chat, input))),
       );
 
       return {
@@ -2057,6 +2092,17 @@ const fromParts = <
         },
       } satisfies Result;
     });
+
+  // The claim differs for resume, branch, and fork; continuation does not.
+  const continueFrom = <E, R>(
+    opener: Effect.Effect<AgentLog.Session, E, R>,
+    input: Prompt.RawInput,
+  ) =>
+    span(
+      Effect.flatMap(opener, (session) =>
+        withSession(session, continuing(session, input)),
+      ),
+    );
 
   const agent: Instance<
     Name,
@@ -2073,65 +2119,45 @@ const fromParts = <
     description: parts.description,
     toolkit: parts.toolkit,
     instructions: parts.instructions,
-    ...plain,
+    ...publicPlain,
 
     of: (handlers) => handlers,
 
-    // A resumed run is an ordinary recorded run that did not start empty. See
-    // {@link continuing}, which is the whole of it.
     resume: (conversationId: string, input: Prompt.RawInput) =>
-      span(
-        Effect.flatMap(
-          AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
-            compatibility: { agent: parts.name, revision: parts.revision },
-          }),
-          (session) => continuing(session, input),
-        ),
+      continueFrom(
+        AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
+          compatibility: { agent: parts.name, revision: parts.revision },
+        }),
+        input,
       ),
 
-    // Identical to `resume` past the claim, which is the point. Branching is a
-    // property of *how the conversation was claimed* — `open` writes the
-    // marker before it reads anything back — so the run below rebuilds its
-    // prompt, recovers its tool outcomes, and resumes its signal cursor from a
-    // history that already describes the branch. Nothing here has to know.
     branchFrom: (
       conversationId: string,
       at: LogOffset.Offset,
       input: Prompt.RawInput,
     ) =>
-      span(
-        Effect.flatMap(
-          AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
-            branchFrom: at,
-            compatibility: { agent: parts.name, revision: parts.revision },
-          }),
-          (session) => continuing(session, input),
-        ),
+      continueFrom(
+        AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
+          branchFrom: at,
+          compatibility: { agent: parts.name, revision: parts.revision },
+        }),
+        input,
       ),
 
-    // The third member of the same family, and the reason `continuing` takes a
-    // session rather than a conversation id. `resume` claims at the end,
-    // `branchFrom` claims at a point, and this claims a *different stream* that
-    // `AgentLog.fork` has already seeded with the ancestor's prefix. By the
-    // time the run below builds its prompt the copy is in `session.history`,
-    // so it rebuilds, recovers and drains exactly as the other two do — and,
-    // unlike them, holds a claim nothing else is contending for.
     forkFrom: (
       conversationId: string,
       at: LogOffset.Offset,
       forkConversationId: string,
       input: Prompt.RawInput,
     ) =>
-      span(
-        Effect.flatMap(
-          AgentLog.fork(
-            LogVocabulary.ConversationId.make(conversationId),
-            at,
-            LogVocabulary.ConversationId.make(forkConversationId),
-            { agent: parts.name, revision: parts.revision },
-          ),
-          (session) => continuing(session, input),
+      continueFrom(
+        AgentLog.fork(
+          LogVocabulary.ConversationId.make(conversationId),
+          at,
+          LogVocabulary.ConversationId.make(forkConversationId),
+          { agent: parts.name, revision: parts.revision },
         ),
+        input,
       ),
 
     // Rebuilt from `parts` like `withHandlers` is, and for the same reason:
@@ -2176,12 +2202,30 @@ const fromParts = <
               const context = yield* Effect.context<never>();
               session = AgentLog.withRecordingPolicy(
                 session,
-                RecordingPolicy.compile(policy, context),
+                RecordingPolicyRuntime.compile(policy, context),
               );
             }
-            return AgentLog.record(session, events(session));
+            return AgentLog.record(
+              session,
+              streamWithSession(session, events(session)),
+            );
           }),
         );
+
+      const recordedEntry = (
+        build: (
+          session: AgentLog.Session,
+        ) => Entry<RuntimeTools, BaseRequires, RunError>,
+      ): Entry<
+        RuntimeTools,
+        BaseRequires | LogStore.Service,
+        RunError | AgentLog.CompatibilityError
+      > => ({
+        stream: (input) =>
+          recorded(input, (session) => build(session).stream(input)),
+        streamIn: (chat, input) =>
+          recorded(input, (session) => build(session).streamIn(chat, input)),
+      });
 
       return fromParts<
         Name,
@@ -2192,76 +2236,24 @@ const fromParts = <
         RunError | AgentLog.CompatibilityError
       >({
         ...parts,
-        entry: () => ({
-          stream: (input: Prompt.RawInput) =>
-            recorded(input, (session) =>
-              parts
-                .entry(
-                  wiring(session, {
-                    startRun: (effective) =>
-                      AgentLog.start(session, {
-                        agent: parts.name,
-                        revision: parts.revision,
-                        input: effective,
-                      }),
+        entry: () => {
+          const entry = recordedEntry((session) =>
+            parts.entry(
+              wiring(session, {
+                startRun: (effective) =>
+                  AgentLog.start(session, {
+                    agent: parts.name,
+                    revision: parts.revision,
+                    input: effective,
                   }),
-                )
-                .stream(input),
+              }),
             ),
-          run: (input: Prompt.RawInput) =>
-            span(
-              foldToResult(
-                recorded(input, (session) =>
-                  parts
-                    .entry(
-                      wiring(session, {
-                        startRun: (effective) =>
-                          AgentLog.start(session, {
-                            agent: parts.name,
-                            revision: parts.revision,
-                            input: effective,
-                          }),
-                      }),
-                    )
-                    .stream(input),
-                ),
-              ),
-            ),
-          streamIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-            recorded(input, (session) =>
-              parts
-                .entry(
-                  wiring(session, {
-                    startRun: (effective) =>
-                      AgentLog.start(session, {
-                        agent: parts.name,
-                        revision: parts.revision,
-                        input: effective,
-                      }),
-                  }),
-                )
-                .streamIn(chat, input),
-            ),
-          runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-            span(
-              foldToResult(
-                recorded(input, (session) =>
-                  parts
-                    .entry(
-                      wiring(session, {
-                        startRun: (effective) =>
-                          AgentLog.start(session, {
-                            agent: parts.name,
-                            revision: parts.revision,
-                            input: effective,
-                          }),
-                      }),
-                    )
-                    .streamIn(chat, input),
-                ),
-              ),
-            ),
-        }),
+          );
+          return {
+            stream: (input) => entry.stream(input),
+            streamIn: (chat, input) => entry.streamIn(chat, input),
+          };
+        },
       });
     },
 
@@ -2315,25 +2307,18 @@ const fromParts = <
         RunError
       >({
         ...parts,
-        entry: (incoming: Wiring) => {
-          const inner = parts.entry(incoming);
-          return {
-            stream: (input: Prompt.RawInput) =>
-              Stream.provide(inner.stream(input), own),
-            run: (input: Prompt.RawInput) =>
-              Effect.provide(inner.run(input), own),
-            streamIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-              Stream.provide(inner.streamIn(chat, input), own),
-            runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-              Effect.provide(inner.runIn(chat, input), own),
-          };
-        },
+        entry: (incoming: Wiring) =>
+          provideEntry(parts.entry(incoming), own) as Entry<
+            RuntimeTools,
+            WithoutOwnHandlers<BaseRequires, OwnTools>,
+            RunError
+          >,
       });
     },
   };
   register(agent, {
     run: (
-      runtime: RunPolicy.Runtime,
+      runtime: RunPolicyRuntime.Runtime,
       session: AgentLog.Session | undefined,
       input: Prompt.RawInput,
     ) =>

@@ -17,7 +17,57 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/run-policy`, `/recording-policy`, `/stop`,
-`/skill`, `/interception`, and `/workflow`.
+`/skill`, `/state`, `/interception`, and `/workflow`.
+
+## Durable State
+
+Define one typed state document and declare it as a tool dependency:
+
+```ts
+import { AgentState } from '@sunfall/vesper-agent/state';
+
+const SupportState = AgentState.make({
+  id: 'support-case',
+  version: '1',
+  schema: Schema.Struct({ phase: Schema.String }),
+  initial: { phase: 'gathering' },
+});
+
+const draft = Tool.make('draft', {
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({ phase: Schema.String }),
+  failure: AgentState.error,
+  dependencies: AgentState.dependencies(SupportState),
+});
+
+const support = Agent.make({
+  // ...
+  state: SupportState,
+}).withHandlers({
+  draft: () =>
+    Effect.gen(function* () {
+      const state = yield* SupportState;
+      return yield* state.update(() => ({ phase: 'drafting' }));
+    }),
+});
+```
+
+`get`, `set`, `update`, and `modify` are typed from the schema. Declaring
+`state` on the agent is the complete wiring: ordinary runs get isolated memory,
+while recorded runs append a complete, fenced checkpoint before a mutation
+returns. Resume restores the latest checkpoint, branches restore the selected
+active-path checkpoint, forks copy it with the selected prefix, and child
+conversations keep their own state. Concurrent mutations are serialized. A
+checkpoint is independent of tool outcomes and external effects; use stable
+idempotency keys when those effects need replay safety.
+
+State definition, compatibility, schema, and JSON-boundary failures use the
+schema-tagged `AgentState.Error`, with stable `reason` values:
+`invalid-definition`, `no-session`, `incompatible`, `decode`, `encode`, and
+`not-json-safe`.
+Direct state operations expose this error. Declare `failure: AgentState.error`
+when a tool handler lets mutation failures escape; state failures are never
+converted to defects.
 
 ## Effect Workflow
 

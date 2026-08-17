@@ -6,6 +6,7 @@ import type { Agent } from './agent.js';
 import { protocolOf } from './internal.js';
 import type { AgentLog } from './log.js';
 import { RunPolicy } from './run-policy.js';
+import { RunPolicyRuntime } from './run-policy-runtime.js';
 import {
   Depth,
   MAX_DEPTH,
@@ -24,7 +25,7 @@ export const handler =
   <Name extends string, R>(
     child: Agent.Named<Name, R>,
     session?: AgentLog.Session,
-    runtime?: RunPolicy.Runtime,
+    runtime?: RunPolicyRuntime.Runtime,
   ) =>
   (input: { readonly prompt: string }, call?: CallContext) =>
     Effect.gen(function* () {
@@ -45,7 +46,7 @@ export const handler =
         );
       }
       const active =
-        runtime ?? (yield* RunPolicy.create(RunPolicy.defaultLimits));
+        runtime ?? (yield* RunPolicyRuntime.create(RunPolicy.defaultLimits));
       const run = (childSession: AgentLog.Session | undefined) =>
         protocol.run(active, childSession, input.prompt).pipe(
           Effect.catchTag('@sunfall/vesper-agent/CompatibilityError', (error) =>
@@ -109,7 +110,7 @@ export const delegateTo = <const Children extends ReadonlyArray<Agent.Named>>(
   >;
   const layer = (
     session: AgentLog.Session | undefined,
-    runtime?: RunPolicy.Runtime,
+    runtime?: RunPolicyRuntime.Runtime,
   ) =>
     kit.toLayer(
       Effect.gen(function* () {

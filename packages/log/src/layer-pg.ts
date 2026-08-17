@@ -4,8 +4,9 @@ import { SqlError } from 'effect/unstable/sql';
 
 import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
-import { ConversationRecord } from './record.js';
+import { RecordBatch } from './record-batch.js';
 import { LogVocabulary } from './vocabulary.js';
+import * as AppendDecision from './append-decision.js';
 
 // Postgres log store.
 //
@@ -324,50 +325,7 @@ export const make = (
   const append = Effect.fn('AiLog.LogStorePg.append')(function* (
     input: LogStore.AppendInput,
   ) {
-    const reject = (reason: Reason, detail: string) =>
-      Effect.fail(failure(input.path, 'append', reason, detail));
-
-    // Cheap rejections before a connection is taken. Nothing below can write
-    // for these, so there is no reason to open a transaction to find out.
-    if (input.records.length === 0) {
-      return yield* reject('empty', 'append carried no records');
-    }
-    const producerSequence = yield* Schema.decodeUnknownEffect(
-      LogVocabulary.ProducerSequence,
-    )(input.sequence).pipe(
-      Effect.mapError(() =>
-        failure(
-          input.path,
-          'append',
-          'conflict',
-          `sequence ${input.sequence} is not a safe natural integer`,
-        ),
-      ),
-    );
-    const epoch = yield* Schema.decodeUnknownEffect(LogVocabulary.Epoch)(
-      input.epoch,
-    ).pipe(
-      Effect.mapError(() =>
-        failure(
-          input.path,
-          'append',
-          'conflict',
-          `epoch ${input.epoch} is not a safe natural integer`,
-        ),
-      ),
-    );
-    const producerId = yield* Schema.decodeUnknownEffect(
-      LogVocabulary.ProducerId,
-    )(input.producerId).pipe(
-      Effect.mapError(() =>
-        failure(
-          input.path,
-          'append',
-          'conflict',
-          'producer id must be non-empty',
-        ),
-      ),
-    );
+    const validated = yield* AppendDecision.validateInput(input, failure);
 
     return yield* client
       .withTransaction(
@@ -390,7 +348,14 @@ export const make = (
 
           const found = locked[0];
           if (found === undefined) {
-            return yield* reject('not_found', 'no stream at this path');
+            return yield* Effect.fail(
+              failure(
+                input.path,
+                'append',
+                'not_found',
+                'no stream at this path',
+              ),
+            );
           }
           const state = yield* readStreamRow(found).pipe(
             Effect.mapError((error) =>
@@ -403,54 +368,22 @@ export const make = (
             ),
           );
 
-          if (epoch !== state.epoch) {
-            return yield* reject(
-              'fenced',
-              `epoch ${input.epoch} is not the current epoch ${state.epoch}`,
-            );
-          }
-          if (producerId !== state.producerId) {
-            return yield* reject(
-              'conflict',
-              `producer ${input.producerId} does not hold epoch ${state.epoch}`,
-            );
-          }
-
-          // Same position as the memory backend puts it: after the identity
-          // checks, before the sequence ones, so an unencodable payload from a
-          // fenced producer still reports `fenced`.
-          const prepared = yield* ConversationRecord.prepare(
-            input.records,
-          ).pipe(
-            Effect.mapError((error) =>
-              failure(input.path, 'append', 'encoding', error.detail),
-            ),
+          const decision = yield* AppendDecision.decide(
+            validated,
+            {
+              epoch: state.epoch,
+              producerId: state.producerId,
+              nextSequence: state.nextProducerSequence,
+              lastFingerprint: state.lastFingerprint,
+            },
+            failure,
           );
-
-          const digest = prepared.fingerprint;
-          const expected = state.nextProducerSequence;
-          if (expected > 0 && producerSequence === expected - 1) {
-            // A retry. Idempotent only if it repeats the same batch: reusing a
-            // sequence for different records is overwriting, and answering it
-            // with the earlier offset drops the new records silently.
-            if (digest !== state.lastFingerprint) {
-              return yield* reject(
-                'conflict',
-                `sequence ${input.sequence} was reused with different content`,
-              );
-            }
-            return state.lastOffset;
-          }
-          if (producerSequence !== expected) {
-            return yield* reject(
-              producerSequence > expected ? 'gap' : 'conflict',
-              `expected sequence ${expected}, got ${input.sequence}`,
-            );
-          }
+          if (decision.kind === 'retry') return state.lastOffset;
 
           // Everything above rejects without writing. From here the batch
           // either commits whole or the transaction rolls back.
-          const sequence = state.nextSequence + BigInt(prepared.entries.length);
+          const sequence =
+            state.nextSequence + BigInt(decision.prepared.entries.length);
           const offset = LogOffset.fromSeq(sequence - 1n);
 
           // One JSON parameter avoids PostgreSQL's 65,535 bind-parameter
@@ -496,13 +429,13 @@ export const make = (
             [
               input.path,
               state.nextSequence.toString(),
-              producerId,
-              epoch,
-              producerSequence,
-              prepared.encoded,
+              validated.producerId,
+              validated.epoch,
+              validated.sequence,
+              decision.prepared.encoded,
               sequence.toString(),
-              LogVocabulary.ProducerSequence.make(Number(producerSequence) + 1),
-              digest,
+              decision.nextSequence,
+              decision.prepared.fingerprint,
               offset,
               channelFor(input.path),
               input.path.slice(0, NOTIFY_PAYLOAD_LIMIT),
@@ -572,7 +505,7 @@ export const make = (
     const page = upToDate ? rows : rows.slice(0, limit);
 
     const decoded = yield* Effect.forEach(page, (row) =>
-      ConversationRecord.decodeEnvelope({
+      RecordBatch.decodeEnvelope({
         offset: asString(row['record_offset']),
         conversationId: asString(row['conversation_id']),
         timestamp: asNumber(row['record_timestamp']),
@@ -644,7 +577,7 @@ export const make = (
     const upToDate = rows.length <= normalized.limit;
     const page = upToDate ? rows : rows.slice(0, normalized.limit);
     const decoded = yield* Effect.forEach(page, (row) =>
-      ConversationRecord.decodeEnvelope({
+      RecordBatch.decodeEnvelope({
         offset: asString(row['record_offset']),
         conversationId: asString(row['conversation_id']),
         timestamp: asNumber(row['record_timestamp']),

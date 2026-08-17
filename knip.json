@@ -1,0 +1,12 @@
+{
+  "$schema": "./node_modules/knip/schema.json",
+  "include": ["files", "dependencies"],
+  "workspaces": {
+    ".": {
+      "entry": ["type-tests/**/*.ts"]
+    },
+    "examples/support-agent": {
+      "entry": ["src/main.ts", "src/requirements.ts"]
+    }
+  }
+}

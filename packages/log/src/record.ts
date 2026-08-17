@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { Schema } from 'effect';
 
 import { LogOffset } from './offset.js';
 import { LogVocabulary } from './vocabulary.js';
@@ -62,6 +62,13 @@ const ResumeState = Schema.Struct({
   signalCursor: LogOffset.Offset,
   completed: Schema.optional(CompletedValue),
   latestTurnUsage: Schema.optional(Usage),
+  state: Schema.optional(
+    Schema.Struct({
+      id: Schema.String,
+      version: Schema.String,
+      value: Schema.Unknown,
+    }),
+  ),
 });
 
 /**
@@ -259,6 +266,13 @@ export const Record = Schema.TaggedUnion({
     usage: Usage,
   },
 
+  /** A complete, schema-versioned snapshot of application conversation state. */
+  StateCheckpoint: {
+    id: Schema.String,
+    version: Schema.String,
+    value: Schema.Unknown,
+  },
+
   /**
    * A delegation, written into **both** conversations.
    *
@@ -381,226 +395,5 @@ export const Envelope = Schema.Struct({
   record: Record,
 });
 export interface Envelope extends Schema.Struct.Type<typeof Envelope.fields> {}
-
-export const envelope = (offset: LogOffset.Offset, entry: Entry): Envelope => ({
-  offset,
-  conversationId: entry.conversationId,
-  timestamp: entry.timestamp,
-  record: entry.record,
-});
-
-/**
- * Codecs for the persistence boundary.
- *
- * Exported because a backend that stores JSON — the Postgres one, when it
- * lands — must round-trip through these rather than casting rows, and
- * because the contract suite uses them to prove a backend hands back decoded
- * records instead of whatever it happened to store.
- */
-export const decodeEnvelope = Schema.decodeUnknownEffect(Envelope);
-export const decodeEntry = Schema.decodeUnknownEffect(Entry);
-export const encodeEnvelope = Schema.encodeEffect(Envelope);
-export const encodeEntry = Schema.encodeEffect(Entry);
-
-/** A record that cannot be turned into its persisted form. */
-export class EncodeError extends Schema.TaggedError<EncodeError>()(
-  '@sunfall/vesper-log/RecordEncodeError',
-  {
-    detail: Schema.String,
-  },
-) {}
-
-/**
- * A digest of a batch's persisted content.
- *
- * This is what makes an append retry safe to answer with the original
- * offset. Matching on producer, epoch, and sequence alone says "you asked
- * about this slot before"; it does not say the caller is asking about the
- * *same records*. A producer that reuses a sequence for different content is
- * not retrying, and converging it onto the earlier offset drops the new
- * records with nothing anywhere to indicate it happened. That is the one
- * failure mode this package exists to remove, so the check is exact rather
- * than a proxy like record count, which only catches the careless version.
- *
- * The digest is taken over the *encoded* form: what a backend persists, not
- * the in-memory objects, so two producers that build structurally identical
- * batches by different routes agree. Encoding is also where a payload that
- * cannot be stored is caught. `prompt`, `params`, and `result` are
- * `Schema.Unknown`, so schema encoding alone passes them through untouched.
- * Preparation below closes that hole by rejecting anything JSON would alter
- * or discard before either backend can write it.
- */
-type JsonPrimitive = null | boolean | number | string;
-type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
-
-const jsonFailure = (path: string, detail: string): EncodeError =>
-  new EncodeError({ detail: `${path} ${detail}` });
-
-/**
- * Validate and clone one value exactly as JSON can represent it.
- *
- * Object keys are sorted by JavaScript's UTF-16 ordering. This is intentional:
- * insertion order is not record content, so two objects with the same keys and
- * values have the same retry identity. Values JSON would silently alter or
- * discard are rejected rather than normalized.
- */
-const jsonClone = (
-  value: unknown,
-  path: string,
-  ancestors: ReadonlySet<object>,
-): JsonValue => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw jsonFailure(path, 'is not finite');
-    if (Object.is(value, -0)) throw jsonFailure(path, 'is negative zero');
-    return value;
-  }
-  if (typeof value !== 'object') {
-    throw jsonFailure(path, `has unsupported type ${typeof value}`);
-  }
-  if (ancestors.has(value)) throw jsonFailure(path, 'contains a cycle');
-
-  const nextAncestors = new Set(ancestors).add(value);
-  if (Array.isArray(value)) {
-    const ownKeys = Reflect.ownKeys(value);
-    let indexes = 0;
-    for (const key of ownKeys) {
-      if (key === 'length') continue;
-      if (
-        typeof key !== 'string' ||
-        !/^(0|[1-9]\d*)$/.test(key) ||
-        Number(key) >= value.length
-      ) {
-        throw jsonFailure(path, `has non-JSON array property ${String(key)}`);
-      }
-      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-      if (!('value' in descriptor)) {
-        throw jsonFailure(`${path}[${key}]`, 'is an accessor property');
-      }
-      indexes += 1;
-    }
-    if (indexes !== value.length) {
-      throw jsonFailure(path, 'is sparse');
-    }
-    const clone: JsonValue[] = [];
-    for (let index = 0; index < value.length; index += 1) {
-      clone.push(jsonClone(value[index], `${path}[${index}]`, nextAncestors));
-    }
-    return clone;
-  }
-
-  const prototype = Object.getPrototypeOf(value) as object | null;
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw jsonFailure(path, 'is not a plain object');
-  }
-  const keys = Reflect.ownKeys(value);
-  const stringKeys: string[] = [];
-  for (const key of keys) {
-    if (typeof key === 'symbol') {
-      throw jsonFailure(path, `has symbol property ${String(key)}`);
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-    if (!descriptor.enumerable) {
-      throw jsonFailure(`${path}.${key}`, 'is non-enumerable');
-    }
-    if (!('value' in descriptor)) {
-      throw jsonFailure(`${path}.${key}`, 'is an accessor property');
-    }
-    stringKeys.push(key);
-  }
-
-  const clone = Object.create(null) as { [key: string]: JsonValue };
-  for (const key of stringKeys.sort()) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-    clone[key] = jsonClone(
-      (descriptor as PropertyDescriptor & { value: unknown }).value,
-      `${path}.${key}`,
-      nextAncestors,
-    );
-  }
-  return clone;
-};
-
-const sha256 = (material: string): Effect.Effect<string, EncodeError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const bytes = new TextEncoder().encode(material);
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      return Array.from(new Uint8Array(digest), (byte) =>
-        byte.toString(16).padStart(2, '0'),
-      ).join('');
-    },
-    catch: (cause) =>
-      new EncodeError({
-        detail: `cannot fingerprint records: ${String(cause)}`,
-      }),
-  });
-
-export interface PreparedBatch {
-  /** Canonical JSON clones decoded back through the public entry schema. */
-  readonly entries: ReadonlyArray<Entry>;
-  /** Exact canonical bytes fingerprinted and suitable for JSON persistence. */
-  readonly encoded: string;
-  /** SHA-256 of the canonical encoded batch bytes. */
-  readonly fingerprint: string;
-}
-
-/** Prepare the one representation every backend stores and fingerprints. */
-export const prepare = (
-  entries: ReadonlyArray<Entry>,
-): Effect.Effect<PreparedBatch, EncodeError> =>
-  Effect.gen(function* () {
-    // Wrapped rather than passed by reference: `encodeEntry` takes an
-    // optional `ParseOptions` second argument, which `Effect.forEach` would
-    // fill with the element index.
-    const encoded = yield* Effect.forEach(entries, (entry) =>
-      encodeEntry(entry),
-    ).pipe(
-      Effect.mapError(
-        (error) =>
-          new EncodeError({
-            detail: `records do not encode: ${String(error)}`,
-          }),
-      ),
-    );
-
-    const canonical = yield* Effect.try({
-      try: () => jsonClone(encoded, '$', new Set()),
-      catch: (cause) =>
-        cause instanceof EncodeError
-          ? cause
-          : new EncodeError({
-              detail: `records are not JSON-safe: ${String(cause)}`,
-            }),
-    });
-    const material = JSON.stringify(canonical);
-    const persisted = JSON.parse(material) as ReadonlyArray<unknown>;
-    const normalized = yield* Effect.forEach(persisted, (entry) =>
-      decodeEntry(entry),
-    ).pipe(
-      Effect.mapError(
-        (error) =>
-          new EncodeError({
-            detail: `canonical records do not decode: ${String(error)}`,
-          }),
-      ),
-    );
-    return {
-      entries: normalized,
-      encoded: material,
-      fingerprint: yield* sha256(material),
-    };
-  });
-
-export const fingerprint = (
-  entries: ReadonlyArray<Entry>,
-): Effect.Effect<string, EncodeError> =>
-  prepare(entries).pipe(Effect.map((prepared) => prepared.fingerprint));
 
 export * as ConversationRecord from './record.js';

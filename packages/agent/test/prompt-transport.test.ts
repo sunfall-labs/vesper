@@ -8,7 +8,7 @@ import { Prompt } from 'effect/unstable/ai';
 
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
-import { RecordingPolicy } from '../src/recording-policy.js';
+import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
 
 const filePrompt = (data: string | Uint8Array | URL): Prompt.RawInput => [
   {
@@ -115,7 +115,7 @@ describe('prompt transport', () => {
       Effect.gen(function* () {
         const bytes = new Uint8Array([1, 2, 3]);
         let seen: unknown;
-        const runtime = RecordingPolicy.compile(
+        const runtime = RecordingPolicyRuntime.compile(
           {
             prompt: (prompt) => {
               seen = fileData(prompt);

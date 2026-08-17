@@ -19,25 +19,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: ${{ matrix.node }}
-
-      # The version comes from devDependencies so the bootstrap nub and the
-      # pinned one are the same by construction; a bump is one edit, not two.
       - name: Setup nub
-        run: |
-          set -euo pipefail
-          npm install -g "@nubjs/nub@$(node -p "require('./package.json').devDependencies['@nubjs/nub']")"
-          nub --version
-
-      - name: Cache the nub store
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: nubjs/setup-nub@47e5e7393d50f4e9544ddaf756aa277972afba2d # v0.4.0
         with:
-          path: ~/.local/share/nub/store
-          key: nub-store-${{ runner.os }}-${{ hashFiles('nub.lock') }}
-          restore-keys: nub-store-${{ runner.os }}-
+          nub-version: 0.7.5
+          node-version: ${{ matrix.node }}
+          cache-dependency-path: nub.lock
 
       - name: Install dependencies
         run: nub install --frozen-lockfile
@@ -53,23 +40,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 22
-
       - name: Setup nub
-        run: |
-          set -euo pipefail
-          npm install -g "@nubjs/nub@$(node -p "require('./package.json').devDependencies['@nubjs/nub']")"
-          nub --version
-
-      - name: Cache the nub store
-        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        uses: nubjs/setup-nub@47e5e7393d50f4e9544ddaf756aa277972afba2d # v0.4.0
         with:
-          path: ~/.local/share/nub/store
-          key: nub-store-${{ runner.os }}-${{ hashFiles('nub.lock') }}
-          restore-keys: nub-store-${{ runner.os }}-
+          nub-version: 0.7.5
+          node-version: 22
+          cache-dependency-path: nub.lock
 
       - name: Install dependencies
         run: nub install --frozen-lockfile

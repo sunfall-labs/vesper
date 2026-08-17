@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
 import { ConversationRecord } from './record.js';
+import { RecordBatch } from './record-batch.js';
 import { Tail } from './tail.js';
 import { LogVocabulary } from './vocabulary.js';
 
@@ -228,6 +229,12 @@ export const logStoreContract = <E, R>(
             signalCursor: LogOffset.fromSeq(7n),
           },
         },
+        StateCheckpoint: {
+          _tag: 'StateCheckpoint',
+          id: 'test-state',
+          version: '1',
+          value: { count: 1 },
+        },
       } satisfies {
         [Tag in ConversationRecord.Record['_tag']]: ConversationRecord.RecordOf<Tag>;
       };
@@ -258,7 +265,7 @@ export const logStoreContract = <E, R>(
           const { store, append } = yield* open('decodes');
           yield* append(0, [text('one')]);
           const page = yield* store.read('decodes');
-          return yield* ConversationRecord.decodeEnvelope(page.records[0]);
+          return yield* RecordBatch.decodeEnvelope(page.records[0]);
         }),
       );
 

@@ -43,6 +43,10 @@
       "types": "./dist/record.d.ts",
       "default": "./dist/record.js"
     },
+    "./record-batch": {
+      "types": "./dist/record-batch.d.ts",
+      "default": "./dist/record-batch.js"
+    },
     "./log-store": {
       "types": "./dist/log-store.d.ts",
       "default": "./dist/log-store.js"
@@ -73,7 +77,6 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
@@ -86,7 +89,9 @@
     }
   },
   "devDependencies": {
-    "effect": "4.0.0-rc.109",
+    "effect": "catalog:",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@types/pg": "^8.20.0",
     "vitest": "^4.1.9"
   },
   "dependencies": {

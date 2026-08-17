@@ -15,37 +15,33 @@ nub run verify
 `nub run verify` is what CI runs and what to run before opening a pull request.
 The build goes first, because the static gates after it resolve cross-package
 imports against built declarations; format, lint, and typecheck then run
-concurrently, because they are independent and a contributor waiting on three
-serial passes stops running the gate at all. Tests are last.
+concurrently with Knip, because they are independent and a contributor waiting
+on four serial passes stops running the gate at all. Tests are last.
 
 Every lane is also a script of its own, so a failure is reproducible with one
-shorter command — which the gate prints alongside it. A lane's output is
-buffered and flushed with a prefix when the lane ends, since three compilers
-writing to one terminal at once is unreadable, and lane failures are collected
-rather than thrown, since a lint failure and a typecheck failure are usually
-one edit apart. Four lanes run at once by default; `nub run verify:serial`,
-`--concurrency=N`, or `VESPER_VERIFY_CONCURRENCY` change that.
+shorter command. `concurrently` groups and labels each lane's output so four
+tools do not write an unreadable stream to the terminal. Use
+`nub run verify:serial` when sequential output is more useful.
 
-| Command                                   | What it runs                        |
-| ----------------------------------------- | ----------------------------------- |
-| `nub run build`                           | `tsgo` per package, `src` to `dist` |
-| `nub run test`                            | `vitest run` over every `test/`     |
-| `nub run typecheck`                       | `tsgo -b` over the project graph    |
-| `nub run typecheck:types`                 | tests, benchmarks, and examples     |
-| `nub run lint` / `nub run lint:fix`       | `oxlint`, warnings denied           |
-| `nub run format` / `nub run format:check` | `oxfmt`                             |
-| `nub run benchmark`                       | the suite in `benchmarks/`          |
+| Command                                   | What it runs                            |
+| ----------------------------------------- | --------------------------------------- |
+| `nub run build`                           | `tsdown`, plus package/type validation  |
+| `nub run test`                            | `vitest run` over every `test/`         |
+| `nub run typecheck`                       | non-emitting package/type checks        |
+| `nub run typecheck:types`                 | tests, benchmarks, and examples         |
+| `nub run lint` / `nub run lint:fix`       | `oxlint`, warnings denied               |
+| `nub run format` / `nub run format:check` | `oxfmt`                                 |
+| `nub run knip`                            | unused files, exports, and dependencies |
+| `nub run benchmark`                       | the suite in `benchmarks/`              |
 
 `nub run example:compliance-relay` and `nub run example:live-smoke` run the two
 programs under `examples/`. Both reach a real provider and need an API key in
 the environment; nothing else does, and tests use scripted `LanguageModel`s.
 
-`nub run typecheck` uses `tsgo -b` rather than a per-package `--noEmit` pass
-because the packages are TypeScript project references: `agent` resolves
-`@sunfall/vesper-log` through the declarations `log` emits, so a clean clone
-has nothing to typecheck against until those exist. `-b` builds what it needs
-and is incremental afterwards. The per-package `typecheck` scripts still work
-once `dist` is present, and are the faster loop while editing one package.
+`nub run typecheck` checks every package and the type-level test projects
+without emitting. tsdown is the only artifact producer; a typecheck can never
+overwrite or leave stale files in `dist`. Per-package `typecheck` scripts remain
+the faster loop while editing one package.
 
 ### Getting nub
 
@@ -60,8 +56,8 @@ npx @nubjs/nub@0.7.5 install
 
 After that `node_modules/.bin/nub` exists, and `npm install -g @nubjs/nub@0.7.5`
 (or [nubjs.com/install.sh](https://nubjs.com/install.sh)) is the convenience of
-having `nub` on `PATH` for daily use. CI does exactly this, reading the version
-out of `devDependencies` so the bootstrap and the pin cannot drift apart.
+having `nub` on `PATH` for daily use. CI uses the pinned official `setup-nub`
+action with the same CLI version and caches against `nub.lock`.
 
 The repository declares Nub as its package manager through
 `devEngines.packageManager`, keeps workspace configuration in the root
@@ -69,11 +65,13 @@ The repository declares Nub as its package manager through
 dev dependency so nested scripts use the same Nub that bootstrapped the
 workspace. Run `nub pm which` to inspect the active package-manager identity.
 
-Publishable packages use exact versions for dependencies on sibling Vesper
-packages rather than `workspace:*`. Nub 0.7.5 preserves the workspace protocol
-in packed manifests, which npm consumers reject with `EUNSUPPORTEDPROTOCOL`.
-Private examples and benchmarks retain `workspace:*` because they are never
-packed.
+The root workspace catalog owns development-time Effect family versions, so an
+RC upgrade is one policy edit for the root, examples, benchmarks, and package
+development dependencies. Published runtime and peer ranges remain concrete:
+Nub 0.7.5 preserves `catalog:` and `workspace:*` in packed manifests instead of
+rewriting them to npm ranges. For the same reason, publishable packages use an
+exact version for a sibling Vesper dependency; private examples and benchmarks
+can safely retain `workspace:*`.
 
 CI runs Node 22 and 24; publishing uses Node 24.
 
@@ -100,10 +98,11 @@ vitest from inside a package is not a supported shortcut.
 
 `vitest.config.ts` aliases every `@sunfall/vesper-*` subpath to the **source**
 file rather than to `dist`, so a failing test points at the file you would
-edit and nothing has to be rebuilt between runs. That alias map mirrors each
-package's `exports`, and the same list appears as `paths` in
-`tsconfig.base.json`. A new subpath therefore has to be added in three places:
-the package's `exports`, the alias map, and `paths`.
+edit and nothing has to be rebuilt between runs. It derives those aliases from
+the `paths` in `tsconfig.base.json`, so TypeScript and Vitest share one source
+map. Public package subpaths remain explicit in each package's `exports` map;
+tsdown validates those built runtime and declaration targets with publint and
+Are the types wrong? during every build.
 
 Type-level assertions are load-bearing here — several tools pin their service
 requirements as assertions that fail at compile rather than at run time — and
@@ -138,17 +137,20 @@ default" does not mean "never run".
 
 ## Building and publishing
 
-Each package builds with `tsgo -p tsconfig.json` after deleting `dist` and
-`.tsbuildinfo`, so a renamed or removed module never survives in the output.
-Packages publish `dist` and `LICENSE`; `@sunfall/vesper-log` also publishes its
-authoritative `migrations` directory. Every `exports` entry names
-`./dist/*.js` and `./dist/*.d.ts`: sources are not published, and a module
-absent from `exports` is unreachable to a consumer however it got into `dist`.
+One tsdown configuration builds every package in unbundled ESM form, generates
+declarations, cleans stale output, keeps dependencies external, and validates
+the finished packages with publint and Are the types wrong?. Packages publish
+`dist` and `LICENSE`; `@sunfall/vesper-log` also publishes its authoritative
+`migrations` directory. Every `exports` entry names `./dist/*.js` and
+`./dist/*.d.ts`: sources are not published, and a module absent from `exports`
+is unreachable to a consumer however it got into `dist`.
 
-`nub run publish:npm` publishes from there. It defaults to the `alpha` dist-tag,
-takes `--dry-run` and `--package <name>`, and is idempotent — a version
-already on the registry is skipped rather than failed, so re-running a
-half-finished release finishes it.
+`nub run publish:npm:dry-run` previews the alpha release, and
+`nub run publish:npm` publishes it. Nub selects the publishable Vesper packages,
+orders their workspace graph, attaches provenance, and skips versions already
+on the registry, so re-running a half-finished release finishes it. The release
+workflow selects beta, next, or latest when the tag or manual input calls for
+another dist-tag.
 
 ## The layering rule
 
@@ -212,7 +214,7 @@ signal. `Compaction.Policy`'s estimator seam is the deliberate contrast — a
 defaulted estimate hides nothing, because the run still works and the reactive
 overflow path catches what a cruder guess misses.
 
-The hard run budget follows the same rule. `RunPolicy.Runtime` is one mutable
+The hard run budget follows the same rule. The run-policy runtime is one mutable
 ledger scoped to a root run and passed explicitly through generated delegation
 handlers into descendant loops. Never recreate it in a child, put it in a
 module global, or implement a hard limit as a `StopCondition`: steers may

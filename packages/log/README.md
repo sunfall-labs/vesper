@@ -20,8 +20,10 @@ npm install @sunfall/vesper-log effect@4.0.0-rc.109
 ```
 
 Modules are exposed as explicit subpaths, including
-`@sunfall/vesper-log/log-store`, `/record`, `/layer-memory`, `/layer-pg`, and
-`/pg-client`.
+`@sunfall/vesper-log/log-store`, `/record`, `/record-batch`, `/layer-memory`,
+`/layer-pg`, and `/pg-client`. `/record` defines the durable conversation
+vocabulary and schemas; `/record-batch` provides canonical JSON preparation,
+codecs, envelopes, and fingerprints for backend authors.
 
 Conversation records expose `FORMAT_VERSION`. New `RunStarted` records and
 resume aggregates carry that version plus agent name/revision. Those fields are

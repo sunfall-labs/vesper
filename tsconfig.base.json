@@ -33,14 +33,19 @@
       ],
       "@sunfall/vesper-agent/signal": ["./packages/agent/src/signal.ts"],
       "@sunfall/vesper-agent/stop": ["./packages/agent/src/stop.ts"],
+      "@sunfall/vesper-agent/state": ["./packages/agent/src/state.ts"],
       "@sunfall/vesper-agent/subagent": ["./packages/agent/src/subagent.ts"],
       "@sunfall/vesper-agent/skill": ["./packages/agent/src/skill.ts"],
       "@sunfall/vesper-agent/compaction": [
         "./packages/agent/src/compaction.ts"
       ],
       "@sunfall/vesper-agent/workflow": ["./packages/agent/src/workflow.ts"],
+      "@sunfall/vesper-log/vocabulary": ["./packages/log/src/vocabulary.ts"],
       "@sunfall/vesper-log/offset": ["./packages/log/src/offset.ts"],
       "@sunfall/vesper-log/record": ["./packages/log/src/record.ts"],
+      "@sunfall/vesper-log/record-batch": [
+        "./packages/log/src/record-batch.ts"
+      ],
       "@sunfall/vesper-log/log-store": ["./packages/log/src/log-store.ts"],
       "@sunfall/vesper-log/tail": ["./packages/log/src/tail.ts"],
       "@sunfall/vesper-log/layer-memory": [
@@ -50,6 +55,7 @@
         "./packages/log/src/log-store-contract.ts"
       ],
       "@sunfall/vesper-log/layer-pg": ["./packages/log/src/layer-pg.ts"],
+      "@sunfall/vesper-log/pg-client": ["./packages/log/src/pg-client.ts"],
       "@sunfall/vesper-workspace/driver": [
         "./packages/workspace/src/driver.ts"
       ],

@@ -6,6 +6,7 @@ import { Agent } from '../src/agent.js';
 import { Depth, MAX_DEPTH, tool, toolName } from '../src/subagent.js';
 import { delegateTo, handler } from '../src/subagent-runtime.js';
 import { RunPolicy } from '../src/run-policy.js';
+import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 
 // A service only the child's work needs. Its presence in the parent's
 // requirement channel is the property this file exists to demonstrate: a
@@ -195,7 +196,7 @@ describe('delegation', () => {
       const result = yield* runAny(
         Effect.gen(function* () {
           const calls = yield* Ref.make(0);
-          const runtime = yield* RunPolicy.create(
+          const runtime = yield* RunPolicyRuntime.create(
             RunPolicy.make({ maxDelegationDepth: 1 }),
           );
           const outcome = yield* handler(

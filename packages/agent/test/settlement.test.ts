@@ -16,6 +16,7 @@ import { Agent } from '../src/agent.js';
 import { protocolOf } from '../src/internal.js';
 import { AgentLog } from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
+import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 
 // Settlement: the durable half of "how did this end".
 //
@@ -140,7 +141,7 @@ const runInSession = <R>(
   session: AgentLog.Session,
   input: string,
 ) =>
-  Effect.flatMap(RunPolicy.create(RunPolicy.defaultLimits), (runtime) =>
+  Effect.flatMap(RunPolicyRuntime.create(RunPolicy.defaultLimits), (runtime) =>
     protocolOf<R>(child)!.run(runtime, session, input),
   );
 

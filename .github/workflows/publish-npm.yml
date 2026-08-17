@@ -47,22 +47,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          registry-url: https://registry.npmjs.org
-
-      - name: Install npm with trusted publishing support
-        run: npm install -g npm@11.12.1
-
-      # The version comes from devDependencies so the bootstrap nub and the
-      # pinned one are the same by construction; a bump is one edit, not two.
       - name: Setup nub
-        run: |
-          set -euo pipefail
-          npm install -g "@nubjs/nub@$(node -p "require('./package.json').devDependencies['@nubjs/nub']")"
-          nub --version
+        uses: nubjs/setup-nub@47e5e7393d50f4e9544ddaf756aa277972afba2d # v0.4.0
+        with:
+          nub-version: 0.7.5
+          node-version: 24
+          cache-dependency-path: nub.lock
+          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: nub install --frozen-lockfile
@@ -73,6 +64,16 @@ jobs:
       - name: Publish preflight
         run: |
           set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            expected_version="${GITHUB_REF_NAME#v}"
+            for package_dir in packages/*; do
+              package_version="$(nub pkg --dir "$package_dir" get version)"
+              if [ "$package_version" != "$expected_version" ]; then
+                echo "::error file=$package_dir/package.json::Tag v$expected_version does not match package version $package_version."
+                exit 1
+              fi
+            done
+          fi
           if [ "$DRY_RUN" != "true" ]; then
             case "$GITHUB_REF" in
               refs/heads/main | refs/tags/v*) ;;
@@ -88,11 +89,24 @@ jobs:
       - name: Publish
         run: |
           set -euo pipefail
+          args=(
+            --filter '@sunfall/vesper-*'
+            --access public
+            --tag "$DIST_TAG"
+          )
+          # Native Nub's provenance flow is only needed for a real upload;
+          # this also keeps dry-runs usable without an OIDC probe.
           if [ "$DRY_RUN" = "true" ]; then
-            nub run publish:npm -- --tag "$DIST_TAG" --dry-run
+            args+=(--dry-run --no-git-checks)
           else
-            nub run publish:npm -- --tag "$DIST_TAG"
+            args+=(--provenance)
+            # GitHub checks out pushed tags detached. The ref preflight above
+            # still gates real releases; this only permits Nub to publish them.
+            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+              args+=(--no-git-checks)
+            fi
           fi
+          nub publish "${args[@]}"
         env:
           DIST_TAG: ${{ env.RELEASE_DIST_TAG }}
           DRY_RUN: ${{ env.RELEASE_DRY_RUN }}

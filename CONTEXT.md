@@ -14,13 +14,22 @@ it for another turn.
 
 **Hard run budget** — non-overridable limits on turns, model calls (including
 compaction), delegation count/depth/concurrency, tool concurrency, elapsed
-time, tokens, and signal processing. One `RunPolicy.Runtime` is created for a
+time, tokens, and signal processing. One run-policy runtime is created for a
 root run and passed by value through every descendant loop. Exhaustion fails
 the run; a steer cannot override it.
 
 **Agent** — a definition: name, explicit non-empty revision, instructions,
 toolkit, subagents, skills, stop condition. Not a running thing. Reusable and
 inert. The revision is application-owned durable compatibility identity.
+
+**State** — one typed document attached to an agent definition. Each run opens
+an isolated handle for it; a recorded run restores the document from its
+conversation and persists every successful mutation before returning it.
+
+**State checkpoint** — a complete encoded State value in the conversation log.
+The latest checkpoint on the active path wins. A settled run carries the latest
+checkpoint in its bounded resume aggregate so reopening does not require an
+unbounded scan.
 
 **Requires** — the third type parameter of `Agent`, and what still has to be
 provided before a run can happen. Unmet requirements are a compile error, which
@@ -36,7 +45,7 @@ byte-identical across turns. Only the catalog line goes in the prompt.
 
 **Record** — one thing that happened in a conversation, appended to the log:
 `RunStarted`, `Text`, `ToolCall`, `ToolStarted`, `ToolOutcome`, `TurnFinished`,
-`Compacted`, `BranchedFrom`, `Completed`, `ChildSession`, `Signal`,
+`StateCheckpoint`, `Compacted`, `BranchedFrom`, `Completed`, `ChildSession`, `Signal`,
 `SignalReceived`, `RunSettled`. The conversation log is the single persistence
 mechanism in this family.
 

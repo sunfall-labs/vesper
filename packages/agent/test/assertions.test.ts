@@ -7,7 +7,9 @@ import { Agent } from '../src/agent.js';
 import { Interception } from '../src/interception.js';
 import type { AgentLog } from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
+import { RunPolicy } from '../src/run-policy.js';
 import { Stop } from '../src/stop.js';
+import { AgentState } from '../src/state.js';
 import { Subagent } from '../src/subagent.js';
 
 // The eight narrowing assertions.
@@ -182,6 +184,41 @@ type HandledBase = LanguageModel.LanguageModel | Db | Notebook;
 
 const _exactPlain: Exact<Agent.Requires<typeof parent>, ParentBase> = true;
 const _exactHandled: Exact<Agent.Requires<typeof handled>, HandledBase> = true;
+
+const State = AgentState.make({
+  id: 'assertion-state',
+  version: '1',
+  schema: Schema.Struct({ count: Schema.Number }),
+  initial: { count: 0 },
+});
+const stateTool = Tool.make('stateful', {
+  description: 'state-aware handler',
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({ count: Schema.Number }),
+  failure: AgentState.error,
+  dependencies: AgentState.dependencies(State, Db),
+});
+const stateful = Agent.make({
+  name: 'stateful',
+  revision: '1',
+  instructions: 'x',
+  toolkit: Toolkit.make(stateTool),
+}).withHandlers({
+  stateful: () =>
+    Effect.gen(function* () {
+      yield* Db;
+      const state = yield* State;
+      return yield* state.update(({ count }) => ({ count: count + 1 }));
+    }),
+});
+const _stateRequired: Has<
+  typeof State,
+  Agent.Requires<typeof stateful>
+> = 'yes';
+const _otherHandlerServiceKept: Has<
+  Db,
+  Agent.Requires<typeof stateful>
+> = 'yes';
 const _exactRecording: Exact<
   Agent.Requires<ReturnType<typeof handled.recordingTo>>,
   HandledBase | LogStore.Service
@@ -235,6 +272,17 @@ const _exactFilteredRecording: Exact<
   Agent.Requires<typeof filteredRecording>,
   HandledBase | LogStore.Service | FirstPolicy
 > = true;
+
+const _noRecordingRuntime: 'Runtime' extends keyof typeof RecordingPolicy
+  ? false
+  : true = true;
+const _noRecordingCompile: 'compile' extends keyof typeof RecordingPolicy
+  ? false
+  : true = true;
+const _noRunRuntime: 'Runtime' extends keyof typeof RunPolicy ? false : true =
+  true;
+const _noRunCreate: 'create' extends keyof typeof RunPolicy ? false : true =
+  true;
 const firstInterceptor = {
   beforeTurn: () =>
     Effect.gen(function* () {

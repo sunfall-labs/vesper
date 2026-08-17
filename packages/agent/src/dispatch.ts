@@ -13,7 +13,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Interception } from './interception.js';
 import type { AgentLog } from './log.js';
-import { RunPolicy } from './run-policy.js';
+import { RunPolicyRuntime } from './run-policy-runtime.js';
 
 // The tool-dispatch seam: consult the log before running a tool.
 //
@@ -99,7 +99,7 @@ export interface GateOptions {
   /** The agent's name, for {@link Interception.ToolCallContext}. */
   readonly agent: string;
   /** Root-run budget shared by this loop and every descendant. */
-  readonly runtime?: RunPolicy.Runtime | undefined;
+  readonly runtime?: RunPolicyRuntime.Runtime | undefined;
   /** Delegation calls use the child semaphore and must not hold a tool permit. */
   readonly unmeteredToolNames?: ReadonlySet<string> | undefined;
   /** Atomic winner between responsive cancellation and dispatch commits. */
@@ -198,7 +198,7 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
                   duration: remaining,
                   orElse: () =>
                     Effect.fail(
-                      RunPolicy.error({
+                      RunPolicyRuntime.error({
                         limit: 'deadline',
                         used: options.runtime!.limits.wallClockMillis,
                         maximum: options.runtime!.limits.wallClockMillis,

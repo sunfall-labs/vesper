@@ -12,7 +12,9 @@ import {
 import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
 import { ConversationRecord } from './record.js';
+import { RecordBatch } from './record-batch.js';
 import { LogVocabulary } from './vocabulary.js';
+import * as AppendDecision from './append-decision.js';
 
 // In-process log store.
 //
@@ -202,105 +204,33 @@ const build = (
     const appendUnlocked = Effect.fn('AiLog.LogStore.append')(function* (
       input: LogStore.AppendInput,
     ) {
-      const reject = (reason: Reason, detail: string) =>
-        Effect.fail(failure(input.path, 'append', reason, detail));
-
-      if (input.records.length === 0) {
-        return yield* reject('empty', 'append carried no records');
-      }
-      const sequence = yield* LogVocabulary.ProducerSequence.pipe(
-        Schema.decodeUnknownEffect,
-      )(input.sequence).pipe(
-        Effect.mapError(() =>
-          failure(
-            input.path,
-            'append',
-            'conflict',
-            `sequence ${input.sequence} is not a safe natural integer`,
-          ),
-        ),
-      );
-      const epoch = yield* LogVocabulary.Epoch.pipe(Schema.decodeUnknownEffect)(
-        input.epoch,
-      ).pipe(
-        Effect.mapError(() =>
-          failure(
-            input.path,
-            'append',
-            'conflict',
-            `epoch ${input.epoch} is not a safe natural integer`,
-          ),
-        ),
-      );
-      const producerId = yield* LogVocabulary.ProducerId.pipe(
-        Schema.decodeUnknownEffect,
-      )(input.producerId).pipe(
-        Effect.mapError(() =>
-          failure(
-            input.path,
-            'append',
-            'conflict',
-            'producer id must be non-empty',
-          ),
-        ),
-      );
+      const validated = yield* AppendDecision.validateInput(input, failure);
       const state = yield* lookup(input.path, 'append');
-      if (epoch !== state.epoch) {
-        return yield* reject(
-          'fenced',
-          `epoch ${input.epoch} is not the current epoch ${state.epoch}`,
-        );
-      }
-      if (producerId !== state.producerId) {
-        return yield* reject(
-          'conflict',
-          `producer ${input.producerId} does not hold epoch ${state.epoch}`,
-        );
-      }
-
-      // The last yield before the write. Fingerprinting is the only
-      // expensive thing an append does, and it is worth it: it is what turns
-      // "you asked about this slot before" into "you asked about these
-      // records before".
-      const prepared = yield* ConversationRecord.prepare(input.records).pipe(
-        Effect.mapError((error) =>
-          failure(input.path, 'append', 'encoding', error.detail),
-        ),
+      const decision = yield* AppendDecision.decide(
+        validated,
+        {
+          epoch: state.epoch,
+          producerId: state.producerId,
+          nextSequence: LogVocabulary.ProducerSequence.make(
+            state.lastSequence + 1,
+          ),
+          lastFingerprint: state.lastFingerprint,
+        },
+        failure,
       );
-      const digest = prepared.fingerprint;
-
-      if (sequence === state.lastSequence) {
-        // A retry. Idempotent only if it repeats the same batch — a producer
-        // that reuses a sequence for different records is not retrying, it
-        // is overwriting, and answering with the old offset would drop the
-        // new records with nothing to indicate it happened.
-        if (digest !== state.lastFingerprint) {
-          return yield* reject(
-            'conflict',
-            `sequence ${input.sequence} was reused with different content`,
-          );
-        }
-        return state.lastOffset;
-      }
-      const expectedSequence = state.lastSequence + 1;
-      if (sequence !== expectedSequence) {
-        return yield* reject(
-          sequence > expectedSequence ? 'gap' : 'conflict',
-          `expected sequence ${expectedSequence}, got ${input.sequence}`,
-        );
-      }
+      if (decision.kind === 'retry') return state.lastOffset;
 
       // Everything above rejects without writing; nothing below can fail.
       // That is what makes the batch atomic, and it is why the validation is
       // exhaustive up front rather than interleaved with the writes.
       let offset = state.lastOffset;
-      for (const entry of prepared.entries) {
+      for (const entry of decision.prepared.entries) {
         offset = LogOffset.fromSeq(BigInt(state.records.length));
-        state.records.push(ConversationRecord.envelope(offset, entry));
+        state.records.push(RecordBatch.envelope(offset, entry));
       }
       state.lastOffset = offset;
-      state.lastSequence = sequence;
-      state.lastFingerprint = digest;
+      state.lastSequence = validated.sequence;
+      state.lastFingerprint = decision.prepared.fingerprint;
 
       const signal = yield* signalFor(input.path);
       yield* PubSub.publish(signal, undefined);

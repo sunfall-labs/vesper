@@ -18,6 +18,7 @@ nub run lint
 nub run lint:fix
 nub run format
 nub run format:check
+nub run knip
 nub run benchmark
 ```
 
@@ -30,7 +31,7 @@ nub run test -- packages/agent/test/workflow.test.ts
 Prefer the nearest existing Nub script over reproducing its implementation.
 For example, use `nub run typecheck`, not a direct `tsgo` command; use
 `nub run format`, not a direct `oxfmt` command; and use `nub run verify`, not
-`node scripts/verify.mjs`.
+a hand-written sequence of its build, static, and test gates.
 
 Direct `npm install` snippets in package README files are documentation for
 external consumers, not commands for working in this repository. The one

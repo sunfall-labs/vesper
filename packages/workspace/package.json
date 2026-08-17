@@ -67,7 +67,6 @@
     "access": "public"
   },
   "scripts": {
-    "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
@@ -80,7 +79,7 @@
     }
   },
   "devDependencies": {
-    "effect": "4.0.0-rc.109",
+    "effect": "catalog:",
     "vitest": "^4.1.9"
   }
 }
