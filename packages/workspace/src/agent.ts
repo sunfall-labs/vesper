@@ -12,15 +12,22 @@ type Collision<Tools extends Record<string, Tool.Any>> = Extract<
 >;
 
 type CollisionFree<Tools extends Record<string, Tool.Any>> = [
-  string extends keyof Tools ? never : Collision<Tools>,
+  string extends keyof Tools ? 'erased' : Collision<Tools>,
 ] extends [never]
   ? unknown
-  : { readonly __workspaceToolNameCollision__: Collision<Tools> };
+  : {
+      readonly __workspaceToolkitMustBePrecise__: string extends keyof Tools
+        ? true
+        : Collision<Tools>;
+    };
 
 /** Explicit workspace tools plus the layer that owns their standard handlers. */
-export interface Adapter<ApplicationTools extends Record<string, Tool.Any>> {
+export interface Composition<
+  ApplicationTools extends Record<string, Tool.Any>,
+> {
   readonly toolkit: Toolkit.Toolkit<ApplicationTools & StandardTools>;
-  readonly layer: Layer.Layer<
+  readonly handlers: Layer.Layer<Tool.HandlersFor<StandardTools>>;
+  readonly defaultLayer: Layer.Layer<
     Tool.HandlersFor<StandardTools> | WorkspaceTools.CommandPolicy
   >;
 }
@@ -31,16 +38,17 @@ const standardLayer = Layer.merge(
 );
 
 /** The standard workspace toolkit without application-owned tools. */
-export const standard: Adapter<{}> = {
+export const standard: Composition<{}> = {
   toolkit: WorkspaceTools.toolkit,
-  layer: standardLayer,
+  handlers: WorkspaceTools.layer,
+  defaultLayer: standardLayer,
 };
 
 /** Add the standard workspace tools to an application toolkit. */
-export const addTo = <ApplicationTools extends Record<string, Tool.Any>>(
+export const compose = <ApplicationTools extends Record<string, Tool.Any>>(
   application: Toolkit.Toolkit<ApplicationTools> &
     CollisionFree<ApplicationTools>,
-): Adapter<ApplicationTools> => {
+): Composition<ApplicationTools> => {
   const collision = Object.keys(application.tools).find((name) =>
     Object.hasOwn(WorkspaceTools.toolkit.tools, name),
   );
@@ -55,7 +63,8 @@ export const addTo = <ApplicationTools extends Record<string, Tool.Any>>(
       application,
       WorkspaceTools.toolkit,
     ) as Toolkit.Toolkit<ApplicationTools & StandardTools>,
-    layer: standardLayer,
+    handlers: WorkspaceTools.layer,
+    defaultLayer: standardLayer,
   };
 };
 

@@ -123,10 +123,10 @@ describe('AgentWorkflow', () => {
           conversationId: 'identity-conversation',
           input: 'hello',
         };
-        const ids = yield* binding.ids(payload);
+        const ids = yield* binding.identify(payload);
         const executionId = yield* binding.workflow.executionId(payload);
 
-        expect(ids).toEqual({
+        expect(ids).toMatchObject({
           executionId,
           conversationId: 'identity-conversation',
         });

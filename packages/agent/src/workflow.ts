@@ -18,9 +18,13 @@ export const RequestFields = {
   input: Schema.String,
 } as const;
 
+type ReservedRequestField = keyof typeof RequestFields;
+type ReservedFree<Fields extends Schema.Struct.Fields> =
+  Extract<keyof Fields, ReservedRequestField> extends never ? Fields : never;
+
 /** Define a workflow request schema with Vesper's required identity fields. */
 export const request = <const Fields extends Schema.Struct.Fields>(
-  fields: Fields,
+  fields: ReservedFree<Fields>,
 ) =>
   Schema.Struct({
     ...RequestFields,
@@ -30,6 +34,17 @@ export const request = <const Fields extends Schema.Struct.Fields>(
 export interface Request {
   readonly conversationId: string;
   readonly input: string;
+}
+
+const IdentityTypeId: unique symbol = Symbol.for(
+  '@sunfall/vesper-agent/AgentWorkflow/Identity',
+);
+
+/** One exact workflow execution and its corresponding Vesper conversation. */
+export interface Identity {
+  readonly [IdentityTypeId]: typeof IdentityTypeId;
+  readonly executionId: string;
+  readonly conversationId: LogVocabulary.ConversationId;
 }
 
 type WorkflowPayload<Payload extends Workflow.AnyStructSchema> =
@@ -51,13 +66,12 @@ export interface Binding<
   /** Register the workflow handler. The application still chooses its engine. */
   readonly layer: Layer.Layer<never, never, Requires>;
   /** Derive both durable identities from one validated workflow payload. */
-  readonly ids: (payload: Payload['~type.make.in']) => Effect.Effect<{
-    readonly executionId: string;
-    readonly conversationId: LogVocabulary.ConversationId;
-  }>;
+  readonly identify: (
+    payload: Payload['~type.make.in'],
+  ) => Effect.Effect<Identity>;
   /** Persist Vesper cancellation intent, then terminally interrupt the workflow. */
   readonly cancel: (
-    payload: Payload['~type.make.in'],
+    identity: Identity,
     signal: CancelSignal,
   ) => Effect.Effect<
     void,
@@ -204,7 +218,9 @@ export const make = <
       .pipe(Effect.mapError(options.mapError)),
   );
 
-  const ids = (payload: (typeof workflow.payloadSchema)['~type.make.in']) =>
+  const identify = (
+    payload: (typeof workflow.payloadSchema)['~type.make.in'],
+  ) =>
     Effect.map(
       workflow.payloadSchema.makeEffect(payload).pipe(Effect.orDie),
       (validated) => ({
@@ -214,19 +230,20 @@ export const make = <
       }),
     ).pipe(
       Effect.flatMap(({ conversationId }) =>
-        Effect.map(workflow.executionId(payload), (executionId) => ({
-          executionId,
-          conversationId,
-        })),
+        Effect.map(
+          workflow.executionId(payload),
+          (executionId) =>
+            ({
+              [IdentityTypeId]: IdentityTypeId,
+              executionId,
+              conversationId,
+            }) satisfies Identity,
+        ),
       ),
     );
 
-  const cancel = (
-    payload: (typeof workflow.payloadSchema)['~type.make.in'],
-    signal: CancelSignal,
-  ) =>
+  const cancel = (identity: Identity, signal: CancelSignal) =>
     Effect.gen(function* () {
-      const identity = yield* ids(payload);
       yield* AgentSignals.send(identity.conversationId, {
         kind: 'cancel',
         text: signal.text,
@@ -235,7 +252,7 @@ export const make = <
       yield* workflow.interrupt(identity.executionId);
     });
 
-  return { workflow, layer, ids, cancel } satisfies Binding<
+  return { workflow, layer, identify, cancel } satisfies Binding<
     Tag,
     WorkflowPayload<Payload>,
     Error,

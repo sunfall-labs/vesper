@@ -23,7 +23,7 @@ describe('WorkspaceAgent', () => {
   });
 
   it('adds standard tools without losing application tools', () => {
-    const adapter = WorkspaceAgent.addTo(Toolkit.make(custom));
+    const adapter = WorkspaceAgent.compose(Toolkit.make(custom));
     expect(Object.keys(adapter.toolkit.tools).sort()).toEqual([
       'edit_file',
       'list_files',
@@ -40,8 +40,17 @@ describe('WorkspaceAgent', () => {
       WorkspaceAgent.standard.toolkit.tools,
     );
     const widened = Toolkit.make(...widenedTools);
-    expect(() => WorkspaceAgent.addTo(widened)).toThrow(
+    // @ts-expect-error erased toolkits cannot preserve exact merged tool names
+    expect(() => WorkspaceAgent.compose(widened)).toThrow(
       'application toolkit already defines it',
     );
+  });
+
+  it('rejects literal standard-tool collisions at compile time', () => {
+    const readFile = WorkspaceAgent.standard.toolkit.tools.read_file;
+    expect(() => {
+      // @ts-expect-error standard tool names are reserved by the composition
+      WorkspaceAgent.compose(Toolkit.make(readFile));
+    }).toThrow('application toolkit already defines it');
   });
 });
