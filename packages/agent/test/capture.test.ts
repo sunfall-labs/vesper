@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Schema } from 'effect';
 import { Tool, Toolkit } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { handler } from '../src/subagent-runtime.js';

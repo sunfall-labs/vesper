@@ -1,6 +1,6 @@
+import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 import { Tool } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { catalog, loader, TOOL_NAME, type Skill } from '../src/skill.js';
 
@@ -52,26 +52,33 @@ describe('loader', () => {
     expect(schema).toContain('escalation');
   });
 
-  it('returns full instructions only when loaded', async () => {
-    // The same function the toolkit layer wires, so this asserts on the
-    // shipped behaviour rather than a copy of it.
-    const { handler } = loader(skills);
-    const handled = await Effect.runPromise(handler({ name: 'refunds' }));
+  it.effect('returns full instructions only when loaded', () =>
+    Effect.gen(function* () {
+      // The same function the toolkit layer wires, so this asserts on the
+      // shipped behaviour rather than a copy of it.
+      const { handler } = loader(skills);
+      const handled = yield* handler({ name: 'refunds' });
 
-    expect(handled).toEqual({
-      instructions: 'STEP 1: verify the order. STEP 2: check the window.',
-    });
-  });
+      expect(handled).toEqual({
+        instructions: 'STEP 1: verify the order. STEP 2: check the window.',
+      });
+    }),
+  );
 
-  it('fails with the unknown name rather than returning nothing', async () => {
-    const { handler } = loader(skills);
-    const outcome = await Effect.runPromise(
-      handler({ name: 'nope' }).pipe(Effect.result),
-    );
-
-    expect(outcome._tag).toBe('Failure');
-    if (outcome._tag === 'Failure') {
-      expect(outcome.failure).toEqual({ unknownSkill: 'nope' });
-    }
-  });
+  it.effect('fails with the unknown name rather than returning nothing', () =>
+    Effect.gen(function* () {
+      const { handler } = loader(skills);
+      yield* handler({ name: 'nope' }).pipe(
+        Effect.result,
+        Effect.tap((outcome) =>
+          Effect.sync(() => {
+            expect(outcome._tag).toBe('Failure');
+            if (outcome._tag === 'Failure') {
+              expect(outcome.failure).toEqual({ unknownSkill: 'nope' });
+            }
+          }),
+        ),
+      );
+    }),
+  );
 });

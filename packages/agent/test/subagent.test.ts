@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Ref, Schema, Stream } from 'effect';
 import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { Depth, MAX_DEPTH, tool, toolName } from '../src/subagent.js';
@@ -29,25 +29,27 @@ const finish = {
 const answering = (text: string, calls: Ref.Ref<number>) =>
   Layer.effect(
     LanguageModel.LanguageModel,
-    LanguageModel.make({
-      generateText: () =>
-        Ref.update(calls, (n) => n + 1).pipe(
-          Effect.as([{ type: 'text' as const, text }, finish]),
-        ),
-      streamText: () =>
-        Stream.fromIterable([
-          { type: 'text-start' as const, id: 't' },
-          { type: 'text-delta' as const, id: 't', delta: text },
-          { type: 'text-end' as const, id: 't' },
-          finish,
-        ]).pipe(Stream.onStart(Ref.update(calls, (n) => n + 1))),
+    Effect.gen(function* () {
+      return yield* LanguageModel.make({
+        generateText: () =>
+          Ref.update(calls, (n) => n + 1).pipe(
+            Effect.as([{ type: 'text' as const, text }, finish]),
+          ),
+        streamText: () =>
+          Stream.fromIterable([
+            { type: 'text-start' as const, id: 't' },
+            { type: 'text-delta' as const, id: 't', delta: text },
+            { type: 'text-end' as const, id: 't' },
+            finish,
+          ]).pipe(Stream.onStart(Ref.update(calls, (n) => n + 1))),
+      });
     }),
   );
 
 // The delegation handler's requirement channel arrives as `any`, because
 // `Agent.Any` erases it for heterogeneous collections. One cast, here.
-const runAny = <A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> =>
-  Effect.runPromise(effect as Effect.Effect<A, E>);
+const runAny = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E> =>
+  effect as Effect.Effect<A, E>;
 
 const researcher = Agent.make({
   name: 'researcher',
@@ -82,166 +84,182 @@ describe('subagent tool', () => {
 });
 
 describe('delegation', () => {
-  it('runs the child and returns its text plus step count', async () => {
-    const result = await runAny(
-      Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        const delegated = yield* handler(researcher)({
-          prompt: 'what is the capital of France?',
-        }).pipe(Effect.provide(answering('Paris.', calls)));
+  it.effect('runs the child and returns its text plus step count', () =>
+    Effect.gen(function* () {
+      const result = yield* runAny(
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          const delegated = yield* handler(researcher)({
+            prompt: 'what is the capital of France?',
+          }).pipe(Effect.provide(answering('Paris.', calls)));
 
-        return { delegated, calls: yield* Ref.get(calls) };
-      }) as Effect.Effect<{
-        delegated: { result: string; steps: number };
-        calls: number;
-      }>,
-    );
+          return { delegated, calls: yield* Ref.get(calls) };
+        }) as Effect.Effect<{
+          delegated: { result: string; steps: number };
+          calls: number;
+        }>,
+      );
 
-    expect(result.delegated.result).toBe('Paris.');
-    expect(result.delegated.steps).toBe(1);
-    expect(result.calls).toBe(1);
-  });
+      expect(result.delegated.result).toBe('Paris.');
+      expect(result.delegated.steps).toBe(1);
+      expect(result.calls).toBe(1);
+    }),
+  );
 
   // The child runs against a fresh conversation. If it inherited the
   // parent's, delegation would spend the parent's context window on the
   // child's intermediate work, which is most of the reason to delegate.
-  it('gives the child its own conversation', async () => {
-    const result = await runAny(
-      Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        const first = yield* handler(researcher)({ prompt: 'one' }).pipe(
-          Effect.provide(answering('A', calls)),
-        );
-        const second = yield* handler(researcher)({ prompt: 'two' }).pipe(
-          Effect.provide(answering('B', calls)),
-        );
-        return [first.steps, second.steps];
-      }) as Effect.Effect<number[]>,
-    );
+  it.effect('gives the child its own conversation', () =>
+    Effect.gen(function* () {
+      const result = yield* runAny(
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          const first = yield* handler(researcher)({ prompt: 'one' }).pipe(
+            Effect.provide(answering('A', calls)),
+          );
+          const second = yield* handler(researcher)({ prompt: 'two' }).pipe(
+            Effect.provide(answering('B', calls)),
+          );
+          return [first.steps, second.steps];
+        }) as Effect.Effect<number[]>,
+      );
 
-    // Both delegations start from step 1 — neither continued the other.
-    expect(result).toEqual([1, 1]);
-  });
+      // Both delegations start from step 1 — neither continued the other.
+      expect(result).toEqual([1, 1]);
+    }),
+  );
 
   // The typed-requirement property, checked by the compiler rather than at
   // runtime: a child whose tools need `Notebook` produces a delegation
   // handler whose Effect still names `Notebook`, so the parent cannot be run
   // until wiring provides it.
-  it("surfaces the child's service requirements to the caller", async () => {
-    const notes = Toolkit.make();
-    const scribe = Agent.make({
-      name: 'scribe',
-      revision: '1',
-      instructions: 'write it down',
-      toolkit: notes,
-    });
+  it.effect("surfaces the child's service requirements to the caller", () =>
+    Effect.gen(function* () {
+      const notes = Toolkit.make();
+      const scribe = Agent.make({
+        name: 'scribe',
+        revision: '1',
+        instructions: 'write it down',
+        toolkit: notes,
+      });
 
-    const delegate = handler(scribe)({ prompt: 'note this' }).pipe(
-      Effect.tap(() =>
+      const delegate = handler(scribe)({ prompt: 'note this' }).pipe(
+        Effect.tap(() =>
+          Effect.gen(function* () {
+            const notebook = yield* Notebook;
+            expect(notebook.note).toBe('recorded');
+          }),
+        ),
+      );
+
+      const result = yield* runAny(
         Effect.gen(function* () {
-          const notebook = yield* Notebook;
-          expect(notebook.note).toBe('recorded');
-        }),
-      ),
-    );
+          const calls = yield* Ref.make(0);
+          return yield* delegate.pipe(
+            Effect.provide(answering('done', calls)),
+            // Removing this line is a compile error, not a runtime surprise.
+            Effect.provideService(Notebook, { note: 'recorded' }),
+          );
+        }) as Effect.Effect<{ result: string; steps: number }>,
+      );
 
-    const result = await runAny(
-      Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        return yield* delegate.pipe(
-          Effect.provide(answering('done', calls)),
-          // Removing this line is a compile error, not a runtime surprise.
-          Effect.provideService(Notebook, { note: 'recorded' }),
-        );
-      }) as Effect.Effect<{ result: string; steps: number }>,
-    );
-
-    expect(result.result).toBe('done');
-  });
+      expect(result.result).toBe('done');
+    }),
+  );
 
   // Cycles are impossible by construction, but depth is not: a -> b -> c
   // chains freely, and each level multiplies model calls. Without a cap an
   // innocent-looking chain is an unbounded bill.
-  it('refuses to delegate past the depth cap', async () => {
-    const result = await runAny(
-      Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        const outcome = yield* handler(researcher)({ prompt: 'go' }).pipe(
-          Effect.provideService(Depth, MAX_DEPTH),
-          Effect.provide(answering('never runs', calls)),
-          Effect.result,
-        );
-        return { outcome, calls: yield* Ref.get(calls) };
-      }),
-    );
+  it.effect('refuses to delegate past the depth cap', () =>
+    Effect.gen(function* () {
+      const result = yield* runAny(
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          const outcome = yield* handler(researcher)({ prompt: 'go' }).pipe(
+            Effect.provideService(Depth, MAX_DEPTH),
+            Effect.provide(answering('never runs', calls)),
+            Effect.result,
+          );
+          return { outcome, calls: yield* Ref.get(calls) };
+        }),
+      );
 
-    expect(result.outcome._tag).toBe('Failure');
-    // Refused before the model was reached, which is the point.
-    expect(result.calls).toBe(0);
-  });
+      expect(result.outcome._tag).toBe('Failure');
+      // Refused before the model was reached, which is the point.
+      expect(result.calls).toBe(0);
+    }),
+  );
 
-  it('uses the shared application depth limit when one is present', async () => {
-    const result = await runAny(
-      Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        const runtime = yield* RunPolicy.create(
-          RunPolicy.make({ maxDelegationDepth: 1 }),
-        );
-        const outcome = yield* handler(
-          researcher,
-          undefined,
-          runtime,
-        )({
-          prompt: 'go',
-        }).pipe(
-          Effect.provideService(Depth, 1),
-          Effect.provide(answering('never runs', calls)),
-          Effect.result,
-        );
-        return { outcome, calls: yield* Ref.get(calls) };
-      }),
-    );
+  it.effect('uses the shared application depth limit when one is present', () =>
+    Effect.gen(function* () {
+      const result = yield* runAny(
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          const runtime = yield* RunPolicy.create(
+            RunPolicy.make({ maxDelegationDepth: 1 }),
+          );
+          const outcome = yield* handler(
+            researcher,
+            undefined,
+            runtime,
+          )({
+            prompt: 'go',
+          }).pipe(
+            Effect.provideService(Depth, 1),
+            Effect.provide(answering('never runs', calls)),
+            Effect.result,
+          );
+          return { outcome, calls: yield* Ref.get(calls) };
+        }),
+      );
 
-    expect(result.outcome._tag).toBe('Failure');
-    expect(result.calls).toBe(0);
-  });
+      expect(result.outcome._tag).toBe('Failure');
+      expect(result.calls).toBe(0);
+    }),
+  );
 
   // Refusal is a tool failure, not a run failure: an agent told it cannot
   // delegate further can still do the work itself.
-  it('reports the refusal to the model rather than aborting the run', async () => {
-    const failure = await runAny(
+  it.effect(
+    'reports the refusal to the model rather than aborting the run',
+    () =>
       Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        const outcome = yield* handler(researcher)({ prompt: 'go' }).pipe(
-          Effect.provideService(Depth, MAX_DEPTH),
-          Effect.provide(answering('never runs', calls)),
-          Effect.result,
+        const failure = yield* runAny(
+          Effect.gen(function* () {
+            const calls = yield* Ref.make(0);
+            const outcome = yield* handler(researcher)({ prompt: 'go' }).pipe(
+              Effect.provideService(Depth, MAX_DEPTH),
+              Effect.provide(answering('never runs', calls)),
+              Effect.result,
+            );
+            return outcome;
+          }),
         );
-        return outcome;
+
+        expect(failure._tag).toBe('Failure');
+        if (failure._tag === 'Failure') {
+          expect(failure.failure).toMatchObject({
+            refused: expect.stringContaining(String(MAX_DEPTH)),
+          });
+        }
       }),
-    );
+  );
 
-    expect(failure._tag).toBe('Failure');
-    if (failure._tag === 'Failure') {
-      expect(failure.failure).toMatchObject({
-        refused: expect.stringContaining(String(MAX_DEPTH)),
-      });
-    }
-  });
+  it.effect('still delegates one level below the cap', () =>
+    Effect.gen(function* () {
+      const result = yield* runAny(
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          return yield* handler(researcher)({ prompt: 'go' }).pipe(
+            Effect.provideService(Depth, MAX_DEPTH - 1),
+            Effect.provide(answering('done', calls)),
+          );
+        }),
+      );
 
-  it('still delegates one level below the cap', async () => {
-    const result = await runAny(
-      Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
-        return yield* handler(researcher)({ prompt: 'go' }).pipe(
-          Effect.provideService(Depth, MAX_DEPTH - 1),
-          Effect.provide(answering('done', calls)),
-        );
-      }),
-    );
-
-    expect(result.result).toBe('done');
-  });
+      expect(result.result).toBe('done');
+    }),
+  );
 
   // Propagation through the *generic* path, which is the one that used to
   // erase everything. `Named` now carries a real `R` (defaulting to
@@ -289,48 +307,52 @@ describe('delegation', () => {
   // when a toolkit layer is built under one context and invoked under
   // another. Guarding that needs a fixture where the service is reachable
   // *only* through the captured context, which no unit test here builds.
-  it('actually provides the captured services to the child at runtime', async () => {
-    const write = Tool.make('write', {
-      description: 'write a note',
-      parameters: Schema.Struct({ text: Schema.String }),
-      success: Schema.Struct({ note: Schema.String }),
-      dependencies: [Notebook],
-    });
-
-    const notes = Toolkit.make(write);
-
-    const scribe = Agent.make({
-      name: 'scribe',
-      revision: '1',
-      instructions: 'write it down',
-      toolkit: notes,
-    });
-
-    const layer = delegateTo(scribe).layer(undefined);
-
-    const result = await runAny(
+  it.effect(
+    'actually provides the captured services to the child at runtime',
+    () =>
       Effect.gen(function* () {
-        const calls = yield* Ref.make(0);
+        const write = Tool.make('write', {
+          description: 'write a note',
+          parameters: Schema.Struct({ text: Schema.String }),
+          success: Schema.Struct({ note: Schema.String }),
+          dependencies: [Notebook],
+        });
 
-        // The child is asked to use its tool; its handler reads `Notebook`,
-        // which only the captured context can supply.
-        return yield* handler(scribe)({ prompt: 'note this' }).pipe(
-          Effect.provide(layer),
-          Effect.provide(
-            notes.toLayer({
-              write: ({ text }) =>
-                Effect.gen(function* () {
-                  const notebook = yield* Notebook;
-                  return { note: `${notebook.note}:${text}` };
+        const notes = Toolkit.make(write);
+
+        const scribe = Agent.make({
+          name: 'scribe',
+          revision: '1',
+          instructions: 'write it down',
+          toolkit: notes,
+        });
+
+        const layer = delegateTo(scribe).layer(undefined);
+
+        const result = yield* runAny(
+          Effect.gen(function* () {
+            const calls = yield* Ref.make(0);
+
+            // The child is asked to use its tool; its handler reads `Notebook`,
+            // which only the captured context can supply.
+            return yield* handler(scribe)({ prompt: 'note this' }).pipe(
+              Effect.provide(layer),
+              Effect.provide(
+                notes.toLayer({
+                  write: ({ text }) =>
+                    Effect.gen(function* () {
+                      const notebook = yield* Notebook;
+                      return { note: `${notebook.note}:${text}` };
+                    }),
                 }),
-            }),
-          ),
-          Effect.provide(answering('done', calls)),
-          Effect.provideService(Notebook, { note: 'recorded' }),
+              ),
+              Effect.provide(answering('done', calls)),
+              Effect.provideService(Notebook, { note: 'recorded' }),
+            );
+          }),
         );
-      }),
-    );
 
-    expect(result.result).toBe('done');
-  });
+        expect(result.result).toBe('done');
+      }),
+  );
 });

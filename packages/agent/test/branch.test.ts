@@ -2,6 +2,8 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { beforeEach, describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
@@ -10,7 +12,6 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { beforeEach, describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { AgentBranch } from '../src/branch.js';
@@ -128,7 +129,7 @@ const agent = Agent.make({
     }),
 });
 
-const CONVERSATION = 'branched-conversation';
+const CONVERSATION = LogVocabulary.ConversationId.make('branched-conversation');
 const PATH = AgentLog.pathFor(CONVERSATION);
 
 beforeEach(() => {
@@ -138,14 +139,12 @@ beforeEach(() => {
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   models: Layer.Layer<LanguageModel.LanguageModel>,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(models),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(models),
+    Effect.provide(LogStoreMemory.layer),
+    Effect.scoped,
   );
 
 const readAll = Effect.fn('test.readAll')(function* () {
@@ -187,7 +186,7 @@ const started = (text: string): ConversationRecord.Record => ({
   _tag: 'RunStarted',
   agent: 'test',
   formatVersion: 1,
-  agentRevision: '1',
+  agentRevision: LogVocabulary.AgentRevision.make('1'),
   prompt: Prompt.make(text).content,
 });
 
@@ -454,76 +453,90 @@ describe('rebuilding a branched conversation', () => {
 });
 
 describe('branching a live conversation', () => {
-  it('writes one marker and keeps the abandoned records in the log', async () => {
-    const models = provider([says('turn 1'), says('turn 2')]);
+  it.effect(
+    'writes one marker and keeps the abandoned records in the log',
+    () => {
+      const models = provider([says('turn 1'), says('turn 2')]);
 
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        const first = yield* readAll();
+      return run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          const first = yield* readAll();
 
-        yield* agent
-          .branchFrom(CONVERSATION, first[0]!.offset, 'actually, hello')
-          .pipe(Effect.orDie);
+          yield* agent
+            .branchFrom(CONVERSATION, first[0]!.offset, 'actually, hello')
+            .pipe(Effect.orDie);
 
-        return yield* readAll();
-      }),
-      models.layer,
-    );
+          return yield* readAll();
+        }),
+        models.layer,
+      ).pipe(
+        Effect.tap((written) =>
+          Effect.sync(() => {
+            // Nothing was rewritten or removed — the first run's records are all still
+            // there, with the marker and the new run appended after them.
+            expect(tags(written)).toEqual([
+              'RunStarted',
+              'Text',
+              'TurnFinished',
+              'Completed',
+              'RunSettled',
+              'BranchedFrom',
+              'RunStarted',
+              'Text',
+              'TurnFinished',
+              'Completed',
+              'RunSettled',
+            ]);
+          }),
+        ),
+      );
+    },
+  );
 
-    // Nothing was rewritten or removed — the first run's records are all still
-    // there, with the marker and the new run appended after them.
-    expect(tags(written)).toEqual([
-      'RunStarted',
-      'Text',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-      'BranchedFrom',
-      'RunStarted',
-      'Text',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-    ]);
-  });
+  it.effect(
+    'runs the branched turn against the earlier point, not the end',
+    () => {
+      const models = provider([says('turn 1'), says('turn 2')]);
 
-  it('runs the branched turn against the earlier point, not the end', async () => {
-    const models = provider([says('turn 1'), says('turn 2')]);
+      return run(
+        Effect.gen(function* () {
+          yield* agent
+            .recordingTo(CONVERSATION)
+            .run('what is the status?')
+            .pipe(Effect.orDie);
+          const first = yield* readAll();
 
-    const asked = await run(
-      Effect.gen(function* () {
-        yield* agent
-          .recordingTo(CONVERSATION)
-          .run('what is the status?')
-          .pipe(Effect.orDie);
-        const first = yield* readAll();
+          yield* agent
+            .branchFrom(
+              CONVERSATION,
+              first[0]!.offset,
+              'what is the status, precisely?',
+            )
+            .pipe(Effect.orDie);
 
-        yield* agent
-          .branchFrom(
-            CONVERSATION,
-            first[0]!.offset,
-            'what is the status, precisely?',
-          )
-          .pipe(Effect.orDie);
+          return models.asked;
+        }),
+        models.layer,
+      ).pipe(
+        Effect.tap((asked) =>
+          Effect.sync(() => {
+            const branched = asked[1]!;
+            expect(rolesOf(branched)).toEqual(['system', 'user', 'user']);
+            expect(textIn(branched)).toContain('what is the status?');
+            expect(textIn(branched)).toContain('precisely');
+            // The answer the first run gave is on the abandoned branch.
+            expect(textIn(branched)).not.toContain('turn 1');
+          }),
+        ),
+      );
+    },
+  );
 
-        return models.asked;
-      }),
-      models.layer,
-    );
-
-    const branched = asked[1]!;
-    expect(rolesOf(branched)).toEqual(['system', 'user', 'user']);
-    expect(textIn(branched)).toContain('what is the status?');
-    expect(textIn(branched)).toContain('precisely');
-    // The answer the first run gave is on the abandoned branch.
-    expect(textIn(branched)).not.toContain('turn 1');
-  });
-
-  it('carries on from the branch on the next resume', async () => {
+  it.effect('carries on from the branch on the next resume', () => {
     const models = provider([says('turn 1'), says('turn 2'), says('turn 3')]);
 
-    const asked = await run(
+    return run(
       Effect.gen(function* () {
         yield* agent
           .recordingTo(CONVERSATION)
@@ -539,23 +552,27 @@ describe('branching a live conversation', () => {
         return models.asked;
       }),
       models.layer,
+    ).pipe(
+      Effect.tap((asked) =>
+        Effect.sync(() => {
+          // The branch is where the conversation continues from now: an ordinary
+          // `resume` afterwards sees the edited turn and not the original one.
+          const resumed = asked[2]!;
+          expect(textIn(resumed)).toContain('edited');
+          expect(textIn(resumed)).toContain('turn 2');
+          expect(textIn(resumed)).not.toContain('turn 1');
+        }),
+      ),
     );
-
-    // The branch is where the conversation continues from now: an ordinary
-    // `resume` afterwards sees the edited turn and not the original one.
-    const resumed = asked[2]!;
-    expect(textIn(resumed)).toContain('edited');
-    expect(textIn(resumed)).toContain('turn 2');
-    expect(textIn(resumed)).not.toContain('turn 1');
   });
 
   // Cost is a fact about what was billed, not about what the conversation now
   // says. Mutation-checked end to end: scoping `usageFrom` to the active path
   // makes the branched run report only its own tokens.
-  it('reports usage across the branch it abandoned', async () => {
+  it.effect('reports usage across the branch it abandoned', () => {
     const models = provider([says('turn 1'), says('turn 2')]);
 
-    const totals = await run(
+    return run(
       Effect.gen(function* () {
         const first = yield* agent
           .recordingTo(CONVERSATION)
@@ -570,10 +587,14 @@ describe('branching a live conversation', () => {
         return { first: first.usage, branched: branched.usage };
       }),
       models.layer,
+    ).pipe(
+      Effect.tap((totals) =>
+        Effect.sync(() => {
+          expect(totals.branched.output).toBe(totals.first.output * 2);
+          expect(totals.branched.input).toBe(totals.first.input * 2);
+        }),
+      ),
     );
-
-    expect(totals.branched.output).toBe(totals.first.output * 2);
-    expect(totals.branched.input).toBe(totals.first.input * 2);
   });
 });
 
@@ -590,10 +611,10 @@ describe('a steer delivered before the branch', () => {
   // `deliveredThrough(AgentBranch.activePath(history))` fails both assertions
   // below — a second `SignalReceived` appears and the branched run takes an
   // extra turn to consume it.
-  it('is not delivered again on the new path', async () => {
+  it.effect('is not delivered again on the new path', () => {
     const models = provider([says('turn 1'), says('turn 2'), says('turn 3')]);
 
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
         yield* AgentSignals.send(CONVERSATION, {
           kind: 'steer',
@@ -616,29 +637,33 @@ describe('a steer delivered before the branch', () => {
         };
       }),
       models.layer,
-    );
+    ).pipe(
+      Effect.tap((observed) =>
+        Effect.sync(() => {
+          // The steer carried the first run past a stop condition every turn
+          // satisfies: two prompts, one delivery.
+          expect(observed.askedBeforeBranch).toBe(2);
 
-    // The steer carried the first run past a stop condition every turn
-    // satisfies: two prompts, one delivery.
-    expect(observed.askedBeforeBranch).toBe(2);
-
-    // One further prompt for the branched turn, and no second delivery. Three
-    // prompts and two deliveries is the re-steer this test exists to catch.
-    expect(observed.asked).toHaveLength(3);
-    expect(
-      observed.written.filter(
-        (envelope) => envelope.record._tag === 'SignalReceived',
+          // One further prompt for the branched turn, and no second delivery. Three
+          // prompts and two deliveries is the re-steer this test exists to catch.
+          expect(observed.asked).toHaveLength(3);
+          expect(
+            observed.written.filter(
+              (envelope) => envelope.record._tag === 'SignalReceived',
+            ),
+          ).toHaveLength(1);
+        }),
       ),
-    ).toHaveLength(1);
+    );
   });
 
   // The control: a steer that arrives *after* the branch is delivered
   // normally. Without this, "never re-deliver" could be implemented as "never
   // deliver to a branched run".
-  it('does not stop a later steer from being delivered', async () => {
+  it.effect('does not stop a later steer from being delivered', () => {
     const models = provider([says('turn 1'), says('turn 2'), says('turn 3')]);
 
-    const written = await run(
+    return run(
       Effect.gen(function* () {
         yield* AgentSignals.send(CONVERSATION, {
           kind: 'steer',
@@ -661,13 +686,19 @@ describe('a steer delivered before the branch', () => {
         return yield* readAll();
       }),
       models.layer,
-    );
-
-    expect(
-      written.flatMap((envelope) =>
-        envelope.record._tag === 'SignalReceived' ? [envelope.record.text] : [],
+    ).pipe(
+      Effect.tap((written) =>
+        Effect.sync(() => {
+          expect(
+            written.flatMap((envelope) =>
+              envelope.record._tag === 'SignalReceived'
+                ? [envelope.record.text]
+                : [],
+            ),
+          ).toEqual(['first steer', 'second steer']);
+        }),
       ),
-    ).toEqual(['first steer', 'second steer']);
+    );
   });
 });
 
@@ -685,7 +716,9 @@ const seed = Effect.fn('test.seed')(function* (
 ) {
   const store = yield* LogStore.Service;
   yield* store.create(PATH, CONVERSATION).pipe(Effect.orDie);
-  const claim = yield* store.acquire(PATH, 'previous-run').pipe(Effect.orDie);
+  const claim = yield* store
+    .acquire(PATH, LogVocabulary.ProducerId.make('previous-run'))
+    .pipe(Effect.orDie);
   yield* store
     .append({
       path: PATH,
@@ -708,15 +741,19 @@ const crashed: ReadonlyArray<ConversationRecord.Record> = [
   {
     _tag: 'ToolCall',
     step: 1,
-    id: 'call-1',
+    id: LogVocabulary.ToolCallId.make('call-1'),
     name: 'lookup',
     params: { id: '42' },
   },
-  { _tag: 'ToolStarted', id: 'call-1', name: 'lookup' },
+  {
+    _tag: 'ToolStarted',
+    id: LogVocabulary.ToolCallId.make('call-1'),
+    name: 'lookup',
+  },
   {
     _tag: 'ToolOutcome',
     step: 1,
-    id: 'call-1',
+    id: LogVocabulary.ToolCallId.make('call-1'),
     name: 'lookup',
     outcome: 'success',
     result: { status: 'from-log' },
@@ -733,10 +770,10 @@ describe('a crashed run on the abandoned branch', () => {
   // Mutation-checked: dropping `AgentBranch.activePath` from the
   // `unsettledTools` call in `log.ts` leaves the handler un-run and puts
   // 'from-log' back into the branched run's prompt.
-  it('does not serve its tool outcomes to the branched run', async () => {
+  it.effect('does not serve its tool outcomes to the branched run', () => {
     const models = provider([callingTurn, says('done')]);
 
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
         yield* seed(crashed);
         const before = yield* readAll();
@@ -748,32 +785,40 @@ describe('a crashed run on the abandoned branch', () => {
         return { dispatchedTotal: dispatched.count, asked: models.asked };
       }),
       models.layer,
+    ).pipe(
+      Effect.tap((observed) =>
+        Effect.sync(() => {
+          // The tool ran, rather than being answered from a branch that is no
+          // longer part of the conversation.
+          expect(observed.dispatchedTotal).toBe(1);
+          expect(textIn(observed.asked[1]!)).toContain('shipped:42');
+          expect(textIn(observed.asked[1]!)).not.toContain('from-log');
+        }),
+      ),
     );
-
-    // The tool ran, rather than being answered from a branch that is no
-    // longer part of the conversation.
-    expect(observed.dispatchedTotal).toBe(1);
-    expect(textIn(observed.asked[1]!)).toContain('shipped:42');
-    expect(textIn(observed.asked[1]!)).not.toContain('from-log');
   });
 
   // The control, and the reason the case above is about branching rather than
   // about recovery having stopped working: an ordinary `resume` of the very
   // same seeded crash still serves the recorded outcome and does not re-run
   // the tool.
-  it('still serves them to an ordinary resume', async () => {
+  it.effect('still serves them to an ordinary resume', () => {
     const models = provider([callingTurn, says('done')]);
 
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
         yield* seed(crashed);
         yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
         return { dispatchedTotal: dispatched.count, asked: models.asked };
       }),
       models.layer,
+    ).pipe(
+      Effect.tap((observed) =>
+        Effect.sync(() => {
+          expect(observed.dispatchedTotal).toBe(0);
+          expect(textIn(observed.asked[1]!)).toContain('from-log');
+        }),
+      ),
     );
-
-    expect(observed.dispatchedTotal).toBe(0);
-    expect(textIn(observed.asked[1]!)).toContain('from-log');
   });
 });

@@ -17,7 +17,91 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/run-policy`, `/recording-policy`, `/stop`,
-`/skill`, and `/interception`.
+`/skill`, `/interception`, and `/workflow`.
+
+## Effect Workflow
+
+`AgentWorkflow.make` binds an agent to `effect/unstable/workflow` without
+introducing another workflow abstraction:
+
+```ts
+import { AgentWorkflow } from '@sunfall/vesper-agent/workflow';
+import { Schema } from 'effect';
+
+class RunFailure extends Schema.TaggedError<RunFailure>()('RunFailure', {
+  message: Schema.String,
+}) {}
+
+const supportWorkflow = AgentWorkflow.make(supportAgent, {
+  tag: 'SupportAgent',
+  payload: {
+    submissionId: Schema.String,
+    conversationId: Schema.String,
+    message: Schema.String,
+  },
+  idempotencyKey: ({ submissionId }) => submissionId,
+  conversationId: ({ conversationId }) => conversationId,
+  input: ({ message }) => message,
+  error: RunFailure,
+  mapError: (error) => new RunFailure({ message: String(error) }),
+});
+
+// Effect-native: execute, poll, interrupt, and resume use whichever
+// WorkflowEngine the application provides.
+const result = supportWorkflow.workflow.execute({
+  submissionId: 'request-1042',
+  conversationId: 'customer-17',
+  message: 'where is my order?',
+});
+
+// Register beside the application's WorkflowEngine, LogStore, model, and
+// every service in Agent.Requires<typeof supportAgent>.
+const SupportWorkflowLive = supportWorkflow.layer;
+```
+
+Durable work inside tools is an ordinary named function:
+
+```ts
+const chargeCard = AgentWorkflow.step({
+  name: 'charge-card',
+  key: ({ orderId }: ChargeInput) => orderId,
+  success: ChargeReceipt,
+  error: ChargeError,
+  execute: ({ customerId, amount }: ChargeInput) =>
+    Effect.gen(function* () {
+      const payments = yield* Payments;
+      const idempotencyKey = yield* AgentWorkflow.idempotencyKey('charge-card');
+
+      return yield* payments.charge({ customerId, amount, idempotencyKey });
+    }),
+});
+
+const billingAgent = Agent.make({
+  // ...
+}).withHandlers({
+  charge_card: (input) => chargeCard(input),
+});
+```
+
+`step` is a small constructor for Effect Workflow `Activity`; it does not add
+a second replay mechanism. A completed activity result is returned on replay
+without running `execute` again. Its mandatory `key` distinguishes logical
+calls within one workflow execution, so repeating the same input replays while
+different orders execute independently; Vesper escapes the key before joining
+it to the step name. Empty keys fail before execution. The Effect requirement
+includes `WorkflowInstance`, which prevents a step from compiling as durable
+outside an active workflow. `idempotencyKey(name)` derives a stable key for an
+external system, but that system must enforce the key: no workflow engine can
+make its side effect atomic with recording the activity result.
+
+The payload and error schemas are application-owned because they cross a
+durable boundary; arbitrary prompt values and failure causes are not assumed to
+be serializable. Vesper's conversation log remains authoritative for model
+turns, tool outcomes, compatibility, and prompt reconstruction. The supplied
+Effect `WorkflowEngine` remains authoritative for accepted execution,
+activities, suspension, interruption, and wakeup. Use
+`WorkflowEngine.layerMemory` in tests or `ClusterWorkflowEngine.layer` for a
+cluster-backed runtime; Vesper does not wrap either one.
 
 Every root run has hard production defaults for model/turn/token/delegation,
 deadline, concurrency, and signal budgets. Set `Definition.runPolicy` to make

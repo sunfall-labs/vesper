@@ -11,6 +11,7 @@ import { AgentHistory } from '@sunfall/vesper-agent/history';
 import { AgentSignals } from '@sunfall/vesper-agent/signal';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Deferred,
   Effect,
@@ -492,18 +493,26 @@ export const runConformance = async (): Promise<ConformanceResult> => {
   const result = await runtime.runPromise(
     Effect.gen(function* () {
       const store = yield* LogStore.Service;
-      yield* store.create('comparison-fencing', 'comparison-fencing');
-      const first = yield* store.acquire('comparison-fencing', 'first');
-      yield* store.acquire('comparison-fencing', 'replacement');
+      const fencingConversation =
+        LogVocabulary.ConversationId.make('comparison-fencing');
+      yield* store.create(fencingConversation, fencingConversation);
+      const first = yield* store.acquire(
+        fencingConversation,
+        LogVocabulary.ProducerId.make('first'),
+      );
+      yield* store.acquire(
+        fencingConversation,
+        LogVocabulary.ProducerId.make('replacement'),
+      );
       const fenced = yield* store
         .append({
-          path: 'comparison-fencing',
+          path: fencingConversation,
           producerId: first.producerId,
           epoch: first.epoch,
           sequence: first.nextSequence,
           records: [
             {
-              conversationId: 'comparison-fencing',
+              conversationId: fencingConversation,
               timestamp: Date.now(),
               record: { _tag: 'Text', step: 1, text: 'stale writer' },
             },
@@ -514,23 +523,39 @@ export const runConformance = async (): Promise<ConformanceResult> => {
         throw new Error('stale Vesper producer was not fenced');
       }
 
-      const recoverySeed = yield* AgentLog.open('comparison-recovery', {
-        compatibility: { agent: 'bench', revision: '1' },
+      const recoveryId = LogVocabulary.ConversationId.make(
+        'comparison-recovery',
+      );
+      const recoverySeed = yield* AgentLog.open(recoveryId, {
+        compatibility: {
+          agent: 'bench',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        },
       });
       yield* recoverySeed.append([
         {
           _tag: 'RunStarted',
           agent: 'bench',
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           formatVersion: 1,
           prompt: [],
         },
-        { _tag: 'ToolStarted', id: 'uncertain', name: TOOL_NAME },
+        {
+          _tag: 'ToolStarted',
+          id: LogVocabulary.ToolCallId.make('uncertain'),
+          name: TOOL_NAME,
+        },
       ]);
-      const recovered = yield* AgentLog.open('comparison-recovery', {
-        compatibility: { agent: 'bench', revision: '1' },
+      const recovered = yield* AgentLog.open(recoveryId, {
+        compatibility: {
+          agent: 'bench',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        },
       });
-      const uncertain = recovered.recovery(TOOL_NAME, 'uncertain');
+      const uncertain = recovered.recovery(
+        TOOL_NAME,
+        LogVocabulary.ToolCallId.make('uncertain'),
+      );
       if (
         !Option.isSome(uncertain) ||
         uncertain.value._tag !== 'Indeterminate'
@@ -538,32 +563,47 @@ export const runConformance = async (): Promise<ConformanceResult> => {
         throw new Error('unfinished Vesper tool was not indeterminate');
       }
 
-      const old = yield* AgentLog.open('comparison-revision', {
-        compatibility: { agent: 'bench', revision: 'old' },
+      const revisionId = LogVocabulary.ConversationId.make(
+        'comparison-revision',
+      );
+      const old = yield* AgentLog.open(revisionId, {
+        compatibility: {
+          agent: 'bench',
+          revision: LogVocabulary.AgentRevision.make('old'),
+        },
       });
       yield* old.append([
         {
           _tag: 'RunStarted',
           agent: 'bench',
-          agentRevision: 'old',
+          agentRevision: LogVocabulary.AgentRevision.make('old'),
           formatVersion: 1,
           prompt: [],
         },
       ]);
-      const mismatch = yield* AgentLog.open('comparison-revision', {
-        compatibility: { agent: 'bench', revision: '1' },
+      const mismatch = yield* AgentLog.open(revisionId, {
+        compatibility: {
+          agent: 'bench',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        },
       }).pipe(Effect.result);
       if (mismatch._tag !== 'Failure') {
         throw new Error('Vesper accepted mismatched revision history');
       }
 
       const bytes = new Uint8Array([0, 1, 255]);
-      const file = yield* AgentLog.open('comparison-file-bytes', {
-        compatibility: { agent: 'bench', revision: '1' },
-      });
+      const file = yield* AgentLog.open(
+        LogVocabulary.ConversationId.make('comparison-file-bytes'),
+        {
+          compatibility: {
+            agent: 'bench',
+            revision: LogVocabulary.AgentRevision.make('1'),
+          },
+        },
+      );
       yield* AgentLog.start(file, {
         agent: 'bench',
-        revision: '1',
+        revision: LogVocabulary.AgentRevision.make('1'),
         input: [
           {
             role: 'user',
@@ -623,9 +663,15 @@ export const runConformance = async (): Promise<ConformanceResult> => {
       });
       yield* Fiber.join(running);
       yield* Deferred.await(stopped);
-      const cancelled = yield* AgentLog.open('comparison-cancel', {
-        compatibility: { agent: 'bench', revision: '1' },
-      });
+      const cancelled = yield* AgentLog.open(
+        LogVocabulary.ConversationId.make('comparison-cancel'),
+        {
+          compatibility: {
+            agent: 'bench',
+            revision: LogVocabulary.AgentRevision.make('1'),
+          },
+        },
+      );
       if (
         !(yield* cancelled.recorded).some(
           (entry) =>
@@ -1042,9 +1088,16 @@ const runHistoryOpen = async (): Promise<ScenarioResult> => {
     ] as const) {
       const reads = { pages: 0, records: 0 };
       const { runtime } = await readyRuntime(reads);
-      const id = `history-${mode}-${records}`;
+      const id = LogVocabulary.ConversationId.make(
+        `history-${mode}-${records}`,
+      );
       const session = await runtime.runPromise(
-        AgentLog.open(id, { compatibility: { agent: 'bench', revision: '1' } }),
+        AgentLog.open(id, {
+          compatibility: {
+            agent: 'bench',
+            revision: LogVocabulary.AgentRevision.make('1'),
+          },
+        }),
       );
       const oldCount = mode === 'uncompacted' ? records : records - 10;
       await runtime.runPromise(
@@ -1073,7 +1126,7 @@ const runHistoryOpen = async (): Promise<ScenarioResult> => {
               _tag: 'Compacted',
               formatVersion: 1,
               agent: 'bench',
-              agentRevision: '1',
+              agentRevision: LogVocabulary.AgentRevision.make('1'),
               step: records,
               summary: 'fixed summary',
               firstKept: beforeCompaction[oldCount]!.offset,
@@ -1106,10 +1159,14 @@ const runHistoryOpen = async (): Promise<ScenarioResult> => {
               _tag: 'RunStarted',
               agent: 'bench',
               formatVersion: 1,
-              agentRevision: '1',
+              agentRevision: LogVocabulary.AgentRevision.make('1'),
               prompt: [],
             },
-            { _tag: 'ToolStarted', id: 'orphan', name: TOOL_NAME },
+            {
+              _tag: 'ToolStarted',
+              id: LogVocabulary.ToolCallId.make('orphan'),
+              name: TOOL_NAME,
+            },
           ]),
         );
       }
@@ -1122,7 +1179,10 @@ const runHistoryOpen = async (): Promise<ScenarioResult> => {
         const t0 = performance.now();
         const opened = await runtime.runPromise(
           AgentLog.open(id, {
-            compatibility: { agent: 'bench', revision: '1' },
+            compatibility: {
+              agent: 'bench',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
           }),
         );
         const elapsed = performance.now() - t0;

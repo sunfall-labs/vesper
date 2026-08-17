@@ -2,6 +2,7 @@ import { Context, Effect, Option, Schema, Stream } from 'effect';
 
 import { LogOffset } from './offset.js';
 import type { ConversationRecord } from './record.js';
+import { LogVocabulary } from './vocabulary.js';
 
 // The append-only log every conversation is written to.
 //
@@ -104,9 +105,9 @@ export interface StreamMeta {
    */
   readonly identity: string;
   /** Bumped by every {@link Interface.acquire}. */
-  readonly epoch: number;
+  readonly epoch: LogVocabulary.Epoch;
   /** The producer holding the current epoch, if any. */
-  readonly producerId: Option.Option<string>;
+  readonly producerId: Option.Option<LogVocabulary.ProducerId>;
   /** Offset of the last record written, or {@link LogOffset.START} if none. */
   readonly head: LogOffset.Offset;
   readonly records: number;
@@ -115,28 +116,28 @@ export interface StreamMeta {
 /** A producer's right to write to a stream, for as long as its epoch holds. */
 export interface ProducerClaim {
   readonly path: string;
-  readonly producerId: string;
-  readonly epoch: number;
+  readonly producerId: LogVocabulary.ProducerId;
+  readonly epoch: LogVocabulary.Epoch;
   /** The sequence the next {@link Interface.append} must carry. Always 0 here. */
-  readonly nextSequence: number;
+  readonly nextSequence: LogVocabulary.ProducerSequence;
 }
 
 /** Optional stream position that must still be current when a producer claims. */
 export interface AcquireExpected {
-  readonly epoch: number;
+  readonly epoch: LogVocabulary.Epoch;
   readonly head: LogOffset.Offset;
 }
 
 export interface AppendInput {
   readonly path: string;
-  readonly producerId: string;
-  readonly epoch: number;
+  readonly producerId: LogVocabulary.ProducerId;
+  readonly epoch: LogVocabulary.Epoch;
   /**
    * The producer's batch counter, starting at
    * {@link ProducerClaim.nextSequence} and incrementing by one per
    * successful append. Not an offset — offsets are the store's to assign.
    */
-  readonly sequence: number;
+  readonly sequence: LogVocabulary.ProducerSequence;
   readonly records: ReadonlyArray<ConversationRecord.Entry>;
 }
 
@@ -288,7 +289,7 @@ export interface Interface {
    */
   readonly acquire: (
     path: string,
-    producerId: string,
+    producerId: LogVocabulary.ProducerId,
     expected?: AcquireExpected,
   ) => Effect.Effect<ProducerClaim, LogStoreError>;
 

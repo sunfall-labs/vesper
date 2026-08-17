@@ -1,6 +1,6 @@
 import * as NodeServices from '@effect/platform-node/NodeServices';
+import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
-import { describe, expect, it } from 'vitest';
 
 import { AttachmentStore } from '../src/attachment-store.js';
 import { AttachmentStoreContract } from '../src/attachment-store-contract.js';
@@ -39,44 +39,35 @@ const ordinary = AttachmentStoreMemory.layer.pipe(
   Layer.provide(NodeServices.layer),
 );
 
-const inItsOwnRuntime = <A>(
-  effect: Effect.Effect<A, unknown, AttachmentStore.Service>,
-): Promise<A> =>
-  Effect.runPromise(Effect.provide(effect, ordinary) as Effect.Effect<A>);
-
 describe('the ordinary memory layer', () => {
-  it('stores and reads back like any other backend', async () => {
-    const read = await inItsOwnRuntime(
-      Effect.gen(function* () {
-        const store = yield* AttachmentStore.Service;
-        const ref = yield* store.put(new TextEncoder().encode('hello'), {
-          mediaType: 'text/plain',
-        });
-        return yield* store.get(ref);
-      }),
-    );
+  it.effect('stores and reads back like any other backend', () =>
+    Effect.gen(function* () {
+      const store = yield* AttachmentStore.Service;
+      const ref = yield* store.put(new TextEncoder().encode('hello'), {
+        mediaType: 'text/plain',
+      });
+      const read = yield* store.get(ref);
 
-    expect(new TextDecoder().decode(read)).toBe('hello');
-  });
+      expect(new TextDecoder().decode(read)).toBe('hello');
+    }).pipe(Effect.provide(ordinary)),
+  );
 
-  it('gives every build its own storage', async () => {
-    const ref = await inItsOwnRuntime(
-      Effect.gen(function* () {
+  it.effect('gives every build its own storage', () =>
+    Effect.gen(function* () {
+      const ref = yield* Effect.gen(function* () {
         const store = yield* AttachmentStore.Service;
         return yield* store.put(new TextEncoder().encode('tenant one'), {
           mediaType: 'text/plain',
         });
-      }),
-    );
+      }).pipe(Effect.provide(ordinary));
 
-    // A second, independent build of the same layer value.
-    const present = await inItsOwnRuntime(
-      Effect.gen(function* () {
+      // A second, independent build of the same layer value.
+      const present = yield* Effect.gen(function* () {
         const store = yield* AttachmentStore.Service;
         return yield* store.has(ref);
-      }),
-    );
+      }).pipe(Effect.provide(ordinary));
 
-    expect(present).toBe(false);
-  });
+      expect(present).toBe(false);
+    }),
+  );
 });

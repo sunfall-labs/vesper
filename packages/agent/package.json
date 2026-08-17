@@ -85,6 +85,10 @@
     "./compaction": {
       "types": "./dist/compaction.d.ts",
       "default": "./dist/compaction.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow.d.ts",
+      "default": "./dist/workflow.js"
     }
   },
   "publishConfig": {

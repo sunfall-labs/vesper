@@ -31,6 +31,10 @@
   },
   "sideEffects": false,
   "exports": {
+    "./vocabulary": {
+      "types": "./dist/vocabulary.d.ts",
+      "default": "./dist/vocabulary.js"
+    },
     "./offset": {
       "types": "./dist/offset.d.ts",
       "default": "./dist/offset.js"
@@ -59,6 +63,10 @@
       "types": "./dist/layer-pg.d.ts",
       "default": "./dist/layer-pg.js"
     },
+    "./pg-client": {
+      "types": "./dist/pg-client.d.ts",
+      "default": "./dist/pg-client.js"
+    },
     "./migrations/001-initial.sql": "./migrations/001-initial.sql"
   },
   "publishConfig": {
@@ -80,5 +88,9 @@
   "devDependencies": {
     "effect": "4.0.0-rc.109",
     "vitest": "^4.1.9"
+  },
+  "dependencies": {
+    "@effect/sql-pg": "4.0.0-rc.109",
+    "pg": "8.20.0"
   }
 }

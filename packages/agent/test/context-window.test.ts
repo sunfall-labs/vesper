@@ -1,6 +1,6 @@
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { Prompt } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
 
 const conversation = Prompt.make([
   { role: 'system', content: 's'.repeat(200) },

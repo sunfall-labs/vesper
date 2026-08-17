@@ -1,5 +1,6 @@
 import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
 import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
+import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Compaction } from '@sunfall/vesper-agent/compaction';
 import { Effect, Layer, Schema, Stream } from 'effect';
@@ -10,7 +11,6 @@ import {
   HttpClientResponse,
   type HttpClientRequest,
 } from 'effect/unstable/http';
-import { describe, expect, it } from 'vitest';
 
 type Reply =
   | {
@@ -225,24 +225,37 @@ const runAgent = (model: Layer.Layer<any, any, never>) =>
       Stream.runCollect,
       Effect.provide(Layer.merge(model, handlers)),
       Effect.orDie,
-      Effect.runPromise,
     );
 
-const failureOf = async (
+const failureOf = (
   model: Layer.Layer<any, any, never>,
-): Promise<AiError.AiError> => {
-  const result = await Effect.runPromise(
-    agent
+): Effect.Effect<AiError.AiError> =>
+  Effect.gen(function* () {
+    const result = yield* agent
       .stream('overflow')
       .pipe(
         Stream.runDrain,
         Effect.provide(Layer.merge(model, handlers)),
         Effect.result,
-      ),
-  );
-  if (result._tag === 'Success') throw new Error('expected provider failure');
-  return result.failure;
-};
+      );
+    if (result._tag === 'Success') throw new Error('expected provider failure');
+    return result.failure;
+  });
+
+type OverflowCase = readonly [
+  name: string,
+  makeLayer: typeof anthropicLayer,
+  body: Record<string, unknown>,
+];
+
+type StructuredErrorCase = readonly [
+  name: string,
+  makeLayer: typeof anthropicLayer,
+  body: string,
+  code: string,
+  codeField: string,
+  requestId: string | undefined,
+];
 
 const textAndCompleted = (
   events: Iterable<{ readonly _tag: string; readonly [key: string]: unknown }>,
@@ -263,71 +276,84 @@ const textAndCompleted = (
 };
 
 describe('official Effect provider seam', () => {
-  it('runs Anthropic request conversion and SSE parsing through one Vesper turn', async () => {
-    const fake = fakeHttp([{ status: 200, body: anthropicSuccess }]);
-    const events = await runAgent(anthropicLayer(fake.layer));
-    const observed = textAndCompleted(events);
-    const request = fake.requests[0]!;
-    const body = requestJson(request) as Record<string, unknown>;
+  it.effect(
+    'runs Anthropic request conversion and SSE parsing through one Vesper turn',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([{ status: 200, body: anthropicSuccess }]);
+        const events = yield* runAgent(anthropicLayer(fake.layer));
+        const observed = textAndCompleted(events);
+        const request = fake.requests[0]!;
+        const body = requestJson(request) as Record<string, unknown>;
 
-    expect(request.url).toBe('https://anthropic.invalid/v1/messages');
-    expect(body).toMatchObject({
-      model: 'claude-fixture',
-      max_tokens: 64,
-      stream: true,
-      system: [
-        { type: 'text', text: 'Answer using the lookup tool when needed.' },
-      ],
-      messages: [
-        { role: 'user', content: [{ type: 'text', text: 'Find sun' }] },
-      ],
-      tools: [{ name: 'lookup', description: 'look up a deterministic value' }],
-    });
-    expect(observed.text).toBe('hello');
-    expect(observed.completed).toMatchObject({
-      usage: { input: 19, output: 7 },
-    });
-  });
+        expect(request.url).toBe('https://anthropic.invalid/v1/messages');
+        expect(body).toMatchObject({
+          model: 'claude-fixture',
+          max_tokens: 64,
+          stream: true,
+          system: [
+            { type: 'text', text: 'Answer using the lookup tool when needed.' },
+          ],
+          messages: [
+            { role: 'user', content: [{ type: 'text', text: 'Find sun' }] },
+          ],
+          tools: [
+            { name: 'lookup', description: 'look up a deterministic value' },
+          ],
+        });
+        expect(observed.text).toBe('hello');
+        expect(observed.completed).toMatchObject({
+          usage: { input: 19, output: 7 },
+        });
+      }),
+  );
 
-  it('runs OpenAI request conversion and SSE parsing through one Vesper turn', async () => {
-    const fake = fakeHttp([{ status: 200, body: openAiSuccess }]);
-    const events = await runAgent(openAiLayer(fake.layer));
-    const observed = textAndCompleted(events);
-    const request = fake.requests[0]!;
-    const body = requestJson(request) as Record<string, unknown>;
+  it.effect(
+    'runs OpenAI request conversion and SSE parsing through one Vesper turn',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([{ status: 200, body: openAiSuccess }]);
+        const events = yield* runAgent(openAiLayer(fake.layer));
+        const observed = textAndCompleted(events);
+        const request = fake.requests[0]!;
+        const body = requestJson(request) as Record<string, unknown>;
 
-    expect(request.url).toBe('https://openai.invalid/v1/responses');
-    expect(body).toMatchObject({
-      model: 'gpt-fixture',
-      max_output_tokens: 64,
-      stream: true,
-      input: [
-        {
-          role: 'system',
-          content: [
+        expect(request.url).toBe('https://openai.invalid/v1/responses');
+        expect(body).toMatchObject({
+          model: 'gpt-fixture',
+          max_output_tokens: 64,
+          stream: true,
+          input: [
             {
-              type: 'input_text',
-              text: 'Answer using the lookup tool when needed.',
+              role: 'system',
+              content: [
+                {
+                  type: 'input_text',
+                  text: 'Answer using the lookup tool when needed.',
+                },
+              ],
+            },
+            {
+              role: 'user',
+              content: [{ type: 'input_text', text: 'Find sun' }],
             },
           ],
-        },
-        { role: 'user', content: [{ type: 'input_text', text: 'Find sun' }] },
-      ],
-      tools: [
-        {
-          type: 'function',
-          name: 'lookup',
-          description: 'look up a deterministic value',
-        },
-      ],
-    });
-    expect(observed.text).toBe('world');
-    expect(observed.completed).toMatchObject({
-      usage: { input: 17, output: 9 },
-    });
-  });
+          tools: [
+            {
+              type: 'function',
+              name: 'lookup',
+              description: 'look up a deterministic value',
+            },
+          ],
+        });
+        expect(observed.text).toBe('world');
+        expect(observed.completed).toMatchObject({
+          usage: { input: 17, output: 9 },
+        });
+      }),
+  );
 
-  it.each([
+  it.effect.each([
     [
       'Anthropic',
       anthropicLayer,
@@ -349,44 +375,50 @@ describe('official Effect provider seam', () => {
     ],
   ] as const)(
     'recognizes a real %s client overflow error but not an unrelated 400',
-    async (_name, makeLayer, overflowBody) => {
-      const overflow = fakeHttp([
-        { status: 400, body: JSON.stringify(overflowBody) },
-      ]);
-      const overflowError = await failureOf(makeLayer(overflow.layer));
-      expect(overflowError.reason._tag).toBe('InvalidRequestError');
-      expect(Compaction.isContextOverflow(overflowError)).toBe(true);
+    (row: OverflowCase, _context: unknown) =>
+      Effect.gen(function* () {
+        const [_name, makeLayer, overflowBody] = row;
+        const overflow = fakeHttp([
+          { status: 400, body: JSON.stringify(overflowBody) },
+        ]);
+        const overflowError = yield* failureOf(makeLayer(overflow.layer));
+        expect(overflowError.reason._tag).toBe('InvalidRequestError');
+        expect(Compaction.isContextOverflow(overflowError)).toBe(true);
 
-      const other = fakeHttp([
-        {
-          status: 400,
-          body: JSON.stringify(
-            'type' in overflowBody
-              ? {
-                  type: 'error',
-                  error: {
-                    type: 'invalid_request_error',
-                    message: 'tool schema is invalid',
+        const other = fakeHttp([
+          {
+            status: 400,
+            body: JSON.stringify(
+              'type' in overflowBody
+                ? {
+                    type: 'error',
+                    error: {
+                      type: 'invalid_request_error',
+                      message: 'tool schema is invalid',
+                    },
+                  }
+                : {
+                    error: {
+                      message: 'tool schema is invalid',
+                      type: 'invalid_request_error',
+                      code: 'invalid_tool',
+                    },
                   },
-                }
-              : {
-                  error: {
-                    message: 'tool schema is invalid',
-                    type: 'invalid_request_error',
-                    code: 'invalid_tool',
-                  },
-                },
+            ),
+          },
+        ]);
+        expect(
+          Compaction.isContextOverflow(
+            yield* failureOf(makeLayer(other.layer)),
           ),
-        },
-      ]);
-      expect(
-        Compaction.isContextOverflow(await failureOf(makeLayer(other.layer))),
-      ).toBe(false);
-      expect(other.requests).toHaveLength(1);
-    },
+        ).toBe(false);
+        expect(other.requests).toHaveLength(1);
+        return Effect.void;
+      }),
+    30_000,
   );
 
-  it.each([
+  it.effect.each([
     [
       'Anthropic',
       anthropicLayer,
@@ -416,55 +448,67 @@ describe('official Effect provider seam', () => {
     ],
   ] as const)(
     'preserves %s in-band structured error details',
-    async (_name, makeLayer, body, code, codeField, requestId) => {
-      const fake = fakeHttp([{ status: 200, body }]);
-      const error = await failureOf(makeLayer(fake.layer));
-      expect(error.reason._tag).toBe('UnknownError');
-      if (error.reason._tag !== 'UnknownError')
-        throw new Error('expected normalized provider error');
-      expect(error.reason.description).toContain(code);
-      expect(error.reason.description).toContain('capacity exhausted');
-      expect(error.reason.description).not.toContain('[object Object]');
-      expect(error.reason.metadata).toMatchObject({ [codeField]: code });
-      if (requestId !== undefined) {
-        expect(error.reason.metadata).toMatchObject({
-          anthropic: { requestId },
-        });
-      }
-    },
+    (row: StructuredErrorCase, _context: unknown) =>
+      Effect.gen(function* () {
+        const [_name, makeLayer, body, code, codeField, requestId] = row;
+        const fake = fakeHttp([{ status: 200, body }]);
+        const error = yield* failureOf(makeLayer(fake.layer));
+        expect(error.reason._tag).toBe('UnknownError');
+        if (error.reason._tag !== 'UnknownError')
+          throw new Error('expected normalized provider error');
+        expect(error.reason.description).toContain(code);
+        expect(error.reason.description).toContain('capacity exhausted');
+        expect(error.reason.description).not.toContain('[object Object]');
+        expect(error.reason.metadata).toMatchObject({ [codeField]: code });
+        if (requestId !== undefined) {
+          expect(error.reason.metadata).toMatchObject({
+            anthropic: { requestId },
+          });
+        }
+        return Effect.void;
+      }),
+    30_000,
   );
 
-  it('retries one Anthropic 429 response below SSE parsing without duplicate output', async () => {
-    const fake = fakeHttp([
-      {
-        status: 429,
-        body: JSON.stringify({
-          type: 'error',
-          error: { type: 'rate_limit_error', message: 'slow down' },
-        }),
-      },
-      { status: 200, body: anthropicSuccess },
-    ]);
-    const events = await runAgent(
-      anthropicLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
-    );
-    expect(fake.requests).toHaveLength(2);
-    expect(textAndCompleted(events).text).toBe('hello');
-  });
+  it.effect(
+    'retries one Anthropic 429 response below SSE parsing without duplicate output',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([
+          {
+            status: 429,
+            body: JSON.stringify({
+              type: 'error',
+              error: { type: 'rate_limit_error', message: 'slow down' },
+            }),
+          },
+          { status: 200, body: anthropicSuccess },
+        ]);
+        const events = yield* runAgent(
+          anthropicLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
+        );
+        expect(fake.requests).toHaveLength(2);
+        expect(textAndCompleted(events).text).toBe('hello');
+      }),
+  );
 
-  it('retries one OpenAI transport error below SSE parsing without duplicate output', async () => {
-    const fake = fakeHttp([
-      { transport: 'connection reset' },
-      { status: 200, body: openAiSuccess },
-    ]);
-    const events = await runAgent(
-      openAiLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
-    );
-    expect(fake.requests).toHaveLength(2);
-    expect(textAndCompleted(events).text).toBe('world');
-  });
+  it.effect(
+    'retries one OpenAI transport error below SSE parsing without duplicate output',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([
+          { transport: 'connection reset' },
+          { status: 200, body: openAiSuccess },
+        ]);
+        const events = yield* runAgent(
+          openAiLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
+        );
+        expect(fake.requests).toHaveLength(2);
+        expect(textAndCompleted(events).text).toBe('world');
+      }),
+  );
 
-  it.each([
+  it.effect.each([
     [
       'Anthropic',
       anthropicLayer,
@@ -484,14 +528,21 @@ describe('official Effect provider seam', () => {
         },
       },
     ],
-  ] as const)('does not retry a %s 400', async (_name, makeLayer, body) => {
-    const fake = fakeHttp([
-      { status: 400, body: JSON.stringify(body) },
-      { status: 200, body: anthropicSuccess },
-    ]);
-    await failureOf(
-      makeLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
-    );
-    expect(fake.requests).toHaveLength(1);
-  });
+  ] as const)(
+    'does not retry a %s 400',
+    (row: OverflowCase, _context: unknown) =>
+      Effect.gen(function* () {
+        const [_name, makeLayer, body] = row;
+        const fake = fakeHttp([
+          { status: 400, body: JSON.stringify(body) },
+          { status: 200, body: anthropicSuccess },
+        ]);
+        yield* failureOf(
+          makeLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
+        );
+        expect(fake.requests).toHaveLength(1);
+        return Effect.void;
+      }),
+    30_000,
+  );
 });

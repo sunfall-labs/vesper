@@ -212,11 +212,18 @@ or 429 can be retried without re-running a turn or duplicating streamed output.
 Vesper does not wrap an entire `LanguageModel` call, because Effect resolves
 tools inside that call.
 
-Durable-workflow step idempotency — DBOS, for instance — is a separate seam,
-not a competitor. Steps make **effects** exactly-once; the log makes
+Durable-workflow activities — Effect Workflow and its cluster-backed engine,
+for instance — are a separate seam, not a competitor. Activities make
+**effects** replayable behind stable identities; the log makes
 **conversation state** durable and replayable; the retry absorbs **provider
 blips**. Producer fencing overlaps none of them — it decides which writer owns
 a stream, not whether work re-runs.
+
+`@sunfall/vesper-agent/workflow` composes these seams rather than merging them.
+It binds an application-owned workflow payload to `agent.resume`, returning an
+ordinary Effect `Workflow` and its registration layer. The application still
+chooses and provides `WorkflowEngine`; Vesper neither wraps
+`ClusterWorkflowEngine` nor treats its message storage as conversation history.
 
 ## Not built, and why
 

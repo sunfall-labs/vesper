@@ -32,6 +32,17 @@ Vesper publishes four packages:
 `workspace` and `attachments` are standalone: nothing in `agent` composes
 them. Applications opt into either package directly.
 
+`@sunfall/vesper-agent/workflow` optionally binds a recorded agent to Effect's
+native `Workflow`: Effect Workflow or Cluster owns durable execution and
+wakeup, while Vesper's log owns durable conversation semantics. The binding
+returns the native workflow plus its registration layer, preserving the
+agent's complete `Requires` channel rather than hiding runtime wiring.
+`AgentWorkflow.step` is the corresponding tool-level primitive: a named Effect
+Workflow `Activity` whose completed result replays without rerunning its effect,
+with a mandatory input-derived key separating repeated logical calls. Its
+requirement channel prevents it being mistaken for durable work outside a
+workflow.
+
 ## Install
 
 ```bash
@@ -342,13 +353,16 @@ a typed failure — continuing past one would produce a run whose result exists
 and whose history does not.
 
 Two backends implement `LogStore`: an in-memory one, and Postgres. The Postgres
-backend imports nothing but `effect` and takes a structurally `pg.Pool`-shaped
-client, so `pg` stays out of the package. It never issues DDL: the schema is
-the application's to own and migrate. The authoritative DDL is published as
-`packages/log/migrations/001-initial.sql`; the integration harness applies that
-same asset. Wake-ups cross processes through `LISTEN`/`NOTIFY`, and its
-`changes` stream fails rather than going quiet, because a dead feed that looks
-healthy is indistinguishable from a conversation where nothing is happening.
+backend consumes Effect's official `PgClient`/`SqlClient`; transaction,
+connection, interruption, and query lifecycles remain Effect SQL concerns. It
+never issues DDL: the schema is the application's to own and migrate. The
+authoritative DDL is published as `packages/log/migrations/001-initial.sql`;
+the integration harness applies that same asset. Wake-ups cross processes
+through `LISTEN`/`NOTIFY`, and its `changes` stream fails rather than going
+quiet, because a dead feed that looks healthy is indistinguishable from a
+conversation where nothing is happening. `VesperPgClient.layer` corrects the
+RC.109 driver's listener readiness and failure propagation while still
+providing the official `PgClient` and generic `SqlClient` services.
 
 ### Resuming a conversation
 

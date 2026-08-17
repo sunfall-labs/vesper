@@ -1,5 +1,6 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Clock, Effect } from 'effect';
 
 // Out-of-band input to a running conversation: steering, and cancel.
@@ -48,7 +49,7 @@ import { Clock, Effect } from 'effect';
  * drain have to agree, and a convention in two places is one that eventually
  * differs.
  */
-export const pathFor = (conversationId: string): string =>
+export const pathFor = (conversationId: LogVocabulary.ConversationId): string =>
   `signals/${conversationId}`;
 
 /** What a sender says. Structural, so a caller needs no schema import. */
@@ -80,12 +81,15 @@ export const send = Effect.fn('AgentSignals.send')(function* (
   signal: Signal,
 ) {
   const store = yield* LogStore.Service;
-  yield* append(store, conversationId, { _tag: 'Signal', ...signal });
+  yield* append(store, LogVocabulary.ConversationId.make(conversationId), {
+    _tag: 'Signal',
+    ...signal,
+  });
 });
 
 const append = (
   store: LogStore.Interface,
-  conversationId: string,
+  conversationId: LogVocabulary.ConversationId,
   record: ConversationRecord.RecordOf<'Signal'>,
 ): Effect.Effect<void, LogStore.LogStoreError> => {
   const path = pathFor(conversationId);
@@ -99,7 +103,10 @@ const append = (
       ),
     );
 
-    const claim = yield* store.acquire(path, crypto.randomUUID());
+    const claim = yield* store.acquire(
+      path,
+      LogVocabulary.ProducerId.make(crypto.randomUUID()),
+    );
     const timestamp = yield* Clock.currentTimeMillis;
 
     yield* store.append({
@@ -107,7 +114,13 @@ const append = (
       producerId: claim.producerId,
       epoch: claim.epoch,
       sequence: claim.nextSequence,
-      records: [{ conversationId, timestamp, record }],
+      records: [
+        {
+          conversationId,
+          timestamp,
+          record,
+        },
+      ],
     });
   });
 };

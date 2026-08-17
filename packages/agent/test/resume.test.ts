@@ -2,6 +2,8 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { beforeEach, describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   type LanguageModel as LanguageModelNamespace,
@@ -11,7 +13,6 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { beforeEach, describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { ContextWindow } from '../src/context-window.js';
@@ -140,7 +141,7 @@ const agent = Agent.make({
 });
 
 const CONVERSATION = 'conversation-1';
-const PATH = AgentLog.pathFor(CONVERSATION);
+const PATH = AgentLog.pathFor(LogVocabulary.ConversationId.make(CONVERSATION));
 
 beforeEach(() => {
   dispatched.count = 0;
@@ -149,14 +150,11 @@ beforeEach(() => {
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   models: Layer.Layer<LanguageModel.LanguageModel>,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(models),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(models),
+    Effect.provide(LogStoreMemory.layer),
   );
 
 const rolesOf = (prompt: Prompt.Prompt) =>
@@ -176,8 +174,8 @@ const envelopes = (
   records: ReadonlyArray<ConversationRecord.Record>,
 ): ReadonlyArray<ConversationRecord.Envelope> =>
   records.map((record, index) => ({
-    offset: LogOffset.Offset.make(String(index)),
-    conversationId: CONVERSATION,
+    offset: LogOffset.fromSeq(BigInt(index)),
+    conversationId: LogVocabulary.ConversationId.make(CONVERSATION),
     timestamp: 0,
     record,
   }));
@@ -186,235 +184,258 @@ describe('resuming a crashed run', () => {
   // The parity test. A run is abandoned after its tool call settles — the
   // consumer walks away mid-conversation, which is what a crash looks like
   // from the log's side — and the conversation is then resumed.
-  it('continues from what the crashed run left, without re-asking or re-running it', async () => {
-    const models = provider([callingTurn, answeringTurn, laterTurn]);
-
-    const observed = await run(
+  it.effect(
+    'continues from what the crashed run left, without re-asking or re-running it',
+    () =>
       Effect.gen(function* () {
-        // Run one, abandoned the moment the tool result arrives.
-        yield* agent
-          .recordingTo(CONVERSATION)
-          .stream('where is order 42?')
-          .pipe(
-            Stream.takeUntil(
-              (event) =>
-                AgentEvents.isPart(event) &&
-                (event.part as Response.StreamPartEncoded).type ===
-                  'tool-result',
-            ),
-            Stream.runDrain,
-            Effect.orDie,
-          );
+        const models = provider([callingTurn, answeringTurn, laterTurn]);
 
-        const afterCrash = yield* readAll();
-        const askedDuringCrash = models.asked.length;
-        const dispatchedDuringCrash = dispatched.count;
+        const observed = yield* run(
+          Effect.gen(function* () {
+            // Run one, abandoned the moment the tool result arrives.
+            yield* agent
+              .recordingTo(CONVERSATION)
+              .stream('where is order 42?')
+              .pipe(
+                Stream.takeUntil(
+                  (event) =>
+                    AgentEvents.isPart(event) &&
+                    (event.part as Response.StreamPartEncoded).type ===
+                      'tool-result',
+                ),
+                Stream.runDrain,
+                Effect.orDie,
+              );
 
-        // Run two: the same conversation, picked back up.
-        const result = yield* agent
-          .resume(CONVERSATION, 'and then?')
-          .pipe(Effect.orDie);
+            const afterCrash = yield* readAll();
+            const askedDuringCrash = models.asked.length;
+            const dispatchedDuringCrash = dispatched.count;
 
-        return {
-          afterCrash: afterCrash.map((envelope) => envelope.record._tag),
-          askedDuringCrash,
-          dispatchedDuringCrash,
-          asked: models.asked,
-          dispatchedTotal: dispatched.count,
-          result,
-        };
+            // Run two: the same conversation, picked back up.
+            const result = yield* agent
+              .resume(CONVERSATION, 'and then?')
+              .pipe(Effect.orDie);
+
+            return {
+              afterCrash: afterCrash.map((envelope) => envelope.record._tag),
+              askedDuringCrash,
+              dispatchedDuringCrash,
+              asked: models.asked,
+              dispatchedTotal: dispatched.count,
+              result,
+            };
+          }),
+          models.layer,
+        );
+
+        // The crashed run got one turn's worth of records and no `Completed`.
+        expect(observed.afterCrash).toEqual([
+          'RunStarted',
+          'ToolStarted',
+          'Text',
+          'ToolCall',
+          'ToolOutcome',
+          'RunSettled',
+        ]);
+        expect(observed.askedDuringCrash).toBe(1);
+        expect(observed.dispatchedDuringCrash).toBe(1);
+
+        // One further provider call, for the turn that had not happened yet. The
+        // completed turn was not re-asked — under replay-from-checkpoint recovery
+        // this number is two, because recovery re-runs the loop from turn one.
+        expect(observed.asked).toHaveLength(2);
+
+        // And the tool that already ran did not run again. Checkpointing never
+        // covered this at all: tool execution happens past the provider seam.
+        expect(observed.dispatchedTotal).toBe(1);
+
+        // The resumed call was given the conversation, not a fresh start.
+        const resumed = observed.asked[1]!;
+        expect(rolesOf(resumed)).toEqual([
+          'system',
+          'user',
+          'assistant',
+          'tool',
+          'user',
+        ]);
+        expect(textIn(resumed)).toContain('where is order 42?');
+        expect(textIn(resumed)).toContain('hello');
+        expect(textIn(resumed)).toContain('call-1');
+        expect(textIn(resumed)).toContain('shipped:42');
+        expect(textIn(resumed)).toContain('and then?');
+
+        expect(observed.result.text).toBe('done');
       }),
-      models.layer,
-    );
-
-    // The crashed run got one turn's worth of records and no `Completed`.
-    expect(observed.afterCrash).toEqual([
-      'RunStarted',
-      'ToolStarted',
-      'Text',
-      'ToolCall',
-      'ToolOutcome',
-      'RunSettled',
-    ]);
-    expect(observed.askedDuringCrash).toBe(1);
-    expect(observed.dispatchedDuringCrash).toBe(1);
-
-    // One further provider call, for the turn that had not happened yet. The
-    // completed turn was not re-asked — under replay-from-checkpoint recovery
-    // this number is two, because recovery re-runs the loop from turn one.
-    expect(observed.asked).toHaveLength(2);
-
-    // And the tool that already ran did not run again. Checkpointing never
-    // covered this at all: tool execution happens past the provider seam.
-    expect(observed.dispatchedTotal).toBe(1);
-
-    // The resumed call was given the conversation, not a fresh start.
-    const resumed = observed.asked[1]!;
-    expect(rolesOf(resumed)).toEqual([
-      'system',
-      'user',
-      'assistant',
-      'tool',
-      'user',
-    ]);
-    expect(textIn(resumed)).toContain('where is order 42?');
-    expect(textIn(resumed)).toContain('hello');
-    expect(textIn(resumed)).toContain('call-1');
-    expect(textIn(resumed)).toContain('shipped:42');
-    expect(textIn(resumed)).toContain('and then?');
-
-    expect(observed.result.text).toBe('done');
-  });
+  );
 
   // The resumed run is an ordinary recorded run: it appends to the same
   // conversation rather than starting a second history beside it.
-  it('records the resumed run into the same conversation', async () => {
-    const models = provider([callingTurn, answeringTurn, laterTurn]);
+  it.effect('records the resumed run into the same conversation', () =>
+    Effect.gen(function* () {
+      const models = provider([callingTurn, answeringTurn, laterTurn]);
 
-    const tags = await run(
-      Effect.gen(function* () {
-        yield* agent
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(
-            Stream.takeUntil(
-              (event) =>
-                AgentEvents.isPart(event) &&
-                (event.part as Response.StreamPartEncoded).type ===
-                  'tool-result',
-            ),
-            Stream.runDrain,
-            Effect.orDie,
-          );
+      const tags = yield* run(
+        Effect.gen(function* () {
+          yield* agent
+            .recordingTo(CONVERSATION)
+            .stream('hi')
+            .pipe(
+              Stream.takeUntil(
+                (event) =>
+                  AgentEvents.isPart(event) &&
+                  (event.part as Response.StreamPartEncoded).type ===
+                    'tool-result',
+              ),
+              Stream.runDrain,
+              Effect.orDie,
+            );
 
-        yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
-        return (yield* readAll()).map((envelope) => envelope.record._tag);
-      }),
-      models.layer,
-    );
+          yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
+          return (yield* readAll()).map((envelope) => envelope.record._tag);
+        }),
+        models.layer,
+      );
 
-    expect(tags).toEqual([
-      'RunStarted',
-      'ToolStarted',
-      'Text',
-      'ToolCall',
-      'ToolOutcome',
-      'RunSettled',
-      'RunStarted',
-      'Text',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-    ]);
-  });
+      expect(tags).toEqual([
+        'RunStarted',
+        'ToolStarted',
+        'Text',
+        'ToolCall',
+        'ToolOutcome',
+        'RunSettled',
+        'RunStarted',
+        'Text',
+        'TurnFinished',
+        'Completed',
+        'RunSettled',
+      ]);
+    }),
+  );
 });
 
 describe('resuming an ordinary conversation', () => {
-  it('starts a new conversation when there is nothing to resume', async () => {
-    const models = provider([answeringTurn]);
+  it.effect('starts a new conversation when there is nothing to resume', () =>
+    Effect.gen(function* () {
+      const models = provider([answeringTurn]);
 
-    const asked = await run(
-      Effect.gen(function* () {
-        yield* agent.resume('fresh', 'hello').pipe(Effect.orDie);
-        return models.asked;
-      }),
-      models.layer,
-    );
+      const asked = yield* run(
+        Effect.gen(function* () {
+          yield* agent.resume('fresh', 'hello').pipe(Effect.orDie);
+          return models.asked;
+        }),
+        models.layer,
+      );
 
-    expect(rolesOf(asked[0]!)).toEqual(['system', 'user']);
-    expect(textIn(asked[0]!)).toContain('be terse');
-  });
+      expect(rolesOf(asked[0]!)).toEqual(['system', 'user']);
+      expect(textIn(asked[0]!)).toContain('be terse');
+    }),
+  );
 
   // The property that makes this a conversation rather than a series of
   // unrelated runs.
-  it('carries the conversation into the next turn', async () => {
-    const models = provider([answeringTurn, laterTurn]);
+  it.effect('carries the conversation into the next turn', () =>
+    Effect.gen(function* () {
+      const models = provider([answeringTurn, laterTurn]);
 
-    const asked = await run(
-      Effect.gen(function* () {
-        yield* agent.resume(CONVERSATION, 'first').pipe(Effect.orDie);
-        yield* agent.resume(CONVERSATION, 'second').pipe(Effect.orDie);
-        return models.asked;
-      }),
-      models.layer,
-    );
+      const asked = yield* run(
+        Effect.gen(function* () {
+          yield* agent.resume(CONVERSATION, 'first').pipe(Effect.orDie);
+          yield* agent.resume(CONVERSATION, 'second').pipe(Effect.orDie);
+          return models.asked;
+        }),
+        models.layer,
+      );
 
-    expect(rolesOf(asked[1]!)).toEqual(['system', 'user', 'assistant', 'user']);
-    expect(textIn(asked[1]!)).toContain('first');
-    expect(textIn(asked[1]!)).toContain('done');
-    expect(textIn(asked[1]!)).toContain('second');
-  });
+      expect(rolesOf(asked[1]!)).toEqual([
+        'system',
+        'user',
+        'assistant',
+        'user',
+      ]);
+      expect(textIn(asked[1]!)).toContain('first');
+      expect(textIn(asked[1]!)).toContain('done');
+      expect(textIn(asked[1]!)).toContain('second');
+    }),
+  );
 
-  it('keeps separate conversations separate', async () => {
-    const models = provider([answeringTurn, laterTurn]);
+  it.effect('keeps separate conversations separate', () =>
+    Effect.gen(function* () {
+      const models = provider([answeringTurn, laterTurn]);
 
-    const asked = await run(
-      Effect.gen(function* () {
-        yield* agent.resume('conv-a', 'first').pipe(Effect.orDie);
-        yield* agent.resume('conv-b', 'first').pipe(Effect.orDie);
-        return models.asked;
-      }),
-      models.layer,
-    );
+      const asked = yield* run(
+        Effect.gen(function* () {
+          yield* agent.resume('conv-a', 'first').pipe(Effect.orDie);
+          yield* agent.resume('conv-b', 'first').pipe(Effect.orDie);
+          return models.asked;
+        }),
+        models.layer,
+      );
 
-    expect(rolesOf(asked[1]!)).toEqual(['system', 'user']);
-  });
+      expect(rolesOf(asked[1]!)).toEqual(['system', 'user']);
+    }),
+  );
 
   // A resumed conversation that reset the count would under-report every turn
   // after the first, which is the number anyone asking about cost wants.
-  it('accumulates usage across the life of the conversation', async () => {
-    const models = provider([answeringTurn, laterTurn]);
+  it.effect('accumulates usage across the life of the conversation', () =>
+    Effect.gen(function* () {
+      const models = provider([answeringTurn, laterTurn]);
 
-    const totals = await run(
+      const totals = yield* run(
+        Effect.gen(function* () {
+          const first = yield* agent
+            .resume(CONVERSATION, 'first')
+            .pipe(Effect.orDie);
+          const second = yield* agent
+            .resume(CONVERSATION, 'second')
+            .pipe(Effect.orDie);
+          return { first: first.usage, second: second.usage };
+        }),
+        models.layer,
+      );
+
+      expect(totals.second.output).toBe(totals.first.output * 2);
+      expect(totals.second.input).toBe(totals.first.input * 2);
+    }),
+  );
+
+  it.effect(
+    'restores the latest turn usage as the resumed estimator anchor',
+    () =>
       Effect.gen(function* () {
-        const first = yield* agent
-          .resume(CONVERSATION, 'first')
-          .pipe(Effect.orDie);
-        const second = yield* agent
-          .resume(CONVERSATION, 'second')
-          .pipe(Effect.orDie);
-        return { first: first.usage, second: second.usage };
+        const models = provider([answeringTurn, laterTurn]);
+        const seen: Array<ContextWindow.TurnUsage | undefined> = [];
+        const heuristics: ContextWindow.Heuristics = {
+          estimate: (_prompt, usage) => {
+            seen.push(usage);
+            return { tokens: 0, usageTokens: 0, trailingTokens: 0 };
+          },
+          shouldCompact: () => false,
+        };
+        const anchored = Agent.make({
+          name: 'anchored',
+          revision: '1',
+          instructions: 'be terse',
+          toolkit: Toolkit.make(),
+          compaction: {
+            contextWindow: 1_000,
+            reserveTokens: 100,
+            keepRecentTokens: 10,
+            instructions: 'sum',
+          },
+        });
+
+        yield* run(
+          Effect.gen(function* () {
+            yield* anchored.resume(CONVERSATION, 'first');
+            yield* anchored.resume(CONVERSATION, 'second');
+          }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
+          models.layer,
+        );
+
+        expect(seen).toEqual([undefined, { inputTokens: 10, outputTokens: 4 }]);
       }),
-      models.layer,
-    );
-
-    expect(totals.second.output).toBe(totals.first.output * 2);
-    expect(totals.second.input).toBe(totals.first.input * 2);
-  });
-
-  it('restores the latest turn usage as the resumed estimator anchor', async () => {
-    const models = provider([answeringTurn, laterTurn]);
-    const seen: Array<ContextWindow.TurnUsage | undefined> = [];
-    const heuristics: ContextWindow.Heuristics = {
-      estimate: (_prompt, usage) => {
-        seen.push(usage);
-        return { tokens: 0, usageTokens: 0, trailingTokens: 0 };
-      },
-      shouldCompact: () => false,
-    };
-    const anchored = Agent.make({
-      name: 'anchored',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(),
-      compaction: {
-        contextWindow: 1_000,
-        reserveTokens: 100,
-        keepRecentTokens: 10,
-        instructions: 'sum',
-      },
-    });
-
-    await run(
-      Effect.gen(function* () {
-        yield* anchored.resume(CONVERSATION, 'first');
-        yield* anchored.resume(CONVERSATION, 'second');
-      }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
-      models.layer,
-    );
-
-    expect(seen).toEqual([undefined, { inputTokens: 10, outputTokens: 4 }]);
-  });
+  );
 });
 
 describe('rebuilding a prompt from records', () => {
@@ -425,21 +446,21 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'looking' },
         {
           _tag: 'ToolCall',
           step: 1,
-          id: 'call-1',
+          id: LogVocabulary.ToolCallId.make('call-1'),
           name: 'lookup',
           params: { id: '42' },
         },
         {
           _tag: 'ToolOutcome',
           step: 1,
-          id: 'call-1',
+          id: LogVocabulary.ToolCallId.make('call-1'),
           name: 'lookup',
           outcome: 'success',
           result: { status: 'shipped:42' },
@@ -468,21 +489,21 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'looking' },
         {
           _tag: 'ToolCall',
           step: 1,
-          id: 'call-1',
+          id: LogVocabulary.ToolCallId.make('call-1'),
           name: 'lookup',
           params: { id: '42' },
         },
         {
           _tag: 'ToolOutcome',
           step: 1,
-          id: 'call-1',
+          id: LogVocabulary.ToolCallId.make('call-1'),
           name: 'lookup',
           outcome: 'success',
           result: { status: 'shipped:42' },
@@ -490,7 +511,7 @@ describe('rebuilding a prompt from records', () => {
         {
           _tag: 'ToolCall',
           step: 1,
-          id: 'call-2',
+          id: LogVocabulary.ToolCallId.make('call-2'),
           name: 'lookup',
           params: { id: '43' },
         },
@@ -512,7 +533,7 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'working' },
@@ -522,7 +543,7 @@ describe('rebuilding a prompt from records', () => {
           text: 'also check the invoice',
           source: 'operator',
           step: 1,
-          at: LogOffset.Offset.make('1'),
+          at: LogOffset.fromSeq(1n),
         },
         { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
       ]),
@@ -541,7 +562,7 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: Prompt.make('hi').content,
         },
         {
@@ -550,7 +571,7 @@ describe('rebuilding a prompt from records', () => {
           text: 'stop',
           source: 'operator',
           step: 1,
-          at: LogOffset.Offset.make('1'),
+          at: LogOffset.fromSeq(1n),
         },
       ]),
     );
@@ -567,7 +588,7 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'done' },
@@ -602,7 +623,7 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: [],
         },
         { _tag: 'TurnFinished', step: 1, usage: { input: 3, output: 1 } },
@@ -617,7 +638,7 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: [],
         },
         { _tag: 'TurnFinished', step: 1, usage: { input: 5, output: 2 } },
@@ -641,7 +662,7 @@ describe('rebuilding a prompt from records', () => {
           _tag: 'RunStarted',
           agent: 'test',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           prompt: [],
         },
         { _tag: 'TurnFinished', step: 1, usage: { input: 10, output: 4 } },

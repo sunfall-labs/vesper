@@ -5,6 +5,7 @@ import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
 import { ConversationRecord } from './record.js';
 import { Tail } from './tail.js';
+import { LogVocabulary } from './vocabulary.js';
 
 // The behaviour every LogStore backend must have, expressed once.
 //
@@ -28,10 +29,21 @@ import { Tail } from './tail.js';
 // second backend gets wrong.
 
 const TIMESTAMP = 1_700_000_000_000;
+const defaultConversationId =
+  LogVocabulary.ConversationId.make('conversation-1');
+const childConversationId =
+  LogVocabulary.ConversationId.make('conversation-1/c1');
+const producer1 = LogVocabulary.ProducerId.make('producer-1');
+const producer2 = LogVocabulary.ProducerId.make('producer-2');
+const producer3 = LogVocabulary.ProducerId.make('producer-3');
+const producerImpostor = LogVocabulary.ProducerId.make('producer-impostor');
+const toolCallId = LogVocabulary.ToolCallId.make('c1');
+const agentRevision = LogVocabulary.AgentRevision.make('1');
+const producerSequence = LogVocabulary.ProducerSequence.make;
 
 const text = (
   value: string,
-  conversationId = 'conversation-1',
+  conversationId: LogVocabulary.ConversationId = defaultConversationId,
 ): ConversationRecord.Entry => ({
   conversationId,
   timestamp: TIMESTAMP,
@@ -86,7 +98,7 @@ export const logStoreContract = <E, R>(
     Effect.gen(function* () {
       const store = yield* LogStore.Service;
       yield* store.create(path, `identity:${path}`);
-      const claim = yield* store.acquire(path, 'producer-1');
+      const claim = yield* store.acquire(path, producer1);
       const append = (
         sequence: number,
         records: ReadonlyArray<ConversationRecord.Entry>,
@@ -95,7 +107,7 @@ export const logStoreContract = <E, R>(
           path,
           producerId: claim.producerId,
           epoch: claim.epoch,
-          sequence,
+          sequence: producerSequence(sequence),
           records,
         });
       return { store, claim, append };
@@ -130,26 +142,26 @@ export const logStoreContract = <E, R>(
           _tag: 'RunStarted',
           agent: 'a',
           formatVersion: 1,
-          agentRevision: '1',
+          agentRevision,
           prompt: [{ role: 'user' }],
         },
         Text: { _tag: 'Text', step: 1, text: 'hello' },
         ToolCall: {
           _tag: 'ToolCall',
           step: 1,
-          id: 'c1',
+          id: toolCallId,
           name: 't',
           params: { a: 1 },
         },
         ToolStarted: {
           _tag: 'ToolStarted',
-          id: 'c1',
+          id: toolCallId,
           name: 't',
         },
         ToolOutcome: {
           _tag: 'ToolOutcome',
           step: 1,
-          id: 'c1',
+          id: toolCallId,
           name: 't',
           outcome: 'failure',
           result: { why: 'no' },
@@ -163,16 +175,16 @@ export const logStoreContract = <E, R>(
           _tag: 'Compacted',
           formatVersion: 1,
           agent: 'test',
-          agentRevision: '1',
+          agentRevision,
           step: 1,
           summary: 'the user asked about order 42',
-          firstKept: LogOffset.Offset.make('0000000000000000_0000000000000003'),
+          firstKept: LogOffset.fromSeq(3n),
           summarizedMessages: 4,
           keptMessages: 2,
         },
         BranchedFrom: {
           _tag: 'BranchedFrom',
-          at: LogOffset.Offset.make('0000000000000000_0000000000000002'),
+          at: LogOffset.fromSeq(2n),
         },
         Completed: {
           _tag: 'Completed',
@@ -182,10 +194,10 @@ export const logStoreContract = <E, R>(
         },
         ChildSession: {
           _tag: 'ChildSession',
-          toolCallId: 'c1',
+          toolCallId,
           agent: 'child',
-          parentConversationId: 'conversation-1',
-          childConversationId: 'conversation-1/c1',
+          parentConversationId: defaultConversationId,
+          childConversationId,
           depth: 1,
         },
         Signal: {
@@ -211,7 +223,7 @@ export const logStoreContract = <E, R>(
           resume: {
             formatVersion: 1,
             agent: 'test',
-            agentRevision: '1',
+            agentRevision,
             usage: { input: 20, output: 10 },
             signalCursor: LogOffset.fromSeq(7n),
           },
@@ -228,7 +240,7 @@ export const logStoreContract = <E, R>(
           yield* append(
             0,
             cases.map((record) => ({
-              conversationId: 'conversation-1',
+              conversationId: defaultConversationId,
               timestamp: TIMESTAMP,
               record,
             })),
@@ -410,7 +422,7 @@ export const logStoreContract = <E, R>(
                 .pipe(Effect.result),
               store
                 .readBackwards('invalid-backwards', {
-                  before: LogOffset.Offset.make('malformed'),
+                  before: 'malformed' as unknown as LogOffset.Offset,
                 })
                 .pipe(Effect.result),
             ]);
@@ -475,7 +487,7 @@ export const logStoreContract = <E, R>(
             yield* store.read('cas-acquire');
             yield* append(0, [text('landed')]);
             const attempted = yield* store
-              .acquire('cas-acquire', 'producer-2', {
+              .acquire('cas-acquire', producer2, {
                 epoch: Option.getOrThrow(before).epoch,
                 head: Option.getOrThrow(before).head,
               })
@@ -484,7 +496,7 @@ export const logStoreContract = <E, R>(
               path: 'cas-acquire',
               producerId: claim.producerId,
               epoch: claim.epoch,
-              sequence: 1,
+              sequence: producerSequence(1),
               records: [text('still-owner')],
             });
             return { attempted, stillWritable };
@@ -505,12 +517,9 @@ export const logStoreContract = <E, R>(
             const before = Option.getOrThrow(
               yield* store.meta('cas-stale-epoch'),
             );
-            const current = yield* store.acquire(
-              'cas-stale-epoch',
-              'producer-2',
-            );
+            const current = yield* store.acquire('cas-stale-epoch', producer2);
             const attempted = yield* store
-              .acquire('cas-stale-epoch', 'producer-3', {
+              .acquire('cas-stale-epoch', producer3, {
                 epoch: before.epoch,
                 head: before.head,
               })
@@ -519,7 +528,7 @@ export const logStoreContract = <E, R>(
               path: 'cas-stale-epoch',
               producerId: current.producerId,
               epoch: current.epoch,
-              sequence: 0,
+              sequence: producerSequence(0),
               records: [text('still-owner')],
             });
             return { attempted, stillWritable };
@@ -538,7 +547,7 @@ export const logStoreContract = <E, R>(
           Effect.gen(function* () {
             const { store, claim } = yield* open('cas-match');
             const before = Option.getOrThrow(yield* store.meta('cas-match'));
-            yield* store.acquire('cas-match', 'producer-2', {
+            yield* store.acquire('cas-match', producer2, {
               epoch: before.epoch,
               head: before.head,
             });
@@ -547,7 +556,7 @@ export const logStoreContract = <E, R>(
                 path: 'cas-match',
                 producerId: claim.producerId,
                 epoch: claim.epoch,
-                sequence: 0,
+                sequence: producerSequence(0),
                 records: [text('stale')],
               })
               .pipe(Effect.result);
@@ -565,13 +574,13 @@ export const logStoreContract = <E, R>(
           Effect.gen(function* () {
             const { store, claim, append } = yield* open('legacy-acquire');
             yield* append(0, [text('landed')]);
-            yield* store.acquire('legacy-acquire', 'producer-2');
+            yield* store.acquire('legacy-acquire', producer2);
             return yield* store
               .append({
                 path: 'legacy-acquire',
                 producerId: claim.producerId,
                 epoch: claim.epoch,
-                sequence: 1,
+                sequence: producerSequence(1),
                 records: [text('stale')],
               })
               .pipe(Effect.result);
@@ -590,14 +599,14 @@ export const logStoreContract = <E, R>(
         const outcome = await run(
           Effect.gen(function* () {
             const { store, claim } = yield* open('fenced');
-            yield* store.acquire('fenced', 'producer-2');
+            yield* store.acquire('fenced', producer2);
 
             return yield* store
               .append({
                 path: 'fenced',
                 producerId: claim.producerId,
                 epoch: claim.epoch,
-                sequence: 0,
+                sequence: producerSequence(0),
                 records: [text('stale')],
               })
               .pipe(Effect.result);
@@ -676,9 +685,9 @@ export const logStoreContract = <E, R>(
             return yield* store
               .append({
                 path: 'impostor',
-                producerId: 'producer-impostor',
+                producerId: producerImpostor,
                 epoch: claim.epoch,
-                sequence: 0,
+                sequence: producerSequence(0),
                 records: [text('one')],
               })
               .pipe(Effect.result);
@@ -714,10 +723,10 @@ export const logStoreContract = <E, R>(
             const { store, append } = yield* open('handover');
             const first = yield* append(0, [text('one')]);
 
-            const second = yield* store.acquire('handover', 'producer-2');
+            const second = yield* store.acquire('handover', producer2);
             const next = yield* store.append({
               path: 'handover',
-              producerId: 'producer-2',
+              producerId: producer2,
               epoch: second.epoch,
               sequence: second.nextSequence,
               records: [text('two')],
@@ -818,12 +827,12 @@ export const logStoreContract = <E, R>(
           const { append } = yield* open('unencodable');
           return yield* append(0, [
             {
-              conversationId: 'conversation-1',
+              conversationId: defaultConversationId,
               timestamp: TIMESTAMP,
               record: {
                 _tag: 'ToolCall',
                 step: 1,
-                id: 'call-1',
+                id: LogVocabulary.ToolCallId.make('call-1'),
                 name: 'search',
                 params: { limit: 1n },
               },
@@ -869,12 +878,12 @@ export const logStoreContract = <E, R>(
           return yield* Effect.forEach(lossy, (params) =>
             append(0, [
               {
-                conversationId: 'conversation-1',
+                conversationId: defaultConversationId,
                 timestamp: TIMESTAMP,
                 record: {
                   _tag: 'ToolCall',
                   step: 1,
-                  id: 'call-1',
+                  id: LogVocabulary.ToolCallId.make('call-1'),
                   name: 'search',
                   params,
                 },
@@ -903,12 +912,12 @@ export const logStoreContract = <E, R>(
           const { store, append } = yield* open('encoded-clone');
           yield* append(0, [
             {
-              conversationId: 'conversation-1',
+              conversationId: defaultConversationId,
               timestamp: TIMESTAMP,
               record: {
                 _tag: 'ToolCall',
                 step: 1,
-                id: 'call-1',
+                id: LogVocabulary.ToolCallId.make('call-1'),
                 name: 'search',
                 params,
               },
@@ -936,12 +945,12 @@ export const logStoreContract = <E, R>(
         Effect.gen(function* () {
           const { append } = yield* open('canonical-key-order');
           const entry = (params: Record<string, number>) => ({
-            conversationId: 'conversation-1',
+            conversationId: defaultConversationId,
             timestamp: TIMESTAMP,
             record: {
               _tag: 'ToolCall' as const,
               step: 1,
-              id: 'call-1',
+              id: LogVocabulary.ToolCallId.make('call-1'),
               name: 'search',
               params,
             },
@@ -973,7 +982,7 @@ export const logStoreContract = <E, R>(
               .pipe(Effect.result),
             store
               .read('invalid-read-options', {
-                after: LogOffset.Offset.make('malformed'),
+                after: 'malformed' as unknown as LogOffset.Offset,
               })
               .pipe(Effect.result),
           ]);
@@ -1061,9 +1070,7 @@ export const logStoreContract = <E, R>(
         const outcome = await run(
           Effect.gen(function* () {
             const store = yield* LogStore.Service;
-            return yield* store
-              .acquire('never', 'producer-1')
-              .pipe(Effect.result);
+            return yield* store.acquire('never', producer1).pipe(Effect.result);
           }),
         );
 

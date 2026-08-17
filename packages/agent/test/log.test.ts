@@ -2,6 +2,8 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
@@ -9,7 +11,6 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { AgentLog } from '../src/log.js';
@@ -99,20 +100,17 @@ const agent = Agent.make({
   lookup: ({ id }) => Effect.succeed({ status: `shipped:${id}` }),
 });
 
-const CONVERSATION = 'conversation-1';
+const CONVERSATION = LogVocabulary.ConversationId.make('conversation-1');
 const PATH = AgentLog.pathFor(CONVERSATION);
 
 /** Defects fail the test with their real cause rather than a cast. */
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(scripted([callingTurn, answeringTurn])),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(scripted([callingTurn, answeringTurn])),
+    Effect.provide(LogStoreMemory.layer),
   );
 
 const readAll = Effect.fn('test.readAll')(function* (path = PATH) {
@@ -130,186 +128,208 @@ const textsOf = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 describe('recording a run', () => {
-  it('serializes concurrent appends through one producer sequence', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        const session = yield* AgentLog.open(CONVERSATION, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
-        yield* Effect.all(
-          Array.from({ length: 50 }, (_, index) =>
-            session.append([{ _tag: 'Text', step: 1, text: String(index) }]),
-          ),
-          { concurrency: 'unbounded' },
-        );
-        return yield* readAll();
-      }),
-    );
+  it.effect('serializes concurrent appends through one producer sequence', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          const session = yield* AgentLog.open(CONVERSATION, {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          });
+          yield* Effect.all(
+            Array.from({ length: 50 }, (_, index) =>
+              session.append([{ _tag: 'Text', step: 1, text: String(index) }]),
+            ),
+            { concurrency: 'unbounded' },
+          );
+          return yield* readAll();
+        }),
+      );
 
-    expect(written).toHaveLength(50);
-    expect(new Set(textsOf(written).map((record) => record.text)).size).toBe(
-      50,
-    );
-  });
+      expect(written).toHaveLength(50);
+      expect(new Set(textsOf(written).map((record) => record.text)).size).toBe(
+        50,
+      );
+    }),
+  );
 
-  it('writes one record per thing that happened, in order', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
+  it.effect('writes one record per thing that happened, in order', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
 
-    expect(tags(written)).toEqual([
-      'RunStarted',
-      'ToolStarted',
-      'Text',
-      'ToolCall',
-      'ToolOutcome',
-      'TurnFinished',
-      'Text',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-    ]);
-  });
+      expect(tags(written)).toEqual([
+        'RunStarted',
+        'ToolStarted',
+        'Text',
+        'ToolCall',
+        'ToolOutcome',
+        'TurnFinished',
+        'Text',
+        'TurnFinished',
+        'Completed',
+        'RunSettled',
+      ]);
+    }),
+  );
 
   // The coalescing claim, stated as a number. Three deltas arrived; one row
   // was written. Appending per delta makes this eight rows of text.
-  it('coalesces contiguous deltas into one Text record', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
+  it.effect('coalesces contiguous deltas into one Text record', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
 
-    expect(textsOf(written)).toEqual([
-      { _tag: 'Text', step: 1, text: 'hello' },
-      { _tag: 'Text', step: 2, text: 'done' },
-    ]);
-  });
+      expect(textsOf(written)).toEqual([
+        { _tag: 'Text', step: 1, text: 'hello' },
+        { _tag: 'Text', step: 2, text: 'done' },
+      ]);
+    }),
+  );
 
-  it('records what the tool was asked and what it answered', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
+  it.effect('records what the tool was asked and what it answered', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
 
-    expect(written.map((envelope) => envelope.record)).toContainEqual({
-      _tag: 'ToolCall',
-      step: 1,
-      id: 'call-1',
-      name: 'lookup',
-      params: { id: '42' },
-    });
-    expect(written.map((envelope) => envelope.record)).toContainEqual({
-      _tag: 'ToolOutcome',
-      step: 1,
-      id: 'call-1',
-      name: 'lookup',
-      outcome: 'success',
-      result: { status: 'shipped:42' },
-    });
-  });
+      expect(written.map((envelope) => envelope.record)).toContainEqual({
+        _tag: 'ToolCall',
+        step: 1,
+        id: 'call-1',
+        name: 'lookup',
+        params: { id: '42' },
+      });
+      expect(written.map((envelope) => envelope.record)).toContainEqual({
+        _tag: 'ToolOutcome',
+        step: 1,
+        id: 'call-1',
+        name: 'lookup',
+        outcome: 'success',
+        result: { status: 'shipped:42' },
+      });
+    }),
+  );
 
-  it('records the run’s input and the result the caller got', async () => {
-    const observed = await run(
-      Effect.gen(function* () {
-        const result = yield* agent
-          .recordingTo(CONVERSATION)
-          .run('where is order 42?')
-          .pipe(Effect.orDie);
-        return { result, written: yield* readAll() };
-      }),
-    );
+  it.effect('records the run’s input and the result the caller got', () =>
+    Effect.gen(function* () {
+      const observed = yield* run(
+        Effect.gen(function* () {
+          const result = yield* agent
+            .recordingTo(CONVERSATION)
+            .run('where is order 42?')
+            .pipe(Effect.orDie);
+          return { result, written: yield* readAll() };
+        }),
+      );
 
-    expect(observed.written[0]?.record).toMatchObject({
-      _tag: 'RunStarted',
-      agent: 'test',
-      formatVersion: 1,
-      agentRevision: '1',
-    });
-    expect(observed.written.map((envelope) => envelope.record)).toContainEqual(
-      expect.objectContaining({
-        _tag: 'Completed',
-        text: observed.result.text,
-        steps: observed.result.steps,
-        usage: observed.result.usage,
-      }),
-    );
-  });
+      expect(observed.written[0]?.record).toMatchObject({
+        _tag: 'RunStarted',
+        agent: 'test',
+        formatVersion: 1,
+        agentRevision: '1',
+      });
+      expect(
+        observed.written.map((envelope) => envelope.record),
+      ).toContainEqual(
+        expect.objectContaining({
+          _tag: 'Completed',
+          text: observed.result.text,
+          steps: observed.result.steps,
+          usage: observed.result.usage,
+        }),
+      );
+    }),
+  );
 
   // The ordering rule that replaced `@sunfall/vesper-durable`'s "withhold `finish`
   // until the checkpoint is durable": a consumer must never act on something
   // the durable record does not yet contain. Forking the append, or moving it
   // after the emit, breaks exactly this.
-  it('has already written the record when the consumer sees the event', async () => {
-    const atToolCall = await run(
+  it.effect(
+    'has already written the record when the consumer sees the event',
+    () =>
       Effect.gen(function* () {
-        const store = yield* LogStore.Service;
-        const seen: string[] = [];
+        const atToolCall = yield* run(
+          Effect.gen(function* () {
+            const store = yield* LogStore.Service;
+            const seen: string[] = [];
 
-        yield* agent
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(
-            Stream.runForEach((event) =>
-              event._tag === 'Part' &&
-              (event.part as Response.StreamPartEncoded).type === 'tool-call'
-                ? Effect.gen(function* () {
-                    const page = yield* store.read(PATH, { limit: 1000 });
-                    seen.push(...tags(page.records));
-                  })
-                : Effect.void,
-            ),
-            Effect.orDie,
-          );
+            yield* agent
+              .recordingTo(CONVERSATION)
+              .stream('hi')
+              .pipe(
+                Stream.runForEach((event) =>
+                  event._tag === 'Part' &&
+                  (event.part as Response.StreamPartEncoded).type ===
+                    'tool-call'
+                    ? Effect.gen(function* () {
+                        const page = yield* store.read(PATH, { limit: 1000 });
+                        seen.push(...tags(page.records));
+                      })
+                    : Effect.void,
+                ),
+                Effect.orDie,
+              );
 
-        return seen;
+            return seen;
+          }),
+        );
+
+        expect(atToolCall).toEqual([
+          'RunStarted',
+          'ToolStarted',
+          'Text',
+          'ToolCall',
+        ]);
       }),
-    );
-
-    expect(atToolCall).toEqual([
-      'RunStarted',
-      'ToolStarted',
-      'Text',
-      'ToolCall',
-    ]);
-  });
+  );
 });
 
 describe('logging is optional', () => {
-  it('runs an unrecorded agent with no LogStore in context', async () => {
-    // No `LogStoreMemory.layer` anywhere in this pipeline. If `run` required
-    // a `LogStore`, this would not compile — which is the assertion.
-    const result = await Effect.runPromise(
-      agent
+  it.effect('runs an unrecorded agent with no LogStore in context', () =>
+    Effect.gen(function* () {
+      // No `LogStoreMemory.layer` anywhere in this pipeline. If `run` required
+      // a `LogStore`, this would not compile — which is the assertion.
+      const result = yield* agent
         .run('hi')
         .pipe(
           Effect.orDie,
           Effect.provide(scripted([callingTurn, answeringTurn])),
-        ),
-    );
+        );
 
-    expect(result.text).toBe('done');
-  });
+      expect(result.text).toBe('done');
+    }),
+  );
 
-  it('writes nothing for a run that was never told where to write', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agent.run('hi').pipe(Effect.orDie);
-        const store = yield* LogStore.Service;
-        return yield* store.meta(PATH);
-      }),
-    );
+  it.effect('writes nothing for a run that was never told where to write', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agent.run('hi').pipe(Effect.orDie);
+          const store = yield* LogStore.Service;
+          return yield* store.meta(PATH);
+        }),
+      );
 
-    // Not "an empty stream" — no stream at all. A `LogStore` being reachable
-    // is not consent to write to it.
-    expect(written._tag).toBe('None');
-  });
+      // Not "an empty stream" — no stream at all. A `LogStore` being reachable
+      // is not consent to write to it.
+      expect(written._tag).toBe('None');
+    }),
+  );
 
   it('puts LogStore in the type only after recordingTo', () => {
     type Plain = Agent.Requires<typeof agent>;
@@ -326,106 +346,112 @@ describe('logging is optional', () => {
 });
 
 describe('Agent.streamFrom', () => {
-  it('replays what was recorded, oldest first', async () => {
-    const replayed = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+  it.effect('replays what was recorded, oldest first', () =>
+    Effect.gen(function* () {
+      const replayed = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
 
-        return yield* Agent.streamFrom(CONVERSATION).pipe(
-          Stream.take(9),
-          Stream.runCollect,
-          Effect.orDie,
-        );
-      }),
-    );
+          return yield* Agent.streamFrom(CONVERSATION).pipe(
+            Stream.take(9),
+            Stream.runCollect,
+            Effect.orDie,
+          );
+        }),
+      );
 
-    expect(tags(replayed)).toEqual([
-      'RunStarted',
-      'ToolStarted',
-      'Text',
-      'ToolCall',
-      'ToolOutcome',
-      'TurnFinished',
-      'Text',
-      'TurnFinished',
-      'Completed',
-    ]);
-  });
+      expect(tags(replayed)).toEqual([
+        'RunStarted',
+        'ToolStarted',
+        'Text',
+        'ToolCall',
+        'ToolOutcome',
+        'TurnFinished',
+        'Text',
+        'TurnFinished',
+        'Completed',
+      ]);
+    }),
+  );
 
-  it('resumes after an offset rather than from the beginning', async () => {
-    const replayed = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        const written = yield* readAll();
+  it.effect('resumes after an offset rather than from the beginning', () =>
+    Effect.gen(function* () {
+      const replayed = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          const written = yield* readAll();
 
-        return yield* Agent.streamFrom(CONVERSATION, written[3]!.offset).pipe(
-          Stream.take(1),
-          Stream.runCollect,
-          Effect.orDie,
-        );
-      }),
-    );
+          return yield* Agent.streamFrom(CONVERSATION, written[3]!.offset).pipe(
+            Stream.take(1),
+            Stream.runCollect,
+            Effect.orDie,
+          );
+        }),
+      );
 
-    expect(tags(replayed)).toEqual(['ToolOutcome']);
-  });
+      expect(tags(replayed)).toEqual(['ToolOutcome']);
+    }),
+  );
 
   // The half that makes it a tail and not a query. The reader is held open
   // until it has drained every historical record, and only then is a new one
   // appended — so this record cannot reach it through catch-up.
-  it('follows records appended after the reader caught up', async () => {
-    const late = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        const store = yield* LogStore.Service;
-        const historical = (yield* readAll()).length;
+  it.effect('follows records appended after the reader caught up', () =>
+    Effect.gen(function* () {
+      const late = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          const store = yield* LogStore.Service;
+          const historical = (yield* readAll()).length;
 
-        const caughtUp = yield* Deferred.make<void>();
-        const seen = yield* Ref.make(0);
+          const caughtUp = yield* Deferred.make<void>();
+          const seen = yield* Ref.make(0);
 
-        const reader = yield* Agent.streamFrom(CONVERSATION).pipe(
-          Stream.tap(() =>
-            Effect.gen(function* () {
-              const count = yield* Ref.updateAndGet(seen, (n) => n + 1);
-              if (count === historical) {
-                yield* Deferred.succeed(caughtUp, undefined);
-              }
-            }),
-          ),
-          Stream.take(historical + 1),
-          Stream.runCollect,
-          Effect.orDie,
-          Effect.forkChild,
-        );
+          const reader = yield* Agent.streamFrom(CONVERSATION).pipe(
+            Stream.tap(() =>
+              Effect.gen(function* () {
+                const count = yield* Ref.updateAndGet(seen, (n) => n + 1);
+                if (count === historical) {
+                  yield* Deferred.succeed(caughtUp, undefined);
+                }
+              }),
+            ),
+            Stream.take(historical + 1),
+            Stream.runCollect,
+            Effect.orDie,
+            Effect.forkChild,
+          );
 
-        yield* Deferred.await(caughtUp);
+          yield* Deferred.await(caughtUp);
 
-        const claim = yield* store
-          .acquire(PATH, 'late-producer')
-          .pipe(Effect.orDie);
-        yield* store
-          .append({
-            path: PATH,
-            producerId: claim.producerId,
-            epoch: claim.epoch,
-            sequence: claim.nextSequence,
-            records: [
-              {
-                conversationId: CONVERSATION,
-                timestamp: 1_700_000_000_000,
-                record: { _tag: 'Text', step: 3, text: 'appended later' },
-              },
-            ],
-          })
-          .pipe(Effect.orDie);
+          const claim = yield* store
+            .acquire(PATH, LogVocabulary.ProducerId.make('late-producer'))
+            .pipe(Effect.orDie);
+          yield* store
+            .append({
+              path: PATH,
+              producerId: claim.producerId,
+              epoch: claim.epoch,
+              sequence: claim.nextSequence,
+              records: [
+                {
+                  conversationId: CONVERSATION,
+                  timestamp: 1_700_000_000_000,
+                  record: { _tag: 'Text', step: 3, text: 'appended later' },
+                },
+              ],
+            })
+            .pipe(Effect.orDie);
 
-        return yield* Fiber.join(reader);
-      }),
-    );
+          return yield* Fiber.join(reader);
+        }),
+      );
 
-    expect(late[late.length - 1]?.record).toMatchObject({
-      text: 'appended later',
-    });
-  });
+      expect(late[late.length - 1]?.record).toMatchObject({
+        text: 'appended later',
+      });
+    }),
+  );
 
   it('starts from the beginning by default', () => {
     // The default is the sentinel, not offset zero: `after` is exclusive, so

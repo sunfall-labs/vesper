@@ -62,6 +62,10 @@ const alias = {
     './packages/agent/src/compaction.ts',
     import.meta.url,
   ).pathname,
+  '@sunfall/vesper-agent/workflow': new URL(
+    './packages/agent/src/workflow.ts',
+    import.meta.url,
+  ).pathname,
   '@sunfall/vesper-log/offset': new URL(
     './packages/log/src/offset.ts',
     import.meta.url,

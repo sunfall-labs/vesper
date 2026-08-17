@@ -19,6 +19,7 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Config,
   Console,
@@ -324,7 +325,9 @@ const readAll = (
 > =>
   Effect.gen(function* () {
     const store = yield* LogStore.Service;
-    const path = AgentLog.pathFor(conversationId);
+    const path = AgentLog.pathFor(
+      LogVocabulary.ConversationId.make(conversationId),
+    );
     const all: Array<ConversationRecord.Envelope> = [];
     let cursor = LogOffset.START;
     let done = false;

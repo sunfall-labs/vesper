@@ -5,7 +5,8 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import { Agent } from '../src/agent.js';
 import { Skill } from '../src/skill.js';
@@ -142,9 +143,6 @@ const compileTimeCollisionAssertions = (): void => {
 };
 void compileTimeCollisionAssertions;
 
-const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
-  Effect.runPromise(Effect.orDie(effect));
-
 // `Agent.Named` rather than a hand-written shape: it is precisely "an agent
 // whose requirements I want to keep", which is what this helper needs.
 //
@@ -183,7 +181,7 @@ describe('declarative definition', () => {
   it('rejects a hand-written child even when it matches the public shape', () => {
     const child: Agent.Named<'hand-written', never> = {
       name: 'hand-written',
-      revision: '1',
+      revision: LogVocabulary.AgentRevision.make('1'),
       run: () =>
         Effect.succeed({
           outcome: 'success',
@@ -204,74 +202,86 @@ describe('declarative definition', () => {
     ).toThrow('was not created by Agent.make');
   });
 
-  it('offers subagents to the model as tools without manual merging', async () => {
-    const parent = Agent.make({
-      name: 'parent',
-      revision: '1',
-      instructions: 'delegate when useful',
-      toolkit: Toolkit.make(ping),
-      subagents: [researcher],
-    });
+  it.effect(
+    'offers subagents to the model as tools without manual merging',
+    () =>
+      Effect.gen(function* () {
+        const parent = Agent.make({
+          name: 'parent',
+          revision: '1',
+          instructions: 'delegate when useful',
+          toolkit: Toolkit.make(ping),
+          subagents: [researcher],
+        });
 
-    const { tools } = await run(drive(parent));
+        const { tools } = yield* drive(parent).pipe(Effect.orDie);
 
-    expect(tools).toContain(Subagent.toolName('researcher'));
-    // The agent's own tools survive the merge.
-    expect(tools).toContain('ping');
-  });
+        expect(tools).toContain(Subagent.toolName('researcher'));
+        // The agent's own tools survive the merge.
+        expect(tools).toContain('ping');
+      }),
+  );
 
-  it('offers the skill loader and puts only the catalog in the prompt', async () => {
-    const helper = Agent.make({
-      name: 'helper',
-      revision: '1',
-      instructions: 'be helpful',
-      toolkit: Toolkit.make(),
-      skills: [refunds],
-    });
+  it.effect(
+    'offers the skill loader and puts only the catalog in the prompt',
+    () =>
+      Effect.gen(function* () {
+        const helper = Agent.make({
+          name: 'helper',
+          revision: '1',
+          instructions: 'be helpful',
+          toolkit: Toolkit.make(),
+          skills: [refunds],
+        });
 
-    const { tools, system } = await run(drive(helper));
+        const { tools, system } = yield* drive(helper).pipe(Effect.orDie);
 
-    expect(tools).toContain(Skill.TOOL_NAME);
-    // The catalog line is visible so the model knows the skill exists...
-    expect(system).toContain('refunds');
-    expect(system).toContain('How to process a refund.');
-    // ...but the body stays out, so the prefix remains cacheable.
-    expect(system).not.toContain('STEP 1');
-  });
+        expect(tools).toContain(Skill.TOOL_NAME);
+        // The catalog line is visible so the model knows the skill exists...
+        expect(system).toContain('refunds');
+        expect(system).toContain('How to process a refund.');
+        // ...but the body stays out, so the prefix remains cacheable.
+        expect(system).not.toContain('STEP 1');
+      }),
+  );
 
-  it('leaves the toolkit alone when nothing is declared', async () => {
-    const plain = Agent.make({
-      name: 'plain',
-      revision: '1',
-      instructions: 'x',
-      toolkit: Toolkit.make(ping),
-    });
+  it.effect('leaves the toolkit alone when nothing is declared', () =>
+    Effect.gen(function* () {
+      const plain = Agent.make({
+        name: 'plain',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(ping),
+      });
 
-    const { tools } = await run(drive(plain));
+      const { tools } = yield* drive(plain).pipe(Effect.orDie);
 
-    expect(tools).toEqual(['ping']);
-  });
+      expect(tools).toEqual(['ping']);
+    }),
+  );
 
   // The layer and the toolkit are produced together precisely so they cannot
   // disagree: every advertised tool has a handler.
-  it('provides handlers for everything it advertises', async () => {
-    const parent = Agent.make({
-      name: 'parent',
-      revision: '1',
-      instructions: 'x',
-      toolkit: Toolkit.make(),
-      subagents: [researcher],
-      skills: [refunds],
-    });
+  it.effect('provides handlers for everything it advertises', () =>
+    Effect.gen(function* () {
+      const parent = Agent.make({
+        name: 'parent',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(),
+        subagents: [researcher],
+        skills: [refunds],
+      });
 
-    const { tools } = await run(drive(parent));
+      const { tools } = yield* drive(parent).pipe(Effect.orDie);
 
-    // Running at all proves the handlers resolved: `make` merges the subagent
-    // and skill tools into the toolkit and provides their handlers itself, so
-    // a drift between the two would fail here at dispatch.
-    expect(tools).toContain(Subagent.toolName('researcher'));
-    expect(tools).toContain(Skill.TOOL_NAME);
-  });
+      // Running at all proves the handlers resolved: `make` merges the subagent
+      // and skill tools into the toolkit and provides their handlers itself, so
+      // a drift between the two would fail here at dispatch.
+      expect(tools).toContain(Subagent.toolName('researcher'));
+      expect(tools).toContain(Skill.TOOL_NAME);
+    }),
+  );
 
   it('rejects generated collisions from widened arrays at runtime', () => {
     const children: ReadonlyArray<Agent.Named> = [researcher, researcher];

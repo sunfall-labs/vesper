@@ -38,6 +38,7 @@
       "@sunfall/vesper-agent/compaction": [
         "./packages/agent/src/compaction.ts"
       ],
+      "@sunfall/vesper-agent/workflow": ["./packages/agent/src/workflow.ts"],
       "@sunfall/vesper-log/offset": ["./packages/log/src/offset.ts"],
       "@sunfall/vesper-log/record": ["./packages/log/src/record.ts"],
       "@sunfall/vesper-log/log-store": ["./packages/log/src/log-store.ts"],

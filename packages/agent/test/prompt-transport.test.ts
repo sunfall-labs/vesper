@@ -1,9 +1,10 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { describe, expect, it } from '@effect/vitest';
 import { Context, Effect } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
@@ -26,8 +27,8 @@ const runStarted = (
   prompt: unknown,
 ): ReadonlyArray<ConversationRecord.Envelope> => [
   {
-    offset: LogOffset.Offset.make('1'),
-    conversationId: 'transport',
+    offset: LogOffset.fromSeq(1n),
+    conversationId: LogVocabulary.ConversationId.make('transport'),
     timestamp: 0,
     record: { _tag: 'RunStarted', agent: 'test', prompt },
   },
@@ -41,95 +42,117 @@ const fileData = (prompt: unknown): unknown =>
   )[0]?.content[0]?.data;
 
 const persist = (input: Prompt.RawInput) =>
-  Effect.runPromise(
-    Effect.gen(function* () {
-      const session = yield* AgentLog.open('transport', {
-        compatibility: { agent: 'test', revision: '1' },
-      });
-      yield* AgentLog.start(session, { agent: 'test', revision: '1', input });
-      const started = (yield* session.recorded)[0]!.record;
-      if (started._tag !== 'RunStarted') throw new Error('missing RunStarted');
-      return started.prompt;
-    }).pipe(Effect.provide(LogStoreMemory.layer), Effect.scoped),
-  );
-
-describe('prompt transport', () => {
-  it('persists and rebuilds Uint8Array file data', async () => {
-    const persisted = await persist(filePrompt(new Uint8Array([0, 1, 255])));
-
-    expect(fileData(persisted)).toMatchObject({
-      _tag: '@sunfall/vesper-agent/PromptFileData',
-      version: 1,
-      encoding: 'base64',
-      value: 'AAH/',
-    });
-    expect(
-      fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
-    ).toEqual(new Uint8Array([0, 1, 255]));
-  });
-
-  it('persists and rebuilds URL file data', async () => {
-    const persisted = await persist(
-      filePrompt(new URL('https://example.com/files/input.bin?version=1')),
-    );
-
-    expect(fileData(persisted)).toMatchObject({
-      _tag: '@sunfall/vesper-agent/PromptFileData',
-      version: 1,
-      encoding: 'url',
-      value: 'https://example.com/files/input.bin?version=1',
-    });
-    expect(
-      fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
-    ).toEqual(new URL('https://example.com/files/input.bin?version=1'));
-  });
-
-  it('leaves ordinary string file data unchanged', async () => {
-    const data = 'data:application/octet-stream;base64,AAH/';
-    const persisted = await persist(filePrompt(data));
-
-    expect(fileData(persisted)).toBe(data);
-    expect(
-      fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
-    ).toBe(data);
-  });
-
-  it('shows recording policy the live file data before transport encoding', async () => {
-    const bytes = new Uint8Array([1, 2, 3]);
-    let seen: unknown;
-    const runtime = RecordingPolicy.compile(
+  Effect.gen(function* () {
+    const session = yield* AgentLog.open(
+      LogVocabulary.ConversationId.make('transport'),
       {
-        prompt: (prompt) => {
-          seen = fileData(prompt);
-          return Effect.succeed(prompt);
+        compatibility: {
+          agent: 'test',
+          revision: LogVocabulary.AgentRevision.make('1'),
         },
       },
-      Context.empty(),
     );
+    yield* AgentLog.start(session, {
+      agent: 'test',
+      revision: LogVocabulary.AgentRevision.make('1'),
+      input,
+    });
+    const started = (yield* session.recorded)[0]!.record;
+    if (started._tag !== 'RunStarted') throw new Error('missing RunStarted');
+    return started.prompt;
+  }).pipe(Effect.provide(LogStoreMemory.layer));
 
-    const persisted = await Effect.runPromise(
+describe('prompt transport', () => {
+  it.effect('persists and rebuilds Uint8Array file data', () =>
+    Effect.gen(function* () {
+      const persisted = yield* persist(filePrompt(new Uint8Array([0, 1, 255])));
+
+      expect(fileData(persisted)).toMatchObject({
+        _tag: '@sunfall/vesper-agent/PromptFileData',
+        version: 1,
+        encoding: 'base64',
+        value: 'AAH/',
+      });
+      expect(
+        fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
+      ).toEqual(new Uint8Array([0, 1, 255]));
+    }),
+  );
+
+  it.effect('persists and rebuilds URL file data', () =>
+    Effect.gen(function* () {
+      const persisted = yield* persist(
+        filePrompt(new URL('https://example.com/files/input.bin?version=1')),
+      );
+
+      expect(fileData(persisted)).toMatchObject({
+        _tag: '@sunfall/vesper-agent/PromptFileData',
+        version: 1,
+        encoding: 'url',
+        value: 'https://example.com/files/input.bin?version=1',
+      });
+      expect(
+        fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
+      ).toEqual(new URL('https://example.com/files/input.bin?version=1'));
+    }),
+  );
+
+  it.effect('leaves ordinary string file data unchanged', () =>
+    Effect.gen(function* () {
+      const data = 'data:application/octet-stream;base64,AAH/';
+      const persisted = yield* persist(filePrompt(data));
+
+      expect(fileData(persisted)).toBe(data);
+      expect(
+        fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
+      ).toBe(data);
+    }),
+  );
+
+  it.effect(
+    'shows recording policy the live file data before transport encoding',
+    () =>
       Effect.gen(function* () {
-        const session = AgentLog.withRecordingPolicy(
-          yield* AgentLog.open('policy-transport', {
-            compatibility: { agent: 'test', revision: '1' },
-          }),
-          runtime,
+        const bytes = new Uint8Array([1, 2, 3]);
+        let seen: unknown;
+        const runtime = RecordingPolicy.compile(
+          {
+            prompt: (prompt) => {
+              seen = fileData(prompt);
+              return Effect.succeed(prompt);
+            },
+          },
+          Context.empty(),
         );
-        yield* AgentLog.start(session, {
-          agent: 'test',
-          revision: '1',
-          input: filePrompt(bytes),
-        });
-        const started = (yield* session.recorded)[0]!.record;
-        if (started._tag !== 'RunStarted')
-          throw new Error('missing RunStarted');
-        return started.prompt;
-      }).pipe(Effect.provide(LogStoreMemory.layer), Effect.scoped),
-    );
 
-    expect(seen).toBe(bytes);
-    expect(fileData(persisted)).toMatchObject({ encoding: 'base64' });
-  });
+        const persisted = yield* Effect.gen(function* () {
+          const session = AgentLog.withRecordingPolicy(
+            yield* AgentLog.open(
+              LogVocabulary.ConversationId.make('policy-transport'),
+              {
+                compatibility: {
+                  agent: 'test',
+                  revision: LogVocabulary.AgentRevision.make('1'),
+                },
+              },
+            ),
+            runtime,
+          );
+          yield* AgentLog.start(session, {
+            agent: 'test',
+            revision: LogVocabulary.AgentRevision.make('1'),
+            input: filePrompt(bytes),
+          });
+          const started = (yield* session.recorded)[0]!.record;
+          if (started._tag !== 'RunStarted')
+            throw new Error('missing RunStarted');
+          return started.prompt;
+        }).pipe(Effect.provide(LogStoreMemory.layer));
+
+        expect(seen).toBe(bytes);
+        expect(fileData(persisted)).toMatchObject({ encoding: 'base64' });
+      }),
+  );
 
   it('rejects a malformed Vesper file-data envelope', () => {
     const prompt = [

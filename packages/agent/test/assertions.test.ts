@@ -1,7 +1,7 @@
 import type { LogStore } from '@sunfall/vesper-log/log-store';
+import { describe, expect, it } from '@effect/vitest';
 import { Context, Effect, Schema, type Stream } from 'effect';
 import { AiError, LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { Interception } from '../src/interception.js';

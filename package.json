@@ -37,6 +37,8 @@
     "@effect/ai-anthropic": "4.0.0-rc.109",
     "@effect/ai-openai": "4.0.0-rc.109",
     "@effect/platform-node": "4.0.0-rc.109",
+    "@effect/sql-pg": "4.0.0-rc.109",
+    "@effect/vitest": "4.0.0-rc.109",
     "@nubjs/nub": "0.7.5",
     "@testcontainers/postgresql": "^11.14.0",
     "@types/node": "^24.0.0",

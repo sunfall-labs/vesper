@@ -1,6 +1,7 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
@@ -8,7 +9,7 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { AgentLog } from '../src/log.js';
@@ -95,20 +96,20 @@ const agent = Agent.make({
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   scripted: Model,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(scripted.layer),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(scripted.layer),
+    Effect.provide(LogStoreMemory.layer),
+    Effect.scoped,
   );
 
 const readAll = Effect.fn('test.readAll')(function* () {
   const store = yield* LogStore.Service;
   const page = yield* store
-    .read(AgentLog.pathFor(CONVERSATION), { limit: 1000 })
+    .read(AgentLog.pathFor(LogVocabulary.ConversationId.make(CONVERSATION)), {
+      limit: 1000,
+    })
     .pipe(Effect.orDie);
   return page.records;
 });
@@ -124,221 +125,242 @@ const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 describe('steering', () => {
-  it('records and emits an oversized signal rejection without injecting it', async () => {
-    const scripted = model();
-    const bounded = Agent.make({
-      name: 'bounded-signals',
-      revision: '1',
-      instructions: 'answer',
-      toolkit: Toolkit.make(),
-      runPolicy: { maxSignalBytes: 4 },
-    });
-
-    const result = await run(
+  it.effect(
+    'records and emits an oversized signal rejection without injecting it',
+    () =>
       Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'too large',
-          source: 'operator',
-        }).pipe(Effect.orDie);
-        const events = yield* bounded
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(Stream.runCollect, Effect.orDie);
-        return { events, records: yield* readAll() };
+        const scripted = model();
+        const bounded = Agent.make({
+          name: 'bounded-signals',
+          revision: '1',
+          instructions: 'answer',
+          toolkit: Toolkit.make(),
+          runPolicy: { maxSignalBytes: 4 },
+        });
+
+        const result = yield* run(
+          Effect.gen(function* () {
+            yield* AgentSignals.send(CONVERSATION, {
+              kind: 'steer',
+              text: 'too large',
+              source: 'operator',
+            }).pipe(Effect.orDie);
+            const events = yield* bounded
+              .recordingTo(CONVERSATION)
+              .stream('hi')
+              .pipe(Stream.runCollect, Effect.orDie);
+            return { events, records: yield* readAll() };
+          }),
+          scripted,
+        );
+
+        expect(result.events).toContainEqual(
+          expect.objectContaining({
+            _tag: 'SignalRejected',
+            reason: 'signal_bytes',
+          }),
+        );
+        expect(scripted.prompts).toHaveLength(1);
+        expect(scripted.prompts[0]).not.toContain('too large');
+        expect(received(result.records)).toContainEqual(
+          expect.objectContaining({ disposition: 'rejected' }),
+        );
       }),
-      scripted,
-    );
+  );
 
-    expect(result.events).toContainEqual(
-      expect.objectContaining({
-        _tag: 'SignalRejected',
-        reason: 'signal_bytes',
-      }),
-    );
-    expect(scripted.prompts).toHaveLength(1);
-    expect(scripted.prompts[0]).not.toContain('too large');
-    expect(received(result.records)).toContainEqual(
-      expect.objectContaining({ disposition: 'rejected' }),
-    );
-  });
-
-  it('announces a bounded-drain backlog and leaves it for the next boundary', async () => {
-    const scripted = model();
-    const bounded = Agent.make({
-      name: 'bounded-backlog',
-      revision: '1',
-      instructions: 'answer',
-      toolkit: Toolkit.make(),
-      runPolicy: { maxSignalsPerBoundary: 1 },
-    });
-
-    const events = await run(
+  it.effect(
+    'announces a bounded-drain backlog and leaves it for the next boundary',
+    () =>
       Effect.gen(function* () {
-        for (const text of ['first', 'second']) {
+        const scripted = model();
+        const bounded = Agent.make({
+          name: 'bounded-backlog',
+          revision: '1',
+          instructions: 'answer',
+          toolkit: Toolkit.make(),
+          runPolicy: { maxSignalsPerBoundary: 1 },
+        });
+
+        const events = yield* run(
+          Effect.gen(function* () {
+            for (const text of ['first', 'second']) {
+              yield* AgentSignals.send(CONVERSATION, {
+                kind: 'steer',
+                text,
+                source: 'operator',
+              }).pipe(Effect.orDie);
+            }
+            return yield* bounded
+              .recordingTo(CONVERSATION)
+              .stream('hi')
+              .pipe(Stream.runCollect, Effect.orDie);
+          }),
+          scripted,
+        );
+
+        expect(events).toContainEqual(
+          expect.objectContaining({ _tag: 'SignalBacklog', maximum: 1 }),
+        );
+        expect(
+          scripted.prompts.some((prompt) => prompt.includes('second')),
+        ).toBe(true);
+      }),
+  );
+
+  it.effect('reaches the model as input on the next turn', () =>
+    Effect.gen(function* () {
+      const scripted = model();
+
+      yield* run(
+        Effect.gen(function* () {
           yield* AgentSignals.send(CONVERSATION, {
             kind: 'steer',
-            text,
+            text: 'also check the invoice',
             source: 'operator',
           }).pipe(Effect.orDie);
-        }
-        return yield* bounded
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(Stream.runCollect, Effect.orDie);
-      }),
-      scripted,
-    );
 
-    expect(events).toContainEqual(
-      expect.objectContaining({ _tag: 'SignalBacklog', maximum: 1 }),
-    );
-    expect(scripted.prompts.some((prompt) => prompt.includes('second'))).toBe(
-      true,
-    );
-  });
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        }),
+        scripted,
+      );
 
-  it('reaches the model as input on the next turn', async () => {
-    const scripted = model();
+      expect(scripted.prompts).toHaveLength(2);
+      expect(scripted.prompts[1]).toContain('also check the invoice');
+    }),
+  );
 
-    await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'also check the invoice',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+  it.effect('overrides a stop condition that would have ended the run', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-      }),
-      scripted,
-    );
+      const result = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'keep going',
+            source: 'operator',
+          }).pipe(Effect.orDie);
 
-    expect(scripted.prompts).toHaveLength(2);
-    expect(scripted.prompts[1]).toContain('also check the invoice');
-  });
+          return yield* agent
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+        }),
+        scripted,
+      );
 
-  it('overrides a stop condition that would have ended the run', async () => {
-    const scripted = model();
+      // Every turn this model produces satisfies the default stop condition.
+      // Two steps happened, so the steer is what carried it past the first.
+      expect(result.steps).toBe(2);
+      expect(result.text).toBe('turn 2');
+    }),
+  );
 
-    const result = await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'keep going',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+  it.effect('records the delivery, with the offset it consumed', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-        return yield* agent
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-      }),
-      scripted,
-    );
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'keep going',
+            source: 'operator',
+          }).pipe(Effect.orDie);
 
-    // Every turn this model produces satisfies the default stop condition.
-    // Two steps happened, so the steer is what carried it past the first.
-    expect(result.steps).toBe(2);
-    expect(result.text).toBe('turn 2');
-  });
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+        scripted,
+      );
 
-  it('records the delivery, with the offset it consumed', async () => {
-    const scripted = model();
-
-    const written = await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
+      expect(received(written)).toEqual([
+        {
+          _tag: 'SignalReceived',
           kind: 'steer',
           text: 'keep going',
           source: 'operator',
-        }).pipe(Effect.orDie);
+          step: 1,
+          at: expect.any(String),
+        },
+      ]);
 
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-      scripted,
-    );
+      // And in the right place: after the text the model had already produced,
+      // before the turn boundary. A rebuilt prompt then reads as the model's
+      // own words followed by the instruction that redirected it, which is the
+      // order they happened in.
+      expect(written.map((envelope) => envelope.record._tag)).toEqual([
+        'RunStarted',
+        'Text',
+        'SignalReceived',
+        'TurnFinished',
+        'Text',
+        'TurnFinished',
+        'Completed',
+        'RunSettled',
+      ]);
+    }),
+  );
 
-    expect(received(written)).toEqual([
-      {
-        _tag: 'SignalReceived',
-        kind: 'steer',
-        text: 'keep going',
-        source: 'operator',
-        step: 1,
-        at: expect.any(String),
-      },
-    ]);
+  it.effect('is delivered once, not to every later run', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-    // And in the right place: after the text the model had already produced,
-    // before the turn boundary. A rebuilt prompt then reads as the model's
-    // own words followed by the instruction that redirected it, which is the
-    // order they happened in.
-    expect(written.map((envelope) => envelope.record._tag)).toEqual([
-      'RunStarted',
-      'Text',
-      'SignalReceived',
-      'TurnFinished',
-      'Text',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-    ]);
-  });
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'keep going',
+            source: 'operator',
+          }).pipe(Effect.orDie);
 
-  it('is delivered once, not to every later run', async () => {
-    const scripted = model();
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* agent
+            .recordingTo(CONVERSATION)
+            .run('again')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+        scripted,
+      );
 
-    const written = await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'keep going',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+      // Two turns in the first run, one in the second: the second run resumed
+      // draining past what the first recorded taking, rather than re-reading
+      // the signal stream from the beginning.
+      expect(scripted.prompts).toHaveLength(3);
+      expect(received(written)).toHaveLength(1);
+    }),
+  );
 
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        yield* agent.recordingTo(CONVERSATION).run('again').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-      scripted,
-    );
+  it.effect('is visible to a consumer of the event stream', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-    // Two turns in the first run, one in the second: the second run resumed
-    // draining past what the first recorded taking, rather than re-reading
-    // the signal stream from the beginning.
-    expect(scripted.prompts).toHaveLength(3);
-    expect(received(written)).toHaveLength(1);
-  });
+      const observed = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'keep going',
+            source: 'operator',
+          }).pipe(Effect.orDie);
 
-  it('is visible to a consumer of the event stream', async () => {
-    const scripted = model();
+          return yield* agent
+            .recordingTo(CONVERSATION)
+            .stream('hi')
+            .pipe(
+              Stream.filter((event) => event._tag === 'Signalled'),
+              Stream.runCollect,
+              Effect.orDie,
+            );
+        }),
+        scripted,
+      );
 
-    const observed = await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'keep going',
-          source: 'operator',
-        }).pipe(Effect.orDie);
-
-        return yield* agent
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(
-            Stream.filter((event) => event._tag === 'Signalled'),
-            Stream.runCollect,
-            Effect.orDie,
-          );
-      }),
-      scripted,
-    );
-
-    expect(observed).toMatchObject([
-      { _tag: 'Signalled', step: 1, kind: 'steer', text: 'keep going' },
-    ]);
-  });
+      expect(observed).toMatchObject([
+        { _tag: 'Signalled', step: 1, kind: 'steer', text: 'keep going' },
+      ]);
+    }),
+  );
 });
 
 describe('cancelling', () => {
@@ -353,190 +375,199 @@ describe('cancelling', () => {
     stopWhen: Stop.maxSteps(5),
   });
 
-  it('ends a run before the model when the cancel is already durable', async () => {
-    const scripted = model();
-
-    const result = await run(
+  it.effect(
+    'ends a run before the model when the cancel is already durable',
+    () =>
       Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'user closed the tab',
-          source: 'ui',
-        }).pipe(Effect.orDie);
+        const scripted = model();
 
-        return yield* persistent
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
+        const result = yield* run(
+          Effect.gen(function* () {
+            yield* AgentSignals.send(CONVERSATION, {
+              kind: 'cancel',
+              text: 'user closed the tab',
+              source: 'ui',
+            }).pipe(Effect.orDie);
+
+            return yield* persistent
+              .recordingTo(CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+          }),
+          scripted,
+        );
+
+        expect(scripted.prompts).toHaveLength(0);
+        // Cancellation ends a run; it does not fail one or add a model call.
+        expect(result.text).toBe('');
+        expect(result.steps).toBe(0);
+        expect(result.outcome).toBe('cancelled');
       }),
-      scripted,
-    );
+  );
 
-    expect(scripted.prompts).toHaveLength(0);
-    // Cancellation ends a run; it does not fail one or add a model call.
-    expect(result.text).toBe('');
-    expect(result.steps).toBe(0);
-    expect(result.outcome).toBe('cancelled');
-  });
+  it.effect('leaves the run alone when nobody cancelled it', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-  it('leaves the run alone when nobody cancelled it', async () => {
-    const scripted = model();
+      const result = yield* run(
+        persistent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie),
+        scripted,
+      );
 
-    const result = await run(
-      persistent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie),
-      scripted,
-    );
+      // The control for the case above: five steps, because the stop condition
+      // is what ends this agent and it was not asked to stop early.
+      expect(result.steps).toBe(5);
+    }),
+  );
 
-    // The control for the case above: five steps, because the stop condition
-    // is what ends this agent and it was not asked to stop early.
-    expect(result.steps).toBe(5);
-  });
+  it.effect('settles the run as cancelled', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-  it('settles the run as cancelled', async () => {
-    const scripted = model();
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'cancel',
+            text: 'user closed the tab',
+            source: 'ui',
+          }).pipe(Effect.orDie);
 
-    const written = await run(
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+        scripted,
+      );
+
+      expect(settlement(written)).toMatchObject([{ outcome: 'cancelled' }]);
+    }),
+  );
+
+  it.effect('outranks a steer delivered in the same batch', () =>
+    Effect.gen(function* () {
+      const scripted = model();
+
+      const result = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'keep going',
+            source: 'operator',
+          }).pipe(Effect.orDie);
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'cancel',
+            text: 'never mind',
+            source: 'ui',
+          }).pipe(Effect.orDie);
+
+          return yield* agent
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+        }),
+        scripted,
+      );
+
+      expect(result.steps).toBe(0);
+      expect(result.outcome).toBe('cancelled');
+    }),
+  );
+
+  it.live(
+    'interrupts an in-flight provider stream and preserves partial text',
+    () =>
       Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'user closed the tab',
-          source: 'ui',
-        }).pipe(Effect.orDie);
-
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-      scripted,
-    );
-
-    expect(settlement(written)).toMatchObject([{ outcome: 'cancelled' }]);
-  });
-
-  it('outranks a steer delivered in the same batch', async () => {
-    const scripted = model();
-
-    const result = await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'keep going',
-          source: 'operator',
-        }).pipe(Effect.orDie);
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'never mind',
-          source: 'ui',
-        }).pipe(Effect.orDie);
-
-        return yield* agent
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-      }),
-      scripted,
-    );
-
-    expect(result.steps).toBe(0);
-    expect(result.outcome).toBe('cancelled');
-  });
-
-  it('interrupts an in-flight provider stream and preserves partial text', async () => {
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const entered = yield* Deferred.make<void>();
-        const stopped = yield* Deferred.make<void>();
-        const blocking = Layer.succeed(
-          LanguageModel.LanguageModel,
-          yield* LanguageModel.make({
-            generateText: () =>
-              Effect.succeed<Response.PartEncoded[]>([finish()]),
-            streamText: () =>
-              Stream.unwrap(
-                Deferred.succeed(entered, undefined).pipe(
-                  Effect.as(
-                    Stream.concat(
-                      Stream.fromIterable([
-                        { type: 'text-start' as const, id: 'partial' },
-                        {
-                          type: 'text-delta' as const,
-                          id: 'partial',
-                          delta: 'partial answer',
-                        },
-                      ]),
-                      Stream.never,
-                    ).pipe(
-                      Stream.ensuring(Deferred.succeed(stopped, undefined)),
+        const result = yield* Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const stopped = yield* Deferred.make<void>();
+          const blocking = Layer.succeed(
+            LanguageModel.LanguageModel,
+            yield* LanguageModel.make({
+              generateText: () =>
+                Effect.succeed<Response.PartEncoded[]>([finish()]),
+              streamText: () =>
+                Stream.unwrap(
+                  Deferred.succeed(entered, undefined).pipe(
+                    Effect.as(
+                      Stream.concat(
+                        Stream.fromIterable([
+                          { type: 'text-start' as const, id: 'partial' },
+                          {
+                            type: 'text-delta' as const,
+                            id: 'partial',
+                            delta: 'partial answer',
+                          },
+                        ]),
+                        Stream.never,
+                      ).pipe(
+                        Stream.ensuring(Deferred.succeed(stopped, undefined)),
+                      ),
                     ),
                   ),
                 ),
-              ),
-          }),
-        );
+            }),
+          );
 
-        const running = yield* Effect.forkChild(
-          agent
-            .recordingTo(CONVERSATION)
-            .run('hi')
-            .pipe(Effect.provide(blocking)),
-        );
-        yield* Deferred.await(entered);
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'change direction',
-          source: 'operator',
-        }).pipe(Effect.orDie);
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'stop now',
-          source: 'ui',
-        }).pipe(Effect.orDie);
+          const running = yield* Effect.forkChild(
+            agent
+              .recordingTo(CONVERSATION)
+              .run('hi')
+              .pipe(Effect.provide(blocking)),
+          );
+          yield* Deferred.await(entered);
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'change direction',
+            source: 'operator',
+          }).pipe(Effect.orDie);
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'cancel',
+            text: 'stop now',
+            source: 'ui',
+          }).pipe(Effect.orDie);
 
-        const completed = yield* Fiber.join(running);
-        yield* Deferred.await(stopped);
-        return { completed, records: yield* readAll() };
-      }).pipe(
-        Effect.provide(LogStoreMemory.layer),
-        Effect.scoped,
-        Effect.timeout('2 seconds'),
-      ),
-    );
+          const completed = yield* Fiber.join(running);
+          yield* Deferred.await(stopped);
+          return { completed, records: yield* readAll() };
+        }).pipe(Effect.provide(LogStoreMemory.layer));
 
-    expect(result.completed.text).toBe('partial answer');
-    expect(result.completed.steps).toBe(1);
-    expect(result.completed.outcome).toBe('cancelled');
-    expect(result.records.map(({ record }) => record._tag)).toEqual([
-      'RunStarted',
-      'Text',
-      'SignalReceived',
-      'SignalReceived',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-    ]);
-    expect(received(result.records).map((signal) => signal.kind)).toEqual([
-      'steer',
-      'cancel',
-    ]);
-    expect(settlement(result.records)).toMatchObject([
-      { outcome: 'cancelled' },
-    ]);
-  });
+        expect(result.completed.text).toBe('partial answer');
+        expect(result.completed.steps).toBe(1);
+        expect(result.completed.outcome).toBe('cancelled');
+        expect(result.records.map(({ record }) => record._tag)).toEqual([
+          'RunStarted',
+          'Text',
+          'SignalReceived',
+          'SignalReceived',
+          'TurnFinished',
+          'Completed',
+          'RunSettled',
+        ]);
+        expect(received(result.records).map((signal) => signal.kind)).toEqual([
+          'steer',
+          'cancel',
+        ]);
+        expect(settlement(result.records)).toMatchObject([
+          { outcome: 'cancelled' },
+        ]);
+      }),
+    2_000,
+  );
 
-  it('does not let an oversized cancel preempt a blocked stream', async () => {
-    const entered = await Effect.runPromise(Deferred.make<void>());
-    const bounded = Agent.make({
-      name: 'bounded-cancel',
-      revision: '1',
-      instructions: 'answer',
-      toolkit: Toolkit.make(),
-      runPolicy: { maxSignalBytes: 4, wallClockMillis: 100 },
-    });
-    const blocking: Model = {
-      prompts: [],
-      layer: Layer.succeed(
-        LanguageModel.LanguageModel,
-        await Effect.runPromise(
-          LanguageModel.make({
+  it.live('does not let an oversized cancel preempt a blocked stream', () =>
+    Effect.gen(function* () {
+      const entered = yield* Deferred.make<void>();
+      const bounded = Agent.make({
+        name: 'bounded-cancel',
+        revision: '1',
+        instructions: 'answer',
+        toolkit: Toolkit.make(),
+        runPolicy: { maxSignalBytes: 4, wallClockMillis: 100 },
+      });
+      const blocking: Model = {
+        prompts: [],
+        layer: Layer.succeed(
+          LanguageModel.LanguageModel,
+          yield* LanguageModel.make({
             generateText: () =>
               Effect.succeed<Response.PartEncoded[]>([finish()]),
             streamText: () =>
@@ -547,11 +578,9 @@ describe('cancelling', () => {
               ),
           }),
         ),
-      ),
-    };
+      };
 
-    await expect(
-      run(
+      const outcome = yield* run(
         Effect.gen(function* () {
           const running = yield* Effect.forkChild(
             bounded.recordingTo(CONVERSATION).run('hi'),
@@ -563,161 +592,119 @@ describe('cancelling', () => {
             source: 'ui',
           }).pipe(Effect.orDie);
           return yield* Fiber.join(running);
-        }),
+        }).pipe(Effect.result),
         blocking,
-      ),
-    ).rejects.toThrow('deadline');
-  });
+      );
+      expect(String(outcome)).toContain('deadline');
+    }),
+  );
 
-  it('does not let a cancel behind the bounded page leapfrog backlog', async () => {
-    const bounded = Agent.make({
-      name: 'backlogged-cancel',
-      revision: '1',
-      instructions: 'answer',
-      toolkit: Toolkit.make(),
-      runPolicy: { maxSignalsPerBoundary: 1, wallClockMillis: 100 },
-    });
-    const blocked: Model = {
-      prompts: [],
-      layer: Layer.effect(
-        LanguageModel.LanguageModel,
-        LanguageModel.make({
-          generateText: () =>
-            Effect.succeed<Response.PartEncoded[]>([finish()]),
-          streamText: () => Stream.never,
-        }),
-      ),
-    };
+  it.live(
+    'does not let a cancel behind the bounded page leapfrog backlog',
+    () =>
+      Effect.gen(function* () {
+        const bounded = Agent.make({
+          name: 'backlogged-cancel',
+          revision: '1',
+          instructions: 'answer',
+          toolkit: Toolkit.make(),
+          runPolicy: { maxSignalsPerBoundary: 1, wallClockMillis: 100 },
+        });
+        const blocked: Model = {
+          prompts: [],
+          layer: Layer.effect(
+            LanguageModel.LanguageModel,
+            LanguageModel.make({
+              generateText: () =>
+                Effect.succeed<Response.PartEncoded[]>([finish()]),
+              streamText: () => Stream.never,
+            }),
+          ),
+        };
 
-    await expect(
-      run(
-        Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'older',
-            source: 'operator',
-          }).pipe(Effect.orDie);
+        const outcome = yield* run(
+          Effect.gen(function* () {
+            yield* AgentSignals.send(CONVERSATION, {
+              kind: 'steer',
+              text: 'older',
+              source: 'operator',
+            }).pipe(Effect.orDie);
+            yield* AgentSignals.send(CONVERSATION, {
+              kind: 'cancel',
+              text: 'newer',
+              source: 'ui',
+            }).pipe(Effect.orDie);
+            return yield* bounded.recordingTo(CONVERSATION).run('hi');
+          }).pipe(Effect.result),
+          blocked,
+        );
+        expect(String(outcome)).toContain('deadline');
+      }),
+  );
+
+  it.effect(
+    'falls back to boundary cancellation when the change feed fails',
+    () =>
+      Effect.gen(function* () {
+        const scripted = model();
+
+        const result = yield* Effect.gen(function* () {
           yield* AgentSignals.send(CONVERSATION, {
             kind: 'cancel',
-            text: 'newer',
+            text: 'stop at boundary',
             source: 'ui',
           }).pipe(Effect.orDie);
-          return yield* bounded.recordingTo(CONVERSATION).run('hi');
-        }),
-        blocked,
-      ),
-    ).rejects.toThrow('deadline');
-  });
-
-  it('falls back to boundary cancellation when the change feed fails', async () => {
-    const scripted = model();
-
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'stop at boundary',
-          source: 'ui',
-        }).pipe(Effect.orDie);
-        return yield* agent.recordingTo(CONVERSATION).run('hi');
-      }).pipe(
-        Effect.provide(scripted.layer),
-        Effect.provide(
-          LogStoreMemory.layerFailingChanges(
-            AgentSignals.pathFor(CONVERSATION),
-          ),
-        ),
-        Effect.scoped,
-      ),
-    );
-
-    expect(result.text).toBe('turn 1');
-    expect(result.outcome).toBe('cancelled');
-    expect(scripted.prompts).toHaveLength(1);
-  });
-
-  it('keeps watcher read failures typed and tears the watcher down', async () => {
-    const readFailed = await Effect.runPromise(Deferred.make<void>());
-    const stopped = await Effect.runPromise(Deferred.make<void>());
-    let failNextSignalRead = true;
-    const instrumented = Layer.effect(
-      LogStore.Service,
-      Effect.map(LogStore.Service, (store) =>
-        LogStore.Service.of({
-          ...store,
-          read: (path, options) =>
-            path === AgentSignals.pathFor(CONVERSATION) && failNextSignalRead
-              ? Effect.sync(() => {
-                  failNextSignalRead = false;
-                }).pipe(
-                  Effect.andThen(Deferred.succeed(readFailed, undefined)),
-                  Effect.andThen(
-                    Effect.fail(
-                      new LogStore.LogStoreError({
-                        path,
-                        operation: 'read',
-                        reason: 'storage',
-                        detail: 'injected watcher read failure',
-                      }),
-                    ),
-                  ),
-                )
-              : store.read(path, options),
-          changes: (path) =>
-            store
-              .changes(path)
-              .pipe(Stream.ensuring(Deferred.succeed(stopped, undefined))),
-        }),
-      ),
-    ).pipe(Layer.provide(LogStoreMemory.layer));
-    const calls = { count: 0 };
-    const waitingProvider = Layer.effect(
-      LanguageModel.LanguageModel,
-      LanguageModel.make({
-        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
-        streamText: () =>
-          Stream.unwrap(
-            Deferred.await(readFailed).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  calls.count += 1;
-                }),
+          return yield* agent.recordingTo(CONVERSATION).run('hi');
+        }).pipe(
+          Effect.provide(scripted.layer),
+          Effect.provide(
+            LogStoreMemory.layerFailingChanges(
+              AgentSignals.pathFor(
+                LogVocabulary.ConversationId.make(CONVERSATION),
               ),
-              Effect.as(Stream.fromIterable(says('after watcher failure'))),
             ),
           ),
+        );
+
+        expect(result.text).toBe('turn 1');
+        expect(result.outcome).toBe('cancelled');
+        expect(scripted.prompts).toHaveLength(1);
       }),
-    );
+  );
 
-    const result = await Effect.runPromise(
-      agent
-        .recordingTo(CONVERSATION)
-        .run('hi')
-        .pipe(
-          Effect.provide(waitingProvider),
-          Effect.provide(instrumented),
-          Effect.scoped,
-        ),
-    );
-    await Effect.runPromise(
-      Deferred.await(stopped).pipe(Effect.timeout('1 second')),
-    );
-
-    expect(result.text).toBe('after watcher failure');
-    expect(calls.count).toBe(1);
-  });
-
-  it('scopes the change-feed watcher to the provider stream', async () => {
-    const scripted = model();
-
-    await Effect.runPromise(
+  it.live(
+    'keeps watcher read failures typed and tears the watcher down',
+    () =>
       Effect.gen(function* () {
+        const readFailed = yield* Deferred.make<void>();
         const stopped = yield* Deferred.make<void>();
+        let failNextSignalRead = true;
         const instrumented = Layer.effect(
           LogStore.Service,
           Effect.map(LogStore.Service, (store) =>
             LogStore.Service.of({
               ...store,
+              read: (path, options) =>
+                path ===
+                  AgentSignals.pathFor(
+                    LogVocabulary.ConversationId.make(CONVERSATION),
+                  ) && failNextSignalRead
+                  ? Effect.sync(() => {
+                      failNextSignalRead = false;
+                    }).pipe(
+                      Effect.andThen(Deferred.succeed(readFailed, undefined)),
+                      Effect.andThen(
+                        Effect.fail(
+                          new LogStore.LogStoreError({
+                            path,
+                            operation: 'read',
+                            reason: 'storage',
+                            detail: 'injected watcher read failure',
+                          }),
+                        ),
+                      ),
+                    )
+                  : store.read(path, options),
               changes: (path) =>
                 store
                   .changes(path)
@@ -725,15 +712,70 @@ describe('cancelling', () => {
             }),
           ),
         ).pipe(Layer.provide(LogStoreMemory.layer));
+        const calls = { count: 0 };
+        const waitingProvider = Layer.effect(
+          LanguageModel.LanguageModel,
+          LanguageModel.make({
+            generateText: () =>
+              Effect.succeed<Response.PartEncoded[]>([finish()]),
+            streamText: () =>
+              Stream.unwrap(
+                Deferred.await(readFailed).pipe(
+                  Effect.tap(() =>
+                    Effect.sync(() => {
+                      calls.count += 1;
+                    }),
+                  ),
+                  Effect.as(Stream.fromIterable(says('after watcher failure'))),
+                ),
+              ),
+          }),
+        );
 
-        yield* agent
+        const result = yield* agent
           .recordingTo(CONVERSATION)
           .run('hi')
-          .pipe(Effect.provide(scripted.layer), Effect.provide(instrumented));
-        yield* Deferred.await(stopped).pipe(Effect.timeout('1 second'));
-      }).pipe(Effect.scoped),
-    );
-  });
+          .pipe(Effect.provide(waitingProvider), Effect.provide(instrumented));
+        yield* Deferred.await(stopped);
+
+        expect(result.text).toBe('after watcher failure');
+        expect(calls.count).toBe(1);
+      }),
+    2_000,
+  );
+
+  it.live(
+    'scopes the change-feed watcher to the provider stream',
+    () =>
+      Effect.gen(function* () {
+        const scripted = model();
+
+        yield* Effect.gen(function* () {
+          const stopped = yield* Deferred.make<void>();
+          const instrumented = Layer.effect(
+            LogStore.Service,
+            Effect.map(LogStore.Service, (store) =>
+              LogStore.Service.of({
+                ...store,
+                changes: (path) =>
+                  store
+                    .changes(path)
+                    .pipe(
+                      Stream.ensuring(Deferred.succeed(stopped, undefined)),
+                    ),
+              }),
+            ),
+          ).pipe(Layer.provide(LogStoreMemory.layer));
+
+          yield* agent
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.provide(scripted.layer), Effect.provide(instrumented));
+          yield* Deferred.await(stopped);
+        });
+      }),
+    2_000,
+  );
 });
 
 // Everything above sends its signal before the run exists, which is the easy
@@ -851,101 +893,64 @@ const signallingAgent = (sendOn: ReadonlyMap<number, AgentSignals.Signal>) => {
 };
 
 describe('a signal that arrives while the run is in flight', () => {
-  it('is delivered at the next turn boundary, not only at the first', async () => {
-    const scripted = workThenTalk(2);
+  it.live('is delivered at the next turn boundary, not only at the first', () =>
+    Effect.gen(function* () {
+      const scripted = workThenTalk(2);
 
-    const written = await run(
-      Effect.gen(function* () {
-        yield* signallingAgent(
-          new Map([
-            [
-              2,
-              {
-                kind: 'steer',
-                text: 'also check the invoice',
-                source: 'operator',
-              } satisfies AgentSignals.Signal,
-            ],
-          ]),
-        )
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* signallingAgent(
+            new Map([
+              [
+                2,
+                {
+                  kind: 'steer',
+                  text: 'also check the invoice',
+                  source: 'operator',
+                } satisfies AgentSignals.Signal,
+              ],
+            ]),
+          )
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
 
-        return yield* readAll();
-      }),
-      scripted,
-    );
-
-    // Turn 1's boundary drained a signal stream that did not exist yet and
-    // survived it; turn 2's tool sent one; turn 3 is where it lands.
-    expect(scripted.prompts).toHaveLength(3);
-    expect(occurrences(scripted.prompts[0]!, 'also check the invoice')).toBe(0);
-    expect(occurrences(scripted.prompts[1]!, 'also check the invoice')).toBe(0);
-    expect(occurrences(scripted.prompts[2]!, 'also check the invoice')).toBe(1);
-
-    expect(received(written)).toMatchObject([
-      { kind: 'steer', text: 'also check the invoice', step: 2 },
-    ]);
-  });
-
-  it('ends the run at the boundary when it is a cancel', async () => {
-    const scripted = workThenTalk(4);
-
-    const result = await run(
-      signallingAgent(
-        new Map([
-          [
-            1,
-            {
-              kind: 'cancel',
-              text: 'user closed the tab',
-              source: 'ui',
-            } satisfies AgentSignals.Signal,
-          ],
-        ]),
-      )
-        .recordingTo(CONVERSATION)
-        .run('hi')
-        .pipe(Effect.orDie),
-      scripted,
-    );
-
-    // The control is in the turn script: this model asks for a tool on the
-    // first four turns, so the stop condition cannot fire at step 1 and the
-    // step ceiling is 6. One step means the cancel ended it.
-    expect(result.steps).toBe(1);
-    expect(scripted.prompts).toHaveLength(1);
-  });
-
-  it('preempts a stalled provider after dispatch commits and its outcome is durable', async () => {
-    const scripted: Model = {
-      prompts: [],
-      layer: Layer.effect(
-        LanguageModel.LanguageModel,
-        LanguageModel.make({
-          generateText: () =>
-            Effect.succeed<Response.PartEncoded[]>([finish()]),
-          streamText: (options) => {
-            scripted.prompts.push(JSON.stringify(options.prompt));
-            return Stream.concat(
-              Stream.make(CALL('call-1', 'work')),
-              Stream.never,
-            );
-          },
+          return yield* readAll();
         }),
-      ),
-    };
+        scripted,
+      );
 
-    const observed = await run(
-      Effect.gen(function* () {
-        const result = yield* signallingAgent(
+      // Turn 1's boundary drained a signal stream that did not exist yet and
+      // survived it; turn 2's tool sent one; turn 3 is where it lands.
+      expect(scripted.prompts).toHaveLength(3);
+      expect(occurrences(scripted.prompts[0]!, 'also check the invoice')).toBe(
+        0,
+      );
+      expect(occurrences(scripted.prompts[1]!, 'also check the invoice')).toBe(
+        0,
+      );
+      expect(occurrences(scripted.prompts[2]!, 'also check the invoice')).toBe(
+        1,
+      );
+
+      expect(received(written)).toMatchObject([
+        { kind: 'steer', text: 'also check the invoice', step: 2 },
+      ]);
+    }),
+  );
+
+  it.effect('ends the run at the boundary when it is a cancel', () =>
+    Effect.gen(function* () {
+      const scripted = workThenTalk(4);
+
+      const result = yield* run(
+        signallingAgent(
           new Map([
             [
               1,
               {
                 kind: 'cancel',
-                text: 'stop after work',
+                text: 'user closed the tab',
                 source: 'ui',
               } satisfies AgentSignals.Signal,
             ],
@@ -953,147 +958,208 @@ describe('a signal that arrives while the run is in flight', () => {
         )
           .recordingTo(CONVERSATION)
           .run('hi')
-          .pipe(Effect.timeout('2 seconds'));
-        return { result, records: yield* readAll() };
+          .pipe(Effect.orDie),
+        scripted,
+      );
+
+      // The control is in the turn script: this model asks for a tool on the
+      // first four turns, so the stop condition cannot fire at step 1 and the
+      // step ceiling is 6. One step means the cancel ended it.
+      expect(result.steps).toBe(1);
+      expect(scripted.prompts).toHaveLength(1);
+    }),
+  );
+
+  it.effect(
+    'preempts a stalled provider after dispatch commits and its outcome is durable',
+    () =>
+      Effect.gen(function* () {
+        const scripted: Model = {
+          prompts: [],
+          layer: Layer.effect(
+            LanguageModel.LanguageModel,
+            LanguageModel.make({
+              generateText: () =>
+                Effect.succeed<Response.PartEncoded[]>([finish()]),
+              streamText: (options) => {
+                scripted.prompts.push(JSON.stringify(options.prompt));
+                return Stream.concat(
+                  Stream.make(CALL('call-1', 'work')),
+                  Stream.never,
+                );
+              },
+            }),
+          ),
+        };
+
+        const observed = yield* run(
+          Effect.gen(function* () {
+            const result = yield* signallingAgent(
+              new Map([
+                [
+                  1,
+                  {
+                    kind: 'cancel',
+                    text: 'stop after work',
+                    source: 'ui',
+                  } satisfies AgentSignals.Signal,
+                ],
+              ]),
+            )
+              .recordingTo(CONVERSATION)
+              .run('hi');
+            return { result, records: yield* readAll() };
+          }),
+          scripted,
+        );
+
+        expect(observed.result.steps).toBe(1);
+        const tags = observed.records.map(({ record }) => record._tag);
+        expect(tags.indexOf('ToolOutcome')).toBeLessThan(
+          tags.indexOf('SignalReceived'),
+        );
+        expect(settlement(observed.records)).toMatchObject([
+          { outcome: 'cancelled' },
+        ]);
       }),
-      scripted,
-    );
+    2_000,
+  );
 
-    expect(observed.result.steps).toBe(1);
-    const tags = observed.records.map(({ record }) => record._tag);
-    expect(tags.indexOf('ToolOutcome')).toBeLessThan(
-      tags.indexOf('SignalReceived'),
-    );
-    expect(settlement(observed.records)).toMatchObject([
-      { outcome: 'cancelled' },
-    ]);
-  });
+  it.effect('leaves the run alone when nothing is sent mid-flight', () =>
+    Effect.gen(function* () {
+      const scripted = workThenTalk(4);
 
-  it('leaves the run alone when nothing is sent mid-flight', async () => {
-    const scripted = workThenTalk(4);
+      const result = yield* run(
+        signallingAgent(new Map())
+          .recordingTo(CONVERSATION)
+          .run('hi')
+          .pipe(Effect.orDie),
+        scripted,
+      );
 
-    const result = await run(
-      signallingAgent(new Map())
-        .recordingTo(CONVERSATION)
-        .run('hi')
-        .pipe(Effect.orDie),
-      scripted,
-    );
-
-    // The other half of the control above: four tool turns then an answer, so
-    // an unsignalled run of this agent takes five steps.
-    expect(result.steps).toBe(5);
-  });
+      // The other half of the control above: four tool turns then an answer, so
+      // an unsignalled run of this agent takes five steps.
+      expect(result.steps).toBe(5);
+    }),
+  );
 
   // The cursor is per-run state advanced by each drain. Not advancing it — or
   // advancing it from the wrong page — re-delivers a steer the agent has
   // already acted on, at every remaining boundary of the same run.
-  it('advances its cursor within one run, so no steer is taken twice', async () => {
-    const scripted = workThenTalk(3);
-
-    const written = await run(
+  it.effect(
+    'advances its cursor within one run, so no steer is taken twice',
+    () =>
       Effect.gen(function* () {
-        yield* signallingAgent(
-          new Map([
-            [
-              1,
-              {
-                kind: 'steer',
-                text: 'first instruction',
-                source: 'operator',
-              } satisfies AgentSignals.Signal,
-            ],
-            [
-              3,
-              {
-                kind: 'steer',
-                text: 'second instruction',
-                source: 'operator',
-              } satisfies AgentSignals.Signal,
-            ],
-          ]),
-        )
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
+        const scripted = workThenTalk(3);
 
-        return yield* readAll();
+        const written = yield* run(
+          Effect.gen(function* () {
+            yield* signallingAgent(
+              new Map([
+                [
+                  1,
+                  {
+                    kind: 'steer',
+                    text: 'first instruction',
+                    source: 'operator',
+                  } satisfies AgentSignals.Signal,
+                ],
+                [
+                  3,
+                  {
+                    kind: 'steer',
+                    text: 'second instruction',
+                    source: 'operator',
+                  } satisfies AgentSignals.Signal,
+                ],
+              ]),
+            )
+              .recordingTo(CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+
+            return yield* readAll();
+          }),
+          scripted,
+        );
+
+        expect(received(written).map((record) => record.text)).toEqual([
+          'first instruction',
+          'second instruction',
+        ]);
+
+        // Four turns: tool, tool, tool, answer. Each instruction reaches the turn
+        // after it was sent and appears exactly once thereafter — a second copy is
+        // what a cursor stuck at its starting offset would produce.
+        expect(scripted.prompts).toHaveLength(4);
+        expect(occurrences(scripted.prompts[0]!, 'first instruction')).toBe(0);
+        expect(occurrences(scripted.prompts[1]!, 'first instruction')).toBe(1);
+        expect(occurrences(scripted.prompts[2]!, 'first instruction')).toBe(1);
+        expect(occurrences(scripted.prompts[3]!, 'first instruction')).toBe(1);
+        expect(occurrences(scripted.prompts[3]!, 'second instruction')).toBe(1);
       }),
-      scripted,
-    );
-
-    expect(received(written).map((record) => record.text)).toEqual([
-      'first instruction',
-      'second instruction',
-    ]);
-
-    // Four turns: tool, tool, tool, answer. Each instruction reaches the turn
-    // after it was sent and appears exactly once thereafter — a second copy is
-    // what a cursor stuck at its starting offset would produce.
-    expect(scripted.prompts).toHaveLength(4);
-    expect(occurrences(scripted.prompts[0]!, 'first instruction')).toBe(0);
-    expect(occurrences(scripted.prompts[1]!, 'first instruction')).toBe(1);
-    expect(occurrences(scripted.prompts[2]!, 'first instruction')).toBe(1);
-    expect(occurrences(scripted.prompts[3]!, 'first instruction')).toBe(1);
-    expect(occurrences(scripted.prompts[3]!, 'second instruction')).toBe(1);
-  });
+  );
 
   // A run that took a steer records how far it drained. The next run has to
   // start from there and no earlier, or the instruction is injected a second
   // time into a conversation that already followed it.
-  it('does not re-deliver a mid-run steer to the run after it', async () => {
-    const scripted = workThenTalk(1);
+  it.effect('does not re-deliver a mid-run steer to the run after it', () =>
+    Effect.gen(function* () {
+      const scripted = workThenTalk(1);
 
-    const written = await run(
-      Effect.gen(function* () {
-        const sending = signallingAgent(
-          new Map([
-            [
-              1,
-              {
-                kind: 'steer',
-                text: 'mid-run instruction',
-                source: 'operator',
-              } satisfies AgentSignals.Signal,
-            ],
-          ]),
-        );
+      const written = yield* run(
+        Effect.gen(function* () {
+          const sending = signallingAgent(
+            new Map([
+              [
+                1,
+                {
+                  kind: 'steer',
+                  text: 'mid-run instruction',
+                  source: 'operator',
+                } satisfies AgentSignals.Signal,
+              ],
+            ]),
+          );
 
-        yield* sending.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        yield* sending
-          .recordingTo(CONVERSATION)
-          .run('again')
-          .pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-      scripted,
-    );
+          yield* sending.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* sending
+            .recordingTo(CONVERSATION)
+            .run('again')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+        scripted,
+      );
 
-    expect(received(written)).toHaveLength(1);
-  });
+      expect(received(written)).toHaveLength(1);
+    }),
+  );
 });
 
 describe('an agent that is not recording', () => {
-  it('has no conversation to signal, and is unaffected by one', async () => {
-    const scripted = model();
+  it.effect('has no conversation to signal, and is unaffected by one', () =>
+    Effect.gen(function* () {
+      const scripted = model();
 
-    const result = await run(
-      Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'never mind',
-          source: 'ui',
-        }).pipe(Effect.orDie);
+      const result = yield* run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'cancel',
+            text: 'never mind',
+            source: 'ui',
+          }).pipe(Effect.orDie);
 
-        return yield* agent.run('hi').pipe(Effect.orDie);
-      }),
-      scripted,
-    );
+          return yield* agent.run('hi').pipe(Effect.orDie);
+        }),
+        scripted,
+      );
 
-    // Signals are addressed to a conversation, and a run only has one when it
-    // is recording. This is a real limit, not an oversight: without an
-    // identity there is nothing for a sender to address.
-    expect(result.text).toBe('turn 1');
-    expect(scripted.prompts).toHaveLength(1);
-  });
+      // Signals are addressed to a conversation, and a run only has one when it
+      // is recording. This is a real limit, not an oversight: without an
+      // identity there is nothing for a sender to address.
+      expect(result.text).toBe('turn 1');
+      expect(scripted.prompts).toHaveLength(1);
+    }),
+  );
 });

@@ -1,6 +1,7 @@
 import { Effect, Schema } from 'effect';
 
 import { LogOffset } from './offset.js';
+import { LogVocabulary } from './vocabulary.js';
 
 /** The conversation record format understood by this Vesper release. */
 export const FORMAT_VERSION = 1;
@@ -56,7 +57,7 @@ const ResumeState = Schema.Struct({
   /** Optional only so legacy records decode and can be rejected deliberately. */
   formatVersion: Schema.optional(Schema.Number),
   agent: Schema.optional(Schema.String),
-  agentRevision: Schema.optional(Schema.String),
+  agentRevision: Schema.optional(LogVocabulary.AgentRevision),
   usage: Usage,
   signalCursor: LogOffset.Offset,
   completed: Schema.optional(CompletedValue),
@@ -100,7 +101,7 @@ export const Record = Schema.TaggedUnion({
     agent: Schema.String,
     /** Optional only so legacy records decode and can be rejected deliberately. */
     formatVersion: Schema.optional(Schema.Number),
-    agentRevision: Schema.optional(Schema.String),
+    agentRevision: Schema.optional(LogVocabulary.AgentRevision),
     /** Encoded `Prompt.RawInput`, held opaque. */
     prompt: Schema.Unknown,
   },
@@ -115,7 +116,7 @@ export const Record = Schema.TaggedUnion({
   ToolCall: {
     step: Schema.Number,
     /** Provider-assigned call id, unique within the conversation. */
-    id: Schema.String,
+    id: LogVocabulary.ToolCallId,
     name: Schema.String,
     params: Schema.Unknown,
   },
@@ -129,7 +130,7 @@ export const Record = Schema.TaggedUnion({
    */
   ToolStarted: {
     /** Provider-assigned call id, unique within the conversation. */
-    id: Schema.String,
+    id: LogVocabulary.ToolCallId,
     name: Schema.String,
   },
   /**
@@ -142,7 +143,7 @@ export const Record = Schema.TaggedUnion({
    */
   ToolOutcome: {
     step: Schema.Number,
-    id: Schema.String,
+    id: LogVocabulary.ToolCallId,
     name: Schema.String,
     outcome: Schema.Literals(['success', 'failure']),
     /**
@@ -185,7 +186,7 @@ export const Record = Schema.TaggedUnion({
     /** Optional only so legacy records decode and can be rejected deliberately. */
     formatVersion: Schema.optional(Schema.Number),
     agent: Schema.optional(Schema.String),
-    agentRevision: Schema.optional(Schema.String),
+    agentRevision: Schema.optional(LogVocabulary.AgentRevision),
     step: Schema.Number,
     /** What the summarized history was replaced by. */
     summary: Schema.String,
@@ -274,11 +275,11 @@ export const Record = Schema.TaggedUnion({
    */
   ChildSession: {
     /** The delegation tool call this child answers. Matches `ToolCall.id`. */
-    toolCallId: Schema.String,
+    toolCallId: LogVocabulary.ToolCallId,
     /** The child agent's name. */
     agent: Schema.String,
-    parentConversationId: Schema.String,
-    childConversationId: Schema.String,
+    parentConversationId: LogVocabulary.ConversationId,
+    childConversationId: LogVocabulary.ConversationId,
     /** The child's delegation depth; 1 for a top-level agent's child. */
     depth: Schema.Number,
   },
@@ -365,7 +366,7 @@ export type RecordOf<Tag extends Record['_tag']> = Extract<
  * different value.
  */
 export const Entry = Schema.Struct({
-  conversationId: Schema.String,
+  conversationId: LogVocabulary.ConversationId,
   /** Epoch milliseconds, from the producer's clock. */
   timestamp: Schema.Number,
   record: Record,
@@ -375,7 +376,7 @@ export interface Entry extends Schema.Struct.Type<typeof Entry.fields> {}
 /** An entry once the store has given it a position. */
 export const Envelope = Schema.Struct({
   offset: LogOffset.Offset,
-  conversationId: Schema.String,
+  conversationId: LogVocabulary.ConversationId,
   timestamp: Schema.Number,
   record: Record,
 });

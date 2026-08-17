@@ -1,6 +1,6 @@
 import * as NodeServices from '@effect/platform-node/NodeServices';
+import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { describe, expect, it } from 'vitest';
 
 import { AttachmentStore } from '../src/attachment-store.js';
 import { AttachmentRef } from '../src/ref.js';
@@ -16,48 +16,48 @@ import { AttachmentRef } from '../src/ref.js';
 // record, a row whose `byte_length` column was written by a different version
 // — and the check that catches it has no other test.
 
-const run = <A, E>(effect: Effect.Effect<A, E, NodeServices.NodeServices>) =>
-  Effect.runPromise(Effect.provide(Effect.result(effect), NodeServices.layer));
-
 const bytesOf = (text: string): Uint8Array => new TextEncoder().encode(text);
 
 describe('AttachmentStore.verified', () => {
-  it('returns the bytes when they are the bytes the reference addresses', async () => {
-    const outcome = await run(
+  it.effect(
+    'returns the bytes when they are the bytes the reference addresses',
+    () =>
       Effect.gen(function* () {
         const bytes = bytesOf('the real document');
         const ref = yield* AttachmentRef.fromBytes(bytes, {
           mediaType: 'text/plain',
         });
-        return yield* AttachmentStore.verified(ref, bytes);
-      }),
-    );
+        const outcome = yield* AttachmentStore.verified(ref, bytes).pipe(
+          Effect.result,
+        );
 
-    expect(outcome._tag).toBe('Success');
-    if (outcome._tag === 'Success') {
-      expect(new TextDecoder().decode(outcome.success)).toBe(
-        'the real document',
-      );
-    }
-  });
+        expect(outcome._tag).toBe('Success');
+        if (outcome._tag === 'Success') {
+          expect(new TextDecoder().decode(outcome.success)).toBe(
+            'the real document',
+          );
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
-  it('fails when the digest does not match', async () => {
-    const outcome = await run(
-      Effect.gen(function* () {
-        const ref = yield* AttachmentRef.fromBytes(bytesOf('the original'), {
-          mediaType: 'text/plain',
-        });
-        return yield* AttachmentStore.verified(ref, bytesOf('a substitute'));
-      }),
-    );
+  it.effect('fails when the digest does not match', () =>
+    Effect.gen(function* () {
+      const ref = yield* AttachmentRef.fromBytes(bytesOf('the original'), {
+        mediaType: 'text/plain',
+      });
+      const outcome = yield* AttachmentStore.verified(
+        ref,
+        bytesOf('a substitute'),
+      ).pipe(Effect.result);
 
-    expect(outcome._tag).toBe('Failure');
-    if (outcome._tag === 'Failure') {
-      expect(outcome.failure).toBeInstanceOf(
-        AttachmentStore.AttachmentIntegrityError,
-      );
-    }
-  });
+      expect(outcome._tag).toBe('Failure');
+      if (outcome._tag === 'Failure') {
+        expect(outcome.failure).toBeInstanceOf(
+          AttachmentStore.AttachmentIntegrityError,
+        );
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   // The length half of the check, which no backend-driven test can reach. A
   // reference whose declared length disagrees with bytes that hash correctly
@@ -65,8 +65,9 @@ describe('AttachmentStore.verified', () => {
   // its payload would mean a quota check, a streaming decision, or an
   // "is this small enough to inline" test was made against a number that is
   // not the length of what was returned.
-  it('fails when the digest matches but the declared length does not', async () => {
-    const outcome = await run(
+  it.effect(
+    'fails when the digest matches but the declared length does not',
+    () =>
       Effect.gen(function* () {
         const bytes = bytesOf('the real document');
         const measured = yield* AttachmentRef.fromBytes(bytes, {
@@ -78,19 +79,20 @@ describe('AttachmentStore.verified', () => {
           ...measured,
           byteLength: measured.byteLength + 1,
         };
-        return yield* AttachmentStore.verified(claimed, bytes);
-      }),
-    );
+        const outcome = yield* AttachmentStore.verified(claimed, bytes).pipe(
+          Effect.result,
+        );
 
-    expect(outcome._tag).toBe('Failure');
-    if (outcome._tag === 'Failure') {
-      expect(outcome.failure).toBeInstanceOf(
-        AttachmentStore.AttachmentIntegrityError,
-      );
-      // The observed length, not the claimed one: the two shapes of corruption
-      // are told apart by exactly this field, and reporting the reference's
-      // own number back would make every mismatch look like bit rot.
-      expect(outcome.failure).toMatchObject({ actualByteLength: 17 });
-    }
-  });
+        expect(outcome._tag).toBe('Failure');
+        if (outcome._tag === 'Failure') {
+          expect(outcome.failure).toBeInstanceOf(
+            AttachmentStore.AttachmentIntegrityError,
+          );
+          // The observed length, not the claimed one: the two shapes of corruption
+          // are told apart by exactly this field, and reporting the reference's
+          // own number back would make every mismatch look like bit rot.
+          expect(outcome.failure).toMatchObject({ actualByteLength: 17 });
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

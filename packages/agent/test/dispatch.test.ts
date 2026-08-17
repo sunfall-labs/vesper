@@ -1,6 +1,8 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { describe, expect, it, test } from '@effect/vitest';
 import { Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
@@ -8,7 +10,6 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { Interception } from '../src/interception.js';
@@ -38,7 +39,8 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
-const CALL_ID = 'call-1';
+const CALL_ID = LogVocabulary.ToolCallId.make('call-1');
+const quiet = test.extend({ disableErrorReporting: true });
 
 const callingTurn: Response.StreamPartEncoded[] = [
   {
@@ -106,7 +108,7 @@ const lookup = Tool.make('lookup', {
   success: Schema.Struct({ status: Schema.String, at: Schema.DateFromString }),
 });
 
-const CONVERSATION = 'dispatch-conversation';
+const CONVERSATION = LogVocabulary.ConversationId.make('dispatch-conversation');
 const PATH = AgentLog.pathFor(CONVERSATION);
 const WHEN = new Date('2026-01-02T03:04:05.000Z');
 /** Deliberately not `WHEN`: a served result must be distinguishable. */
@@ -129,15 +131,15 @@ const agentWith = (ran: { count: number }) =>
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   prompts: string[] = [],
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(scripted(prompts)),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+): Effect.Effect<A> =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(scripted(prompts)),
+    Effect.provide(LogStoreMemory.layer),
+    Effect.scoped,
   );
+
+const runQuiet = <A>(effect: Effect.Effect<A>) => Effect.exit(effect);
 
 /**
  * Write a previous run's records straight into the conversation.
@@ -151,7 +153,9 @@ const seed = Effect.fn('test.seed')(function* (
 ) {
   const store = yield* LogStore.Service;
   yield* store.create(PATH, CONVERSATION).pipe(Effect.orDie);
-  const claim = yield* store.acquire(PATH, 'previous-run').pipe(Effect.orDie);
+  const claim = yield* store
+    .acquire(PATH, LogVocabulary.ProducerId.make('previous-run'))
+    .pipe(Effect.orDie);
   yield* store
     .append({
       path: PATH,
@@ -171,7 +175,7 @@ const started: ConversationRecord.Record = {
   _tag: 'RunStarted',
   agent: 'test',
   formatVersion: 1,
-  agentRevision: '1',
+  agentRevision: LogVocabulary.AgentRevision.make('1'),
   prompt: [],
 };
 
@@ -218,265 +222,286 @@ const readAll = Effect.fn('test.readAll')(function* () {
 });
 
 describe('responsive cancellation arbitration', () => {
-  it('prevents dispatch when cancellation wins first', async () => {
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const arbitration = yield* ToolDispatch.makeTurnArbitration;
-        yield* arbitration.cancel;
-        return {
-          dispatched: yield* arbitration.dispatchCommits,
-        };
-      }),
-    );
+  it.effect('prevents dispatch when cancellation wins first', () =>
+    Effect.gen(function* () {
+      const arbitration = yield* ToolDispatch.makeTurnArbitration;
+      yield* arbitration.cancel;
+      const result = {
+        dispatched: yield* arbitration.dispatchCommits,
+      };
 
-    expect(result).toEqual({ dispatched: false });
-  });
+      expect(result).toEqual({ dispatched: false });
+    }),
+  );
 
-  it('defers cancellation when dispatch commits first', async () => {
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const arbitration = yield* ToolDispatch.makeTurnArbitration;
-        const dispatched = yield* arbitration.dispatchCommits;
-        const cancelled = yield* Ref.make(false);
-        const cancelling = yield* Effect.forkChild(
-          arbitration.cancel.pipe(Effect.andThen(Ref.set(cancelled, true))),
-        );
-        yield* Effect.yieldNow;
-        const beforeSettlement = yield* Ref.get(cancelled);
-        yield* arbitration.settled;
-        yield* Fiber.join(cancelling);
-        return {
-          dispatched,
-          beforeSettlement,
-        };
-      }),
-    );
+  it.effect('defers cancellation when dispatch commits first', () =>
+    Effect.gen(function* () {
+      const arbitration = yield* ToolDispatch.makeTurnArbitration;
+      const dispatched = yield* arbitration.dispatchCommits;
+      const cancelled = yield* Ref.make(false);
+      const cancelling = yield* Effect.forkChild(
+        arbitration.cancel.pipe(Effect.andThen(Ref.set(cancelled, true))),
+      );
+      yield* Effect.yieldNow;
+      const beforeSettlement = yield* Ref.get(cancelled);
+      yield* arbitration.settled;
+      yield* Fiber.join(cancelling);
+      const result = {
+        dispatched,
+        beforeSettlement,
+      };
 
-    expect(result.dispatched).toBe(true);
-    expect(result.beforeSettlement).toBe(false);
-  });
+      expect(result.dispatched).toBe(true);
+      expect(result.beforeSettlement).toBe(false);
+    }),
+  );
 });
 
 describe('recovering a tool call from the log', () => {
-  it('does not re-run a tool an unsettled run already settled', async () => {
-    const ran = { count: 0 };
+  it.effect('does not re-run a tool an unsettled run already settled', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
 
-    const written = await run(
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, outcome]);
+          yield* agentWith(ran)
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
+
+      expect(ran.count).toBe(0);
+      // The new run recorded the outcome it was served, not one it produced.
+      expect(outcomesOf(written).at(-1)).toMatchObject({
+        id: CALL_ID,
+        result: { status: 'from-log' },
+      });
+    }),
+  );
+
+  it.effect('shows the model the recovered result, not a fresh one', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+      const prompts: string[] = [];
+
+      yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, outcome]);
+          yield* agentWith(ran)
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+        }),
+        prompts,
+      );
+
+      // The second turn's prompt carries the tool result message. It is the
+      // encoded result that lands there, which is why the log stores that form.
+      expect(prompts[1]).toContain('from-log');
+      expect(prompts[1]).not.toContain('fresh:');
+    }),
+  );
+
+  it.effect('re-runs the tool once the earlier run has settled', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, outcome, settledRun]);
+          yield* agentWith(ran)
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
+
+      // A conversation whose last run finished has nothing to recover. Serving
+      // its outcomes to a later run would answer a *new* question with an old
+      // answer, which is worse than running the tool twice.
+      expect(ran.count).toBe(1);
+      expect(outcomesOf(written).at(-1)).toMatchObject({
+        result: { status: 'fresh:42' },
+      });
+    }),
+  );
+
+  it.effect('dispatches normally on a conversation with no history', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agentWith(ran)
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
+
+      expect(ran.count).toBe(1);
+      expect(outcomesOf(written)).toHaveLength(1);
+    }),
+  );
+
+  it.effect(
+    'will not serve an outcome recorded under a different tool name',
+    () =>
       Effect.gen(function* () {
-        yield* seed([started, called, outcome]);
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-        return yield* readAll();
+        const ran = { count: 0 };
+
+        yield* run(
+          Effect.gen(function* () {
+            yield* seed([
+              started,
+              called,
+              { ...outcome, _tag: 'ToolOutcome', name: 'something_else' },
+            ]);
+            yield* agentWith(ran)
+              .recordingTo(CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+          }),
+        );
+
+        expect(ran.count).toBe(1);
       }),
-    );
-
-    expect(ran.count).toBe(0);
-    // The new run recorded the outcome it was served, not one it produced.
-    expect(outcomesOf(written).at(-1)).toMatchObject({
-      id: CALL_ID,
-      result: { status: 'from-log' },
-    });
-  });
-
-  it('shows the model the recovered result, not a fresh one', async () => {
-    const ran = { count: 0 };
-    const prompts: string[] = [];
-
-    await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, outcome]);
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-      }),
-      prompts,
-    );
-
-    // The second turn's prompt carries the tool result message. It is the
-    // encoded result that lands there, which is why the log stores that form.
-    expect(prompts[1]).toContain('from-log');
-    expect(prompts[1]).not.toContain('fresh:');
-  });
-
-  it('re-runs the tool once the earlier run has settled', async () => {
-    const ran = { count: 0 };
-
-    const written = await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, outcome, settledRun]);
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
-
-    // A conversation whose last run finished has nothing to recover. Serving
-    // its outcomes to a later run would answer a *new* question with an old
-    // answer, which is worse than running the tool twice.
-    expect(ran.count).toBe(1);
-    expect(outcomesOf(written).at(-1)).toMatchObject({
-      result: { status: 'fresh:42' },
-    });
-  });
-
-  it('dispatches normally on a conversation with no history', async () => {
-    const ran = { count: 0 };
-
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
-
-    expect(ran.count).toBe(1);
-    expect(outcomesOf(written)).toHaveLength(1);
-  });
-
-  it('will not serve an outcome recorded under a different tool name', async () => {
-    const ran = { count: 0 };
-
-    await run(
-      Effect.gen(function* () {
-        yield* seed([
-          started,
-          called,
-          { ...outcome, _tag: 'ToolOutcome', name: 'something_else' },
-        ]);
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-      }),
-    );
-
-    expect(ran.count).toBe(1);
-  });
+  );
 });
 
 describe('recovering indeterminate tool execution', () => {
-  it('lets a queued cancel win before an indeterminate retry has side effects', async () => {
-    const ran = { count: 0 };
-    const prompts: string[] = [];
-
-    const result = await run(
+  it.effect(
+    'lets a queued cancel win before an indeterminate retry has side effects',
+    () =>
       Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'cancel',
-          text: 'stop before retry',
-          source: 'test',
-        });
-        return yield* agentWith(ran)
-          .intercepting({
-            onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
-          })
-          .resume(CONVERSATION, 'hi');
+        const ran = { count: 0 };
+        const prompts: string[] = [];
+
+        const result = yield* run(
+          Effect.gen(function* () {
+            yield* seed([started, called, toolStarted]);
+            yield* AgentSignals.send(CONVERSATION, {
+              kind: 'cancel',
+              text: 'stop before retry',
+              source: 'test',
+            });
+            return yield* agentWith(ran)
+              .intercepting({
+                onIndeterminateToolCall: () =>
+                  Effect.succeed(Interception.retry),
+              })
+              .resume(CONVERSATION, 'hi');
+          }),
+          prompts,
+        );
+
+        expect(result.outcome).toBe('cancelled');
+        expect(ran.count).toBe(0);
+        expect(prompts).toEqual([]);
       }),
-      prompts,
-    );
+  );
 
-    expect(result.outcome).toBe('cancelled');
-    expect(ran.count).toBe(0);
-    expect(prompts).toEqual([]);
-  });
-
-  it('lets a cancel arriving during recovery win before dispatch commits', async () => {
-    const ran = { count: 0 };
-
-    const result = await run(
+  it.effect(
+    'lets a cancel arriving during recovery win before dispatch commits',
+    () =>
       Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        return yield* agentWith(ran)
-          .intercepting({
-            onIndeterminateToolCall: () =>
-              AgentSignals.send(CONVERSATION, {
-                kind: 'cancel',
-                text: 'stop during recovery',
-                source: 'test',
-              }).pipe(
-                Effect.orDie,
-                Effect.andThen(Effect.sleep(20)),
-                Effect.as(Interception.retry),
-              ),
-          })
-          .resume(CONVERSATION, 'hi');
+        const ran = { count: 0 };
+
+        const result = yield* run(
+          Effect.gen(function* () {
+            yield* seed([started, called, toolStarted]);
+            return yield* agentWith(ran)
+              .intercepting({
+                onIndeterminateToolCall: () =>
+                  AgentSignals.send(CONVERSATION, {
+                    kind: 'cancel',
+                    text: 'stop during recovery',
+                    source: 'test',
+                  }).pipe(
+                    Effect.orDie,
+                    Effect.andThen(Effect.sleep(20)),
+                    Effect.as(Interception.retry),
+                  ),
+              })
+              .resume(CONVERSATION, 'hi');
+          }),
+        );
+
+        expect(result.outcome).toBe('cancelled');
+        expect(ran.count).toBe(0);
       }),
-    );
+  );
 
-    expect(result.outcome).toBe('cancelled');
-    expect(ran.count).toBe(0);
-  });
+  it.live('interrupts an indeterminate retry at the root deadline', () =>
+    Effect.gen(function* () {
+      const entered = { count: 0 };
+      const hanging = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(lookup),
+        runPolicy: { wallClockMillis: 100 },
+      }).withHandlers({
+        lookup: () =>
+          Effect.sync(() => {
+            entered.count += 1;
+          }).pipe(Effect.andThen(Effect.never)),
+      });
 
-  it('interrupts an indeterminate retry at the root deadline', async () => {
-    const entered = { count: 0 };
-    const hanging = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(lookup),
-      runPolicy: { wallClockMillis: 100 },
-    }).withHandlers({
-      lookup: () =>
-        Effect.sync(() => {
-          entered.count += 1;
-        }).pipe(Effect.andThen(Effect.never)),
-    });
+      const exit = yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, toolStarted]);
+          return yield* hanging
+            .intercepting({
+              onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
+            })
+            .resume(CONVERSATION, 'hi')
+            .pipe(Effect.result);
+        }),
+      );
 
-    const exit = await run(
+      expect(exit._tag).toBe('Failure');
+      expect(String(exit)).toContain('deadline');
+      expect(entered.count).toBe(1);
+    }),
+  );
+
+  it.effect(
+    'fails before a provider can emit a different call id without a resolver',
+    () =>
       Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        return yield* hanging
-          .intercepting({
-            onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
-          })
-          .resume(CONVERSATION, 'hi')
-          .pipe(Effect.exit);
+        const calls = { count: 0 };
+        const ran = { count: 0 };
+
+        const exit = yield* Effect.gen(function* () {
+          yield* seed([started, called, toolStarted]);
+          return yield* agentWith(ran)
+            .resume(CONVERSATION, 'hi')
+            .pipe(Effect.result);
+        }).pipe(
+          Effect.provide(differentCallProvider(calls)),
+          Effect.provide(LogStoreMemory.layer),
+          Effect.scoped,
+        );
+
+        expect(exit._tag).toBe('Failure');
+        expect(calls.count).toBe(0);
+        expect(ran.count).toBe(0);
       }),
-    );
+  );
 
-    expect(exit._tag).toBe('Failure');
-    expect(String(exit)).toContain('deadline');
-    expect(entered.count).toBe(1);
-  });
+  it.effect('fails safely when ToolStarted has no original ToolCall', () =>
+    Effect.gen(function* () {
+      const calls = { count: 0 };
+      const ran = { count: 0 };
+      const resolved = { count: 0 };
 
-  it('fails before a provider can emit a different call id without a resolver', async () => {
-    const calls = { count: 0 };
-    const ran = { count: 0 };
-
-    const exit = await Effect.runPromise(
-      Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        return yield* agentWith(ran)
-          .resume(CONVERSATION, 'hi')
-          .pipe(Effect.exit);
-      }).pipe(
-        Effect.provide(differentCallProvider(calls)),
-        Effect.provide(LogStoreMemory.layer),
-        Effect.scoped,
-      ),
-    );
-
-    expect(exit._tag).toBe('Failure');
-    expect(calls.count).toBe(0);
-    expect(ran.count).toBe(0);
-  });
-
-  it('fails safely when ToolStarted has no original ToolCall', async () => {
-    const calls = { count: 0 };
-    const ran = { count: 0 };
-    const resolved = { count: 0 };
-
-    const exit = await Effect.runPromise(
-      Effect.gen(function* () {
+      const exit = yield* Effect.gen(function* () {
         yield* seed([started, toolStarted]);
         return yield* agentWith(ran)
           .intercepting({
@@ -486,385 +511,439 @@ describe('recovering indeterminate tool execution', () => {
             },
           })
           .resume(CONVERSATION, 'hi')
-          .pipe(Effect.exit);
+          .pipe(Effect.result);
       }).pipe(
         Effect.provide(differentCallProvider(calls)),
         Effect.provide(LogStoreMemory.layer),
         Effect.scoped,
-      ),
-    );
+      );
 
-    expect(exit._tag).toBe('Failure');
-    expect(String(exit)).toContain('has no matching ToolCall');
-    expect(calls.count).toBe(0);
-    expect(ran.count).toBe(0);
-    expect(resolved.count).toBe(0);
-  });
+      expect(exit._tag).toBe('Failure');
+      expect(String(exit)).toContain('has no matching ToolCall');
+      expect(calls.count).toBe(0);
+      expect(ran.count).toBe(0);
+      expect(resolved.count).toBe(0);
+    }),
+  );
 
-  it('recovers when durable ToolStarted precedes its matching ToolCall', async () => {
-    const resolved: string[] = [];
-
-    await run(
+  it.effect(
+    'recovers when durable ToolStarted precedes its matching ToolCall',
+    () =>
       Effect.gen(function* () {
-        yield* seed([started, toolStarted, called]);
-        yield* agentWith({ count: 0 })
-          .intercepting({
-            onIndeterminateToolCall: (call) => {
-              resolved.push(call.toolCallId!);
-              return Effect.succeed(
-                Interception.reconcile({
-                  status: 'confirmed',
-                  at: RECORDED.toISOString(),
-                }),
-              );
-            },
-          })
-          .resume(CONVERSATION, 'hi');
+        const resolved: string[] = [];
+
+        yield* run(
+          Effect.gen(function* () {
+            yield* seed([started, toolStarted, called]);
+            yield* agentWith({ count: 0 })
+              .intercepting({
+                onIndeterminateToolCall: (call) => {
+                  resolved.push(call.toolCallId!);
+                  return Effect.succeed(
+                    Interception.reconcile({
+                      status: 'confirmed',
+                      at: RECORDED.toISOString(),
+                    }),
+                  );
+                },
+              })
+              .resume(CONVERSATION, 'hi');
+          }),
+        );
+
+        expect(resolved).toEqual([CALL_ID]);
       }),
-    );
+  );
 
-    expect(resolved).toEqual([CALL_ID]);
-  });
+  it.effect('resolves multiple orphaned calls in original ToolCall order', () =>
+    Effect.gen(function* () {
+      const seen: string[] = [];
+      const secondCall: ConversationRecord.Record = {
+        ...called,
+        id: LogVocabulary.ToolCallId.make('call-2'),
+        params: { id: '43' },
+      };
+      const secondStart: ConversationRecord.Record = {
+        ...toolStarted,
+        id: LogVocabulary.ToolCallId.make('call-2'),
+      };
 
-  it('resolves multiple orphaned calls in original ToolCall order', async () => {
-    const seen: string[] = [];
-    const secondCall: ConversationRecord.Record = {
-      ...called,
-      id: 'call-2',
-      params: { id: '43' },
-    };
-    const secondStart: ConversationRecord.Record = {
-      ...toolStarted,
-      id: 'call-2',
-    };
-
-    await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, secondCall, secondStart, toolStarted]);
-        yield* agentWith({ count: 0 })
-          .intercepting({
-            onIndeterminateToolCall: (call) => {
-              seen.push(call.toolCallId!);
-              return Effect.succeed(
-                Interception.reconcile({
-                  status: `confirmed:${String((call.params as { id: string }).id)}`,
-                  at: RECORDED.toISOString(),
-                }),
-              );
-            },
-          })
-          .resume(CONVERSATION, 'hi');
-      }),
-    );
-
-    expect(seen).toEqual([CALL_ID, 'call-2']);
-  });
-
-  it('persists ToolStarted after dispatch commits and leaves a crashing dispatch orphaned', async () => {
-    const mutations = { count: 0 };
-    const sawStarted = { value: false };
-    const trackedLookup = Tool.make('lookup', {
-      description: 'look an order up',
-      parameters: Schema.Struct({ id: Schema.String }),
-      success: Schema.Struct({
-        status: Schema.String,
-        at: Schema.DateFromString,
-      }),
-      dependencies: [LogStore.Service],
-    });
-    const crashing = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(trackedLookup),
-    }).withHandlers({
-      lookup: () =>
+      yield* run(
         Effect.gen(function* () {
-          const records = yield* readAll();
-          sawStarted.value = records.some(
-            ({ record }) =>
-              record._tag === 'ToolStarted' && record.id === CALL_ID,
-          );
-          mutations.count += 1;
-          return yield* Effect.die(
-            new Error('process lost after dispatch commits'),
-          );
+          yield* seed([started, called, secondCall, secondStart, toolStarted]);
+          yield* agentWith({ count: 0 })
+            .intercepting({
+              onIndeterminateToolCall: (call) => {
+                seen.push(call.toolCallId!);
+                return Effect.succeed(
+                  Interception.reconcile({
+                    status: `confirmed:${String((call.params as { id: string }).id)}`,
+                    at: RECORDED.toISOString(),
+                  }),
+                );
+              },
+            })
+            .resume(CONVERSATION, 'hi');
         }),
-    });
+      );
 
-    const records = await run(
+      expect(seen).toEqual([CALL_ID, LogVocabulary.ToolCallId.make('call-2')]);
+    }),
+  );
+
+  quiet(
+    'persists ToolStarted after dispatch commits and leaves a crashing dispatch orphaned',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const mutations = { count: 0 };
+          const sawStarted = { value: false };
+          const trackedLookup = Tool.make('lookup', {
+            description: 'look an order up',
+            parameters: Schema.Struct({ id: Schema.String }),
+            success: Schema.Struct({
+              status: Schema.String,
+              at: Schema.DateFromString,
+            }),
+            dependencies: [LogStore.Service],
+          });
+          const crashing = Agent.make({
+            name: 'test',
+            revision: '1',
+            instructions: 'be terse',
+            toolkit: Toolkit.make(trackedLookup),
+          }).withHandlers({
+            lookup: () =>
+              Effect.gen(function* () {
+                const records = yield* readAll();
+                sawStarted.value = records.some(
+                  ({ record }) =>
+                    record._tag === 'ToolStarted' && record.id === CALL_ID,
+                );
+                mutations.count += 1;
+                return yield* Effect.die(
+                  new Error('process lost after dispatch commits'),
+                );
+              }),
+          });
+
+          const records = yield* run(
+            Effect.gen(function* () {
+              yield* crashing
+                .recordingTo(CONVERSATION)
+                .run('hi')
+                .pipe(Effect.result);
+              return yield* readAll();
+            }),
+          );
+
+          expect(sawStarted.value).toBe(true);
+          expect(mutations.count).toBe(1);
+          expect(
+            records.some(({ record }) => record._tag === 'ToolOutcome'),
+          ).toBe(false);
+          expect(
+            records.some(({ record }) => record._tag === 'RunSettled'),
+          ).toBe(false);
+        }),
+      ),
+  );
+
+  it.effect(
+    'does not re-run by default, even when beforeToolCall dispatches',
+    () =>
       Effect.gen(function* () {
-        yield* crashing.recordingTo(CONVERSATION).run('hi').pipe(Effect.exit);
-        return yield* readAll();
+        const ran = { count: 0 };
+
+        const result = yield* run(
+          Effect.gen(function* () {
+            yield* seed([started, called, toolStarted]);
+            const exit = yield* agentWith(ran)
+              .intercepting({
+                beforeToolCall: () => Effect.succeed(Interception.dispatch),
+              })
+              .resume(CONVERSATION, 'hi')
+              .pipe(Effect.result);
+            return { exit, records: yield* readAll() };
+          }),
+        );
+
+        expect(result.exit._tag).toBe('Failure');
+        expect(ran.count).toBe(0);
+        expect(
+          result.records.some(({ record }) => record._tag === 'RunSettled'),
+        ).toBe(false);
       }),
-    );
+  );
 
-    expect(sawStarted.value).toBe(true);
-    expect(mutations.count).toBe(1);
-    expect(records.some(({ record }) => record._tag === 'ToolOutcome')).toBe(
-      false,
-    );
-    expect(records.some(({ record }) => record._tag === 'RunSettled')).toBe(
-      false,
-    );
-  });
+  it.effect('runs only after an explicit Retry decision', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+      const resolved = { count: 0 };
+      const prompts: string[] = [];
 
-  it('does not re-run by default, even when beforeToolCall dispatches', async () => {
-    const ran = { count: 0 };
-
-    const result = await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        const exit = yield* agentWith(ran)
-          .intercepting({
-            beforeToolCall: () => Effect.succeed(Interception.dispatch),
-          })
-          .resume(CONVERSATION, 'hi')
-          .pipe(Effect.exit);
-        return { exit, records: yield* readAll() };
-      }),
-    );
-
-    expect(result.exit._tag).toBe('Failure');
-    expect(ran.count).toBe(0);
-    expect(
-      result.records.some(({ record }) => record._tag === 'RunSettled'),
-    ).toBe(false);
-  });
-
-  it('runs only after an explicit Retry decision', async () => {
-    const ran = { count: 0 };
-    const resolved = { count: 0 };
-    const prompts: string[] = [];
-
-    const records = await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        yield* agentWith(ran)
-          .intercepting({
-            onIndeterminateToolCall: (call) => {
-              resolved.count += 1;
-              expect(call).toMatchObject({
-                name: 'lookup',
-                toolCallId: CALL_ID,
-                params: { id: '42' },
-              });
-              return Effect.succeed(Interception.retry);
-            },
-          })
-          .resume(CONVERSATION, 'hi');
-        return yield* readAll();
-      }),
-      prompts,
-    );
-
-    expect(ran.count).toBe(1);
-    expect(resolved.count).toBe(1);
-    expect(prompts[0]).toContain('fresh:42');
-    expect(
-      records.filter(({ record }) => record._tag === 'ToolStarted'),
-    ).toHaveLength(2);
-    expect(records.at(-1)?.record._tag).toBe('RunSettled');
-  });
-
-  it('reconciles with an explicit Answer without dispatching', async () => {
-    const ran = { count: 0 };
-    const prompts: string[] = [];
-
-    const records = await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        yield* agentWith(ran)
-          .intercepting({
-            onIndeterminateToolCall: (call) => {
-              expect(call.toolCallId).toBe(CALL_ID);
-              expect(call.params).toEqual({ id: '42' });
-              return Effect.succeed(
-                Interception.reconcile({
-                  status: 'confirmed',
-                  at: RECORDED.toISOString(),
-                }),
-              );
-            },
-          })
-          .resume(CONVERSATION, 'hi');
-        return yield* readAll();
-      }),
-      prompts,
-    );
-
-    expect(ran.count).toBe(0);
-    expect(prompts[0]).toContain('confirmed');
-    expect(outcomesOf(records).at(-1)?.result).toMatchObject({
-      status: 'confirmed',
-    });
-    expect(records.at(-1)?.record._tag).toBe('RunSettled');
-  });
-
-  it('rejects a reconciliation answer outside the tool result schema', async () => {
-    const ran = { count: 0 };
-
-    await expect(
-      run(
+      const records = yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, toolStarted]);
           yield* agentWith(ran)
             .intercepting({
-              onIndeterminateToolCall: () =>
-                Effect.succeed(Interception.reconcile({ staleShape: true })),
+              onIndeterminateToolCall: (call) => {
+                resolved.count += 1;
+                expect(call).toMatchObject({
+                  name: 'lookup',
+                  toolCallId: CALL_ID,
+                  params: { id: '42' },
+                });
+                return Effect.succeed(Interception.retry);
+              },
             })
             .resume(CONVERSATION, 'hi');
+          return yield* readAll();
+        }),
+        prompts,
+      );
+
+      expect(ran.count).toBe(1);
+      expect(resolved.count).toBe(1);
+      expect(prompts[0]).toContain('fresh:42');
+      expect(
+        records.filter(({ record }) => record._tag === 'ToolStarted'),
+      ).toHaveLength(2);
+      expect(records.at(-1)?.record._tag).toBe('RunSettled');
+    }),
+  );
+
+  it.effect('reconciles with an explicit Answer without dispatching', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+      const prompts: string[] = [];
+
+      const records = yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, toolStarted]);
+          yield* agentWith(ran)
+            .intercepting({
+              onIndeterminateToolCall: (call) => {
+                expect(call.toolCallId).toBe(CALL_ID);
+                expect(call.params).toEqual({ id: '42' });
+                return Effect.succeed(
+                  Interception.reconcile({
+                    status: 'confirmed',
+                    at: RECORDED.toISOString(),
+                  }),
+                );
+              },
+            })
+            .resume(CONVERSATION, 'hi');
+          return yield* readAll();
+        }),
+        prompts,
+      );
+
+      expect(ran.count).toBe(0);
+      expect(prompts[0]).toContain('confirmed');
+      expect(outcomesOf(records).at(-1)?.result).toMatchObject({
+        status: 'confirmed',
+      });
+      expect(records.at(-1)?.record._tag).toBe('RunSettled');
+    }),
+  );
+
+  quiet(
+    'rejects a reconciliation answer outside the tool result schema',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const ran = { count: 0 };
+
+          const result = yield* run(
+            Effect.gen(function* () {
+              yield* seed([started, called, toolStarted]);
+              yield* agentWith(ran)
+                .intercepting({
+                  onIndeterminateToolCall: () =>
+                    Effect.succeed(
+                      Interception.reconcile({ staleShape: true }),
+                    ),
+                })
+                .resume(CONVERSATION, 'hi');
+            }),
+          ).pipe(Effect.result);
+          expect(String(result)).toContain(
+            'does not match its current result schema',
+          );
+          expect(ran.count).toBe(0);
         }),
       ),
-    ).rejects.toThrow('does not match its current result schema');
-    expect(ran.count).toBe(0);
-  });
+  );
 
-  it('keeps a crashed explicit retry indeterminate for the next resume', async () => {
-    const mutations = { count: 0 };
-    const crashing = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(lookup),
-    }).withHandlers({
-      lookup: () =>
-        Effect.sync(() => {
-          mutations.count += 1;
-          throw new Error('lost after retry mutation');
+  quiet(
+    'keeps a crashed explicit retry indeterminate for the next resume',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const mutations = { count: 0 };
+          const crashing = Agent.make({
+            name: 'test',
+            revision: '1',
+            instructions: 'be terse',
+            toolkit: Toolkit.make(lookup),
+          }).withHandlers({
+            lookup: () =>
+              Effect.sync(() => {
+                mutations.count += 1;
+                throw new Error('lost after retry mutation');
+              }),
+          });
+
+          const records = yield* run(
+            Effect.gen(function* () {
+              yield* seed([started, called, toolStarted]);
+              yield* crashing
+                .intercepting({
+                  onIndeterminateToolCall: () =>
+                    Effect.succeed(Interception.retry),
+                })
+                .resume(CONVERSATION, 'hi')
+                .pipe(Effect.result);
+              yield* agentWith({ count: 0 })
+                .intercepting({
+                  onIndeterminateToolCall: (call) => {
+                    expect(call.toolCallId).toBe(CALL_ID);
+                    return Effect.succeed(
+                      Interception.reconcile({
+                        status: 'externally-confirmed',
+                        at: RECORDED.toISOString(),
+                      }),
+                    );
+                  },
+                })
+                .resume(CONVERSATION, 'hi');
+              return yield* readAll();
+            }),
+          );
+
+          expect(mutations.count).toBe(1);
+          expect(outcomesOf(records).at(-1)?.id).toBe(CALL_ID);
         }),
-    });
-
-    const records = await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, toolStarted]);
-        yield* crashing
-          .intercepting({
-            onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
-          })
-          .resume(CONVERSATION, 'hi')
-          .pipe(Effect.exit);
-        yield* agentWith({ count: 0 })
-          .intercepting({
-            onIndeterminateToolCall: (call) => {
-              expect(call.toolCallId).toBe(CALL_ID);
-              return Effect.succeed(
-                Interception.reconcile({
-                  status: 'externally-confirmed',
-                  at: RECORDED.toISOString(),
-                }),
-              );
-            },
-          })
-          .resume(CONVERSATION, 'hi');
-        return yield* readAll();
-      }),
-    );
-
-    expect(mutations.count).toBe(1);
-    expect(outcomesOf(records).at(-1)?.id).toBe(CALL_ID);
-  });
+      ),
+  );
 });
 
 describe('what a tool outcome stores', () => {
-  it('settles normally after the durable outcome resolves its start', async () => {
-    const ran = { count: 0 };
-
-    const records = await run(
+  it.effect(
+    'settles normally after the durable outcome resolves its start',
+    () =>
       Effect.gen(function* () {
-        yield* agentWith(ran).recordingTo(CONVERSATION).run('hi');
-        return yield* readAll();
+        const ran = { count: 0 };
+
+        const records = yield* run(
+          Effect.gen(function* () {
+            yield* agentWith(ran).recordingTo(CONVERSATION).run('hi');
+            return yield* readAll();
+          }),
+        );
+
+        const tags = records.map(({ record }) => record._tag);
+        expect(tags.indexOf('ToolStarted')).toBeLessThan(
+          tags.indexOf('ToolOutcome'),
+        );
+        expect(tags.at(-1)).toBe('RunSettled');
       }),
-    );
+  );
 
-    const tags = records.map(({ record }) => record._tag);
-    expect(tags.indexOf('ToolStarted')).toBeLessThan(
-      tags.indexOf('ToolOutcome'),
-    );
-    expect(tags.at(-1)).toBe('RunSettled');
-  });
+  it.effect('stores the toolkit’s encoding, not the handler’s value', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
 
-  it('stores the toolkit’s encoding, not the handler’s value', async () => {
-    const ran = { count: 0 };
-
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
-
-    // `at` is a `Date` in the handler and an ISO string in the log, because
-    // the encoded form is the one the provider is shown and the only one a
-    // resuming dispatch can serve back unchanged.
-    expect(outcomesOf(written)[0]?.result).toEqual({
-      status: 'fresh:42',
-      at: WHEN.toISOString(),
-    });
-  });
-
-  it('decodes a served result back through the tool’s schema', async () => {
-    const ran = { count: 0 };
-    const seen: unknown[] = [];
-    const sources: unknown[] = [];
-
-    await run(
-      Effect.gen(function* () {
-        yield* seed([started, called, outcome]);
-        yield* agentWith(ran)
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(
-            Stream.runForEach((event) =>
-              Effect.sync(() => {
-                if (
-                  event._tag === 'Part' &&
-                  (event.part as Response.StreamPartEncoded).type ===
-                    'tool-result'
-                ) {
-                  sources.push(
-                    (event.part as { readonly resultSource?: unknown })
-                      .resultSource,
-                  );
-                  seen.push(
-                    (event.part as unknown as { result: { at: unknown } })
-                      .result.at,
-                  );
-                }
-              }),
-            ),
-            Effect.orDie,
-          );
-      }),
-    );
-
-    // A consumer of the live stream reads the decoded half of a tool result.
-    // Serving the stored JSON there would hand it a string where its type
-    // says `Date` — so the stored value goes back through the tool's own
-    // codec first.
-    expect(seen).toEqual([RECORDED]);
-    expect(sources).toEqual(['substituted']);
-  });
-
-  it('fails safely when a recovered result no longer matches the schema', async () => {
-    const ran = { count: 0 };
-    const encoded = { staleShape: true };
-
-    await expect(
-      run(
+      const written = yield* run(
         Effect.gen(function* () {
-          yield* seed([started, called, { ...outcome, result: encoded }]);
+          yield* agentWith(ran)
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
+
+      // `at` is a `Date` in the handler and an ISO string in the log, because
+      // the encoded form is the one the provider is shown and the only one a
+      // resuming dispatch can serve back unchanged.
+      expect(outcomesOf(written)[0]?.result).toEqual({
+        status: 'fresh:42',
+        at: WHEN.toISOString(),
+      });
+    }),
+  );
+
+  it.effect('decodes a served result back through the tool’s schema', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+      const seen: unknown[] = [];
+      const sources: unknown[] = [];
+
+      yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, outcome]);
           yield* agentWith(ran)
             .recordingTo(CONVERSATION)
             .stream('hi')
-            .pipe(Stream.runDrain);
+            .pipe(
+              Stream.runForEach((event) =>
+                Effect.sync(() => {
+                  if (
+                    event._tag === 'Part' &&
+                    (event.part as Response.StreamPartEncoded).type ===
+                      'tool-result'
+                  ) {
+                    sources.push(
+                      (event.part as { readonly resultSource?: unknown })
+                        .resultSource,
+                    );
+                    seen.push(
+                      (event.part as unknown as { result: { at: unknown } })
+                        .result.at,
+                    );
+                  }
+                }),
+              ),
+              Effect.orDie,
+            );
+        }),
+      );
+
+      // A consumer of the live stream reads the decoded half of a tool result.
+      // Serving the stored JSON there would hand it a string where its type
+      // says `Date` — so the stored value goes back through the tool's own
+      // codec first.
+      expect(seen).toEqual([RECORDED]);
+      expect(sources).toEqual(['substituted']);
+    }),
+  );
+
+  quiet(
+    'fails safely when a recovered result no longer matches the schema',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const ran = { count: 0 };
+          const encoded = { staleShape: true };
+
+          const result = yield* run(
+            Effect.gen(function* () {
+              yield* seed([started, called, { ...outcome, result: encoded }]);
+              yield* agentWith(ran)
+                .recordingTo(CONVERSATION)
+                .stream('hi')
+                .pipe(Stream.runDrain);
+            }),
+          ).pipe(Effect.result);
+          expect(String(result)).toContain(
+            'does not match its current result schema',
+          );
+
+          expect(ran.count).toBe(0);
         }),
       ),
-    ).rejects.toThrow('does not match its current result schema');
-
-    expect(ran.count).toBe(0);
-  });
+  );
 });

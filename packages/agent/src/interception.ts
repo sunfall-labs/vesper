@@ -1,5 +1,6 @@
 import type { Effect } from 'effect';
 import type { AiError, Prompt } from 'effect/unstable/ai';
+import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Stop } from './stop.js';
 
@@ -94,7 +95,7 @@ export interface Run {
    * logging: an agent may be intercepted without `recordingTo`, and an
    * interceptor keyed on a conversation has to be able to tell.
    */
-  readonly conversationId: string | undefined;
+  readonly conversationId: LogVocabulary.ConversationId | undefined;
 }
 
 /**
@@ -157,7 +158,7 @@ export interface ToolCallContext extends Run {
    * Optional because `Toolkit.WithHandler['handle']` makes it optional; every
    * provider in practice supplies it.
    */
-  readonly toolCallId: string | undefined;
+  readonly toolCallId: LogVocabulary.ToolCallId | undefined;
   /**
    * The parameters as dispatch received them — the provider's encoded form,
    * before the tool's parameter schema has decoded them.

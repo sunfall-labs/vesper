@@ -1,5 +1,6 @@
 import { Effect } from 'effect';
 import { AiError, Toolkit } from 'effect/unstable/ai';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Agent } from './agent.js';
 import { protocolOf } from './internal.js';
@@ -16,7 +17,7 @@ import {
 } from './subagent.js';
 
 interface CallContext {
-  readonly toolCallId?: string | undefined;
+  readonly toolCallId?: LogVocabulary.ToolCallId | undefined;
 }
 
 export const handler =
@@ -64,7 +65,9 @@ export const handler =
           ? run(undefined)
           : Effect.flatMap(
               session.child({
-                toolCallId: call?.toolCallId ?? crypto.randomUUID(),
+                toolCallId:
+                  call?.toolCallId ??
+                  LogVocabulary.ToolCallId.make(crypto.randomUUID()),
                 agent: child.name,
                 revision: child.revision,
                 depth: depth + 1,
@@ -119,7 +122,16 @@ export const delegateTo = <const Children extends ReadonlyArray<Agent.Named>>(
                 child,
                 session,
                 runtime,
-              )(input, call).pipe(Effect.provide(context)),
+              )(
+                input,
+                call.toolCallId === undefined
+                  ? call
+                  : {
+                      toolCallId: LogVocabulary.ToolCallId.make(
+                        call.toolCallId,
+                      ),
+                    },
+              ).pipe(Effect.provide(context)),
           ]),
         );
         return handlers as never;

@@ -2,6 +2,8 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { describe, expect, it } from '@effect/vitest';
 import { Effect, Exit, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
@@ -10,7 +12,6 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { AgentHistory } from '../src/history.js';
@@ -124,25 +125,25 @@ const agent = Agent.make({
   lookup: ({ id }) => Effect.succeed({ status: `shipped:${id}` }),
 });
 
-const ANCESTOR = 'ancestor-conversation';
+const ANCESTOR = LogVocabulary.ConversationId.make('ancestor-conversation');
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   models: Layer.Layer<LanguageModel.LanguageModel>,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(models),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(models),
+    Effect.provide(LogStoreMemory.layer),
+    Effect.scoped,
   );
 
 const readPath = Effect.fn('test.readPath')(function* (conversationId: string) {
   const store = yield* LogStore.Service;
   const page = yield* store
-    .read(AgentLog.pathFor(conversationId), { limit: 1000 })
+    .read(AgentLog.pathFor(LogVocabulary.ConversationId.make(conversationId)), {
+      limit: 1000,
+    })
     .pipe(Effect.orDie);
   return page.records;
 });
@@ -152,7 +153,10 @@ const readSignals = Effect.fn('test.readSignals')(function* (
 ) {
   const store = yield* LogStore.Service;
   const page = yield* store
-    .read(AgentSignals.pathFor(conversationId), { limit: 1000 })
+    .read(
+      AgentSignals.pathFor(LogVocabulary.ConversationId.make(conversationId)),
+      { limit: 1000 },
+    )
     .pipe(Effect.orDie);
   return page.records;
 });
@@ -166,7 +170,9 @@ const failsOnceAfter = (
     Effect.gen(function* () {
       const store = yield* LogStore.Service;
       const failed = yield* Ref.make(false);
-      const path = AgentLog.pathFor(conversationId);
+      const path = AgentLog.pathFor(
+        LogVocabulary.ConversationId.make(conversationId),
+      );
       const inject = <A>(effect: Effect.Effect<A, LogStore.LogStoreError>) =>
         Effect.gen(function* () {
           const value = yield* effect;
@@ -211,7 +217,7 @@ const started = (text: string): ConversationRecord.Record => ({
   _tag: 'RunStarted',
   agent: 'test',
   formatVersion: 1,
-  agentRevision: '1',
+  agentRevision: LogVocabulary.AgentRevision.make('1'),
   prompt: Prompt.make(text).content,
 });
 
@@ -244,90 +250,115 @@ describe('two forks of one conversation', () => {
   // append. Here each fork is its own stream with its own producer, so both
   // hold a claim at once — which is what the rendezvous inside the provider
   // proves. Neither run can leave `streamText` until the other has entered it.
-  it('run at the same time, each in its own stream', async () => {
-    const models = provider([says('fork answer')], rendezvous(2));
+  it.effect(
+    'run at the same time, each in its own stream',
+    () => {
+      const models = provider([says('fork answer')], rendezvous(2));
 
-    const observed = await run(
-      Effect.gen(function* () {
-        // Built by hand rather than by a run, so the ancestor does not have to
-        // pass through the provider that is about to block on a rendezvous.
-        const session = yield* AgentLog.open(ANCESTOR, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
-        yield* session.append([
-          started('what is the status?'),
-          said('checking now'),
-          turn,
-          settled,
-        ]);
-        const tip = (yield* session.recorded).at(-1)!.offset;
+      return Effect.gen(function* () {
+        const observed = yield* run(
+          Effect.gen(function* () {
+            // Built by hand rather than by a run, so the ancestor does not have to
+            // pass through the provider that is about to block on a rendezvous.
+            const session = yield* AgentLog.open(
+              LogVocabulary.ConversationId.make(ANCESTOR),
+              {
+                compatibility: {
+                  agent: 'test',
+                  revision: LogVocabulary.AgentRevision.make('1'),
+                },
+              },
+            );
+            yield* session.append([
+              started('what is the status?'),
+              said('checking now'),
+              turn,
+              settled,
+            ]);
+            const tip = (yield* session.recorded).at(-1)!.offset;
 
-        const [left, right] = yield* Effect.all(
-          [
-            agent
-              .forkFrom(ANCESTOR, tip, 'fork-left', 'explore the left one')
-              .pipe(Effect.orDie),
-            agent
-              .forkFrom(ANCESTOR, tip, 'fork-right', 'explore the right one')
-              .pipe(Effect.orDie),
-          ],
-          { concurrency: 'unbounded' },
+            const [left, right] = yield* Effect.all(
+              [
+                agent
+                  .forkFrom(ANCESTOR, tip, 'fork-left', 'explore the left one')
+                  .pipe(Effect.orDie),
+                agent
+                  .forkFrom(
+                    ANCESTOR,
+                    tip,
+                    'fork-right',
+                    'explore the right one',
+                  )
+                  .pipe(Effect.orDie),
+              ],
+              { concurrency: 'unbounded' },
+            );
+
+            return {
+              left,
+              right,
+              asked: models.asked,
+              leftLog: yield* readPath('fork-left'),
+              rightLog: yield* readPath('fork-right'),
+            };
+          }),
+          models.layer,
         );
 
-        return {
-          left,
-          right,
-          asked: models.asked,
-          leftLog: yield* readPath('fork-left'),
-          rightLog: yield* readPath('fork-right'),
-        };
-      }),
-      models.layer,
-    );
+        // Both finished. Under fencing one of them would have died on an append.
+        expect(observed.left.text).toBe('fork answer');
+        expect(observed.right.text).toBe('fork answer');
 
-    // Both finished. Under fencing one of them would have died on an append.
-    expect(observed.left.text).toBe('fork answer');
-    expect(observed.right.text).toBe('fork answer');
+        // Each fork carries the ancestor's prefix and only its own new input. The
+        // prompts are matched by content rather than by index because two
+        // concurrent runs reach the provider in no fixed order.
+        const prompts = observed.asked.map(textIn);
+        const forLeft = prompts.find((body) => body.includes('the left one'))!;
+        const forRight = prompts.find((body) =>
+          body.includes('the right one'),
+        )!;
 
-    // Each fork carries the ancestor's prefix and only its own new input. The
-    // prompts are matched by content rather than by index because two
-    // concurrent runs reach the provider in no fixed order.
-    const prompts = observed.asked.map(textIn);
-    const forLeft = prompts.find((body) => body.includes('the left one'))!;
-    const forRight = prompts.find((body) => body.includes('the right one'))!;
+        expect(forLeft).toContain('checking now');
+        expect(forLeft).not.toContain('the right one');
+        expect(forRight).toContain('checking now');
+        expect(forRight).not.toContain('the left one');
 
-    expect(forLeft).toContain('checking now');
-    expect(forLeft).not.toContain('the right one');
-    expect(forRight).toContain('checking now');
-    expect(forRight).not.toContain('the left one');
-
-    // Each fork is a whole conversation: the copied prefix, then its own run.
-    expect(tags(observed.leftLog)).toEqual([
-      'RunStarted',
-      'Text',
-      'TurnFinished',
-      'RunSettled',
-      'RunStarted',
-      'Text',
-      'TurnFinished',
-      'Completed',
-      'RunSettled',
-    ]);
-    expect(tags(observed.rightLog)).toEqual(tags(observed.leftLog));
-  });
+        // Each fork is a whole conversation: the copied prefix, then its own run.
+        expect(tags(observed.leftLog)).toEqual([
+          'RunStarted',
+          'Text',
+          'TurnFinished',
+          'RunSettled',
+          'RunStarted',
+          'Text',
+          'TurnFinished',
+          'Completed',
+          'RunSettled',
+        ]);
+        expect(tags(observed.rightLog)).toEqual(tags(observed.leftLog));
+      });
+    },
+    10_000,
+  );
 });
 
 describe('a fork and the conversation it came from', () => {
-  it('reports only fork-billed usage across later resumes', async () => {
+  it.effect('reports only fork-billed usage across later resumes', () => {
     const models = provider([
       says('first fork turn'),
       says('second fork turn'),
     ]);
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
+        const session = yield* AgentLog.open(
+          LogVocabulary.ConversationId.make(ANCESTOR),
+          {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          },
+        );
         yield* session.append([
           started('original'),
           said('ancestor answer'),
@@ -342,23 +373,27 @@ describe('a fork and the conversation it came from', () => {
         const second = yield* agent
           .resume('usage-fork', 'fork twice')
           .pipe(Effect.orDie);
-        return { first, second };
+        expect(first.usage).toEqual({ input: 10, output: 4 });
+        expect(second.usage).toEqual({ input: 20, output: 8 });
       }),
       models.layer,
     );
-
-    expect(observed.first.usage).toEqual({ input: 10, output: 4 });
-    expect(observed.second.usage).toEqual({ input: 20, output: 8 });
   });
 
-  it('leaves the ancestor exactly as it was', async () => {
+  it.effect('leaves the ancestor exactly as it was', () => {
     const models = provider([says('fork answer')]);
 
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
+        const session = yield* AgentLog.open(
+          LogVocabulary.ConversationId.make(ANCESTOR),
+          {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          },
+        );
         yield* session.append([
           started('original'),
           said('first'),
@@ -371,29 +406,35 @@ describe('a fork and the conversation it came from', () => {
           .forkFrom(ANCESTOR, before.at(-1)!.offset, 'a-fork', 'a new idea')
           .pipe(Effect.orDie);
 
-        return { before, after: yield* readPath(ANCESTOR) };
+        const after = yield* readPath(ANCESTOR);
+
+        // No marker, no copy, no note that a fork was taken — reading an ancestor
+        // takes no producer claim, so it cannot even fence a run that is live on
+        // it. This is the trade against `branchFrom`'s single navigable tail.
+        expect(after).toEqual(before);
       }),
       models.layer,
     );
-
-    // No marker, no copy, no note that a fork was taken — reading an ancestor
-    // takes no producer claim, so it cannot even fence a run that is live on
-    // it. This is the trade against `branchFrom`'s single navigable tail.
-    expect(observed.after).toEqual(observed.before);
   });
 
-  it('does not receive what the ancestor records afterwards', async () => {
+  it.effect('does not receive what the ancestor records afterwards', () => {
     const models = provider([
       says('fork answer'),
       says('ancestor answer'),
       says('later fork answer'),
     ]);
 
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
+        const session = yield* AgentLog.open(
+          LogVocabulary.ConversationId.make(ANCESTOR),
+          {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          },
+        );
         yield* session.append([
           started('original'),
           said('shared past'),
@@ -414,25 +455,24 @@ describe('a fork and the conversation it came from', () => {
         // And the fork carries on too. Its prompt is the evidence.
         yield* agent.resume('a-fork', 'and the fork too').pipe(Effect.orDie);
 
-        return { asked: models.asked, forkLog: yield* readPath('a-fork') };
+        const forkLog = yield* readPath('a-fork');
+        const laterFork = textIn(models.asked.at(-1)!);
+        expect(laterFork).toContain('shared past');
+        expect(laterFork).toContain('the fork question');
+        // The two conversations diverged at the fork and never rejoined.
+        expect(laterFork).not.toContain('the ancestor carries on');
+        expect(laterFork).not.toContain('ancestor answer');
+
+        expect(
+          forkLog.some(
+            (envelope) =>
+              envelope.record._tag === 'Text' &&
+              envelope.record.text === 'ancestor answer',
+          ),
+        ).toBe(false);
       }),
       models.layer,
     );
-
-    const laterFork = textIn(observed.asked.at(-1)!);
-    expect(laterFork).toContain('shared past');
-    expect(laterFork).toContain('the fork question');
-    // The two conversations diverged at the fork and never rejoined.
-    expect(laterFork).not.toContain('the ancestor carries on');
-    expect(laterFork).not.toContain('ancestor answer');
-
-    expect(
-      observed.forkLog.some(
-        (envelope) =>
-          envelope.record._tag === 'Text' &&
-          envelope.record.text === 'ancestor answer',
-      ),
-    ).toBe(false);
   });
 });
 
@@ -451,9 +491,15 @@ describe('a fork and the conversation it came from', () => {
 const branchedAncestor = Effect.fn('test.branchedAncestor')(function* (
   deliveredAt: LogOffset.Offset,
 ) {
-  const session = yield* AgentLog.open(ANCESTOR, {
-    compatibility: { agent: 'test', revision: '1' },
-  });
+  const session = yield* AgentLog.open(
+    LogVocabulary.ConversationId.make(ANCESTOR),
+    {
+      compatibility: {
+        agent: 'test',
+        revision: LogVocabulary.AgentRevision.make('1'),
+      },
+    },
+  );
 
   yield* session.append([started('original'), said('abandoned answer'), turn]);
   const opening = (yield* session.recorded)[0]!;
@@ -478,7 +524,7 @@ const branchedAncestor = Effect.fn('test.branchedAncestor')(function* (
       _tag: 'Compacted',
       formatVersion: 1,
       agent: 'test',
-      agentRevision: '1',
+      agentRevision: LogVocabulary.AgentRevision.make('1'),
       step: 1,
       summary: 'the story so far',
       firstKept: answerA.offset,
@@ -500,16 +546,21 @@ describe('the offset pointers in a copied prefix', () => {
   // ancestor's offset resolves, in the fork, onto the compaction record
   // itself, so `keptFrom` keeps nothing verbatim and the kept tail vanishes
   // from the prompt. Nothing errors; the fork simply forgets two messages.
-  it('reseats a compaction boundary onto the fork’s own offsets', async () => {
+  it.effect('reseats a compaction boundary onto the fork’s own offsets', () => {
     const models = provider([says('fork answer')]);
 
-    const observed = await run(
+    return run(
       Effect.gen(function* () {
         const ancestor = yield* branchedAncestor(LogOffset.START);
-        const fork = yield* AgentLog.fork(ANCESTOR, ancestor.tip, 'a-fork', {
-          agent: 'test',
-          revision: '1',
-        });
+        const fork = yield* AgentLog.fork(
+          LogVocabulary.ConversationId.make(ANCESTOR),
+          ancestor.tip,
+          LogVocabulary.ConversationId.make('a-fork'),
+          {
+            agent: 'test',
+            revision: LogVocabulary.AgentRevision.make('1'),
+          },
+        );
 
         const copied = fork.history.find(
           (envelope) => envelope.record._tag === 'Compacted',
@@ -520,33 +571,28 @@ describe('the offset pointers in a copied prefix', () => {
             envelope.record.text === 'answer A',
         )!;
 
-        return {
-          ancestorBoundary: ancestor.answerA.offset,
-          forkBoundary: (
-            copied.record as ConversationRecord.RecordOf<'Compacted'>
-          ).firstKept,
-          forkAnswerA: answerA.offset,
-          prompt: AgentHistory.messagesFrom(fork.history),
-        };
+        if (copied.record._tag !== 'Compacted')
+          throw new Error('expected copied compaction');
+        const forkBoundary = copied.record.firstKept;
+
+        // The premise: the same record sits at a different offset in the fork. If
+        // these were equal the test below would pass without any rewriting.
+        expect(answerA.offset).not.toBe(ancestor.answerA.offset);
+
+        // The pointer followed it.
+        expect(forkBoundary).toBe(answerA.offset);
+
+        // And it means the same thing: the summary, then the tail the compaction
+        // kept verbatim — the answer and the steer that redirected it.
+        const body = textsIn(AgentHistory.messagesFrom(fork.history));
+        expect(body).toContain('the story so far');
+        expect(body).toContain('answer A');
+        expect(body).toContain('steered mid-run');
+        // Still summarized away, so this is a compaction and not a no-op.
+        expect(body).not.toContain('real question');
       }),
       models.layer,
     );
-
-    // The premise: the same record sits at a different offset in the fork. If
-    // these were equal the test below would pass without any rewriting.
-    expect(observed.forkAnswerA).not.toBe(observed.ancestorBoundary);
-
-    // The pointer followed it.
-    expect(observed.forkBoundary).toBe(observed.forkAnswerA);
-
-    // And it means the same thing: the summary, then the tail the compaction
-    // kept verbatim — the answer and the steer that redirected it.
-    const body = textsIn(observed.prompt);
-    expect(body).toContain('the story so far');
-    expect(body).toContain('answer A');
-    expect(body).toContain('steered mid-run');
-    // Still summarized away, so this is a compaction and not a no-op.
-    expect(body).not.toContain('real question');
   });
 
   // The other half, and a different kind of wrongness: this pointer names an
@@ -557,75 +603,83 @@ describe('the offset pointers in a copied prefix', () => {
   // the fork's delivery cursor at the ancestor's signal offset, which is past
   // where the fork's own first signal is written — and the steer below is
   // never delivered. Silent: no error, an agent that is simply not steered.
-  it('restarts the signal cursor, so a signal to the fork is delivered', async () => {
-    const models = provider([says('fork answer')]);
+  it.effect(
+    'restarts the signal cursor, so a signal to the fork is delivered',
+    () => {
+      const models = provider([says('fork answer')]);
 
-    const observed = await run(
-      Effect.gen(function* () {
-        // Two signals to the ancestor, the second of them delivered, so the
-        // recorded cursor is past the offset the fork's first signal will get.
-        yield* AgentSignals.send(ANCESTOR, {
-          kind: 'steer',
-          text: 'first ancestor steer',
-          source: 'operator',
-        }).pipe(Effect.orDie);
-        yield* AgentSignals.send(ANCESTOR, {
-          kind: 'steer',
-          text: 'second ancestor steer',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+      return run(
+        Effect.gen(function* () {
+          // Two signals to the ancestor, the second of them delivered, so the
+          // recorded cursor is past the offset the fork's first signal will get.
+          yield* AgentSignals.send(ANCESTOR, {
+            kind: 'steer',
+            text: 'first ancestor steer',
+            source: 'operator',
+          }).pipe(Effect.orDie);
+          yield* AgentSignals.send(ANCESTOR, {
+            kind: 'steer',
+            text: 'second ancestor steer',
+            source: 'operator',
+          }).pipe(Effect.orDie);
 
-        const ancestorSignals = yield* readSignals(ANCESTOR);
-        const ancestor = yield* branchedAncestor(ancestorSignals[1]!.offset);
+          const ancestorSignals = yield* readSignals(ANCESTOR);
+          const ancestor = yield* branchedAncestor(ancestorSignals[1]!.offset);
 
-        const fork = yield* AgentLog.fork(ANCESTOR, ancestor.tip, 'a-fork', {
-          agent: 'test',
-          revision: '1',
-        });
+          const fork = yield* AgentLog.fork(
+            LogVocabulary.ConversationId.make(ANCESTOR),
+            ancestor.tip,
+            LogVocabulary.ConversationId.make('a-fork'),
+            {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          );
 
-        yield* AgentSignals.send('a-fork', {
-          kind: 'steer',
-          text: 'a steer for the fork',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+          yield* AgentSignals.send('a-fork', {
+            kind: 'steer',
+            text: 'a steer for the fork',
+            source: 'operator',
+          }).pipe(Effect.orDie);
 
-        const forkSignals = yield* readSignals('a-fork');
-        const copied = fork.history.find(
-          (envelope) => envelope.record._tag === 'SignalReceived',
-        )!;
+          const forkSignals = yield* readSignals('a-fork');
+          const copied = fork.history.find(
+            (envelope) => envelope.record._tag === 'SignalReceived',
+          )!;
 
-        return {
-          ancestorCursor: ancestorSignals[1]!.offset,
-          forkSignalAt: forkSignals[0]!.offset,
-          copiedAt: (
-            copied.record as ConversationRecord.RecordOf<'SignalReceived'>
-          ).at,
-          delivered: yield* fork.drainSignals,
-          prompt: textsIn(AgentHistory.messagesFrom(fork.history)),
-        };
-      }),
-      models.layer,
-    );
+          if (copied.record._tag !== 'SignalReceived')
+            throw new Error('expected copied signal');
+          const copiedAt = copied.record.at;
+          const delivered = yield* fork.drainSignals;
 
-    // The premise: carrying the ancestor's cursor over would park the fork
-    // past its own first signal, because the fork's signal stream starts again
-    // from the beginning.
-    expect(
-      LogOffset.isAfter(observed.ancestorCursor, observed.forkSignalAt),
-    ).toBe(true);
+          // The premise: carrying the ancestor's cursor over would park the fork
+          // past its own first signal, because the fork's signal stream starts again
+          // from the beginning.
+          expect(
+            LogOffset.isAfter(
+              ancestorSignals[1]!.offset,
+              forkSignals[0]!.offset,
+            ),
+          ).toBe(true);
 
-    // Reset rather than rewritten — the fork has drained none of its own.
-    expect(observed.copiedAt).toBe(LogOffset.START);
+          // Reset rather than rewritten — the fork has drained none of its own.
+          expect(copiedAt).toBe(LogOffset.START);
 
-    // So the steer actually arrives.
-    expect(observed.delivered.map((signal) => signal.text)).toEqual([
-      'a steer for the fork',
-    ]);
+          // So the steer actually arrives.
+          expect(delivered.map((signal) => signal.text)).toEqual([
+            'a steer for the fork',
+          ]);
 
-    // And the copied record kept its body: the ancestor's steer is still a
-    // user message in the conversation the fork inherited.
-    expect(observed.prompt).toContain('steered mid-run');
-  });
+          // And the copied record kept its body: the ancestor's steer is still a
+          // user message in the conversation the fork inherited.
+          expect(textsIn(AgentHistory.messagesFrom(fork.history))).toContain(
+            'steered mid-run',
+          );
+        }),
+        models.layer,
+      );
+    },
+  );
 });
 
 describe('forking into an id that is already a conversation', () => {
@@ -633,14 +687,20 @@ describe('forking into an id that is already a conversation', () => {
   // conversation would interleave two histories with nothing to say it
   // happened, so the `create` in `AgentLog.fork` does not tolerate the
   // conflict that `open` does.
-  it('is a defect, not an append into it', async () => {
+  it.effect('is a defect, not an append into it', () => {
     const models = provider([says('fork answer')]);
 
-    const outcome = await run(
+    return run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
+        const session = yield* AgentLog.open(
+          LogVocabulary.ConversationId.make(ANCESTOR),
+          {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          },
+        );
         yield* session.append([
           started('original'),
           said('first'),
@@ -649,47 +709,63 @@ describe('forking into an id that is already a conversation', () => {
         ]);
         const tip = (yield* session.recorded).at(-1)!.offset;
 
-        const occupied = yield* AgentLog.open('already-here', {
-          compatibility: { agent: 'test', revision: '1' },
-        });
+        const occupied = yield* AgentLog.open(
+          LogVocabulary.ConversationId.make('already-here'),
+          {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          },
+        );
         yield* occupied.append([started('a life of its own')]);
 
         const exit = yield* Effect.exit(
-          AgentLog.fork(ANCESTOR, tip, 'already-here', {
-            agent: 'test',
-            revision: '1',
-          }),
+          AgentLog.fork(
+            LogVocabulary.ConversationId.make(ANCESTOR),
+            tip,
+            LogVocabulary.ConversationId.make('already-here'),
+            {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          ),
         );
 
-        return {
-          failed: Exit.isFailure(exit),
-          // Untouched: the fork wrote nothing into the conversation it
-          // collided with, rather than half a prefix.
-          occupiedLog: tags(yield* readPath('already-here')),
-        };
+        expect(Exit.isFailure(exit)).toBe(true);
+        // Untouched: the fork wrote nothing into the conversation it
+        // collided with, rather than half a prefix.
+        expect(tags(yield* readPath('already-here'))).toEqual(['RunStarted']);
       }),
       models.layer,
     );
-
-    expect(outcome.failed).toBe(true);
-    expect(outcome.occupiedLog).toEqual(['RunStarted']);
   });
 });
 
 describe('fork seeding recovery', () => {
   for (const operation of ['create', 'acquire', 'append'] as const) {
-    it(`converges after a crash following ${operation}`, async () => {
-      const destination = `retry-${operation}`;
-      const layer = failsOnceAfter(operation, destination);
-      const result = await Effect.runPromise(
-        Effect.gen(function* () {
-          const ancestor = yield* AgentLog.open(ANCESTOR, {
-            compatibility: { agent: 'test', revision: '1' },
-          });
+    it.effect(`converges after a crash following ${operation}`, () =>
+      Effect.gen(function* () {
+        const destination = `retry-${operation}`;
+        const layer = failsOnceAfter(operation, destination);
+        const result = yield* Effect.gen(function* () {
+          const ancestor = yield* AgentLog.open(
+            LogVocabulary.ConversationId.make(ANCESTOR),
+            {
+              compatibility: {
+                agent: 'test',
+                revision: LogVocabulary.AgentRevision.make('1'),
+              },
+            },
+          );
           yield* ancestor.append([
             started('original'),
             said('copied once'),
-            { _tag: 'ToolStarted', id: 'copied-call', name: 'lookup' },
+            {
+              _tag: 'ToolStarted',
+              id: LogVocabulary.ToolCallId.make('copied-call'),
+              name: 'lookup',
+            },
             turn,
           ]);
           const copiedText = (yield* ancestor.recorded)[1]!;
@@ -698,7 +774,7 @@ describe('fork seeding recovery', () => {
               _tag: 'Compacted',
               formatVersion: 1,
               agent: 'test',
-              agentRevision: '1',
+              agentRevision: LogVocabulary.AgentRevision.make('1'),
               step: 1,
               summary: 'seed summary',
               firstKept: copiedText.offset,
@@ -709,28 +785,38 @@ describe('fork seeding recovery', () => {
           ]);
           const tip = (yield* ancestor.recorded).at(-1)!.offset;
 
-          const first = yield* AgentLog.fork(ANCESTOR, tip, destination, {
-            agent: 'test',
-            revision: '1',
-          }).pipe(Effect.exit);
-          const retried = yield* AgentLog.fork(ANCESTOR, tip, destination, {
-            agent: 'test',
-            revision: '1',
-          });
+          const first = yield* AgentLog.fork(
+            LogVocabulary.ConversationId.make(ANCESTOR),
+            tip,
+            LogVocabulary.ConversationId.make(destination),
+            {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          ).pipe(Effect.exit);
+          const retried = yield* AgentLog.fork(
+            LogVocabulary.ConversationId.make(ANCESTOR),
+            tip,
+            LogVocabulary.ConversationId.make(destination),
+            {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          );
           return { first, records: retried.history };
-        }).pipe(Effect.provide(layer), Effect.scoped),
-      );
+        }).pipe(Effect.provide(layer), Effect.scoped);
 
-      expect(Exit.isFailure(result.first)).toBe(true);
-      // Session history is the retained resume view: the compacted-away
-      // RunStarted was copied physically, but is not materialized on open.
-      expect(tags(result.records)).toEqual([
-        'Text',
-        'ToolStarted',
-        'TurnFinished',
-        'Compacted',
-        'RunSettled',
-      ]);
-    });
+        expect(Exit.isFailure(result.first)).toBe(true);
+        // Session history is the retained resume view: the compacted-away
+        // RunStarted was copied physically, but is not materialized on open.
+        expect(tags(result.records)).toEqual([
+          'Text',
+          'ToolStarted',
+          'TurnFinished',
+          'Compacted',
+          'RunSettled',
+        ]);
+      }),
+    );
   }
 });

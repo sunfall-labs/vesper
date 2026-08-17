@@ -2,9 +2,10 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, type Layer } from 'effect';
 import { LanguageModel, Prompt, Toolkit } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { fakeProvider, turnOf } from './compaction-fixtures.js';
@@ -44,7 +45,7 @@ const LIMIT = 500;
 /** Long enough that a prompt still carrying it cannot fit under `LIMIT`. */
 const BULK = 'L'.repeat(4000);
 
-const CONVERSATION = 'compacted-1';
+const CONVERSATION = LogVocabulary.ConversationId.make('compacted-1');
 const PATH = AgentLog.pathFor(CONVERSATION);
 
 const POLICY = {
@@ -64,14 +65,12 @@ const agent = Agent.make({
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   models: Layer.Layer<LanguageModel.LanguageModel>,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(models),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+): Effect.Effect<A> =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(models),
+    Effect.provide(LogStoreMemory.layer),
+    Effect.scoped,
   );
 
 const readAll = Effect.fn('test.readAll')(function* () {
@@ -116,68 +115,78 @@ const scripted = () =>
   });
 
 describe('a conversation that compacted, resumed', () => {
-  it('records what the summary said and where the kept history starts', async () => {
-    const models = scripted();
-    const observed = await run(threeRuns(models), models.layer);
+  it.effect(
+    'records what the summary said and where the kept history starts',
+    () =>
+      Effect.gen(function* () {
+        const models = scripted();
+        const observed = yield* run(threeRuns(models), models.layer);
 
-    const compactions = observed.records.filter(
-      (envelope) => envelope.record._tag === 'Compacted',
-    );
-    expect(compactions).toHaveLength(1);
+        const compactions = observed.records.filter(
+          (envelope) => envelope.record._tag === 'Compacted',
+        );
+        expect(compactions).toHaveLength(1);
 
-    const record = compactions[0]!
-      .record as ConversationRecord.RecordOf<'Compacted'>;
-    expect(record.summary).toBe('SUMMARY');
-    expect(record.summarizedMessages).toBe(2);
-    expect(record.keptMessages).toBe(1);
+        const record = compactions[0]!
+          .record as ConversationRecord.RecordOf<'Compacted'>;
+        expect(record.summary).toBe('SUMMARY');
+        expect(record.summarizedMessages).toBe(2);
+        expect(record.keptMessages).toBe(1);
 
-    // The pointer names the record that opened the kept tail — the second
-    // run's `RunStarted`, which is where `question two` entered the
-    // conversation. Not a count, and not the compaction record itself.
-    const runStarts = observed.records.filter(
-      (envelope) => envelope.record._tag === 'RunStarted',
-    );
-    expect(record.firstKept).toBe(runStarts[1]!.offset);
-    expect(record.firstKept).not.toBe(LogOffset.START);
+        // The pointer names the record that opened the kept tail — the second
+        // run's `RunStarted`, which is where `question two` entered the
+        // conversation. Not a count, and not the compaction record itself.
+        const runStarts = observed.records.filter(
+          (envelope) => envelope.record._tag === 'RunStarted',
+        );
+        expect(record.firstKept).toBe(runStarts[1]!.offset);
+        expect(record.firstKept).not.toBe(LogOffset.START);
 
-    const completions = observed.records.filter(
-      (envelope) => envelope.record._tag === 'Completed',
-    );
-    expect(completions[1]?.record).toMatchObject({
-      usage: { input: 20, output: 8 },
-    });
-  });
+        const completions = observed.records.filter(
+          (envelope) => envelope.record._tag === 'Completed',
+        );
+        expect(completions[1]?.record).toMatchObject({
+          usage: { input: 20, output: 8 },
+        });
+      }),
+  );
 
-  it('does not hand the resumed run the history compaction replaced', async () => {
-    const models = scripted();
-    const observed = await run(threeRuns(models), models.layer);
+  it.effect(
+    'does not hand the resumed run the history compaction replaced',
+    () =>
+      Effect.gen(function* () {
+        const models = scripted();
+        const observed = yield* run(threeRuns(models), models.layer);
 
-    const last = textIn(observed.asked[observed.asked.length - 1]!);
+        const last = textIn(observed.asked[observed.asked.length - 1]!);
 
-    // The summary is there, in the words the compacted `Chat` used.
-    expect(last).toContain('SUMMARY');
-    expect(last).toContain('Summary of earlier conversation');
-    // The kept tail is there verbatim, and so is everything after it.
-    expect(last).toContain('question two');
-    expect(last).toContain('second answer');
-    expect(last).toContain('question three');
-    // And the replaced history is not.
-    expect(last).not.toContain('question one');
-    expect(last).not.toContain(BULK);
-  });
+        // The summary is there, in the words the compacted `Chat` used.
+        expect(last).toContain('SUMMARY');
+        expect(last).toContain('Summary of earlier conversation');
+        // The kept tail is there verbatim, and so is everything after it.
+        expect(last).toContain('question two');
+        expect(last).toContain('second answer');
+        expect(last).toContain('question three');
+        // And the replaced history is not.
+        expect(last).not.toContain('question one');
+        expect(last).not.toContain(BULK);
+      }),
+  );
 
-  it('compacts once for the conversation, not once per resumption', async () => {
-    const models = scripted();
-    const observed = await run(threeRuns(models), models.layer);
+  it.effect('compacts once for the conversation, not once per resumption', () =>
+    Effect.gen(function* () {
+      const models = scripted();
+      const observed = yield* run(threeRuns(models), models.layer);
 
-    expect(observed.summariesAfterCompacting).toBe(1);
-    expect(observed.summariesTotal).toBe(1);
+      expect(observed.summariesAfterCompacting).toBe(1);
+      expect(observed.summariesTotal).toBe(1);
 
-    // And the third run's first prompt fit, so it was never retried: one
-    // stream call for run one, two for run two (the overflow and the retry),
-    // one for run three.
-    expect(observed.asked).toHaveLength(4);
-  });
+      // And the third run's first prompt fit, so it was never retried: one
+      // stream call for run one, two for run two (the overflow and the retry),
+      // one for run three.
+      expect(observed.asked).toHaveLength(4);
+    }),
+  );
 });
 
 describe('rebuilding a compacted conversation', () => {
@@ -207,7 +216,7 @@ describe('rebuilding a compacted conversation', () => {
     _tag: 'RunStarted',
     agent: 'test',
     formatVersion: 1,
-    agentRevision: '1',
+    agentRevision: LogVocabulary.AgentRevision.make('1'),
     prompt: Prompt.make(prompt).content,
   });
 

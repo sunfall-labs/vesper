@@ -2,7 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
+import { PgClient } from '@effect/sql-pg';
+import { ManagedRuntime, Redacted } from 'effect';
 import pg from 'pg';
+
+import { VesperPgClient } from '../src/pg-client.js';
 
 // Test support for `layer-pg.integration.test.ts`. Not part of the package's
 // public surface — nothing in `exports` points here.
@@ -39,7 +43,9 @@ const IMAGE = process.env['ARBOR_POSTGRES_TEST_IMAGE'] ?? 'postgres:16-alpine';
 
 export interface ProvisionedTestDatabase {
   readonly connectionString: string;
-  readonly pool: pg.Pool;
+  readonly adminPool: pg.Pool;
+  readonly pgLayer: ReturnType<typeof VesperPgClient.layer>;
+  readonly runtime: ManagedRuntime.ManagedRuntime<PgClient.PgClient, unknown>;
   readonly cleanup: () => Promise<void>;
 }
 
@@ -141,14 +147,22 @@ export const createPostgresTestHarness =
           adminConnectionString,
           databaseName,
         );
-        const pool = new pg.Pool({ connectionString });
-        await pool.query(SCHEMA_DDL);
+        const databaseAdmin = new pg.Pool({ connectionString });
+        await databaseAdmin.query(SCHEMA_DDL);
+
+        const pgLayer = VesperPgClient.layer({
+          url: Redacted.make(connectionString),
+        });
+        const runtime = ManagedRuntime.make(pgLayer);
 
         return {
           connectionString,
-          pool,
+          adminPool: databaseAdmin,
+          pgLayer,
+          runtime,
           cleanup: async () => {
-            await pool.end();
+            await runtime.dispose();
+            await databaseAdmin.end();
             await waitForConnectionsToClose(admin, databaseName);
             await dropDatabase(admin, databaseName);
           },

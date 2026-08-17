@@ -1,17 +1,11 @@
-import {
-  Cause,
-  Data,
-  Effect,
-  Layer,
-  Option,
-  Queue,
-  Scope,
-  Stream,
-} from 'effect';
+import { PgClient } from '@effect/sql-pg';
+import { Effect, Layer, Option, Schema, Stream } from 'effect';
+import { SqlError } from 'effect/unstable/sql';
 
 import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
 import { ConversationRecord } from './record.js';
+import { LogVocabulary } from './vocabulary.js';
 
 // Postgres log store.
 //
@@ -20,15 +14,11 @@ import { ConversationRecord } from './record.js';
 // memory analogue — batch atomicity across a crash, and wake-ups that reach a
 // pod that did not write — are the reason this file exists.
 //
-// ## No driver, no connection lifecycle
+// ## Driver and connection lifecycle
 //
-// This module imports nothing but `effect`. A caller supplies a {@link Client}
-// — query, transaction, listen — and keeps its own pool. The usual
-// `PersistenceAdapter` lifecycle (`connect`/`migrate`/`close`) is `Layer`
-// reinvented for a framework that does not have one, and this package has
-// `Layer`. {@link fromPool} adapts anything shaped
-// like a `pg.Pool`, structurally, so `pg` stays out of this package's
-// dependency list and out of the family's layering rule.
+// A caller supplies the official `@effect/sql-pg` client directly, or provides
+// it to {@link layer}. Its pool and connection lifecycle remain owned by the
+// PgClient layer.
 //
 // Nothing here runs migrations. The authoritative DDL applications should put
 // into their migration system ships at `migrations/001-initial.sql`, and the
@@ -67,71 +57,8 @@ import { ConversationRecord } from './record.js';
 // what JavaScript's `<` does. Do not remove those; the failure they prevent is
 // an empty log that looks like an empty conversation.
 
-/** A row as the driver hands it back. */
-export type Row = Readonly<Record<string, unknown>>;
-
-/**
- * Whatever the driver failed with, flattened.
- *
- * Not a `Schema` error: nothing on this path crosses a checkpoint, and the
- * driver's own error object is not something this package can model.
- */
-export class SqlFailure extends Data.TaggedError(
-  '@sunfall/vesper-log/SqlFailure',
-)<{
-  readonly detail: string;
-  /** SQLSTATE, when the driver reports one. */
-  readonly code?: string | undefined;
-}> {}
-
-/** Somewhere statements can run: the pool, or one transaction's connection. */
-export interface Sql {
-  readonly query: (
-    text: string,
-    params?: ReadonlyArray<unknown>,
-  ) => Effect.Effect<ReadonlyArray<Row>, SqlFailure>;
-}
-
-/**
- * The whole Postgres surface this backend needs.
- *
- * Three operations, no lifecycle. `Layer` acquires and releases; a caller
- * hands over a pool it already has and keeps owning it.
- */
-export interface Client extends Sql {
-  /**
-   * Run `body` inside one transaction on one connection.
-   *
-   * A failure or an interruption must roll back. This is the entire basis of
-   * append atomicity — the contract requires that a rejected batch leave the
-   * log exactly as it was, and nothing above this line re-checks it.
-   */
-  readonly transaction: <A, E, R>(
-    body: (tx: Sql) => Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | SqlFailure, R>;
-
-  /**
-   * Take a dedicated session and `LISTEN` on `channel`.
-   *
-   * **The returned effect must not complete until the `LISTEN` has taken
-   * effect.** That completion is the only evidence a subscription exists, and
-   * {@link Interface.changes}'s opening wake-up is emitted on the strength of
-   * it. An implementation that returns early re-opens precisely the race the
-   * opening tick exists to close, and the symptom is a tail that hangs rather
-   * than a test that fails.
-   *
-   * The stream emits one element per notification and **fails** if the session
-   * drops. A change feed that goes quiet is indistinguishable from a
-   * conversation where nothing is happening; that is why `changes` has an
-   * error channel at all.
-   */
-  readonly listen: (
-    channel: string,
-  ) => Effect.Effect<Stream.Stream<void, SqlFailure>, SqlFailure, Scope.Scope>;
-
-  /** Close this client's shared notification session, if it has one. */
-  readonly closeNotifications?: Effect.Effect<void>;
-}
+/** A row as PostgreSQL hands it back. */
+type Row = Readonly<Record<string, unknown>>;
 
 export interface Options {
   /**
@@ -139,6 +66,8 @@ export interface Options {
    * which is what `migrations/001-initial.sql` creates.
    */
   readonly schema?: string;
+  /** Bounds every statement run while an append transaction holds a connection. */
+  readonly transactionStatementTimeoutMs?: number;
 }
 
 type Operation = LogStore.LogStoreError['operation'];
@@ -193,26 +122,43 @@ const asString = (value: unknown): string =>
 
 interface StreamRow {
   readonly identity: string;
-  readonly epoch: number;
-  readonly producerId: string | undefined;
+  readonly epoch: LogVocabulary.Epoch;
+  readonly producerId: LogVocabulary.ProducerId | undefined;
   readonly nextSequence: bigint;
-  readonly nextProducerSequence: number;
+  readonly nextProducerSequence: LogVocabulary.ProducerSequence;
   readonly lastFingerprint: string;
   readonly lastOffset: LogOffset.Offset;
 }
 
-const readStreamRow = (row: Row): StreamRow => ({
-  identity: asString(row['identity']),
-  epoch: asNumber(row['epoch']),
-  producerId:
-    row['producer_id'] === null || row['producer_id'] === undefined
-      ? undefined
-      : asString(row['producer_id']),
-  nextSequence: asBigInt(row['next_sequence']),
-  nextProducerSequence: asNumber(row['next_producer_sequence']),
-  lastFingerprint: asString(row['last_fingerprint']),
-  lastOffset: LogOffset.Offset.make(asString(row['last_offset'])),
+const StreamRowSchema = Schema.Struct({
+  identity: Schema.String,
+  epoch: LogVocabulary.Epoch,
+  producerId: Schema.NullOr(LogVocabulary.ProducerId),
+  nextProducerSequence: LogVocabulary.ProducerSequence,
 });
+
+const readStreamRow = (row: Row): Effect.Effect<StreamRow, unknown> =>
+  Schema.decodeUnknownEffect(StreamRowSchema)({
+    identity: asString(row['identity']),
+    epoch: asNumber(row['epoch']),
+    producerId:
+      row['producer_id'] === null || row['producer_id'] === undefined
+        ? null
+        : asString(row['producer_id']),
+    nextProducerSequence: asNumber(row['next_producer_sequence']),
+  }).pipe(
+    Effect.flatMap((decoded) =>
+      LogOffset.decode(asString(row['last_offset'])).pipe(
+        Effect.map((lastOffset) => ({
+          ...decoded,
+          producerId: decoded.producerId ?? undefined,
+          nextSequence: asBigInt(row['next_sequence']),
+          lastFingerprint: asString(row['last_fingerprint']),
+          lastOffset,
+        })),
+      ),
+    ),
+  );
 
 const metaOf = (path: string, row: StreamRow): LogStore.StreamMeta => ({
   path,
@@ -226,13 +172,26 @@ const metaOf = (path: string, row: StreamRow): LogStore.StreamMeta => ({
   records: Number(row.nextSequence),
 });
 
-export const make = (client: Client, options?: Options): LogStore.Interface => {
+export const make = (
+  client: PgClient.PgClient,
+  options?: Options,
+): LogStore.Interface => {
   const schema = options?.schema ?? DEFAULT_SCHEMA;
   if (!IDENTIFIER.test(schema)) {
     // A defect, not a failure: the schema name is wiring, not input, and it is
     // interpolated into SQL because Postgres has no parameter for an
     // identifier.
     throw new Error(`Not a usable Postgres schema name: ${schema}`);
+  }
+  const transactionStatementTimeoutMs =
+    options?.transactionStatementTimeoutMs ?? 30_000;
+  if (
+    !Number.isSafeInteger(transactionStatementTimeoutMs) ||
+    transactionStatementTimeoutMs < 1
+  ) {
+    throw new Error(
+      `transactionStatementTimeoutMs must be a positive integer, got ${transactionStatementTimeoutMs}`,
+    );
   }
   const streams = `${schema}.streams`;
   const records = `${schema}.records`;
@@ -248,24 +207,19 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
   /** Driver failures become `storage`; our own failures pass through. */
   const asLogStoreError =
     (path: string, operation: Operation) =>
-    (error: SqlFailure | LogStore.LogStoreError): LogStore.LogStoreError =>
+    (
+      error: SqlError.SqlError | LogStore.LogStoreError,
+    ): LogStore.LogStoreError =>
       error instanceof LogStore.LogStoreError
         ? error
-        : failure(
-            path,
-            operation,
-            'storage',
-            error.code === undefined
-              ? error.detail
-              : `${error.detail} (SQLSTATE ${error.code})`,
-          );
+        : failure(path, operation, 'storage', error.message);
 
   const create = Effect.fn('AiLog.LogStorePg.create')(function* (
     path: string,
     identity: string,
   ) {
     const rows = yield* client
-      .query(
+      .unsafe<Row>(
         `INSERT INTO ${streams} (path, identity)
          VALUES ($1, $2)
          ON CONFLICT (path) DO NOTHING
@@ -281,16 +235,33 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
         failure(path, 'create', 'conflict', 'a stream already exists here'),
       );
     }
-    return metaOf(path, readStreamRow(row));
+    const decoded = yield* readStreamRow(row).pipe(
+      Effect.mapError((error) =>
+        failure(
+          path,
+          'create',
+          'storage',
+          `stored stream does not decode: ${String(error)}`,
+        ),
+      ),
+    );
+    return metaOf(path, decoded);
   });
 
   const acquire = Effect.fn('AiLog.LogStorePg.acquire')(function* (
     path: string,
-    producerId: string,
+    producerId: LogVocabulary.ProducerId,
     expected?: LogStore.AcquireExpected,
   ) {
+    const decodedProducerId = yield* Schema.decodeUnknownEffect(
+      LogVocabulary.ProducerId,
+    )(producerId).pipe(
+      Effect.mapError(() =>
+        failure(path, 'acquire', 'invalid', 'producer id must be non-empty'),
+      ),
+    );
     const rows = yield* client
-      .query(
+      .unsafe<Row>(
         `UPDATE ${streams}
          SET epoch = epoch + 1,
              producer_id = $2,
@@ -300,7 +271,12 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
             AND ($3::bigint IS NULL OR epoch = $3)
            AND ($4::text IS NULL OR last_offset = $4)
          RETURNING epoch`,
-        [path, producerId, expected?.epoch ?? null, expected?.head ?? null],
+        [
+          path,
+          decodedProducerId,
+          expected?.epoch ?? null,
+          expected?.head ?? null,
+        ],
       )
       .pipe(Effect.mapError(asLogStoreError(path, 'acquire')));
 
@@ -308,7 +284,7 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
     if (row === undefined) {
       if (expected !== undefined) {
         const existing = yield* client
-          .query(`SELECT 1 FROM ${streams} WHERE path = $1`, [path])
+          .unsafe<Row>(`SELECT 1 FROM ${streams} WHERE path = $1`, [path])
           .pipe(Effect.mapError(asLogStoreError(path, 'acquire')));
         if (existing[0] !== undefined) {
           return yield* Effect.fail(
@@ -328,9 +304,20 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
 
     return {
       path,
-      producerId,
-      epoch: asNumber(row['epoch']),
-      nextSequence: 0,
+      producerId: decodedProducerId,
+      epoch: yield* Schema.decodeUnknownEffect(LogVocabulary.Epoch)(
+        asNumber(row['epoch']),
+      ).pipe(
+        Effect.mapError((error) =>
+          failure(
+            path,
+            'acquire',
+            'storage',
+            `stored epoch does not decode: ${String(error)}`,
+          ),
+        ),
+      ),
+      nextSequence: LogVocabulary.ProducerSequence.make(0),
     } satisfies LogStore.ProducerClaim;
   });
 
@@ -345,21 +332,54 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
     if (input.records.length === 0) {
       return yield* reject('empty', 'append carried no records');
     }
-    if (!Number.isInteger(input.sequence) || input.sequence < 0) {
-      return yield* reject(
-        'conflict',
-        `sequence ${input.sequence} is not a non-negative integer`,
-      );
-    }
+    const producerSequence = yield* Schema.decodeUnknownEffect(
+      LogVocabulary.ProducerSequence,
+    )(input.sequence).pipe(
+      Effect.mapError(() =>
+        failure(
+          input.path,
+          'append',
+          'conflict',
+          `sequence ${input.sequence} is not a safe natural integer`,
+        ),
+      ),
+    );
+    const epoch = yield* Schema.decodeUnknownEffect(LogVocabulary.Epoch)(
+      input.epoch,
+    ).pipe(
+      Effect.mapError(() =>
+        failure(
+          input.path,
+          'append',
+          'conflict',
+          `epoch ${input.epoch} is not a safe natural integer`,
+        ),
+      ),
+    );
+    const producerId = yield* Schema.decodeUnknownEffect(
+      LogVocabulary.ProducerId,
+    )(input.producerId).pipe(
+      Effect.mapError(() =>
+        failure(
+          input.path,
+          'append',
+          'conflict',
+          'producer id must be non-empty',
+        ),
+      ),
+    );
 
     return yield* client
-      .transaction((tx) =>
+      .withTransaction(
         Effect.gen(function* () {
+          yield* client.unsafe(
+            `SET LOCAL statement_timeout = ${transactionStatementTimeoutMs}`,
+          );
           // The row lock. Every check below reads state that the write at the
           // bottom then advances, so the two have to be one critical section
           // per stream — which producer fencing already implies, since a
           // stream has one writer at a time by construction.
-          const locked = yield* tx.query(
+          const locked = yield* client.unsafe<Row>(
             `SELECT identity, epoch, producer_id, next_sequence,
                     next_producer_sequence, last_fingerprint, last_offset
              FROM ${streams}
@@ -372,15 +392,24 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
           if (found === undefined) {
             return yield* reject('not_found', 'no stream at this path');
           }
-          const state = readStreamRow(found);
+          const state = yield* readStreamRow(found).pipe(
+            Effect.mapError((error) =>
+              failure(
+                input.path,
+                'append',
+                'storage',
+                `stored stream does not decode: ${String(error)}`,
+              ),
+            ),
+          );
 
-          if (input.epoch !== state.epoch) {
+          if (epoch !== state.epoch) {
             return yield* reject(
               'fenced',
               `epoch ${input.epoch} is not the current epoch ${state.epoch}`,
             );
           }
-          if (input.producerId !== state.producerId) {
+          if (producerId !== state.producerId) {
             return yield* reject(
               'conflict',
               `producer ${input.producerId} does not hold epoch ${state.epoch}`,
@@ -400,7 +429,7 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
 
           const digest = prepared.fingerprint;
           const expected = state.nextProducerSequence;
-          if (expected > 0 && input.sequence === expected - 1) {
+          if (expected > 0 && producerSequence === expected - 1) {
             // A retry. Idempotent only if it repeats the same batch: reusing a
             // sequence for different records is overwriting, and answering it
             // with the earlier offset drops the new records silently.
@@ -412,9 +441,9 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
             }
             return state.lastOffset;
           }
-          if (input.sequence !== expected) {
+          if (producerSequence !== expected) {
             return yield* reject(
-              input.sequence > expected ? 'gap' : 'conflict',
+              producerSequence > expected ? 'gap' : 'conflict',
               `expected sequence ${expected}, got ${input.sequence}`,
             );
           }
@@ -430,7 +459,7 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
           // still all-or-nothing and occupies exactly one producer sequence.
           // `prepared.encoded` is also the exact material fingerprinted above:
           // no second schema encode or per-record stringify can drift from it.
-          yield* tx.query(
+          yield* client.unsafe(
             `WITH input AS (
                SELECT $2::bigint + item.ordinality - 1 AS seq,
                       (item.ordinality - 1)::integer AS batch_index,
@@ -467,12 +496,12 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
             [
               input.path,
               state.nextSequence.toString(),
-              input.producerId,
-              input.epoch,
-              input.sequence,
+              producerId,
+              epoch,
+              producerSequence,
               prepared.encoded,
               sequence.toString(),
-              input.sequence + 1,
+              LogVocabulary.ProducerSequence.make(Number(producerSequence) + 1),
               digest,
               offset,
               channelFor(input.path),
@@ -506,7 +535,7 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
     // lateral side pages it. `limit + 1` answers `upToDate` without a second
     // count — a backend that guesses `false` here makes `Tail` spin.
     const rows = yield* client
-      .query(
+      .unsafe<Row>(
         `SELECT r.record_offset, r.conversation_id, r.record_timestamp, r.record
          FROM ${streams} s
          LEFT JOIN LATERAL (
@@ -584,7 +613,7 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
     );
     const before = Option.getOrUndefined(normalized.before);
     const rows = yield* client
-      .query(
+      .unsafe<Row>(
         `SELECT r.record_offset, r.conversation_id, r.record_timestamp, r.record
            FROM ${streams} s
            LEFT JOIN LATERAL (
@@ -640,7 +669,7 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
 
   const meta = Effect.fn('AiLog.LogStorePg.meta')(function* (path: string) {
     const rows = yield* client
-      .query(
+      .unsafe<Row>(
         `SELECT identity, epoch, producer_id, next_sequence,
                 next_producer_sequence, last_fingerprint, last_offset
          FROM ${streams}
@@ -652,22 +681,30 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
     const row = rows[0];
     return row === undefined
       ? Option.none<LogStore.StreamMeta>()
-      : Option.some(metaOf(path, readStreamRow(row)));
+      : Option.some(
+          metaOf(
+            path,
+            yield* readStreamRow(row).pipe(
+              Effect.mapError((error) =>
+                failure(
+                  path,
+                  'meta',
+                  'storage',
+                  `stored stream does not decode: ${String(error)}`,
+                ),
+              ),
+            ),
+          ),
+        );
   });
 
-  // Subscribe, *then* emit the opening wake-up — the same order as the memory
-  // backend, for the same reason. `listen` resolving is the proof that the
-  // `LISTEN` took effect, so nothing appended after this point can be missed.
-  // Emitting first and subscribing after would put the race back.
+  // The corrected listener's first element is its readiness handshake: LISTEN
+  // has completed before this opening wake-up can be observed.
   const changes = (path: string): Stream.Stream<void, LogStore.LogStoreError> =>
-    Stream.unwrap(
-      client.listen(channelFor(path)).pipe(
-        Effect.map((notifications) => {
-          const opening: Stream.Stream<void> = Stream.make(undefined);
-          return Stream.concat(opening, notifications);
-        }),
-      ),
-    ).pipe(Stream.mapError(asLogStoreError(path, 'changes')));
+    client.listen(channelFor(path)).pipe(
+      Stream.map(() => undefined),
+      Stream.mapError(asLogStoreError(path, 'changes')),
+    );
 
   return LogStore.Service.of({
     create,
@@ -681,324 +718,13 @@ export const make = (client: Client, options?: Options): LogStore.Interface => {
 };
 
 export const layer = (
-  client: Client,
   options?: Options,
-): Layer.Layer<LogStore.Service> =>
+): Layer.Layer<LogStore.Service, never, PgClient.PgClient> =>
   Layer.effect(
     LogStore.Service,
-    Effect.acquireRelease(
-      Effect.sync(() => make(client, options)),
-      () => client.closeNotifications ?? Effect.void,
+    Effect.map(Effect.service(PgClient.PgClient), (client) =>
+      make(client, options),
     ),
   );
-
-// ---------------------------------------------------------------------------
-// node-postgres adapter
-// ---------------------------------------------------------------------------
-
-/** What this adapter uses of a `pg.QueryResult`. */
-export interface QueryResultLike {
-  readonly rows: ReadonlyArray<Row>;
-}
-
-/** What this adapter uses of a `pg.PoolClient`. */
-export interface PoolConnectionLike {
-  query(
-    text: string,
-    values?: ReadonlyArray<unknown>,
-  ): Promise<QueryResultLike>;
-  on(
-    event: 'notification',
-    listener: (message: {
-      readonly channel: string;
-      readonly payload?: string | undefined;
-    }) => void,
-  ): unknown;
-  on(event: 'error', listener: (error: Error) => void): unknown;
-  on(event: 'end', listener: () => void): unknown;
-  /** `true` destroys the connection instead of returning it to the pool. */
-  release(destroy?: boolean): void;
-}
-
-/**
- * What this adapter uses of a `pg.Pool`.
- *
- * Structural on purpose. `pg` is not a dependency of `@sunfall/vesper-log` and should
- * not become one — the family's layering rule is `log -> effect` — so an
- * application passes the pool it already owns and this module never learns
- * which driver it came from.
- */
-export interface PoolLike {
-  connect(): Promise<PoolConnectionLike>;
-  query(
-    text: string,
-    values?: ReadonlyArray<unknown>,
-  ): Promise<QueryResultLike>;
-}
-
-export interface PoolOptions {
-  /** Bounds every statement run while a transaction holds a pool connection. */
-  readonly transactionStatementTimeoutMs?: number;
-}
-
-const sqlFailure = (cause: unknown): SqlFailure => {
-  const code =
-    typeof cause === 'object' && cause !== null && 'code' in cause
-      ? String((cause as { code: unknown }).code)
-      : undefined;
-  return new SqlFailure({
-    detail: cause instanceof Error ? cause.message : String(cause),
-    code,
-  });
-};
-
-/**
- * Turn a pool into a {@link Client}.
- *
- * The pool stays the caller's: this never creates one and never ends one. The
- * It owns at most one dedicated notification session. All channels and
- * subscribers share that session; the session is destroyed when its last
- * subscriber leaves or the layer closes because a connection that has issued
- * `LISTEN` is not safe to hand back to a pool that does not reset it.
- */
-export const fromPool = (pool: PoolLike, options?: PoolOptions): Client => {
-  const transactionStatementTimeoutMs =
-    options?.transactionStatementTimeoutMs ?? 30_000;
-  if (
-    !Number.isSafeInteger(transactionStatementTimeoutMs) ||
-    transactionStatementTimeoutMs < 1
-  ) {
-    throw new Error(
-      `transactionStatementTimeoutMs must be a positive integer, got ${transactionStatementTimeoutMs}`,
-    );
-  }
-  const runQuery =
-    (
-      run: (
-        text: string,
-        values?: ReadonlyArray<unknown>,
-      ) => Promise<QueryResultLike>,
-    ) =>
-    (text: string, params?: ReadonlyArray<unknown>) =>
-      Effect.tryPromise({
-        try: () => run(text, params ?? []),
-        catch: sqlFailure,
-      }).pipe(Effect.map((result) => result.rows));
-
-  const query = runQuery((text, values) => pool.query(text, values));
-
-  const transaction = <A, E, R>(
-    body: (tx: Sql) => Effect.Effect<A, E, R>,
-  ): Effect.Effect<A, E | SqlFailure, R> =>
-    Effect.suspend(() => {
-      // A connection whose ROLLBACK did not land is still inside an aborted
-      // transaction, and `pg` does not reset one on release. Returning it to
-      // the pool would hand the next caller a connection that fails every
-      // statement with 25P02 — so it gets destroyed instead.
-      let poisoned = false;
-
-      return Effect.acquireUseRelease(
-        Effect.tryPromise({ try: () => pool.connect(), catch: sqlFailure }),
-        (connection) => {
-          const tx: Sql = {
-            // node-postgres promises do not expose protocol cancellation. Do
-            // not release a connection while its statement is still running;
-            // wait for Postgres' bounded statement timeout, then roll back.
-            query: (text, values) =>
-              runQuery((sql, params) => connection.query(sql, params))(
-                text,
-                values,
-              ).pipe(Effect.uninterruptible),
-          };
-          return Effect.tryPromise({
-            // The timeout value is a validated positive integer, so it is safe
-            // to inline. Keeping this with BEGIN saves one network round trip
-            // for every transaction while preserving transaction-local scope.
-            try: () =>
-              connection.query(
-                `BEGIN; SET LOCAL statement_timeout = ${transactionStatementTimeoutMs}`,
-              ),
-            catch: sqlFailure,
-          }).pipe(
-            Effect.uninterruptible,
-            Effect.flatMap(() => body(tx)),
-            Effect.tap(() =>
-              Effect.tryPromise({
-                try: () => connection.query('COMMIT'),
-                catch: sqlFailure,
-              }).pipe(Effect.uninterruptible),
-            ),
-            // Runs for a failure and for an interruption alike; both leave an
-            // open transaction that has to be undone. A rollback that itself
-            // fails must not replace the failure that caused it — the caller
-            // needs to know it was fenced, not that the socket also died on
-            // the way out.
-            Effect.onError(() =>
-              Effect.tryPromise({
-                try: () => connection.query('ROLLBACK'),
-                catch: sqlFailure,
-              }).pipe(
-                Effect.uninterruptible,
-                Effect.catchCause(() =>
-                  Effect.sync(() => {
-                    poisoned = true;
-                  }),
-                ),
-              ),
-            ),
-          );
-        },
-        (connection) => Effect.sync(() => connection.release(poisoned)),
-      );
-    });
-
-  type Wakeups = Queue.Queue<void, SqlFailure | Cause.Done>;
-  const channels = new Map<string, Set<Wakeups>>();
-  let listener: PoolConnectionLike | undefined;
-  let serial: Promise<void> = Promise.resolve();
-
-  // LISTEN and UNLISTEN mutate session state, so they must be ordered even
-  // when subscription scopes open and close concurrently.
-  const exclusive = <A>(body: () => Promise<A>): Promise<A> => {
-    const result = serial.then(body, body);
-    serial = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  };
-
-  const release = (connection: PoolConnectionLike) => {
-    try {
-      // LISTEN is session state. Never return this connection to the pool.
-      connection.release(true);
-    } catch {
-      // A driver may already have destroyed a connection after error/end.
-    }
-  };
-
-  const failSession = (connection: PoolConnectionLike, failure: SqlFailure) => {
-    if (listener !== connection) return;
-    listener = undefined;
-    const cause = Cause.fail(failure);
-    for (const subscribers of channels.values()) {
-      for (const wakeups of subscribers) {
-        Queue.failCauseUnsafe(wakeups, cause);
-      }
-    }
-    channels.clear();
-    release(connection);
-  };
-
-  const connectListener = async (): Promise<PoolConnectionLike> => {
-    const connection = await pool.connect();
-    listener = connection;
-    connection.on('notification', (message) => {
-      if (listener !== connection) return;
-      const subscribers = channels.get(message.channel);
-      if (subscribers === undefined) return;
-      for (const wakeups of subscribers) {
-        Queue.offerUnsafe(wakeups, undefined);
-      }
-    });
-    // A dropped session must fail every attached stream. Subsequent
-    // subscriptions reconnect; failed streams do not silently resume because
-    // doing so would weaken their explicit error channel.
-    connection.on('error', (error) => {
-      failSession(connection, sqlFailure(error));
-    });
-    connection.on('end', () => {
-      failSession(
-        connection,
-        new SqlFailure({
-          detail: 'LISTEN connection ended without an error',
-        }),
-      );
-    });
-    return connection;
-  };
-
-  const register = (channel: string, wakeups: Wakeups): Promise<void> =>
-    exclusive(async () => {
-      if (!IDENTIFIER.test(channel) || channel.length > 63) {
-        throw new SqlFailure({
-          detail: `Not a usable Postgres channel name: ${channel}`,
-        });
-      }
-
-      const connection = listener ?? (await connectListener());
-      const existing = channels.get(channel);
-      if (existing !== undefined) {
-        existing.add(wakeups);
-        return;
-      }
-
-      // Register the queue before awaiting LISTEN so an error/end during the
-      // query reaches this subscriber rather than leaving it parked forever.
-      channels.set(channel, new Set([wakeups]));
-      try {
-        await connection.query(`LISTEN "${channel}"`);
-        if (listener !== connection) {
-          throw new SqlFailure({ detail: 'LISTEN connection ended' });
-        }
-      } catch (error) {
-        const failure = error instanceof SqlFailure ? error : sqlFailure(error);
-        failSession(connection, failure);
-        throw failure;
-      }
-    });
-
-  const unregister = (channel: string, wakeups: Wakeups): Promise<void> =>
-    exclusive(async () => {
-      const subscribers = channels.get(channel);
-      if (subscribers === undefined) return;
-      subscribers.delete(wakeups);
-      if (subscribers.size > 0) return;
-
-      channels.delete(channel);
-      const connection = listener;
-      if (connection === undefined) return;
-      try {
-        await connection.query(`UNLISTEN "${channel}"`);
-      } catch (error) {
-        failSession(connection, sqlFailure(error));
-        return;
-      }
-
-      if (listener === connection && channels.size === 0) {
-        listener = undefined;
-        release(connection);
-      }
-    });
-
-  const listen = (channel: string) =>
-    Effect.gen(function* () {
-      // Sliding, capacity one. Publishing must never block on a reader, and
-      // dropping a wake-up is safe because the wake-up only means "read again".
-      const wakeups = yield* Queue.sliding<void, SqlFailure | Cause.Done>(1);
-      yield* Effect.acquireRelease(
-        Effect.tryPromise({
-          try: () => register(channel, wakeups),
-          catch: (error) =>
-            error instanceof SqlFailure ? error : sqlFailure(error),
-        }),
-        () => Effect.promise(() => unregister(channel, wakeups)),
-      );
-      return Stream.fromQueue(wakeups);
-    });
-
-  const closeNotifications = Effect.promise(() =>
-    exclusive(async () => {
-      const connection = listener;
-      if (connection === undefined) return;
-      failSession(
-        connection,
-        new SqlFailure({ detail: 'LISTEN session closed with its layer' }),
-      );
-    }),
-  );
-
-  return { query, transaction, listen, closeNotifications };
-};
 
 export * as LogStorePg from './layer-pg.js';

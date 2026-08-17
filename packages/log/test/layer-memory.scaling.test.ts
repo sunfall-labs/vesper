@@ -1,31 +1,36 @@
 import { performance } from 'node:perf_hooks';
 
+import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { describe, expect, it } from 'vitest';
 
 import { LogStoreMemory } from '../src/layer-memory.js';
 import { LogStore } from '../src/log-store.js';
 import { LogOffset } from '../src/offset.js';
+import { LogVocabulary } from '../src/vocabulary.js';
 
 const describeScaling =
   process.env['RUN_LOG_SCALING'] === '1' ? describe : describe.skip;
 
 describeScaling('LogStore memory pagination scaling', () => {
   for (const size of [1_000, 10_000]) {
-    it(`reads near the end of ${size.toLocaleString()} records`, async () => {
-      const result = await Effect.runPromise(
+    it.effect(
+      `reads near the end of ${size.toLocaleString()} records`,
+      () =>
         Effect.gen(function* () {
           const path = `scale-${size}`;
           const store = yield* LogStore.Service;
           yield* store.create(path, 'identity');
-          const claim = yield* store.acquire(path, 'producer');
+          const claim = yield* store.acquire(
+            path,
+            LogVocabulary.ProducerId.make('producer'),
+          );
           yield* store.append({
             path,
             producerId: claim.producerId,
             epoch: claim.epoch,
-            sequence: 0,
+            sequence: LogVocabulary.ProducerSequence.make(0),
             records: Array.from({ length: size }, (_, index) => ({
-              conversationId: 'conversation',
+              conversationId: LogVocabulary.ConversationId.make('conversation'),
               timestamp: 1_700_000_000_000 + index,
               record: {
                 _tag: 'Text' as const,
@@ -41,17 +46,17 @@ describeScaling('LogStore memory pagination scaling', () => {
           for (let iteration = 0; iteration < 10_000; iteration += 1) {
             page = yield* store.read(path, { after, limit: 1 });
           }
-          return { page: page!, elapsedMs: performance.now() - started };
-        }).pipe(Effect.provide(LogStoreMemory.layer)),
-      );
+          const elapsedMs = performance.now() - started;
 
-      expect(result.page.records).toHaveLength(1);
-      expect(result.page.records[0]?.offset).toBe(
-        LogOffset.fromSeq(BigInt(size - 1)),
-      );
-      console.info(
-        `memory ${size.toLocaleString()}-record tail reads: 10,000 in ${result.elapsedMs.toFixed(1)}ms`,
-      );
-    }, 30_000);
+          expect(page!.records).toHaveLength(1);
+          expect(page!.records[0]?.offset).toBe(
+            LogOffset.fromSeq(BigInt(size - 1)),
+          );
+          console.info(
+            `memory ${size.toLocaleString()}-record tail reads: 10,000 in ${elapsedMs.toFixed(1)}ms`,
+          );
+        }).pipe(Effect.provide(LogStoreMemory.layer)),
+      { timeout: 30_000 },
+    );
   }
 });

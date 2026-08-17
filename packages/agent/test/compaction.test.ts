@@ -6,7 +6,7 @@ import {
   Prompt,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import {
@@ -120,26 +120,27 @@ describe('Service', () => {
   // If this became an ordinary service the whole package would stop being
   // runnable without wiring, which is the property that keeps every other
   // test in this directory free of runtime policy.
-  it('defaults to the pure heuristics with nothing provided', async () => {
-    const installed = await Effect.runPromise(ContextWindow.Service);
+  it.effect('defaults to the pure heuristics with nothing provided', () =>
+    Effect.gen(function* () {
+      const installed = yield* ContextWindow.Service;
+      expect(installed).toBe(ContextWindow.pure);
+    }),
+  );
 
-    expect(installed).toBe(ContextWindow.pure);
-  });
+  it.effect('takes an override', () =>
+    Effect.gen(function* () {
+      const fixed: ContextWindow.Heuristics = {
+        estimate: () => ({ tokens: 7, usageTokens: 7, trailingTokens: 0 }),
+        shouldCompact: () => true,
+      };
 
-  it('takes an override', async () => {
-    const fixed: ContextWindow.Heuristics = {
-      estimate: () => ({ tokens: 7, usageTokens: 7, trailingTokens: 0 }),
-      shouldCompact: () => true,
-    };
-
-    const installed = await Effect.runPromise(
-      ContextWindow.Service.pipe(
+      const installed = yield* ContextWindow.Service.pipe(
         Effect.provideService(ContextWindow.Service, fixed),
-      ),
-    );
+      );
 
-    expect(installed).toBe(fixed);
-  });
+      expect(installed).toBe(fixed);
+    }),
+  );
 });
 
 describe('usageFromTurn', () => {
@@ -172,49 +173,53 @@ describe('shouldCompact', () => {
     instructions: '',
   };
 
-  it('fires once the estimate crosses the window minus reserve', async () => {
-    const prompt = Prompt.make([message('user', 'z'.repeat(400))]);
+  it.effect('fires once the estimate crosses the window minus reserve', () =>
+    Effect.gen(function* () {
+      const prompt = Prompt.make([message('user', 'z'.repeat(400))]);
 
-    expect(await Effect.runPromise(shouldCompact(prompt, 200, policy))).toBe(
-      false,
-    );
-    expect(await Effect.runPromise(shouldCompact(prompt, 110, policy))).toBe(
-      true,
-    );
-  });
+      expect(yield* shouldCompact(prompt, 200, policy)).toBe(false);
+      expect(yield* shouldCompact(prompt, 110, policy)).toBe(true);
+    }),
+  );
 
   // The point of the seam. Without this the trigger is whatever this package
   // guessed, and installing a provider-backed estimator changes nothing.
-  it('asks the installed heuristics rather than counting characters itself', async () => {
-    const seen: Array<ContextWindow.TurnUsage | undefined> = [];
+  it.effect(
+    'asks the installed heuristics rather than counting characters itself',
+    () =>
+      Effect.gen(function* () {
+        const seen: Array<ContextWindow.TurnUsage | undefined> = [];
 
-    const fixed: ContextWindow.Heuristics = {
-      estimate: (_prompt, usage) => {
-        seen.push(usage);
-        return { tokens: 99_000, usageTokens: 98_000, trailingTokens: 1_000 };
-      },
-      shouldCompact: (tokens, window, settings) =>
-        tokens > window - settings.reserveTokens,
-    };
+        const fixed: ContextWindow.Heuristics = {
+          estimate: (_prompt, usage) => {
+            seen.push(usage);
+            return {
+              tokens: 99_000,
+              usageTokens: 98_000,
+              trailingTokens: 1_000,
+            };
+          },
+          shouldCompact: (tokens, window, settings) =>
+            tokens > window - settings.reserveTokens,
+        };
 
-    // Four characters of text. Nothing a character count does with this
-    // prompt could cross a 100,000-token window.
-    const prompt = Prompt.make([message('user', 'tiny')]);
+        // Four characters of text. Nothing a character count does with this
+        // prompt could cross a 100,000-token window.
+        const prompt = Prompt.make([message('user', 'tiny')]);
 
-    const fired = await Effect.runPromise(
-      shouldCompact(
-        prompt,
-        100_000,
-        { ...policy, reserveTokens: 20_000 },
-        { inputTokens: 98_000, outputTokens: 0 },
-      ).pipe(Effect.provideService(ContextWindow.Service, fixed)),
-    );
+        const fired = yield* shouldCompact(
+          prompt,
+          100_000,
+          { ...policy, reserveTokens: 20_000 },
+          { inputTokens: 98_000, outputTokens: 0 },
+        ).pipe(Effect.provideService(ContextWindow.Service, fixed));
 
-    expect(fired).toBe(true);
-    // And the anchor reached the estimator rather than being dropped on the
-    // way, which is the half of this that fails silently.
-    expect(seen).toEqual([{ inputTokens: 98_000, outputTokens: 0 }]);
-  });
+        expect(fired).toBe(true);
+        // And the anchor reached the estimator rather than being dropped on the
+        // way, which is the half of this that fails silently.
+        expect(seen).toEqual([{ inputTokens: 98_000, outputTokens: 0 }]);
+      }),
+  );
 });
 
 describe('compact', () => {
@@ -230,20 +235,22 @@ describe('compact', () => {
       chat: Chat.Service,
     ) => Effect.Effect<A, unknown, LanguageModel.LanguageModel>,
     history: Prompt.Prompt,
-  ) => {
+  ): Effect.Effect<{
+    value: A;
+    history: Prompt.Prompt;
+    models: ReturnType<typeof fakeProvider>;
+  }> => {
     const models = fakeProvider();
 
-    return Effect.runPromise(
-      Effect.gen(function* () {
-        const chat = yield* Chat.fromPrompt(history);
-        const value = yield* build(chat);
-        return { value, history: yield* Ref.get(chat.history), models };
-      }).pipe(Effect.provide(models.layer)) as Effect.Effect<{
-        value: A;
-        history: Prompt.Prompt;
-        models: typeof models;
-      }>,
-    );
+    return Effect.gen(function* () {
+      const chat = yield* Chat.fromPrompt(history);
+      const value = yield* build(chat);
+      return { value, history: yield* Ref.get(chat.history), models };
+    }).pipe(Effect.provide(models.layer)) as Effect.Effect<{
+      value: A;
+      history: Prompt.Prompt;
+      models: typeof models;
+    }>;
   };
 
   const terse = Prompt.make([
@@ -269,121 +276,139 @@ describe('compact', () => {
   // A summarization request is a conversation with an instruction stapled to
   // the end, and a model handed one without being told otherwise answers the
   // conversation. This is the sentence that tells it otherwise.
-  it('runs the summarization call under the summarizer system prompt', async () => {
-    const { models } = await run((chat) => compact(chat, policy), terse);
+  it.effect(
+    'runs the summarization call under the summarizer system prompt',
+    () =>
+      Effect.gen(function* () {
+        const { models } = yield* run((chat) => compact(chat, policy), terse);
 
-    const sent = models.summaries[0]!;
-    expect(sent.content[0]).toMatchObject({
-      role: 'system',
-      content: defaultSystem,
-    });
-    // And the agent's own instructions are not what the summarizer runs
-    // under: an agent told to be terse will write a terse summary, but an
-    // agent told to file support tickets will file one.
-    expect(JSON.stringify(sent.content)).not.toContain('BE TERSE');
-  });
+        const sent = models.summaries[0]!;
+        expect(sent.content[0]).toMatchObject({
+          role: 'system',
+          content: defaultSystem,
+        });
+        // And the agent's own instructions are not what the summarizer runs
+        // under: an agent told to be terse will write a terse summary, but an
+        // agent told to file support tickets will file one.
+        expect(JSON.stringify(sent.content)).not.toContain('BE TERSE');
+      }),
+  );
 
-  it('lets a caller replace the summarizer system prompt', async () => {
-    const { models } = await run(
-      (chat) => compact(chat, { ...policy, system: 'MINE' }),
-      headless,
-    );
+  it.effect('lets a caller replace the summarizer system prompt', () =>
+    Effect.gen(function* () {
+      const { models } = yield* run(
+        (chat) => compact(chat, { ...policy, system: 'MINE' }),
+        headless,
+      );
 
-    expect(models.summaries[0]!.content[0]).toMatchObject({
-      role: 'system',
-      content: 'MINE',
-    });
-  });
+      expect(models.summaries[0]!.content[0]).toMatchObject({
+        role: 'system',
+        content: 'MINE',
+      });
+    }),
+  );
 
-  it('replaces old turns with a summary and keeps the recent tail', async () => {
-    const { history } = await run((chat) => compact(chat, policy), terse);
+  it.effect('replaces old turns with a summary and keeps the recent tail', () =>
+    Effect.gen(function* () {
+      const { history } = yield* run((chat) => compact(chat, policy), terse);
 
-    const texts = textsOf(history);
+      const texts = textsOf(history);
 
-    // System survives — it is the agent's identity, not conversation.
-    expect(texts[0]).toBe('BE TERSE');
-    expect(texts[1]).toContain('SUMMARY');
-    // The recent tail is preserved verbatim, not paraphrased.
-    expect(texts[texts.length - 1]).toBe('recent');
-    expect(texts.some((t) => t.includes('a'.repeat(200)))).toBe(false);
-  });
+      // System survives — it is the agent's identity, not conversation.
+      expect(texts[0]).toBe('BE TERSE');
+      expect(texts[1]).toContain('SUMMARY');
+      // The recent tail is preserved verbatim, not paraphrased.
+      expect(texts[texts.length - 1]).toBe('recent');
+      expect(texts.some((t) => t.includes('a'.repeat(200)))).toBe(false);
+    }),
+  );
 
   // Spending a model call to paraphrase recent history as itself is pure
   // waste, and it loses fidelity for nothing.
-  it('does nothing when there is no older history to summarize', async () => {
-    const { value, models } = await run(
-      (chat) => compact(chat, policy),
-      Prompt.make([
-        { role: 'system', content: 'BE TERSE' },
-        message('user', 'hi'),
-      ]),
-    );
+  it.effect('does nothing when there is no older history to summarize', () =>
+    Effect.gen(function* () {
+      const { value, models } = yield* run(
+        (chat) => compact(chat, policy),
+        Prompt.make([
+          { role: 'system', content: 'BE TERSE' },
+          message('user', 'hi'),
+        ]),
+      );
 
-    expect(value).toBeUndefined();
-    expect(models.summaries).toHaveLength(0);
-  });
+      expect(value).toBeUndefined();
+      expect(models.summaries).toHaveLength(0);
+    }),
+  );
 
   // What it did, not that it did something. The loop announces this and the
   // log stores it; a boolean could carry neither, which is how `Compacted`
   // ended up a record with counts and no summary in it.
-  it('reports the summary and the shape of the split', async () => {
-    const { value } = await run((chat) => compact(chat, policy), terse);
+  it.effect('reports the summary and the shape of the split', () =>
+    Effect.gen(function* () {
+      const { value } = yield* run((chat) => compact(chat, policy), terse);
 
-    expect(value).toEqual({
-      summary: 'SUMMARY',
-      summarizedMessages: 2,
-      keptMessages: 1,
-      usage: { input: 10, output: 4 },
-    });
-  });
+      expect(value).toEqual({
+        summary: 'SUMMARY',
+        summarizedMessages: 2,
+        keptMessages: 1,
+        usage: { input: 10, output: 4 },
+      });
+    }),
+  );
 
-  it('keeps assistant tool calls and their tool results on the same side', async () => {
-    const call = Prompt.makeMessage('assistant', {
-      content: [
-        Prompt.makePart('tool-call', {
-          id: 'call-1',
-          name: 'lookup',
-          params: {},
-          providerExecuted: false,
-        }),
-      ],
-    });
-    const result = Prompt.makeMessage('tool', {
-      content: [
-        Prompt.makePart('tool-result', {
-          id: 'call-1',
-          name: 'lookup',
-          result: 'ok',
-          isFailure: false,
-          providerExecuted: false,
-        }),
-      ],
-    });
-    const history = Prompt.make([
-      message('user', 'old'.repeat(100)),
-      call,
-      result,
-    ]);
+  it.effect(
+    'keeps assistant tool calls and their tool results on the same side',
+    () =>
+      Effect.gen(function* () {
+        const call = Prompt.makeMessage('assistant', {
+          content: [
+            Prompt.makePart('tool-call', {
+              id: 'call-1',
+              name: 'lookup',
+              params: {},
+              providerExecuted: false,
+            }),
+          ],
+        });
+        const result = Prompt.makeMessage('tool', {
+          content: [
+            Prompt.makePart('tool-result', {
+              id: 'call-1',
+              name: 'lookup',
+              result: 'ok',
+              isFailure: false,
+              providerExecuted: false,
+            }),
+          ],
+        });
+        const history = Prompt.make([
+          message('user', 'old'.repeat(100)),
+          call,
+          result,
+        ]);
 
-    const { history: compacted } = await run(
-      (chat) => compact(chat, { ...policy, keepRecentTokens: 1 }),
-      history,
-    );
+        const { history: compacted } = yield* run(
+          (chat) => compact(chat, { ...policy, keepRecentTokens: 1 }),
+          history,
+        );
 
-    expect(compacted.content.map((entry) => entry.role)).toEqual([
-      'user',
-      'assistant',
-      'tool',
-    ]);
-  });
+        expect(compacted.content.map((entry) => entry.role)).toEqual([
+          'user',
+          'assistant',
+          'tool',
+        ]);
+      }),
+  );
 
   // One renderer, used by the compacted `Chat` and by the rebuild in
   // `history.ts`. Two would agree until one of them was edited.
-  it('frames the summary the way summaryMessage does', async () => {
-    const { history } = await run((chat) => compact(chat, policy), headless);
+  it.effect('frames the summary the way summaryMessage does', () =>
+    Effect.gen(function* () {
+      const { history } = yield* run((chat) => compact(chat, policy), headless);
 
-    expect(history.content[0]).toEqual(summaryMessage('SUMMARY'));
-  });
+      expect(history.content[0]).toEqual(summaryMessage('SUMMARY'));
+    }),
+  );
 });
 
 describe('isContextOverflow', () => {
@@ -438,11 +463,11 @@ describe('withCompaction', () => {
 
   // The reactive trigger is what actually saves a run: the estimate is wrong
   // often enough that relying on it alone would strand conversations.
-  it('compacts and retries once when a turn overflows', async () => {
-    const models = fakeProvider();
+  it.effect('compacts and retries once when a turn overflows', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider();
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const attempts = yield* Ref.make(0);
 
         const chat = yield* Chat.fromPrompt(
@@ -466,21 +491,21 @@ describe('withCompaction', () => {
         );
 
         return { value, attempts: yield* Ref.get(attempts) };
-      }) as Effect.Effect<{ value: string; attempts: number }>,
-    );
+      }) as Effect.Effect<{ value: string; attempts: number }>;
 
-    expect(result.value).toBe('ok');
-    expect(result.attempts).toBe(2);
-    expect(models.summaries).toHaveLength(1);
-  });
+      expect(result.value).toBe('ok');
+      expect(result.attempts).toBe(2);
+      expect(models.summaries).toHaveLength(1);
+    }),
+  );
 
   // Looping would spend a model call per attempt to rediscover that the
   // recent tail alone does not fit.
-  it('does not retry a second time', async () => {
-    const models = fakeProvider();
+  it.effect('does not retry a second time', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider();
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
         const attempts = yield* Ref.make(0);
 
         const chat = yield* Chat.fromPrompt(
@@ -502,12 +527,12 @@ describe('withCompaction', () => {
         );
 
         return { outcome, attempts: yield* Ref.get(attempts) };
-      }) as Effect.Effect<{ outcome: { _tag: string }; attempts: number }>,
-    );
+      }) as Effect.Effect<{ outcome: { _tag: string }; attempts: number }>;
 
-    expect(result.outcome._tag).toBe('Failure');
-    expect(result.attempts).toBe(2);
-  });
+      expect(result.outcome._tag).toBe('Failure');
+      expect(result.attempts).toBe(2);
+    }),
+  );
 });
 
 // The reactive trigger as the *loop* wires it, which is not the same code as
@@ -551,172 +576,192 @@ describe('the loop’s reactive compaction', () => {
       ),
     );
 
-  const overflowing = async () => {
+  const overflowing = () => {
     // Big enough that history plus input is refused, small enough that the
     // summary plus the kept tail plus the input is not.
     const models = fakeProvider({ limit: 150 });
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
-        const chat = yield* seeded();
-        const value = yield* reactive.runIn(chat, 'MARKER');
-        return { value, history: yield* Ref.get(chat.history) };
-        // `orDie` rather than an assertion on the whole effect: it is the
-        // error channel `runPromise` needs cleared, and saying so leaves the
-        // success type inferred instead of restated.
-      }).pipe(Effect.orDie, Effect.provide(models.layer)),
-    );
-
-    return { ...result, models };
+    return Effect.gen(function* () {
+      const chat = yield* seeded();
+      const value = yield* reactive.runIn(chat, 'MARKER');
+      return {
+        value,
+        history: yield* Ref.get(chat.history),
+        models,
+      };
+      // `orDie` rather than an assertion on the whole effect: it is the
+      // error channel `runPromise` needs cleared, and saying so leaves the
+      // success type inferred instead of restated.
+    }).pipe(Effect.orDie, Effect.provide(models.layer));
   };
 
-  it('does not send the overflowed turn’s input twice on the retry', async () => {
-    const { models } = await overflowing();
+  it.effect(
+    'does not send the overflowed turn’s input twice on the retry',
+    () =>
+      Effect.gen(function* () {
+        const { models } = yield* overflowing();
 
-    expect(models.asked).toHaveLength(2);
-    const retried = textOf(models.asked[1]!);
+        expect(models.asked).toHaveLength(2);
+        const retried = textOf(models.asked[1]!);
 
-    expect(retried.split('MARKER')).toHaveLength(2);
-  });
+        expect(retried.split('MARKER')).toHaveLength(2);
+      }),
+  );
 
   // The input is what the summarizer must be shown *behind*, not what it
   // summarizes: it is the newest message, so it is the recent tail `splitAt`
   // protects and the history behind it is what gets replaced. That is the only
   // split that shrinks a request whose bulk is the input itself.
-  it('summarizes the history behind the input and keeps the input', async () => {
-    const { models } = await overflowing();
+  it.effect('summarizes the history behind the input and keeps the input', () =>
+    Effect.gen(function* () {
+      const { models } = yield* overflowing();
 
-    const summarized = textOf(models.summaries[0]!);
-    expect(summarized).toContain('a'.repeat(400));
-    expect(summarized).not.toContain('MARKER');
+      const summarized = textOf(models.summaries[0]!);
+      expect(summarized).toContain('a'.repeat(400));
+      expect(summarized).not.toContain('MARKER');
 
-    const retried = textOf(models.asked[1]!);
-    expect(retried).toContain('Summary of earlier conversation');
-    expect(retried).not.toContain('a'.repeat(400));
-  });
+      const retried = textOf(models.asked[1]!);
+      expect(retried).toContain('Summary of earlier conversation');
+      expect(retried).not.toContain('a'.repeat(400));
+    }),
+  );
 
   // The retry has to be a smaller request than the one that was refused, or
   // compaction has spent a model call to change nothing.
-  it('retries with a smaller prompt than the one that was refused', async () => {
-    const { models } = await overflowing();
+  it.effect('retries with a smaller prompt than the one that was refused', () =>
+    Effect.gen(function* () {
+      const { models } = yield* overflowing();
 
-    expect(textOf(models.asked[1]!).length).toBeLessThan(
-      textOf(models.asked[0]!).length,
-    );
-  });
+      expect(textOf(models.asked[1]!).length).toBeLessThan(
+        textOf(models.asked[0]!).length,
+      );
+    }),
+  );
 
-  it('completes the run once the retry fits', async () => {
-    const { value } = await overflowing();
+  it.effect('completes the run once the retry fits', () =>
+    Effect.gen(function* () {
+      const { value } = yield* overflowing();
 
-    expect(value.text).toBe('answer');
-  });
+      expect(value.text).toBe('answer');
+    }),
+  );
 
-  it('does not retry when compaction cannot change the prompt', async () => {
-    const asked: Prompt.Prompt[] = [];
-    const layer = Layer.effect(
-      LanguageModel.LanguageModel,
-      LanguageModel.make({
-        generateText: () => Effect.succeed([]),
-        streamText: (options) => {
-          asked.push(options.prompt);
-          return Stream.fail(overflow);
+  it.effect('does not retry when compaction cannot change the prompt', () =>
+    Effect.gen(function* () {
+      const asked: Prompt.Prompt[] = [];
+      const layer = Layer.effect(
+        LanguageModel.LanguageModel,
+        LanguageModel.make({
+          generateText: () => Effect.succeed([]),
+          streamText: (options) => {
+            asked.push(options.prompt);
+            return Stream.fail(overflow);
+          },
+        }),
+      );
+      const short = Agent.make({
+        name: 'short',
+        revision: '1',
+        instructions: 'S',
+        toolkit: Toolkit.make(),
+        compaction: {
+          reserveTokens: 0,
+          keepRecentTokens: 10_000,
+          instructions: 'sum',
         },
-      }),
-    );
-    const short = Agent.make({
-      name: 'short',
-      revision: '1',
-      instructions: 'S',
-      toolkit: Toolkit.make(),
-      compaction: {
-        reserveTokens: 0,
-        keepRecentTokens: 10_000,
-        instructions: 'sum',
-      },
-    });
+      });
 
-    const exit = await Effect.runPromise(
-      short.run('only recent').pipe(Effect.exit, Effect.provide(layer)),
-    );
+      const exit = yield* short
+        .run('only recent')
+        .pipe(Effect.exit, Effect.provide(layer));
 
-    expect(exit._tag).toBe('Failure');
-    expect(asked).toHaveLength(1);
-  });
+      expect(exit._tag).toBe('Failure');
+      expect(asked).toHaveLength(1);
+    }),
+  );
 
-  it('does not retry after partial output became externally visible', async () => {
-    const asked: Prompt.Prompt[] = [];
-    const layer = Layer.effect(
-      LanguageModel.LanguageModel,
-      LanguageModel.make({
-        generateText: () => Effect.succeed([]),
-        streamText: (options) => {
-          asked.push(options.prompt);
-          return Stream.concat(
-            Stream.fromIterable([
-              { type: 'text-start' as const, id: 'partial' },
-              { type: 'text-delta' as const, id: 'partial', delta: 'visible' },
-            ]),
-            Stream.fail(overflow),
-          );
-        },
-      }),
-    );
-    const events: string[] = [];
-
-    await Effect.runPromise(
+  it.effect(
+    'does not retry after partial output became externally visible',
+    () =>
       Effect.gen(function* () {
-        const chat = yield* seeded();
-        return yield* reactive.streamIn(chat, 'next').pipe(
-          Stream.tap((event) =>
-            Effect.sync(() => {
-              if (event._tag === 'Part') events.push(event.part.type);
-            }),
-          ),
-          Stream.runDrain,
+        const asked: Prompt.Prompt[] = [];
+        const layer = Layer.effect(
+          LanguageModel.LanguageModel,
+          LanguageModel.make({
+            generateText: () => Effect.succeed([]),
+            streamText: (options) => {
+              asked.push(options.prompt);
+              return Stream.concat(
+                Stream.fromIterable([
+                  { type: 'text-start' as const, id: 'partial' },
+                  {
+                    type: 'text-delta' as const,
+                    id: 'partial',
+                    delta: 'visible',
+                  },
+                ]),
+                Stream.fail(overflow),
+              );
+            },
+          }),
         );
-      }).pipe(Effect.exit, Effect.provide(layer)),
-    );
+        const events: string[] = [];
 
-    expect(events).toContain('text-delta');
-    expect(asked).toHaveLength(1);
-  });
+        yield* Effect.gen(function* () {
+          const chat = yield* seeded();
+          return yield* reactive.streamIn(chat, 'next').pipe(
+            Stream.tap((event) =>
+              Effect.sync(() => {
+                if (event._tag === 'Part') events.push(event.part.type);
+              }),
+            ),
+            Stream.runDrain,
+          );
+        }).pipe(Effect.exit, Effect.provide(layer));
 
-  it('normalizes structured in-band overflow errors for reactive compaction', async () => {
-    let calls = 0;
-    const layer = Layer.effect(
-      LanguageModel.LanguageModel,
-      LanguageModel.make({
-        generateText: () =>
-          Effect.succeed([
-            { type: 'text' as const, text: 'SUMMARY' },
-            finish(10, 4),
-          ]),
-        streamText: () => {
-          calls += 1;
-          return calls === 1
-            ? Stream.make({
-                type: 'error' as const,
-                error: {
-                  code: 'model_context_window_exceeded',
-                  message: 'maximum context length exceeded',
-                  metadata: { requestId: 'req-1' },
-                },
-              })
-            : Stream.fromIterable(turnOf('answer', 'answer'));
-        },
+        expect(events).toContain('text-delta');
+        expect(asked).toHaveLength(1);
       }),
-    );
+  );
 
-    const result = await Effect.runPromise(
+  it.effect(
+    'normalizes structured in-band overflow errors for reactive compaction',
+    () =>
       Effect.gen(function* () {
-        const chat = yield* seeded();
-        return yield* reactive.runIn(chat, 'next');
-      }).pipe(Effect.orDie, Effect.provide(layer)),
-    );
+        let calls = 0;
+        const layer = Layer.effect(
+          LanguageModel.LanguageModel,
+          LanguageModel.make({
+            generateText: () =>
+              Effect.succeed([
+                { type: 'text' as const, text: 'SUMMARY' },
+                finish(10, 4),
+              ]),
+            streamText: () => {
+              calls += 1;
+              return calls === 1
+                ? Stream.make({
+                    type: 'error' as const,
+                    error: {
+                      code: 'model_context_window_exceeded',
+                      message: 'maximum context length exceeded',
+                      metadata: { requestId: 'req-1' },
+                    },
+                  })
+                : Stream.fromIterable(turnOf('answer', 'answer'));
+            },
+          }),
+        );
 
-    expect(result.text).toBe('answer');
-    expect(calls).toBe(2);
-  });
+        const result = yield* Effect.gen(function* () {
+          const chat = yield* seeded();
+          return yield* reactive.runIn(chat, 'next');
+        }).pipe(Effect.orDie, Effect.provide(layer));
+
+        expect(result.text).toBe('answer');
+        expect(calls).toBe(2);
+      }),
+  );
 });
 
 // The proactive trigger: compaction that fires from an estimate, before the
@@ -735,143 +780,150 @@ describe('the loop’s reactive compaction', () => {
 // is the caller supplying one. With it absent the loop behaves exactly as it
 // did, which is what every other test in this directory relies on.
 describe('compaction from an estimate', () => {
-  it('compacts before the turn when the estimate crosses the threshold', async () => {
-    const models = fakeProvider({ inputTokens: 50 });
-    const agent = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(),
-      compaction: { ...POLICY, contextWindow: 1_000 },
-    });
-
-    const asked = await Effect.runPromise(
+  it.effect(
+    'compacts before the turn when the estimate crosses the threshold',
+    () =>
       Effect.gen(function* () {
-        const chat = yield* Chat.fromPrompt(seeded);
-        yield* agent.runIn(chat, 'next');
-        return models.asked;
-      }).pipe(Effect.provide(models.layer), Effect.orDie),
-    );
+        const models = fakeProvider({ inputTokens: 50 });
+        const agent = Agent.make({
+          name: 'test',
+          revision: '1',
+          instructions: 'be terse',
+          toolkit: Toolkit.make(),
+          compaction: { ...POLICY, contextWindow: 1_000 },
+        });
 
-    // One summary, and it happened before the provider was ever asked to
-    // serve a turn — so no turn was rejected and none was re-run.
-    expect(models.summaries).toHaveLength(1);
-    expect(asked).toHaveLength(1);
+        const asked = yield* Effect.gen(function* () {
+          const chat = yield* Chat.fromPrompt(seeded);
+          yield* agent.runIn(chat, 'next');
+          return models.asked;
+        }).pipe(Effect.provide(models.layer), Effect.orDie);
 
-    const sent = JSON.stringify(asked[0]!.content);
-    expect(sent).toContain('SUMMARY');
-    expect(sent).not.toContain('a'.repeat(4_000));
-  });
+        // One summary, and it happened before the provider was ever asked to
+        // serve a turn — so no turn was rejected and none was re-run.
+        expect(models.summaries).toHaveLength(1);
+        expect(asked).toHaveLength(1);
+
+        const sent = JSON.stringify(asked[0]!.content);
+        expect(sent).toContain('SUMMARY');
+        expect(sent).not.toContain('a'.repeat(4_000));
+      }),
+  );
 
   // The gate, and the reason every other test in this directory is unaffected.
-  it('does nothing when the caller named no context window', async () => {
-    const models = fakeProvider({ inputTokens: 50 });
-    const agent = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(),
-      compaction: POLICY,
-    });
+  it.effect('does nothing when the caller named no context window', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider({ inputTokens: 50 });
+      const agent = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: POLICY,
+      });
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const chat = yield* Chat.fromPrompt(seeded);
         yield* agent.runIn(chat, 'next');
-      }).pipe(Effect.provide(models.layer), Effect.orDie),
-    );
+      }).pipe(Effect.provide(models.layer), Effect.orDie);
 
-    expect(models.summaries).toHaveLength(0);
-    expect(JSON.stringify(models.asked[0]!.content)).toContain(
-      'a'.repeat(4_000),
-    );
-  });
+      expect(models.summaries).toHaveLength(0);
+      expect(JSON.stringify(models.asked[0]!.content)).toContain(
+        'a'.repeat(4_000),
+      );
+    }),
+  );
 
-  it('announces the rewrite, so a resumed conversation can honour it', async () => {
-    const models = fakeProvider({ inputTokens: 50 });
-    const agent = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(),
-      compaction: { ...POLICY, contextWindow: 1_000 },
-    });
-
-    const events = await Effect.runPromise(
+  it.effect(
+    'announces the rewrite, so a resumed conversation can honour it',
+    () =>
       Effect.gen(function* () {
-        const chat = yield* Chat.fromPrompt(seeded);
-        return yield* Stream.runCollect(agent.streamIn(chat, 'next'));
-      }).pipe(Effect.provide(models.layer), Effect.orDie),
-    );
+        const models = fakeProvider({ inputTokens: 50 });
+        const agent = Agent.make({
+          name: 'test',
+          revision: '1',
+          instructions: 'be terse',
+          toolkit: Toolkit.make(),
+          compaction: { ...POLICY, contextWindow: 1_000 },
+        });
 
-    const compacted = events.filter((event) => event._tag === 'Compacted');
-    expect(compacted).toHaveLength(1);
-    expect(compacted[0]).toMatchObject({ step: 1, summary: 'SUMMARY' });
+        const events = yield* Effect.gen(function* () {
+          const chat = yield* Chat.fromPrompt(seeded);
+          return yield* Stream.runCollect(agent.streamIn(chat, 'next'));
+        }).pipe(Effect.provide(models.layer), Effect.orDie);
 
-    // After the turn opened, matching where the reactive path puts it. A
-    // reader folding this stream sees one shape for both triggers.
-    const tags = events.map((event) => event._tag);
-    expect(tags.indexOf('Compacted')).toBe(tags.indexOf('TurnStarted') + 1);
-  });
+        const compacted = events.filter((event) => event._tag === 'Compacted');
+        expect(compacted).toHaveLength(1);
+        expect(compacted[0]).toMatchObject({ step: 1, summary: 'SUMMARY' });
 
-  it('includes summarization usage in the completed result', async () => {
-    const models = fakeProvider({ inputTokens: 50 });
-    const agent = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(),
-      compaction: { ...POLICY, contextWindow: 1_000 },
-    });
+        // After the turn opened, matching where the reactive path puts it. A
+        // reader folding this stream sees one shape for both triggers.
+        const tags = events.map((event) => event._tag);
+        expect(tags.indexOf('Compacted')).toBe(tags.indexOf('TurnStarted') + 1);
+      }),
+  );
 
-    const result = await Effect.runPromise(
-      Effect.gen(function* () {
+  it.effect('includes summarization usage in the completed result', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider({ inputTokens: 50 });
+      const agent = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: { ...POLICY, contextWindow: 1_000 },
+      });
+
+      const result = yield* Effect.gen(function* () {
         const chat = yield* Chat.fromPrompt(seeded);
         return yield* agent.runIn(chat, 'next');
-      }).pipe(Effect.provide(models.layer), Effect.orDie),
-    );
+      }).pipe(Effect.provide(models.layer), Effect.orDie);
 
-    expect(result.usage).toEqual({ input: 60, output: 24 });
-  });
+      expect(result.usage).toEqual({ input: 60, output: 24 });
+    }),
+  );
 
   // The wiring that makes the seam worth anything. The estimator is handed
   // what the provider reported for the previous turn; without it the whole
   // conversation remains a character count and reported usage is wasted.
-  it('hands the estimator the previous turn own reported usage', async () => {
-    const models = fakeProvider({ inputTokens: 7_777 });
-    const seen: Array<ContextWindow.TurnUsage | undefined> = [];
+  it.effect('hands the estimator the previous turn own reported usage', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider({ inputTokens: 7_777 });
+      const seen: Array<ContextWindow.TurnUsage | undefined> = [];
 
-    const recording: ContextWindow.Heuristics = {
-      estimate: (_prompt, usage) => {
-        seen.push(usage);
-        return { tokens: 0, usageTokens: 0, trailingTokens: 0 };
-      },
-      shouldCompact: () => false,
-    };
+      const recording: ContextWindow.Heuristics = {
+        estimate: (_prompt, usage) => {
+          seen.push(usage);
+          return { tokens: 0, usageTokens: 0, trailingTokens: 0 };
+        },
+        shouldCompact: () => false,
+      };
 
-    const agent = Agent.make({
-      name: 'test',
-      revision: '1',
-      instructions: 'be terse',
-      toolkit: Toolkit.make(),
-      compaction: { ...POLICY, contextWindow: 1_000 },
-      // Two turns, so there is a previous turn to have reported anything.
-      stopWhen: ({ step }) => Effect.succeed(step >= 2),
-    });
+      const agent = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: { ...POLICY, contextWindow: 1_000 },
+        // Two turns, so there is a previous turn to have reported anything.
+        stopWhen: ({ step }) => Effect.succeed(step >= 2),
+      });
 
-    await Effect.runPromise(
-      Effect.gen(function* () {
+      yield* Effect.gen(function* () {
         const chat = yield* Chat.fromPrompt(seeded);
         yield* agent.runIn(chat, 'next');
       }).pipe(
         Effect.provide(models.layer),
         Effect.provideService(ContextWindow.Service, recording),
         Effect.orDie,
-      ),
-    );
+      );
 
-    // Nothing had been billed before the first turn, and the first turn's
-    // figures anchor the second.
-    expect(seen).toEqual([undefined, { inputTokens: 7_777, outputTokens: 20 }]);
-  });
+      // Nothing had been billed before the first turn, and the first turn's
+      // figures anchor the second.
+      expect(seen).toEqual([
+        undefined,
+        { inputTokens: 7_777, outputTokens: 20 },
+      ]);
+    }),
+  );
 });

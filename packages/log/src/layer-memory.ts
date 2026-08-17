@@ -4,6 +4,7 @@ import {
   MutableHashMap,
   Option,
   PubSub,
+  Schema,
   Semaphore,
   Stream,
 } from 'effect';
@@ -11,6 +12,7 @@ import {
 import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
 import { ConversationRecord } from './record.js';
+import { LogVocabulary } from './vocabulary.js';
 
 // In-process log store.
 //
@@ -30,14 +32,14 @@ import { ConversationRecord } from './record.js';
 
 interface StreamState {
   readonly identity: string;
-  epoch: number;
-  producerId: string | undefined;
+  epoch: LogVocabulary.Epoch;
+  producerId: LogVocabulary.ProducerId | undefined;
   /**
    * Producer sequence of the last applied append in the current epoch, or
    * `-1` before the first. Reset by `acquire`; distinct from the record
    * sequence backing `lastOffset`, which never resets.
    */
-  lastSequence: number;
+  lastSequence: LogVocabulary.ProducerSequence | -1;
   /** Digest of the batch `lastSequence` wrote, for exact retry detection. */
   lastFingerprint: string;
   lastOffset: LogOffset.Offset;
@@ -137,7 +139,7 @@ const build = (
       yield* signalFor(path);
       const state: StreamState = {
         identity,
-        epoch: 0,
+        epoch: LogVocabulary.Epoch.make(0),
         producerId: undefined,
         lastSequence: -1,
         lastFingerprint: '',
@@ -152,7 +154,7 @@ const build = (
 
     const acquireUnlocked = Effect.fn('AiLog.LogStore.acquire')(function* (
       path: string,
-      producerId: string,
+      producerId: LogVocabulary.ProducerId,
       expected?: LogStore.AcquireExpected,
     ) {
       const state = yield* lookup(path, 'acquire');
@@ -171,16 +173,24 @@ const build = (
         );
       }
 
-      state.epoch += 1;
-      state.producerId = producerId;
+      const decodedProducerId = yield* LogVocabulary.ProducerId.pipe(
+        Schema.decodeUnknownEffect,
+      )(producerId).pipe(
+        Effect.mapError(() =>
+          failure(path, 'acquire', 'invalid', 'producer id must be non-empty'),
+        ),
+      );
+      const epoch = LogVocabulary.Epoch.make(Number(state.epoch) + 1);
+      state.epoch = epoch;
+      state.producerId = decodedProducerId;
       state.lastSequence = -1;
       state.lastFingerprint = '';
 
       return {
         path,
-        producerId,
-        epoch: state.epoch,
-        nextSequence: 0,
+        producerId: decodedProducerId,
+        epoch,
+        nextSequence: LogVocabulary.ProducerSequence.make(0),
       } satisfies LogStore.ProducerClaim;
     });
     const acquire: LogStore.Interface['acquire'] = (
@@ -192,26 +202,56 @@ const build = (
     const appendUnlocked = Effect.fn('AiLog.LogStore.append')(function* (
       input: LogStore.AppendInput,
     ) {
-      const state = yield* lookup(input.path, 'append');
       const reject = (reason: Reason, detail: string) =>
         Effect.fail(failure(input.path, 'append', reason, detail));
 
       if (input.records.length === 0) {
         return yield* reject('empty', 'append carried no records');
       }
-      if (!Number.isInteger(input.sequence) || input.sequence < 0) {
-        return yield* reject(
-          'conflict',
-          `sequence ${input.sequence} is not a non-negative integer`,
-        );
-      }
-      if (input.epoch !== state.epoch) {
+      const sequence = yield* LogVocabulary.ProducerSequence.pipe(
+        Schema.decodeUnknownEffect,
+      )(input.sequence).pipe(
+        Effect.mapError(() =>
+          failure(
+            input.path,
+            'append',
+            'conflict',
+            `sequence ${input.sequence} is not a safe natural integer`,
+          ),
+        ),
+      );
+      const epoch = yield* LogVocabulary.Epoch.pipe(Schema.decodeUnknownEffect)(
+        input.epoch,
+      ).pipe(
+        Effect.mapError(() =>
+          failure(
+            input.path,
+            'append',
+            'conflict',
+            `epoch ${input.epoch} is not a safe natural integer`,
+          ),
+        ),
+      );
+      const producerId = yield* LogVocabulary.ProducerId.pipe(
+        Schema.decodeUnknownEffect,
+      )(input.producerId).pipe(
+        Effect.mapError(() =>
+          failure(
+            input.path,
+            'append',
+            'conflict',
+            'producer id must be non-empty',
+          ),
+        ),
+      );
+      const state = yield* lookup(input.path, 'append');
+      if (epoch !== state.epoch) {
         return yield* reject(
           'fenced',
           `epoch ${input.epoch} is not the current epoch ${state.epoch}`,
         );
       }
-      if (input.producerId !== state.producerId) {
+      if (producerId !== state.producerId) {
         return yield* reject(
           'conflict',
           `producer ${input.producerId} does not hold epoch ${state.epoch}`,
@@ -229,7 +269,7 @@ const build = (
       );
       const digest = prepared.fingerprint;
 
-      if (input.sequence === state.lastSequence) {
+      if (sequence === state.lastSequence) {
         // A retry. Idempotent only if it repeats the same batch — a producer
         // that reuses a sequence for different records is not retrying, it
         // is overwriting, and answering with the old offset would drop the
@@ -242,10 +282,11 @@ const build = (
         }
         return state.lastOffset;
       }
-      if (input.sequence !== state.lastSequence + 1) {
+      const expectedSequence = state.lastSequence + 1;
+      if (sequence !== expectedSequence) {
         return yield* reject(
-          input.sequence > state.lastSequence + 1 ? 'gap' : 'conflict',
-          `expected sequence ${state.lastSequence + 1}, got ${input.sequence}`,
+          sequence > expectedSequence ? 'gap' : 'conflict',
+          `expected sequence ${expectedSequence}, got ${input.sequence}`,
         );
       }
 
@@ -258,7 +299,7 @@ const build = (
         state.records.push(ConversationRecord.envelope(offset, entry));
       }
       state.lastOffset = offset;
-      state.lastSequence = input.sequence;
+      state.lastSequence = sequence;
       state.lastFingerprint = digest;
 
       const signal = yield* signalFor(input.path);

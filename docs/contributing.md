@@ -118,7 +118,10 @@ asserts a type will pass `nub run test` while failing the gate.
 backend cannot demonstrate: that the schema the test harness creates is the
 schema the layer actually queries, and that a `LISTEN` connection dying
 reaches the consumer as a failure rather than as a tail that looks healthy and
-delivers nothing.
+delivers nothing. Queries and transactions run through Effect SQL's official
+`PgClient`; the suite also pins the corrected RC.109 listener readiness,
+transaction rollback, timeout isolation, and cross-client notification
+semantics.
 
 It is skipped unless opted into, because a suite that silently needs a
 container runtime is a suite that fails for a contributor who has not been
@@ -189,8 +192,9 @@ Provider retries belong in the official client's `HttpClient` transformation,
 below streamed output and tool resolution. Wrapping a whole `LanguageModel`
 call risks duplicating output or re-running tools.
 
-A durable workflow engine's steps — DBOS's, for instance — are a separate seam
-and not a competitor: steps make **effects** exactly-once, the log makes
+A durable workflow engine's activities — Effect Workflow's, for instance — are
+a separate seam and not a competitor: activities make **effects** replayable,
+the log makes
 **conversation state** durable and resumable, and provider HTTP policy absorbs
 **provider blips**.
 

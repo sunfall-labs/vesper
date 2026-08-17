@@ -1,6 +1,7 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Cause,
   Clock,
@@ -83,7 +84,7 @@ import { RecordingPolicy } from './recording-policy.js';
  * lands — without a collision that would only surface as one log interleaved
  * into another.
  */
-export const pathFor = (conversationId: string): string =>
+export const pathFor = (conversationId: LogVocabulary.ConversationId): string =>
   `conversations/${conversationId}`;
 
 /**
@@ -100,10 +101,12 @@ export const pathFor = (conversationId: string): string =>
  * anything about provider ids, including their Unicode normalization.
  */
 export const childIdFor = (
-  parentConversationId: string,
-  toolCallId: string,
-): string =>
-  `child-v1:${parentConversationId.length}:${parentConversationId}${toolCallId}`;
+  parentConversationId: LogVocabulary.ConversationId,
+  toolCallId: LogVocabulary.ToolCallId,
+): LogVocabulary.ConversationId =>
+  LogVocabulary.ConversationId.make(
+    `child-v1:${parentConversationId.length}:${parentConversationId}${toolCallId}`,
+  );
 
 /** How a tool call ended, as a previous run recorded it. */
 export interface Settled {
@@ -121,7 +124,7 @@ export type Recovery =
 export interface IndeterminateToolCall {
   readonly step: number;
   readonly name: string;
-  readonly toolCallId: string;
+  readonly toolCallId: LogVocabulary.ToolCallId;
   readonly params: unknown;
 }
 
@@ -179,7 +182,7 @@ interface ClaimOptions {
 /** Durable identity required before a definition may continue history. */
 export interface Compatibility {
   readonly agent: string;
-  readonly revision: string;
+  readonly revision: LogVocabulary.AgentRevision;
 }
 
 /** A durable conversation cannot be opened by this compatibility identity. */
@@ -191,7 +194,7 @@ export class CompatibilityError extends Schema.TaggedError<CompatibilityError>()
     expectedRevision: Schema.String,
     persistedFormat: Schema.optional(Schema.Number),
     persistedAgent: Schema.optional(Schema.String),
-    persistedRevision: Schema.optional(Schema.String),
+    persistedRevision: Schema.optional(LogVocabulary.AgentRevision),
   },
 ) {}
 
@@ -217,10 +220,10 @@ export const assertCompatible = (
 
 export interface ChildOptions {
   /** The delegation tool call the child answers. */
-  readonly toolCallId: string;
+  readonly toolCallId: LogVocabulary.ToolCallId;
   /** The child agent's name. */
   readonly agent: string;
-  readonly revision: string;
+  readonly revision: LogVocabulary.AgentRevision;
   /** The child's delegation depth; 1 for a top-level agent's child. */
   readonly depth: number;
 }
@@ -249,7 +252,7 @@ const SessionTypeId: unique symbol = Symbol.for(
 export interface Session {
   /** @internal Prevents structural fabrication outside this module. */
   readonly [SessionTypeId]: typeof SessionTypeId;
-  readonly conversationId: string;
+  readonly conversationId: LogVocabulary.ConversationId;
   readonly compatibility: Compatibility;
 
   /** Usage copied from an ancestor when this conversation was forked. */
@@ -326,7 +329,7 @@ export interface Session {
   /** @internal Recovery index for tool dispatch. */
   readonly recovery: (
     name: string,
-    toolCallId: string,
+    toolCallId: LogVocabulary.ToolCallId,
   ) => Option.Option<Recovery>;
 
   /** @internal Orphaned calls in their original durable ToolCall order. */
@@ -341,7 +344,7 @@ export interface Session {
   /** @internal Register work released after an outcome is durable. */
   readonly onToolSettled: (
     name: string,
-    toolCallId: string,
+    toolCallId: LogVocabulary.ToolCallId,
     effect: Effect.Effect<void>,
   ) => void;
 
@@ -417,7 +420,7 @@ export interface Session {
  * served tool results answering calls that are no longer in its prompt.
  */
 export const open = Effect.fn('AgentLog.open')(function* (
-  conversationId: string,
+  conversationId: LogVocabulary.ConversationId,
   options: OpenOptions,
 ) {
   const store = yield* LogStore.Service;
@@ -488,9 +491,9 @@ const ACQUIRE_ATTEMPTS = 4;
  * every other non-empty destination is rejected.
  */
 export const fork = Effect.fn('AgentLog.fork')(function* (
-  conversationId: string,
+  conversationId: LogVocabulary.ConversationId,
   at: LogOffset.Offset,
-  forkConversationId: string,
+  forkConversationId: LogVocabulary.ConversationId,
   compatibility: Compatibility,
 ) {
   yield* validateCompatibilityInput(compatibility);
@@ -520,7 +523,7 @@ export const fork = Effect.fn('AgentLog.fork')(function* (
 
 const openWith = (
   store: LogStore.Interface,
-  conversationId: string,
+  conversationId: LogVocabulary.ConversationId,
   options: ClaimOptions,
 ): Effect.Effect<Session, CompatibilityError> =>
   Effect.gen(function* () {
@@ -569,7 +572,7 @@ const openWith = (
             );
       yield* validateCompatibility(retainedBeforeClaim, options.compatibility);
       const acquired = yield* store
-        .acquire(path, crypto.randomUUID(), {
+        .acquire(path, LogVocabulary.ProducerId.make(crypto.randomUUID()), {
           epoch: observed.epoch,
           head: observed.head,
         })
@@ -639,7 +642,10 @@ const openWith = (
                 // it does not. The permit covers both operations: without it,
                 // concurrent signal, event, and child writes can read the same
                 // sequence and submit different batches under one producer key.
-                yield* Ref.set(sequence, next + 1);
+                yield* Ref.set(
+                  sequence,
+                  LogVocabulary.ProducerSequence.make(next + 1),
+                );
               }),
             ),
           );
@@ -758,7 +764,7 @@ const openWith = (
               conversationId,
               options.toolCallId,
             );
-            const reference: ConversationRecord.Record = {
+            const reference: ConversationRecord.RecordOf<'ChildSession'> = {
               _tag: 'ChildSession',
               toolCallId: options.toolCallId,
               agent: options.agent,
@@ -1017,7 +1023,7 @@ const mergeByOffset = (
 interface PersistedCompatibility {
   readonly formatVersion?: number | undefined;
   readonly agent?: string | undefined;
-  readonly agentRevision?: string | undefined;
+  readonly agentRevision?: LogVocabulary.AgentRevision | undefined;
 }
 
 /** Validate every retained durable definition identity against one authority. */
@@ -1252,7 +1258,7 @@ const updateResumeState = (
 const FORK_IDENTITY_PREFIX = '@sunfall/vesper-agent/fork/v1:';
 
 interface ForkIdentity {
-  readonly sourceConversationId: string;
+  readonly sourceConversationId: LogVocabulary.ConversationId;
   readonly at: LogOffset.Offset;
   readonly records: number;
   readonly inheritedUsage: Stop.Usage;
@@ -1267,26 +1273,23 @@ const forkIdentity = (identity: ForkIdentity): string =>
     identity.inheritedUsage.output,
   ])}`;
 
+const ForkIdentitySchema = Schema.Tuple([
+  LogVocabulary.ConversationId,
+  LogOffset.Offset,
+  Schema.Number,
+  Schema.Number,
+  Schema.Number,
+]);
+
 const parseForkIdentity = (identity: string): ForkIdentity | undefined => {
   if (!identity.startsWith(FORK_IDENTITY_PREFIX)) return undefined;
   try {
-    const value: unknown = JSON.parse(
-      identity.slice(FORK_IDENTITY_PREFIX.length),
+    const value = Schema.decodeUnknownSync(ForkIdentitySchema)(
+      JSON.parse(identity.slice(FORK_IDENTITY_PREFIX.length)),
     );
-    if (
-      !Array.isArray(value) ||
-      value.length !== 5 ||
-      typeof value[0] !== 'string' ||
-      typeof value[1] !== 'string' ||
-      typeof value[2] !== 'number' ||
-      typeof value[3] !== 'number' ||
-      typeof value[4] !== 'number'
-    ) {
-      return undefined;
-    }
     return {
       sourceConversationId: value[0],
-      at: LogOffset.Offset.make(value[1]),
+      at: value[1],
       records: value[2],
       inheritedUsage: { input: value[3], output: value[4] },
     };
@@ -1296,7 +1299,7 @@ const parseForkIdentity = (identity: string): ForkIdentity | undefined => {
 };
 
 const ensureChildReference = (
-  conversationId: string,
+  conversationId: LogVocabulary.ConversationId,
   history: ReadonlyArray<ConversationRecord.Envelope>,
   reference: ConversationRecord.RecordOf<'ChildSession'>,
   append: Session['append'],
@@ -1469,8 +1472,10 @@ const reseat = (
  * file — no error and no "binary file matches" line. A search for a symbol
  * that is plainly present comes back empty, which reads as absence.
  */
-const settledKey = (name: string, toolCallId: string): string =>
-  `${name}\u001f${toolCallId}`;
+const settledKey = (
+  name: string,
+  toolCallId: LogVocabulary.ToolCallId,
+): string => `${name}\u001f${toolCallId}`;
 
 /**
  * Tool states belonging to runs that started and never settled.
@@ -1608,7 +1613,7 @@ const deliveredThrough = (
 export interface Options {
   /** Agent name, written into `RunStarted`. */
   readonly agent: string;
-  readonly revision: string;
+  readonly revision: LogVocabulary.AgentRevision;
   /** The run's input, written into `RunStarted` as prompt messages. */
   readonly input: Prompt.RawInput;
 }
@@ -1824,6 +1829,16 @@ const flush = (pending: Pending): ReadonlyArray<ConversationRecord.Record> => {
   return [record];
 };
 
+const signalOffset = (offset: string): LogOffset.Offset => {
+  try {
+    return LogOffset.Offset.make(offset);
+  } catch (cause) {
+    throw new Error(`Signal event carried an invalid log offset: ${offset}`, {
+      cause,
+    });
+  }
+};
+
 /**
  * What one event contributes to the log, coalescing text as it goes.
  *
@@ -1858,7 +1873,7 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
           text: event.text,
           source: event.source,
           step: event.step,
-          at: LogOffset.Offset.make(event.at),
+          at: signalOffset(event.at),
         },
       ];
     case 'SignalRejected':
@@ -1870,7 +1885,7 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
           text: event.text,
           source: event.source,
           step: event.step,
-          at: LogOffset.Offset.make(event.at),
+          at: signalOffset(event.at),
           disposition: 'rejected',
           reason: event.reason,
         },
@@ -1929,7 +1944,7 @@ const partRecords = <Tools extends Record<string, Tool.Any>>(
         {
           _tag: 'ToolCall',
           step,
-          id: encoded.id,
+          id: LogVocabulary.ToolCallId.make(encoded.id),
           name: encoded.name,
           params: encoded.params,
         },
@@ -1940,7 +1955,7 @@ const partRecords = <Tools extends Record<string, Tool.Any>>(
         {
           _tag: 'ToolOutcome',
           step,
-          id: encoded.id,
+          id: LogVocabulary.ToolCallId.make(encoded.id),
           name: encoded.name,
           outcome: encoded.isFailure ? 'failure' : 'success',
           result: (part as Response.ToolResultPart<string, unknown, unknown>)

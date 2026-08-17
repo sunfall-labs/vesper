@@ -2,6 +2,7 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Tail } from '@sunfall/vesper-log/tail';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Exit, Layer, Option, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
@@ -228,7 +229,7 @@ export interface Instance<
 > {
   readonly [TypeId]: TypeId;
   readonly name: Name;
-  readonly revision: string;
+  readonly revision: LogVocabulary.AgentRevision;
   /** Shown to a parent when this agent is used as a subagent. */
   readonly description?: string | undefined;
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
@@ -562,7 +563,7 @@ export interface Instance<
  */
 export interface Named<Name extends string = string, R = unknown> {
   readonly name: Name;
-  readonly revision: string;
+  readonly revision: LogVocabulary.AgentRevision;
   readonly description?: string | undefined;
   readonly run: (
     input: Prompt.RawInput,
@@ -658,6 +659,20 @@ export type Requires<A> =
     infer _Error
   >
     ? _R
+    : never;
+
+/** Extract the typed failure channel of an agent run. */
+export type Error<A> =
+  A extends Instance<
+    infer _Name,
+    infer _Own,
+    infer _R,
+    infer _Runtime,
+    infer _Base,
+    infer _Interceptor,
+    infer RunError
+  >
+    ? RunError
     : never;
 
 /**
@@ -759,6 +774,7 @@ export const make = <
   if (definition.revision.trim() === '') {
     throw new Error(`Agent "${definition.name}" revision must be non-empty`);
   }
+  const revision = LogVocabulary.AgentRevision.make(definition.revision);
 
   const stopWhen = definition.stopWhen ?? Stop.defaultCondition<RuntimeTools>();
   const runPolicy = RunPolicy.make(definition.runPolicy);
@@ -1703,7 +1719,7 @@ export const make = <
 
   return fromParts<Name, Tools, RuntimeTools, BaseRequires, never>({
     name: definition.name,
-    revision: definition.revision,
+    revision,
     description: definition.description,
     ownToolkit: definition.toolkit,
     toolkit,
@@ -1830,7 +1846,11 @@ export const streamFrom = (
   ConversationRecord.Envelope,
   LogStore.LogStoreError,
   LogStore.Service
-> => Tail.from(AgentLog.pathFor(conversationId), after);
+> =>
+  Tail.from(
+    AgentLog.pathFor(LogVocabulary.ConversationId.make(conversationId)),
+    after,
+  );
 
 /**
  * The four entry points, for one session.
@@ -1901,7 +1921,7 @@ interface Parts<
   RunError,
 > {
   readonly name: Name;
-  readonly revision: string;
+  readonly revision: LogVocabulary.AgentRevision;
   readonly description: string | undefined;
   readonly ownToolkit: Toolkit.Toolkit<OwnTools>;
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
@@ -2062,7 +2082,7 @@ const fromParts = <
     resume: (conversationId: string, input: Prompt.RawInput) =>
       span(
         Effect.flatMap(
-          AgentLog.open(conversationId, {
+          AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
             compatibility: { agent: parts.name, revision: parts.revision },
           }),
           (session) => continuing(session, input),
@@ -2081,7 +2101,7 @@ const fromParts = <
     ) =>
       span(
         Effect.flatMap(
-          AgentLog.open(conversationId, {
+          AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
             branchFrom: at,
             compatibility: { agent: parts.name, revision: parts.revision },
           }),
@@ -2104,10 +2124,12 @@ const fromParts = <
     ) =>
       span(
         Effect.flatMap(
-          AgentLog.fork(conversationId, at, forkConversationId, {
-            agent: parts.name,
-            revision: parts.revision,
-          }),
+          AgentLog.fork(
+            LogVocabulary.ConversationId.make(conversationId),
+            at,
+            LogVocabulary.ConversationId.make(forkConversationId),
+            { agent: parts.name, revision: parts.revision },
+          ),
           (session) => continuing(session, input),
         ),
       ),
@@ -2130,6 +2152,7 @@ const fromParts = <
       conversationId: string,
       policy?: RecordingPolicy.Policy<never>,
     ) => {
+      const target = LogVocabulary.ConversationId.make(conversationId);
       const recorded = (
         input: Prompt.RawInput,
         events: (
@@ -2146,7 +2169,7 @@ const fromParts = <
       > =>
         Stream.unwrap(
           Effect.gen(function* () {
-            let session = yield* AgentLog.open(conversationId, {
+            let session = yield* AgentLog.open(target, {
               compatibility: { agent: parts.name, revision: parts.revision },
             });
             if (policy !== undefined) {

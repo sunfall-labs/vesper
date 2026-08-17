@@ -9,6 +9,7 @@ import {
   Stream,
 } from 'effect';
 import { AiError, type Tool, type Toolkit } from 'effect/unstable/ai';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Interception } from './interception.js';
 import type { AgentLog } from './log.js';
@@ -175,7 +176,11 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
 
       yield* Effect.gen(function* () {
         yield* options.session.append([
-          { _tag: 'ToolStarted', id: call.toolCallId, name: call.name },
+          {
+            _tag: 'ToolStarted',
+            id: call.toolCallId,
+            name: call.name,
+          },
         ]);
         const metered =
           options.runtime === undefined ||
@@ -442,10 +447,14 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
 
     const handle: Dispatch = (name, params, toolCallId) =>
       Effect.gen(function* () {
+        const normalizedToolCallId =
+          toolCallId === undefined
+            ? undefined
+            : LogVocabulary.ToolCallId.make(toolCallId);
         const prior =
-          toolCallId === undefined || session === undefined
+          normalizedToolCallId === undefined || session === undefined
             ? Option.none<AgentLog.Recovery>()
-            : session.recovery(name, toolCallId);
+            : session.recovery(name, normalizedToolCallId);
 
         // Step 1. A call an unsettled earlier run already completed is served
         // from the log and goes no further — not to the interceptor, and not
@@ -460,7 +469,9 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
         }
 
         if (Option.isSome(prior)) {
-          return yield* Effect.fail(indeterminateError(name, toolCallId!));
+          return yield* Effect.fail(
+            indeterminateError(name, normalizedToolCallId!),
+          );
         }
 
         // Step 3. The ordinary interceptor, which may answer in the tool's place.
@@ -478,7 +489,7 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
               agent: options.agent,
               conversationId: session?.conversationId,
               name,
-              toolCallId,
+              toolCallId: normalizedToolCallId,
               params,
             })
             .pipe(Effect.provide(services));
@@ -504,18 +515,22 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
           return yield* Effect.never;
         }
         if (session !== undefined) {
-          if (toolCallId === undefined) {
+          if (normalizedToolCallId === undefined) {
             return yield* Effect.fail(missingToolCallIdError(name));
           }
           if (options.arbitration !== undefined) {
             session.onToolSettled(
               name,
-              toolCallId,
+              normalizedToolCallId,
               options.arbitration.settled,
             );
           }
           yield* session.append([
-            { _tag: 'ToolStarted', id: toolCallId, name },
+            {
+              _tag: 'ToolStarted',
+              id: normalizedToolCallId,
+              name,
+            },
           ]);
         }
         const guarded =
@@ -557,7 +572,7 @@ type Dispatch = (
 
 const indeterminateError = (
   name: string,
-  toolCallId: string,
+  toolCallId: LogVocabulary.ToolCallId,
 ): AiError.AiError =>
   new AiError.AiError({
     module: 'Agent',

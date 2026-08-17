@@ -1,8 +1,9 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { describe, expect, it } from '@effect/vitest';
 import { Context, Effect, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { AgentLog } from '../src/log.js';
@@ -48,100 +49,106 @@ const policy = {
 } satisfies RecordingPolicy.Policy<Redactor>;
 
 describe('recording policy', () => {
-  it('filters persistence without changing the live model prompt', async () => {
-    const seen: string[] = [];
-    const conversation = 'redacted';
-    const agent = Agent.make({
-      name: 'redacted',
-      revision: '1',
-      instructions: 'answer',
-      toolkit: Toolkit.make(),
-    });
+  it.effect('filters persistence without changing the live model prompt', () =>
+    Effect.gen(function* () {
+      const seen: string[] = [];
+      const conversation = 'redacted';
+      const agent = Agent.make({
+        name: 'redacted',
+        revision: '1',
+        instructions: 'answer',
+        toolkit: Toolkit.make(),
+      });
 
-    const records = await Effect.runPromise(
-      Effect.gen(function* () {
+      const records = yield* Effect.gen(function* () {
         yield* agent.recordingTo(conversation, policy).run('input secret');
         const store = yield* LogStore.Service;
-        return (yield* store.read(AgentLog.pathFor(conversation), {
-          limit: 100,
-        })).records;
+        return (yield* store.read(
+          AgentLog.pathFor(LogVocabulary.ConversationId.make(conversation)),
+          {
+            limit: 100,
+          },
+        )).records;
       }).pipe(
         Effect.provideService(Redactor, { replacement: '[redacted prompt]' }),
         Effect.provide(model(seen)),
         Effect.provide(LogStoreMemory.layer),
-        Effect.scoped,
-      ),
-    );
+      );
 
-    expect(seen[0]).toContain('input secret');
-    const started = records.find(({ record }) => record._tag === 'RunStarted');
-    expect(JSON.stringify(started?.record)).toContain('[redacted prompt]');
-    expect(JSON.stringify(started?.record)).not.toContain('input secret');
-  });
+      expect(seen[0]).toContain('input secret');
+      const started = records.find(
+        ({ record }) => record._tag === 'RunStarted',
+      );
+      expect(JSON.stringify(started?.record)).toContain('[redacted prompt]');
+      expect(JSON.stringify(started?.record)).not.toContain('input secret');
+    }),
+  );
 
-  it('covers tool parameters/results, delivered signals, and rendered causes', async () => {
-    const filtered = await Effect.runPromise(
+  it.effect(
+    'covers tool parameters/results, delivered signals, and rendered causes',
+    () =>
       Effect.gen(function* () {
-        const context = yield* Effect.context<never>();
-        const runtime = RecordingPolicy.compile(
-          {
-            toolParameters: () => Effect.succeed({ redacted: 'params' }),
-            toolResult: () => Effect.succeed({ redacted: 'result' }),
-            signal: (signal) =>
-              Effect.succeed({ ...signal, text: '[redacted signal]' }),
-            cause: () => Effect.succeed('[redacted cause]'),
-          },
-          context,
-        );
-        return yield* Effect.forEach(
-          [
+        const filtered = yield* Effect.gen(function* () {
+          const context = yield* Effect.context<never>();
+          const runtime = RecordingPolicy.compile(
             {
-              _tag: 'ToolCall' as const,
-              step: 1,
-              id: 'a',
-              name: 'tool',
-              params: { secret: true },
+              toolParameters: () => Effect.succeed({ redacted: 'params' }),
+              toolResult: () => Effect.succeed({ redacted: 'result' }),
+              signal: (signal) =>
+                Effect.succeed({ ...signal, text: '[redacted signal]' }),
+              cause: () => Effect.succeed('[redacted cause]'),
             },
-            {
-              _tag: 'ToolOutcome' as const,
-              step: 1,
-              id: 'a',
-              name: 'tool',
-              outcome: 'success' as const,
-              result: { secret: true },
-            },
-            {
-              _tag: 'ToolStarted' as const,
-              id: 'a',
-              name: 'tool',
-            },
-            {
-              _tag: 'SignalReceived' as const,
-              kind: 'steer' as const,
-              text: 'secret',
-              source: 'operator',
-              step: 1,
-              at: '00000000000000000001' as never,
-            },
-            {
-              _tag: 'RunSettled' as const,
-              outcome: 'failure' as const,
-              detail: 'secret stack',
-              steps: 1,
-              usage: { input: 1, output: 1 },
-            },
-          ],
-          runtime.filter,
-        );
-      }),
-    );
+            context,
+          );
+          return yield* Effect.forEach(
+            [
+              {
+                _tag: 'ToolCall' as const,
+                step: 1,
+                id: LogVocabulary.ToolCallId.make('a'),
+                name: 'tool',
+                params: { secret: true },
+              },
+              {
+                _tag: 'ToolOutcome' as const,
+                step: 1,
+                id: LogVocabulary.ToolCallId.make('a'),
+                name: 'tool',
+                outcome: 'success' as const,
+                result: { secret: true },
+              },
+              {
+                _tag: 'ToolStarted' as const,
+                id: LogVocabulary.ToolCallId.make('a'),
+                name: 'tool',
+              },
+              {
+                _tag: 'SignalReceived' as const,
+                kind: 'steer' as const,
+                text: 'secret',
+                source: 'operator',
+                step: 1,
+                at: '00000000000000000001' as never,
+              },
+              {
+                _tag: 'RunSettled' as const,
+                outcome: 'failure' as const,
+                detail: 'secret stack',
+                steps: 1,
+                usage: { input: 1, output: 1 },
+              },
+            ],
+            runtime.filter,
+          );
+        });
 
-    expect(filtered).toMatchObject([
-      { params: { redacted: 'params' } },
-      { result: { redacted: 'result' } },
-      { _tag: 'ToolStarted', id: 'a', name: 'tool' },
-      { text: '[redacted signal]' },
-      { detail: '[redacted cause]' },
-    ]);
-  });
+        expect(filtered).toMatchObject([
+          { params: { redacted: 'params' } },
+          { result: { redacted: 'result' } },
+          { _tag: 'ToolStarted', id: 'a', name: 'tool' },
+          { text: '[redacted signal]' },
+          { detail: '[redacted cause]' },
+        ]);
+      }),
+  );
 });

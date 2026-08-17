@@ -35,9 +35,9 @@ import { Effect, Order, Schema } from 'effect';
  * no runtime check; {@link fromSeq} and {@link toSeq} are the validated
  * constructors.
  */
-export const Offset = Schema.String.pipe(
-  Schema.brand('@sunfall/vesper-log/Offset'),
-);
+export const Offset = Schema.String.check(
+  Schema.isPattern(/^(?:-1|\d{16}_\d{16})$/),
+).pipe(Schema.brand('@sunfall/vesper-log/Offset'));
 export type Offset = typeof Offset.Type;
 
 export class OffsetError extends Schema.TaggedError<OffsetError>()(
@@ -107,7 +107,7 @@ export const toSeq = (offset: Offset): Effect.Effect<bigint, OffsetError> =>
   Effect.suspend(() => {
     if (offset === START) return Effect.succeed(-1n);
 
-    const match = PATTERN.exec(offset);
+    const match = PATTERN.exec(String(offset));
     if (match === null) {
       return Effect.fail(new OffsetError({ offset }));
     }
@@ -115,6 +115,9 @@ export const toSeq = (offset: Offset): Effect.Effect<bigint, OffsetError> =>
       BigInt(match[1]!) * COMPONENT_SPAN + BigInt(match[2]!),
     );
   });
+
+/** Decode an offset arriving from persistence or another external boundary. */
+export const decode = Schema.decodeUnknownEffect(Offset);
 
 /**
  * Ordering on offsets.

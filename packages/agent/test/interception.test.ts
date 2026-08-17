@@ -1,6 +1,7 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Context, Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
@@ -11,7 +12,7 @@ import {
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, test } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { AgentEvents } from '../src/event.js';
@@ -36,7 +37,8 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
-const CALL_ID = 'call-1';
+const CALL_ID = LogVocabulary.ToolCallId.make('call-1');
+const quiet = test.extend({ disableErrorReporting: true });
 
 const callingTurn: Response.StreamPartEncoded[] = [
   {
@@ -122,324 +124,367 @@ const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   calls: ReadonlyArray<Call> = [callingTurn, answeringTurn],
   prompts: string[] = [],
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(scripted(calls, prompts)),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(scripted(calls, prompts)),
+    Effect.provide(LogStoreMemory.layer),
+    Effect.scoped,
   );
+
+const runQuiet = <A>(effect: Effect.Effect<A>) => Effect.exit(effect);
 
 // ---------------------------------------------------------------- beforeTurn
 
 describe('beforeTurn', () => {
-  it('fires once per turn, with the totals the earlier turns produced', async () => {
-    const seen: ReadonlyArray<unknown>[] = [];
-    const ran = { count: 0 };
-
-    await run(
-      agentWith(ran)
-        .intercepting({
-          beforeTurn: (context) =>
-            Effect.sync(() => {
-              seen.push([context.agent, context.step, context.usage]);
-              return Interception.proceed;
-            }),
-        })
-        .run('hi'),
-    );
-
-    expect(seen).toEqual([
-      ['test', 1, { input: 0, output: 0 }],
-      ['test', 2, { input: 10, output: 4 }],
-    ]);
-  });
-
-  it('replaces the turn’s input when it says so', async () => {
-    const prompts: string[] = [];
-    const ran = { count: 0 };
-
-    await run(
-      agentWith(ran)
-        .intercepting({
-          beforeTurn: (context) =>
-            Effect.succeed(
-              context.step === 1
-                ? Interception.proceedWith('rewritten by the interceptor')
-                : Interception.proceed,
-            ),
-        })
-        .run('the original question'),
-      [callingTurn, answeringTurn],
-      prompts,
-    );
-
-    expect(prompts[0]).toContain('rewritten by the interceptor');
-    expect(prompts[0]).not.toContain('the original question');
-  });
-
-  it('persists the rewritten input reconstruction will replay', async () => {
-    const ran = { count: 0 };
-
-    const written = await run(
+  it.effect(
+    'fires once per turn, with the totals the earlier turns produced',
+    () =>
       Effect.gen(function* () {
-        yield* agentWith(ran)
+        const seen: ReadonlyArray<unknown>[] = [];
+        const ran = { count: 0 };
+
+        yield* run(
+          agentWith(ran)
+            .intercepting({
+              beforeTurn: (context) =>
+                Effect.sync(() => {
+                  seen.push([context.agent, context.step, context.usage]);
+                  return Interception.proceed;
+                }),
+            })
+            .run('hi'),
+        );
+
+        expect(seen).toEqual([
+          ['test', 1, { input: 0, output: 0 }],
+          ['test', 2, { input: 10, output: 4 }],
+        ]);
+      }),
+  );
+
+  it.effect('replaces the turn’s input when it says so', () =>
+    Effect.gen(function* () {
+      const prompts: string[] = [];
+      const ran = { count: 0 };
+
+      yield* run(
+        agentWith(ran)
           .intercepting({
-            beforeTurn: () =>
-              Effect.succeed(Interception.proceedWith('persisted rewrite')),
+            beforeTurn: (context) =>
+              Effect.succeed(
+                context.step === 1
+                  ? Interception.proceedWith('rewritten by the interceptor')
+                  : Interception.proceed,
+              ),
           })
-          .recordingTo(CONVERSATION)
-          .run('discarded original');
-        return yield* readAll();
-      }),
-    );
+          .run('the original question'),
+        [callingTurn, answeringTurn],
+        prompts,
+      );
 
-    const started = written.find(
-      (envelope) => envelope.record._tag === 'RunStarted',
-    )?.record;
-    expect(JSON.stringify(started)).toContain('persisted rewrite');
-    expect(JSON.stringify(started)).not.toContain('discarded original');
-  });
+      expect(prompts[0]).toContain('rewritten by the interceptor');
+      expect(prompts[0]).not.toContain('the original question');
+    }),
+  );
 
-  it('is handed the input it is being asked about', async () => {
-    const seen: string[] = [];
-    const ran = { count: 0 };
+  it.effect('persists the rewritten input reconstruction will replay', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
 
-    await run(
-      agentWith(ran)
-        .intercepting({
-          beforeTurn: (context) =>
-            Effect.sync(() => {
-              seen.push(JSON.stringify(context.input.content));
-              return Interception.proceed;
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agentWith(ran)
+            .intercepting({
+              beforeTurn: () =>
+                Effect.succeed(Interception.proceedWith('persisted rewrite')),
+            })
+            .recordingTo(CONVERSATION)
+            .run('discarded original');
+          return yield* readAll();
+        }),
+      );
+
+      const started = written.find(
+        (envelope) => envelope.record._tag === 'RunStarted',
+      )?.record;
+      expect(JSON.stringify(started)).toContain('persisted rewrite');
+      expect(JSON.stringify(started)).not.toContain('discarded original');
+    }),
+  );
+
+  it.effect('is handed the input it is being asked about', () =>
+    Effect.gen(function* () {
+      const seen: string[] = [];
+      const ran = { count: 0 };
+
+      yield* run(
+        agentWith(ran)
+          .intercepting({
+            beforeTurn: (context) =>
+              Effect.sync(() => {
+                seen.push(JSON.stringify(context.input.content));
+                return Interception.proceed;
+              }),
+          })
+          .run('the original question'),
+      );
+
+      // Normalised to a `Prompt`, so a `RawInput` string arrives as a message
+      // rather than as a string an interceptor would have to re-normalise.
+      expect(seen[0]).toContain('the original question');
+      // Later turns add nothing unless a steer arrived.
+      expect(seen[1]).toBe('[]');
+    }),
+  );
+
+  quiet(
+    'ends the run without starting the turn when it fails',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const events: string[] = [];
+          const ran = { count: 0 };
+
+          const exit = yield* agentWith(ran)
+            .intercepting({ beforeTurn: () => Effect.fail(refused) })
+            .stream('hi')
+            .pipe(
+              Stream.runForEach((event) =>
+                Effect.sync(() => {
+                  events.push(event._tag);
+                }),
+              ),
+              Effect.result,
+              Effect.provide(scripted([callingTurn, answeringTurn])),
+              Effect.scoped,
+            );
+
+          expect(exit._tag).toBe('Failure');
+          // Not even `TurnStarted`: the seam is *before* a turn, so a refused turn
+          // leaves no trace of a turn that never ran.
+          expect(events).toEqual([]);
+        }),
+      ),
+  );
+
+  quiet(
+    'settles a refused recorded run only after recording its input',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const ran = { count: 0 };
+
+          const tags = yield* run(
+            Effect.gen(function* () {
+              yield* agentWith(ran)
+                .intercepting({ beforeTurn: () => Effect.fail(refused) })
+                .recordingTo(CONVERSATION)
+                .run('refused input')
+                .pipe(Effect.result);
+              return (yield* readAll()).map((envelope) => envelope.record._tag);
             }),
-        })
-        .run('the original question'),
-    );
+          );
 
-    // Normalised to a `Prompt`, so a `RawInput` string arrives as a message
-    // rather than as a string an interceptor would have to re-normalise.
-    expect(seen[0]).toContain('the original question');
-    // Later turns add nothing unless a steer arrived.
-    expect(seen[1]).toBe('[]');
-  });
-
-  it('ends the run without starting the turn when it fails', async () => {
-    const events: string[] = [];
-    const ran = { count: 0 };
-
-    const exit = await Effect.runPromise(
-      agentWith(ran)
-        .intercepting({ beforeTurn: () => Effect.fail(refused) })
-        .stream('hi')
-        .pipe(
-          Stream.runForEach((event) =>
-            Effect.sync(() => {
-              events.push(event._tag);
-            }),
-          ),
-          Effect.exit,
-          Effect.provide(scripted([callingTurn, answeringTurn])),
-          Effect.scoped,
-        ),
-    );
-
-    expect(exit._tag).toBe('Failure');
-    // Not even `TurnStarted`: the seam is *before* a turn, so a refused turn
-    // leaves no trace of a turn that never ran.
-    expect(events).toEqual([]);
-  });
-
-  it('settles a refused recorded run only after recording its input', async () => {
-    const ran = { count: 0 };
-
-    const tags = await run(
-      Effect.gen(function* () {
-        yield* agentWith(ran)
-          .intercepting({ beforeTurn: () => Effect.fail(refused) })
-          .recordingTo(CONVERSATION)
-          .run('refused input')
-          .pipe(Effect.exit);
-        return (yield* readAll()).map((envelope) => envelope.record._tag);
-      }),
-    );
-
-    expect(tags).toEqual(['RunStarted', 'RunSettled']);
-  });
+          expect(tags).toEqual(['RunStarted', 'RunSettled']);
+        }),
+      ),
+  );
 });
 
 // ----------------------------------------------------------- beforeModelCall
 
 describe('beforeModelCall', () => {
-  it('fires once per provider call', async () => {
-    const seen: Interception.Attempt[] = [];
-    const ran = { count: 0 };
+  it.effect('fires once per provider call', () =>
+    Effect.gen(function* () {
+      const seen: Interception.Attempt[] = [];
+      const ran = { count: 0 };
 
-    await run(
-      agentWith(ran)
-        .intercepting({
+      yield* run(
+        agentWith(ran)
+          .intercepting({
+            beforeModelCall: (context) =>
+              Effect.sync(() => {
+                seen.push(context.attempt);
+              }),
+          })
+          .run('hi'),
+      );
+
+      expect(seen).toEqual(['initial', 'initial']);
+    }),
+  );
+
+  it.effect(
+    'fires again, marked as a retry, when compaction retries the turn',
+    () =>
+      Effect.gen(function* () {
+        const seen: Interception.Attempt[] = [];
+        const ran = { count: 0 };
+
+        const intercepted = agentWith(ran).intercepting({
           beforeModelCall: (context) =>
             Effect.sync(() => {
               seen.push(context.attempt);
             }),
-        })
-        .run('hi'),
-    );
+        });
 
-    expect(seen).toEqual(['initial', 'initial']);
-  });
-
-  it('fires again, marked as a retry, when compaction retries the turn', async () => {
-    const seen: Interception.Attempt[] = [];
-    const ran = { count: 0 };
-
-    const intercepted = agentWith(ran).intercepting({
-      beforeModelCall: (context) =>
-        Effect.sync(() => {
-          seen.push(context.attempt);
-        }),
-    });
-
-    await run(
-      Effect.gen(function* () {
-        const chat = yield* Chat.fromPrompt(
-          Prompt.make([
-            { role: 'system', content: 'S' },
-            { role: 'user', content: 'old'.repeat(20_000) },
-            { role: 'assistant', content: 'answer'.repeat(20_000) },
-          ]),
+        yield* run(
+          Effect.gen(function* () {
+            const chat = yield* Chat.fromPrompt(
+              Prompt.make([
+                { role: 'system', content: 'S' },
+                { role: 'user', content: 'old'.repeat(20_000) },
+                { role: 'assistant', content: 'answer'.repeat(20_000) },
+              ]),
+            );
+            yield* intercepted.runIn(chat, 'hi');
+          }),
+          [overflow, answeringTurn],
         );
-        yield* intercepted.runIn(chat, 'hi');
+
+        expect(seen).toEqual(['initial', 'after-compaction']);
       }),
-      [overflow, answeringTurn],
-    );
+  );
 
-    expect(seen).toEqual(['initial', 'after-compaction']);
-  });
+  quiet(
+    'refuses the call before the provider is reached',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const prompts: string[] = [];
+          const ran = { count: 0 };
 
-  it('refuses the call before the provider is reached', async () => {
-    const prompts: string[] = [];
-    const ran = { count: 0 };
+          const exit = yield* agentWith(ran)
+            .intercepting({ beforeModelCall: () => Effect.fail(refused) })
+            .run('hi')
+            .pipe(
+              Effect.result,
+              Effect.provide(scripted([callingTurn, answeringTurn], prompts)),
+              Effect.scoped,
+            );
 
-    const exit = await Effect.runPromise(
-      agentWith(ran)
-        .intercepting({ beforeModelCall: () => Effect.fail(refused) })
-        .run('hi')
-        .pipe(
-          Effect.exit,
-          Effect.provide(scripted([callingTurn, answeringTurn], prompts)),
-          Effect.scoped,
-        ),
-    );
-
-    expect(exit._tag).toBe('Failure');
-    // The point of a seam *before* the call: the provider was never asked, so
-    // nothing was spent and nothing reached the conversation.
-    expect(prompts).toEqual([]);
-  });
+          expect(exit._tag).toBe('Failure');
+          // The point of a seam *before* the call: the provider was never asked, so
+          // nothing was spent and nothing reached the conversation.
+          expect(prompts).toEqual([]);
+        }),
+      ),
+  );
 });
 
 // ------------------------------------------------------------ beforeToolCall
 
 describe('beforeToolCall', () => {
-  it('is handed the call the model asked for', async () => {
-    const seen: unknown[] = [];
-    const ran = { count: 0 };
+  it.effect('is handed the call the model asked for', () =>
+    Effect.gen(function* () {
+      const seen: unknown[] = [];
+      const ran = { count: 0 };
 
-    await run(
-      agentWith(ran)
-        .intercepting({
-          beforeToolCall: (context) =>
-            Effect.sync(() => {
-              seen.push([context.name, context.toolCallId, context.params]);
-              return Interception.dispatch;
-            }),
-        })
-        .run('hi'),
-    );
-
-    expect(seen).toEqual([['lookup', CALL_ID, { id: '42' }]]);
-    expect(ran.count).toBe(1);
-  });
-
-  it('answers in the tool’s place without running it', async () => {
-    const prompts: string[] = [];
-    const ran = { count: 0 };
-
-    await run(
-      agentWith(ran)
-        .intercepting({
-          beforeToolCall: () =>
-            Effect.succeed(Interception.refuse('lookup is not allowed here')),
-        })
-        .run('hi'),
-      [callingTurn, answeringTurn],
-      prompts,
-    );
-
-    expect(ran.count).toBe(0);
-    // What the model is shown is the substituted result, in the same place a
-    // real one would have been.
-    expect(prompts[1]).toContain('lookup is not allowed here');
-    expect(prompts[1]).not.toContain('fresh:42');
-  });
-
-  it('records a substituted answer as an ordinary tool outcome', async () => {
-    const ran = { count: 0 };
-
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agentWith(ran)
+      yield* run(
+        agentWith(ran)
           .intercepting({
-            beforeToolCall: () => Effect.succeed(Interception.refuse('denied')),
+            beforeToolCall: (context) =>
+              Effect.sync(() => {
+                seen.push([context.name, context.toolCallId, context.params]);
+                return Interception.dispatch;
+              }),
           })
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
+          .run('hi'),
+      );
 
-    // The claim in `dispatch.ts`: an answered call is written down like any
-    // other, so if *this* run crashed a later one would recover the answer the
-    // interceptor gave rather than re-asking it.
-    expect(outcomesOf(written)).toEqual([
-      expect.objectContaining({
-        id: CALL_ID,
-        name: 'lookup',
-        outcome: 'failure',
-        result: 'denied',
-      }),
-    ]);
-    expect(written.some(({ record }) => record._tag === 'ToolStarted')).toBe(
-      false,
-    );
-  });
+      expect(seen).toEqual([['lookup', CALL_ID, { id: '42' }]]);
+      expect(ran.count).toBe(1);
+    }),
+  );
 
-  it('fails the run when it fails', async () => {
-    const ran = { count: 0 };
+  it.effect('answers in the tool’s place without running it', () =>
+    Effect.gen(function* () {
+      const prompts: string[] = [];
+      const ran = { count: 0 };
 
-    const exit = await Effect.runPromise(
-      agentWith(ran)
-        .intercepting({ beforeToolCall: () => Effect.fail(refused) })
-        .run('hi')
-        .pipe(
-          Effect.exit,
-          Effect.provide(scripted([callingTurn, answeringTurn])),
-          Effect.scoped,
-        ),
-    );
+      yield* run(
+        agentWith(ran)
+          .intercepting({
+            beforeToolCall: () =>
+              Effect.succeed(Interception.refuse('lookup is not allowed here')),
+          })
+          .run('hi'),
+        [callingTurn, answeringTurn],
+        prompts,
+      );
 
-    expect(exit._tag).toBe('Failure');
-    expect(ran.count).toBe(0);
-  });
+      expect(ran.count).toBe(0);
+      // What the model is shown is the substituted result, in the same place a
+      // real one would have been.
+      expect(prompts[1]).toContain('lookup is not allowed here');
+      expect(prompts[1]).not.toContain('fresh:42');
+    }),
+  );
+
+  it.effect('records a substituted answer as an ordinary tool outcome', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agentWith(ran)
+            .intercepting({
+              beforeToolCall: () =>
+                Effect.succeed(Interception.refuse('denied')),
+            })
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
+
+      // The claim in `dispatch.ts`: an answered call is written down like any
+      // other, so if *this* run crashed a later one would recover the answer the
+      // interceptor gave rather than re-asking it.
+      expect(outcomesOf(written)).toEqual([
+        expect.objectContaining({
+          id: CALL_ID,
+          name: 'lookup',
+          outcome: 'failure',
+          result: 'denied',
+        }),
+      ]);
+      expect(written.some(({ record }) => record._tag === 'ToolStarted')).toBe(
+        false,
+      );
+    }),
+  );
+
+  quiet(
+    'fails the run when it fails',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        Effect.gen(function* () {
+          const ran = { count: 0 };
+
+          const exit = yield* agentWith(ran)
+            .intercepting({ beforeToolCall: () => Effect.fail(refused) })
+            .run('hi')
+            .pipe(
+              Effect.result,
+              Effect.provide(scripted([callingTurn, answeringTurn])),
+              Effect.scoped,
+            );
+
+          expect(exit._tag).toBe('Failure');
+          expect(ran.count).toBe(0);
+        }),
+      ),
+  );
 });
 
 // ------------------------------------------------- interception vs. recovery
 
-const CONVERSATION = 'interception-conversation';
+const CONVERSATION = LogVocabulary.ConversationId.make(
+  'interception-conversation',
+);
 const PATH = AgentLog.pathFor(CONVERSATION);
 
 const seed = Effect.fn('test.seed')(function* (
@@ -447,7 +492,9 @@ const seed = Effect.fn('test.seed')(function* (
 ) {
   const store = yield* LogStore.Service;
   yield* store.create(PATH, CONVERSATION).pipe(Effect.orDie);
-  const claim = yield* store.acquire(PATH, 'previous-run').pipe(Effect.orDie);
+  const claim = yield* store
+    .acquire(PATH, LogVocabulary.ProducerId.make('previous-run'))
+    .pipe(Effect.orDie);
   yield* store
     .append({
       path: PATH,
@@ -479,7 +526,7 @@ const crashed: ReadonlyArray<ConversationRecord.Record> = [
     _tag: 'RunStarted',
     agent: 'test',
     formatVersion: 1,
-    agentRevision: '1',
+    agentRevision: LogVocabulary.AgentRevision.make('1'),
     prompt: [],
   },
   {
@@ -500,131 +547,143 @@ const crashed: ReadonlyArray<ConversationRecord.Record> = [
 ];
 
 describe('when the log and an interceptor both have an opinion', () => {
-  it('serves the recovered outcome and does not consult the interceptor', async () => {
-    const consulted: string[] = [];
-    const ran = { count: 0 };
-
-    const written = await run(
+  it.effect(
+    'serves the recovered outcome and does not consult the interceptor',
+    () =>
       Effect.gen(function* () {
-        yield* seed(crashed);
-        yield* agentWith(ran)
-          .intercepting({
-            beforeToolCall: (context) =>
-              Effect.sync(() => {
-                consulted.push(context.name);
-                return Interception.refuse('denied');
-              }),
-          })
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-        return yield* readAll();
+        const consulted: string[] = [];
+        const ran = { count: 0 };
+
+        const written = yield* run(
+          Effect.gen(function* () {
+            yield* seed(crashed);
+            yield* agentWith(ran)
+              .intercepting({
+                beforeToolCall: (context) =>
+                  Effect.sync(() => {
+                    consulted.push(context.name);
+                    return Interception.refuse('denied');
+                  }),
+              })
+              .recordingTo(CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+            return yield* readAll();
+          }),
+        );
+
+        // The call already ran, in the run that crashed. Refusing it now would
+        // show the model a refusal for work that actually happened.
+        expect(consulted).toEqual([]);
+        expect(ran.count).toBe(0);
+        expect(outcomesOf(written).at(-1)?.result).toEqual({
+          status: 'from-log',
+        });
+        expect(
+          written.some(({ record }) => record._tag === 'ToolStarted'),
+        ).toBe(false);
       }),
-    );
+  );
 
-    // The call already ran, in the run that crashed. Refusing it now would
-    // show the model a refusal for work that actually happened.
-    expect(consulted).toEqual([]);
-    expect(ran.count).toBe(0);
-    expect(outcomesOf(written).at(-1)?.result).toEqual({ status: 'from-log' });
-    expect(written.some(({ record }) => record._tag === 'ToolStarted')).toBe(
-      false,
-    );
-  });
+  it.effect('consults the interceptor once the earlier run has settled', () =>
+    Effect.gen(function* () {
+      const consulted: string[] = [];
+      const ran = { count: 0 };
 
-  it('consults the interceptor once the earlier run has settled', async () => {
-    const consulted: string[] = [];
-    const ran = { count: 0 };
+      yield* run(
+        Effect.gen(function* () {
+          yield* seed([
+            ...crashed,
+            {
+              _tag: 'RunSettled',
+              outcome: 'success',
+              detail: '',
+              steps: 2,
+              usage: { input: 0, output: 0 },
+            },
+          ]);
+          yield* agentWith(ran)
+            .intercepting({
+              beforeToolCall: (context) =>
+                Effect.sync(() => {
+                  consulted.push(context.name);
+                  return Interception.dispatch;
+                }),
+            })
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+        }),
+      );
 
-    await run(
-      Effect.gen(function* () {
-        yield* seed([
-          ...crashed,
-          {
-            _tag: 'RunSettled',
-            outcome: 'success',
-            detail: '',
-            steps: 2,
-            usage: { input: 0, output: 0 },
-          },
-        ]);
-        yield* agentWith(ran)
+      // A settled conversation has an empty recovery index, so the ordering
+      // above never comes up and the seam is back in charge.
+      expect(consulted).toEqual(['lookup']);
+      expect(ran.count).toBe(1);
+    }),
+  );
+
+  it.effect('tells the interceptor which conversation it is in', () =>
+    Effect.gen(function* () {
+      const seen: Array<string | undefined> = [];
+      const ran = { count: 0 };
+
+      yield* run(
+        Effect.gen(function* () {
+          yield* agentWith(ran)
+            .intercepting({
+              beforeToolCall: (context) =>
+                Effect.sync(() => {
+                  seen.push(context.conversationId);
+                  return Interception.dispatch;
+                }),
+              beforeTurn: (context) =>
+                Effect.sync(() => {
+                  seen.push(context.conversationId);
+                  return Interception.proceed;
+                }),
+            })
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+        }),
+      );
+
+      expect(new Set(seen)).toEqual(new Set([CONVERSATION]));
+    }),
+  );
+
+  it.effect('says so when the run is not recording', () =>
+    Effect.gen(function* () {
+      const seen: Array<string | undefined> = [];
+      const ran = { count: 0 };
+
+      yield* run(
+        agentWith(ran)
           .intercepting({
-            beforeToolCall: (context) =>
-              Effect.sync(() => {
-                consulted.push(context.name);
-                return Interception.dispatch;
-              }),
-          })
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-      }),
-    );
-
-    // A settled conversation has an empty recovery index, so the ordering
-    // above never comes up and the seam is back in charge.
-    expect(consulted).toEqual(['lookup']);
-    expect(ran.count).toBe(1);
-  });
-
-  it('tells the interceptor which conversation it is in', async () => {
-    const seen: Array<string | undefined> = [];
-    const ran = { count: 0 };
-
-    await run(
-      Effect.gen(function* () {
-        yield* agentWith(ran)
-          .intercepting({
-            beforeToolCall: (context) =>
-              Effect.sync(() => {
-                seen.push(context.conversationId);
-                return Interception.dispatch;
-              }),
             beforeTurn: (context) =>
               Effect.sync(() => {
                 seen.push(context.conversationId);
                 return Interception.proceed;
               }),
           })
-          .recordingTo(CONVERSATION)
-          .run('hi')
-          .pipe(Effect.orDie);
-      }),
-    );
+          .run('hi'),
+      );
 
-    expect(new Set(seen)).toEqual(new Set([CONVERSATION]));
-  });
-
-  it('says so when the run is not recording', async () => {
-    const seen: Array<string | undefined> = [];
-    const ran = { count: 0 };
-
-    await run(
-      agentWith(ran)
-        .intercepting({
-          beforeTurn: (context) =>
-            Effect.sync(() => {
-              seen.push(context.conversationId);
-              return Interception.proceed;
-            }),
-        })
-        .run('hi'),
-    );
-
-    expect(seen).toEqual([undefined, undefined]);
-  });
+      expect(seen).toEqual([undefined, undefined]);
+    }),
+  );
 });
 
 // ------------------------------------------------------------- opting out
 
 describe('an agent that is not intercepted', () => {
-  it('emits exactly what it emitted before', async () => {
-    const ran = { count: 0 };
-    const tags: string[] = [];
+  it.effect('emits exactly what it emitted before', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
+      const tags: string[] = [];
 
-    await Effect.runPromise(
-      agentWith(ran)
+      yield* agentWith(ran)
         .stream('hi')
         .pipe(
           Stream.runForEach((event) =>
@@ -635,27 +694,29 @@ describe('an agent that is not intercepted', () => {
           Effect.orDie,
           Effect.provide(scripted([callingTurn, answeringTurn])),
           Effect.scoped,
-        ),
-    );
+        );
 
-    expect(tags.filter((tag) => tag !== 'Part')).toEqual([
-      'TurnStarted',
-      'TurnFinished',
-      'TurnStarted',
-      'TurnFinished',
-      'Completed',
-    ]);
-    expect(ran.count).toBe(1);
-  });
+      expect(tags.filter((tag) => tag !== 'Part')).toEqual([
+        'TurnStarted',
+        'TurnFinished',
+        'TurnStarted',
+        'TurnFinished',
+        'Completed',
+      ]);
+      expect(ran.count).toBe(1);
+    }),
+  );
 
-  it('an interceptor with no seams changes nothing', async () => {
-    const ran = { count: 0 };
+  it.effect('an interceptor with no seams changes nothing', () =>
+    Effect.gen(function* () {
+      const ran = { count: 0 };
 
-    const result = await run(agentWith(ran).intercepting({}).run('hi'));
+      const result = yield* run(agentWith(ran).intercepting({}).run('hi'));
 
-    expect(result.text).toBe('done');
-    expect(ran.count).toBe(1);
-  });
+      expect(result.text).toBe('done');
+      expect(ran.count).toBe(1);
+    }),
+  );
 });
 
 // ------------------------------------------------------- the requirement type
@@ -719,13 +780,17 @@ const _recoveryWidened: Has<
 > = 'yes';
 
 describe('the requirement channel', () => {
-  it('names the interceptor’s services, and only the intercepted agent’s', () => {
-    expect([_guard, _widened, _kept, _untaxed, _recoveryWidened]).toEqual([
-      'not-any',
-      'yes',
-      'yes',
-      'no',
-      'yes',
-    ]);
-  });
+  it.effect(
+    'names the interceptor’s services, and only the intercepted agent’s',
+    () =>
+      Effect.sync(() => {
+        expect([_guard, _widened, _kept, _untaxed, _recoveryWidened]).toEqual([
+          'not-any',
+          'yes',
+          'yes',
+          'no',
+          'yes',
+        ]);
+      }),
+  );
 });

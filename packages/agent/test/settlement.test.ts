@@ -2,6 +2,8 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
 import {
   AiError,
@@ -9,7 +11,6 @@ import {
   type Response,
   Toolkit,
 } from 'effect/unstable/ai';
-import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
 import { protocolOf } from '../src/internal.js';
@@ -102,7 +103,7 @@ const stallsSettlement = (interrupted: Ref.Ref<boolean>) =>
     ),
   ).pipe(Layer.provide(LogStoreMemory.layer));
 
-const CONVERSATION = 'settling-conversation';
+const CONVERSATION = LogVocabulary.ConversationId.make('settling-conversation');
 
 const agent = Agent.make({
   name: 'test',
@@ -127,14 +128,11 @@ const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
   model: Layer.Layer<LanguageModel.LanguageModel> = answering,
-): Promise<A> =>
-  Effect.runPromise(
-    effect.pipe(
-      Effect.orDie,
-      Effect.provide(model),
-      Effect.provide(LogStoreMemory.layer),
-      Effect.scoped,
-    ),
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(model),
+    Effect.provide(LogStoreMemory.layer),
   );
 
 const runInSession = <R>(
@@ -147,44 +145,46 @@ const runInSession = <R>(
   );
 
 describe('how a run settles', () => {
-  it('records a completed run as a success, with its totals', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-        return yield* readAll();
-      }),
-    );
+  it.effect('records a completed run as a success, with its totals', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          return yield* readAll();
+        }),
+      );
 
-    expect(settlement(written)).toEqual([
-      {
-        _tag: 'RunSettled',
-        outcome: 'success',
-        detail: '',
-        steps: 1,
-        usage: { input: 5, output: 2 },
-        resume: {
-          formatVersion: 1,
-          agent: 'test',
-          agentRevision: '1',
+      expect(settlement(written)).toEqual([
+        {
+          _tag: 'RunSettled',
+          outcome: 'success',
+          detail: '',
+          steps: 1,
           usage: { input: 5, output: 2 },
-          signalCursor: LogOffset.START,
-          completed: {
-            outcome: 'success',
-            text: 'done',
-            steps: 1,
+          resume: {
+            formatVersion: 1,
+            agent: 'test',
+            agentRevision: LogVocabulary.AgentRevision.make('1'),
             usage: { input: 5, output: 2 },
+            signalCursor: LogOffset.START,
+            completed: {
+              outcome: 'success',
+              text: 'done',
+              steps: 1,
+              usage: { input: 5, output: 2 },
+            },
+            latestTurnUsage: { input: 5, output: 2 },
           },
-          latestTurnUsage: { input: 5, output: 2 },
         },
-      },
-    ]);
-    // Last, so a reader tailing the log knows nothing more is coming.
-    expect(written.at(-1)?.record._tag).toBe('RunSettled');
-  });
+      ]);
+      // Last, so a reader tailing the log knows nothing more is coming.
+      expect(written.at(-1)?.record._tag).toBe('RunSettled');
+    }),
+  );
 
-  it('records a failed run, and does not swallow the failure', async () => {
-    const observed = await Effect.runPromise(
-      Effect.gen(function* () {
+  it.effect('records a failed run, and does not swallow the failure', () =>
+    Effect.gen(function* () {
+      const observed = yield* Effect.gen(function* () {
         const outcome = yield* agent
           .recordingTo(CONVERSATION)
           .run('hi')
@@ -194,24 +194,23 @@ describe('how a run settles', () => {
         Effect.orDie,
         Effect.provide(failing),
         Effect.provide(LogStoreMemory.layer),
-        Effect.scoped,
-      ),
-    );
+      );
 
-    expect(observed.outcome._tag).toBe('Failure');
-    expect(settlement(observed.written)).toMatchObject([
-      { outcome: 'failure' },
-    ]);
-    // The cause is rendered into the record rather than reduced to a flag,
-    // because "it failed" is not something anyone can act on later.
-    expect(settlement(observed.written)[0]?.detail).toContain(
-      'the provider fell over',
-    );
-  });
+      expect(observed.outcome._tag).toBe('Failure');
+      expect(settlement(observed.written)).toMatchObject([
+        { outcome: 'failure' },
+      ]);
+      // The cause is rendered into the record rather than reduced to a flag,
+      // because "it failed" is not something anyone can act on later.
+      expect(settlement(observed.written)[0]?.detail).toContain(
+        'the provider fell over',
+      );
+    }),
+  );
 
-  it('records an interrupted run as interrupted', async () => {
-    const written = await Effect.runPromise(
-      Effect.gen(function* () {
+  it.effect('records an interrupted run as interrupted', () =>
+    Effect.gen(function* () {
+      const written = yield* Effect.gen(function* () {
         const reached = yield* Deferred.make<void>();
 
         const running = yield* agent
@@ -230,115 +229,124 @@ describe('how a run settles', () => {
         yield* Fiber.interrupt(running);
 
         return yield* readAll();
-      }).pipe(
-        Effect.orDie,
-        Effect.provide(LogStoreMemory.layer),
-        Effect.scoped,
-      ),
-    );
+      }).pipe(Effect.orDie, Effect.provide(LogStoreMemory.layer));
 
-    expect(settlement(written)).toMatchObject([{ outcome: 'interrupted' }]);
-  });
+      expect(settlement(written)).toMatchObject([{ outcome: 'interrupted' }]);
+    }),
+  );
 
-  it('records an abandoned event stream as interrupted, not a success', async () => {
-    const written = await run(
+  it.effect(
+    'records an abandoned event stream as interrupted, not a success',
+    () =>
       Effect.gen(function* () {
-        // A consumer that takes what it wants and walks away. The run did not
-        // finish, and saying "success" here would claim a result nobody got.
-        yield* agent
-          .recordingTo(CONVERSATION)
-          .stream('hi')
-          .pipe(Stream.take(2), Stream.runDrain, Effect.orDie);
+        const written = yield* run(
+          Effect.gen(function* () {
+            // A consumer that takes what it wants and walks away. The run did not
+            // finish, and saying "success" here would claim a result nobody got.
+            yield* agent
+              .recordingTo(CONVERSATION)
+              .stream('hi')
+              .pipe(Stream.take(2), Stream.runDrain, Effect.orDie);
 
-        return yield* readAll();
-      }),
-    );
-
-    expect(settlement(written)).toMatchObject([
-      {
-        outcome: 'interrupted',
-        detail: expect.stringContaining('abandoned'),
-      },
-    ]);
-  });
-
-  it('bounds a stalled settlement append and leaves an orphan', async () => {
-    const interrupted = await Effect.runPromise(Ref.make(false));
-    const observed = await Effect.runPromise(
-      Effect.gen(function* () {
-        const session = yield* AgentLog.open(CONVERSATION, {
-          compatibility: { agent: 'test', revision: '1' },
-        });
-        const stalled: AgentLog.Session = {
-          ...session,
-          settlementTimeoutMillis: 10,
-        };
-
-        const result = yield* runInSession(agent, stalled, 'hi').pipe(
-          Effect.timeout(1_000),
-          Effect.orDie,
+            return yield* readAll();
+          }),
         );
-        return {
-          result,
-          written: yield* session.recorded,
-          interrupted: yield* Ref.get(interrupted),
-        };
-      }).pipe(
-        Effect.provide(answering),
-        Effect.provide(stallsSettlement(interrupted)),
-        Effect.scoped,
-      ),
-    );
 
-    expect(observed.result.text).toBe('done');
-    expect(observed.interrupted).toBe(true);
-    expect(settlement(observed.written)).toEqual([]);
-    expect(observed.written.map(({ record }) => record._tag)).toContain(
-      'Completed',
-    );
-  });
+        expect(settlement(written)).toMatchObject([
+          {
+            outcome: 'interrupted',
+            detail: expect.stringContaining('abandoned'),
+          },
+        ]);
+      }),
+  );
+
+  it.live(
+    'bounds a stalled settlement append and leaves an orphan',
+    () =>
+      Effect.gen(function* () {
+        const interrupted = yield* Ref.make(false);
+        const observed = yield* Effect.gen(function* () {
+          const session = yield* AgentLog.open(CONVERSATION, {
+            compatibility: {
+              agent: 'test',
+              revision: LogVocabulary.AgentRevision.make('1'),
+            },
+          });
+          const stalled: AgentLog.Session = {
+            ...session,
+            settlementTimeoutMillis: 10,
+          };
+
+          const result = yield* runInSession(agent, stalled, 'hi').pipe(
+            Effect.timeout(1_000),
+            Effect.orDie,
+          );
+          return {
+            result,
+            written: yield* session.recorded,
+            interrupted: yield* Ref.get(interrupted),
+          };
+        }).pipe(
+          Effect.provide(answering),
+          Effect.provide(stallsSettlement(interrupted)),
+        );
+
+        expect(observed.result.text).toBe('done');
+        expect(observed.interrupted).toBe(true);
+        expect(settlement(observed.written)).toEqual([]);
+        expect(observed.written.map(({ record }) => record._tag)).toContain(
+          'Completed',
+        );
+      }),
+    10_000,
+  );
 });
 
 describe('orphans', () => {
-  it('are a RunStarted with nothing after it', async () => {
-    const written = await run(
-      Effect.gen(function* () {
-        const store = yield* LogStore.Service;
-        const path = AgentLog.pathFor(CONVERSATION);
-        yield* store.create(path, CONVERSATION).pipe(Effect.orDie);
-        const claim = yield* store.acquire(path, 'dead-run').pipe(Effect.orDie);
-        yield* store
-          .append({
-            path,
-            producerId: claim.producerId,
-            epoch: claim.epoch,
-            sequence: claim.nextSequence,
-            records: [
-              {
-                conversationId: CONVERSATION,
-                timestamp: 1_700_000_000_000,
-                record: {
-                  _tag: 'RunStarted',
-                  agent: 'test',
-                  formatVersion: 1,
-                  agentRevision: '1',
-                  prompt: [],
+  it.effect('are a RunStarted with nothing after it', () =>
+    Effect.gen(function* () {
+      const written = yield* run(
+        Effect.gen(function* () {
+          const store = yield* LogStore.Service;
+          const path = AgentLog.pathFor(CONVERSATION);
+          yield* store.create(path, CONVERSATION).pipe(Effect.orDie);
+          const claim = yield* store
+            .acquire(path, LogVocabulary.ProducerId.make('dead-run'))
+            .pipe(Effect.orDie);
+          yield* store
+            .append({
+              path,
+              producerId: claim.producerId,
+              epoch: claim.epoch,
+              sequence: claim.nextSequence,
+              records: [
+                {
+                  conversationId: CONVERSATION,
+                  timestamp: 1_700_000_000_000,
+                  record: {
+                    _tag: 'RunStarted',
+                    agent: 'test',
+                    formatVersion: 1,
+                    agentRevision: LogVocabulary.AgentRevision.make('1'),
+                    prompt: [],
+                  },
                 },
-              },
-            ],
-          })
-          .pipe(Effect.orDie);
+              ],
+            })
+            .pipe(Effect.orDie);
 
-        return yield* readAll();
-      }),
-    );
+          return yield* readAll();
+        }),
+      );
 
-    // Stated as a test because it is the shape every reader of this log is
-    // told to look for, and because it is what a settle-time write failure
-    // leaves behind — the absence is the signal, so it has to be legible.
-    expect(written.map((envelope) => envelope.record._tag)).toEqual([
-      'RunStarted',
-    ]);
-    expect(settlement(written)).toEqual([]);
-  });
+      // Stated as a test because it is the shape every reader of this log is
+      // told to look for, and because it is what a settle-time write failure
+      // leaves behind — the absence is the signal, so it has to be legible.
+      expect(written.map((envelope) => envelope.record._tag)).toEqual([
+        'RunStarted',
+      ]);
+      expect(settlement(written)).toEqual([]);
+    }),
+  );
 });
