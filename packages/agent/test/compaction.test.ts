@@ -1,4 +1,4 @@
-import { Effect, Ref, Stream } from 'effect';
+import { Effect, Layer, Ref, Stream } from 'effect';
 import {
   AiError,
   Chat,
@@ -9,7 +9,13 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
-import { fakeProvider, message, overflow } from './compaction-fixtures.js';
+import {
+  fakeProvider,
+  finish,
+  message,
+  overflow,
+  turnOf,
+} from './compaction-fixtures.js';
 import {
   compact,
   defaultSystem,
@@ -113,7 +119,7 @@ describe('Service', () => {
   // A `Reference`, so nothing has to be provided and nothing appears in `R`.
   // If this became an ordinary service the whole package would stop being
   // runnable without wiring, which is the property that keeps every other
-  // test in this directory free of Pi.
+  // test in this directory free of runtime policy.
   it('defaults to the pure heuristics with nothing provided', async () => {
     const installed = await Effect.runPromise(ContextWindow.Service);
 
@@ -327,7 +333,48 @@ describe('compact', () => {
       summary: 'SUMMARY',
       summarizedMessages: 2,
       keptMessages: 1,
+      usage: { input: 10, output: 4 },
     });
+  });
+
+  it('keeps assistant tool calls and their tool results on the same side', async () => {
+    const call = Prompt.makeMessage('assistant', {
+      content: [
+        Prompt.makePart('tool-call', {
+          id: 'call-1',
+          name: 'lookup',
+          params: {},
+          providerExecuted: false,
+        }),
+      ],
+    });
+    const result = Prompt.makeMessage('tool', {
+      content: [
+        Prompt.makePart('tool-result', {
+          id: 'call-1',
+          name: 'lookup',
+          result: 'ok',
+          isFailure: false,
+          providerExecuted: false,
+        }),
+      ],
+    });
+    const history = Prompt.make([
+      message('user', 'old'.repeat(100)),
+      call,
+      result,
+    ]);
+
+    const { history: compacted } = await run(
+      (chat) => compact(chat, { ...policy, keepRecentTokens: 1 }),
+      history,
+    );
+
+    expect(compacted.content.map((entry) => entry.role)).toEqual([
+      'user',
+      'assistant',
+      'tool',
+    ]);
   });
 
   // One renderer, used by the compacted `Chat` and by the rebuild in
@@ -355,6 +402,20 @@ describe('isContextOverflow', () => {
         }),
       ),
     ).toBe(true);
+  });
+
+  it.each([
+    'prompt is too long: 213462 tokens > 200000 maximum',
+    'maximum context length is 128000 tokens',
+    'model_context_window_exceeded',
+  ])('recognizes official provider descriptions: %s', (description) => {
+    const error = new AiError.AiError({
+      module: 'test',
+      method: 'generateText',
+      reason: new AiError.InvalidRequestError({ description }),
+    });
+
+    expect(isContextOverflow(error)).toBe(true);
   });
 
   it('does not treat other request errors as overflow', () => {
@@ -473,6 +534,7 @@ describe('the loop’s reactive compaction', () => {
 
   const reactive = Agent.make({
     name: 'reactive',
+    revision: '1',
     instructions: 'S',
     toolkit: Toolkit.make(),
     // No `contextWindow`, so nothing fires from an estimate and the only
@@ -548,6 +610,113 @@ describe('the loop’s reactive compaction', () => {
 
     expect(value.text).toBe('answer');
   });
+
+  it('does not retry when compaction cannot change the prompt', async () => {
+    const asked: Prompt.Prompt[] = [];
+    const layer = Layer.effect(
+      LanguageModel.LanguageModel,
+      LanguageModel.make({
+        generateText: () => Effect.succeed([]),
+        streamText: (options) => {
+          asked.push(options.prompt);
+          return Stream.fail(overflow);
+        },
+      }),
+    );
+    const short = Agent.make({
+      name: 'short',
+      revision: '1',
+      instructions: 'S',
+      toolkit: Toolkit.make(),
+      compaction: {
+        reserveTokens: 0,
+        keepRecentTokens: 10_000,
+        instructions: 'sum',
+      },
+    });
+
+    const exit = await Effect.runPromise(
+      short.run('only recent').pipe(Effect.exit, Effect.provide(layer)),
+    );
+
+    expect(exit._tag).toBe('Failure');
+    expect(asked).toHaveLength(1);
+  });
+
+  it('does not retry after partial output became externally visible', async () => {
+    const asked: Prompt.Prompt[] = [];
+    const layer = Layer.effect(
+      LanguageModel.LanguageModel,
+      LanguageModel.make({
+        generateText: () => Effect.succeed([]),
+        streamText: (options) => {
+          asked.push(options.prompt);
+          return Stream.concat(
+            Stream.fromIterable([
+              { type: 'text-start' as const, id: 'partial' },
+              { type: 'text-delta' as const, id: 'partial', delta: 'visible' },
+            ]),
+            Stream.fail(overflow),
+          );
+        },
+      }),
+    );
+    const events: string[] = [];
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const chat = yield* seeded();
+        return yield* reactive.streamIn(chat, 'next').pipe(
+          Stream.tap((event) =>
+            Effect.sync(() => {
+              if (event._tag === 'Part') events.push(event.part.type);
+            }),
+          ),
+          Stream.runDrain,
+        );
+      }).pipe(Effect.exit, Effect.provide(layer)),
+    );
+
+    expect(events).toContain('text-delta');
+    expect(asked).toHaveLength(1);
+  });
+
+  it('normalizes structured in-band overflow errors for reactive compaction', async () => {
+    let calls = 0;
+    const layer = Layer.effect(
+      LanguageModel.LanguageModel,
+      LanguageModel.make({
+        generateText: () =>
+          Effect.succeed([
+            { type: 'text' as const, text: 'SUMMARY' },
+            finish(10, 4),
+          ]),
+        streamText: () => {
+          calls += 1;
+          return calls === 1
+            ? Stream.make({
+                type: 'error' as const,
+                error: {
+                  code: 'model_context_window_exceeded',
+                  message: 'maximum context length exceeded',
+                  metadata: { requestId: 'req-1' },
+                },
+              })
+            : Stream.fromIterable(turnOf('answer', 'answer'));
+        },
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const chat = yield* seeded();
+        return yield* reactive.runIn(chat, 'next');
+      }).pipe(Effect.orDie, Effect.provide(layer)),
+    );
+
+    expect(result.text).toBe('answer');
+    expect(calls).toBe(2);
+  });
 });
 
 // The proactive trigger: compaction that fires from an estimate, before the
@@ -570,6 +739,7 @@ describe('compaction from an estimate', () => {
     const models = fakeProvider({ inputTokens: 50 });
     const agent = Agent.make({
       name: 'test',
+      revision: '1',
       instructions: 'be terse',
       toolkit: Toolkit.make(),
       compaction: { ...POLICY, contextWindow: 1_000 },
@@ -598,6 +768,7 @@ describe('compaction from an estimate', () => {
     const models = fakeProvider({ inputTokens: 50 });
     const agent = Agent.make({
       name: 'test',
+      revision: '1',
       instructions: 'be terse',
       toolkit: Toolkit.make(),
       compaction: POLICY,
@@ -620,6 +791,7 @@ describe('compaction from an estimate', () => {
     const models = fakeProvider({ inputTokens: 50 });
     const agent = Agent.make({
       name: 'test',
+      revision: '1',
       instructions: 'be terse',
       toolkit: Toolkit.make(),
       compaction: { ...POLICY, contextWindow: 1_000 },
@@ -642,10 +814,29 @@ describe('compaction from an estimate', () => {
     expect(tags.indexOf('Compacted')).toBe(tags.indexOf('TurnStarted') + 1);
   });
 
+  it('includes summarization usage in the completed result', async () => {
+    const models = fakeProvider({ inputTokens: 50 });
+    const agent = Agent.make({
+      name: 'test',
+      revision: '1',
+      instructions: 'be terse',
+      toolkit: Toolkit.make(),
+      compaction: { ...POLICY, contextWindow: 1_000 },
+    });
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const chat = yield* Chat.fromPrompt(seeded);
+        return yield* agent.runIn(chat, 'next');
+      }).pipe(Effect.provide(models.layer), Effect.orDie),
+    );
+
+    expect(result.usage).toEqual({ input: 60, output: 24 });
+  });
+
   // The wiring that makes the seam worth anything. The estimator is handed
   // what the provider reported for the previous turn; without it the whole
-  // conversation is a character count and Pi's estimator degrades to the
-  // heuristic it was brought in to replace.
+  // conversation remains a character count and reported usage is wasted.
   it('hands the estimator the previous turn own reported usage', async () => {
     const models = fakeProvider({ inputTokens: 7_777 });
     const seen: Array<ContextWindow.TurnUsage | undefined> = [];
@@ -660,6 +851,7 @@ describe('compaction from an estimate', () => {
 
     const agent = Agent.make({
       name: 'test',
+      revision: '1',
       instructions: 'be terse',
       toolkit: Toolkit.make(),
       compaction: { ...POLICY, contextWindow: 1_000 },

@@ -55,6 +55,7 @@ const POLICY = {
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(),
   compaction: POLICY,
@@ -138,6 +139,13 @@ describe('a conversation that compacted, resumed', () => {
     );
     expect(record.firstKept).toBe(runStarts[1]!.offset);
     expect(record.firstKept).not.toBe(LogOffset.START);
+
+    const completions = observed.records.filter(
+      (envelope) => envelope.record._tag === 'Completed',
+    );
+    expect(completions[1]?.record).toMatchObject({
+      usage: { input: 20, output: 8 },
+    });
   });
 
   it('does not hand the resumed run the history compaction replaced', async () => {
@@ -198,6 +206,8 @@ describe('rebuilding a compacted conversation', () => {
   const started = (prompt: string): ConversationRecord.Record => ({
     _tag: 'RunStarted',
     agent: 'test',
+    formatVersion: 1,
+    agentRevision: '1',
     prompt: Prompt.make(prompt).content,
   });
 

@@ -1,7 +1,7 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Effect, Layer, Ref, Schema, Stream } from 'effect';
+import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
   type Response,
@@ -87,6 +87,7 @@ const CONVERSATION = 'signalled-conversation';
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(),
 });
@@ -123,6 +124,80 @@ const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 describe('steering', () => {
+  it('records and emits an oversized signal rejection without injecting it', async () => {
+    const scripted = model();
+    const bounded = Agent.make({
+      name: 'bounded-signals',
+      revision: '1',
+      instructions: 'answer',
+      toolkit: Toolkit.make(),
+      runPolicy: { maxSignalBytes: 4 },
+    });
+
+    const result = await run(
+      Effect.gen(function* () {
+        yield* AgentSignals.send(CONVERSATION, {
+          kind: 'steer',
+          text: 'too large',
+          source: 'operator',
+        }).pipe(Effect.orDie);
+        const events = yield* bounded
+          .recordingTo(CONVERSATION)
+          .stream('hi')
+          .pipe(Stream.runCollect, Effect.orDie);
+        return { events, records: yield* readAll() };
+      }),
+      scripted,
+    );
+
+    expect(result.events).toContainEqual(
+      expect.objectContaining({
+        _tag: 'SignalRejected',
+        reason: 'signal_bytes',
+      }),
+    );
+    expect(scripted.prompts).toHaveLength(1);
+    expect(scripted.prompts[0]).not.toContain('too large');
+    expect(received(result.records)).toContainEqual(
+      expect.objectContaining({ disposition: 'rejected' }),
+    );
+  });
+
+  it('announces a bounded-drain backlog and leaves it for the next boundary', async () => {
+    const scripted = model();
+    const bounded = Agent.make({
+      name: 'bounded-backlog',
+      revision: '1',
+      instructions: 'answer',
+      toolkit: Toolkit.make(),
+      runPolicy: { maxSignalsPerBoundary: 1 },
+    });
+
+    const events = await run(
+      Effect.gen(function* () {
+        for (const text of ['first', 'second']) {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text,
+            source: 'operator',
+          }).pipe(Effect.orDie);
+        }
+        return yield* bounded
+          .recordingTo(CONVERSATION)
+          .stream('hi')
+          .pipe(Stream.runCollect, Effect.orDie);
+      }),
+      scripted,
+    );
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ _tag: 'SignalBacklog', maximum: 1 }),
+    );
+    expect(scripted.prompts.some((prompt) => prompt.includes('second'))).toBe(
+      true,
+    );
+  });
+
   it('reaches the model as input on the next turn', async () => {
     const scripted = model();
 
@@ -272,12 +347,13 @@ describe('cancelling', () => {
   // sooner ended it because it was told to.
   const persistent = Agent.make({
     name: 'persistent',
+    revision: '1',
     instructions: 'keep going',
     toolkit: Toolkit.make(),
     stopWhen: Stop.maxSteps(5),
   });
 
-  it('ends the run at the turn boundary, without another model call', async () => {
+  it('ends a run before the model when the cancel is already durable', async () => {
     const scripted = model();
 
     const result = await run(
@@ -296,11 +372,11 @@ describe('cancelling', () => {
       scripted,
     );
 
-    expect(scripted.prompts).toHaveLength(1);
-    // Cancellation ends a run; it does not fail one. The work already done
-    // comes back rather than being thrown away with the fiber.
-    expect(result.text).toBe('turn 1');
-    expect(result.steps).toBe(1);
+    expect(scripted.prompts).toHaveLength(0);
+    // Cancellation ends a run; it does not fail one or add a model call.
+    expect(result.text).toBe('');
+    expect(result.steps).toBe(0);
+    expect(result.outcome).toBe('cancelled');
   });
 
   it('leaves the run alone when nobody cancelled it', async () => {
@@ -360,7 +436,303 @@ describe('cancelling', () => {
       scripted,
     );
 
-    expect(result.steps).toBe(1);
+    expect(result.steps).toBe(0);
+    expect(result.outcome).toBe('cancelled');
+  });
+
+  it('interrupts an in-flight provider stream and preserves partial text', async () => {
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const stopped = yield* Deferred.make<void>();
+        const blocking = Layer.succeed(
+          LanguageModel.LanguageModel,
+          yield* LanguageModel.make({
+            generateText: () =>
+              Effect.succeed<Response.PartEncoded[]>([finish()]),
+            streamText: () =>
+              Stream.unwrap(
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.as(
+                    Stream.concat(
+                      Stream.fromIterable([
+                        { type: 'text-start' as const, id: 'partial' },
+                        {
+                          type: 'text-delta' as const,
+                          id: 'partial',
+                          delta: 'partial answer',
+                        },
+                      ]),
+                      Stream.never,
+                    ).pipe(
+                      Stream.ensuring(Deferred.succeed(stopped, undefined)),
+                    ),
+                  ),
+                ),
+              ),
+          }),
+        );
+
+        const running = yield* Effect.forkChild(
+          agent
+            .recordingTo(CONVERSATION)
+            .run('hi')
+            .pipe(Effect.provide(blocking)),
+        );
+        yield* Deferred.await(entered);
+        yield* AgentSignals.send(CONVERSATION, {
+          kind: 'steer',
+          text: 'change direction',
+          source: 'operator',
+        }).pipe(Effect.orDie);
+        yield* AgentSignals.send(CONVERSATION, {
+          kind: 'cancel',
+          text: 'stop now',
+          source: 'ui',
+        }).pipe(Effect.orDie);
+
+        const completed = yield* Fiber.join(running);
+        yield* Deferred.await(stopped);
+        return { completed, records: yield* readAll() };
+      }).pipe(
+        Effect.provide(LogStoreMemory.layer),
+        Effect.scoped,
+        Effect.timeout('2 seconds'),
+      ),
+    );
+
+    expect(result.completed.text).toBe('partial answer');
+    expect(result.completed.steps).toBe(1);
+    expect(result.completed.outcome).toBe('cancelled');
+    expect(result.records.map(({ record }) => record._tag)).toEqual([
+      'RunStarted',
+      'Text',
+      'SignalReceived',
+      'SignalReceived',
+      'TurnFinished',
+      'Completed',
+      'RunSettled',
+    ]);
+    expect(received(result.records).map((signal) => signal.kind)).toEqual([
+      'steer',
+      'cancel',
+    ]);
+    expect(settlement(result.records)).toMatchObject([
+      { outcome: 'cancelled' },
+    ]);
+  });
+
+  it('does not let an oversized cancel preempt a blocked stream', async () => {
+    const entered = await Effect.runPromise(Deferred.make<void>());
+    const bounded = Agent.make({
+      name: 'bounded-cancel',
+      revision: '1',
+      instructions: 'answer',
+      toolkit: Toolkit.make(),
+      runPolicy: { maxSignalBytes: 4, wallClockMillis: 100 },
+    });
+    const blocking: Model = {
+      prompts: [],
+      layer: Layer.succeed(
+        LanguageModel.LanguageModel,
+        await Effect.runPromise(
+          LanguageModel.make({
+            generateText: () =>
+              Effect.succeed<Response.PartEncoded[]>([finish()]),
+            streamText: () =>
+              Stream.unwrap(
+                Deferred.succeed(entered, undefined).pipe(
+                  Effect.as(Stream.never),
+                ),
+              ),
+          }),
+        ),
+      ),
+    };
+
+    await expect(
+      run(
+        Effect.gen(function* () {
+          const running = yield* Effect.forkChild(
+            bounded.recordingTo(CONVERSATION).run('hi'),
+          );
+          yield* Deferred.await(entered);
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'cancel',
+            text: 'too large',
+            source: 'ui',
+          }).pipe(Effect.orDie);
+          return yield* Fiber.join(running);
+        }),
+        blocking,
+      ),
+    ).rejects.toThrow('deadline');
+  });
+
+  it('does not let a cancel behind the bounded page leapfrog backlog', async () => {
+    const bounded = Agent.make({
+      name: 'backlogged-cancel',
+      revision: '1',
+      instructions: 'answer',
+      toolkit: Toolkit.make(),
+      runPolicy: { maxSignalsPerBoundary: 1, wallClockMillis: 100 },
+    });
+    const blocked: Model = {
+      prompts: [],
+      layer: Layer.effect(
+        LanguageModel.LanguageModel,
+        LanguageModel.make({
+          generateText: () =>
+            Effect.succeed<Response.PartEncoded[]>([finish()]),
+          streamText: () => Stream.never,
+        }),
+      ),
+    };
+
+    await expect(
+      run(
+        Effect.gen(function* () {
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'steer',
+            text: 'older',
+            source: 'operator',
+          }).pipe(Effect.orDie);
+          yield* AgentSignals.send(CONVERSATION, {
+            kind: 'cancel',
+            text: 'newer',
+            source: 'ui',
+          }).pipe(Effect.orDie);
+          return yield* bounded.recordingTo(CONVERSATION).run('hi');
+        }),
+        blocked,
+      ),
+    ).rejects.toThrow('deadline');
+  });
+
+  it('falls back to boundary cancellation when the change feed fails', async () => {
+    const scripted = model();
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        yield* AgentSignals.send(CONVERSATION, {
+          kind: 'cancel',
+          text: 'stop at boundary',
+          source: 'ui',
+        }).pipe(Effect.orDie);
+        return yield* agent.recordingTo(CONVERSATION).run('hi');
+      }).pipe(
+        Effect.provide(scripted.layer),
+        Effect.provide(
+          LogStoreMemory.layerFailingChanges(
+            AgentSignals.pathFor(CONVERSATION),
+          ),
+        ),
+        Effect.scoped,
+      ),
+    );
+
+    expect(result.text).toBe('turn 1');
+    expect(result.outcome).toBe('cancelled');
+    expect(scripted.prompts).toHaveLength(1);
+  });
+
+  it('keeps watcher read failures typed and tears the watcher down', async () => {
+    const readFailed = await Effect.runPromise(Deferred.make<void>());
+    const stopped = await Effect.runPromise(Deferred.make<void>());
+    let failNextSignalRead = true;
+    const instrumented = Layer.effect(
+      LogStore.Service,
+      Effect.map(LogStore.Service, (store) =>
+        LogStore.Service.of({
+          ...store,
+          read: (path, options) =>
+            path === AgentSignals.pathFor(CONVERSATION) && failNextSignalRead
+              ? Effect.sync(() => {
+                  failNextSignalRead = false;
+                }).pipe(
+                  Effect.andThen(Deferred.succeed(readFailed, undefined)),
+                  Effect.andThen(
+                    Effect.fail(
+                      new LogStore.LogStoreError({
+                        path,
+                        operation: 'read',
+                        reason: 'storage',
+                        detail: 'injected watcher read failure',
+                      }),
+                    ),
+                  ),
+                )
+              : store.read(path, options),
+          changes: (path) =>
+            store
+              .changes(path)
+              .pipe(Stream.ensuring(Deferred.succeed(stopped, undefined))),
+        }),
+      ),
+    ).pipe(Layer.provide(LogStoreMemory.layer));
+    const calls = { count: 0 };
+    const waitingProvider = Layer.effect(
+      LanguageModel.LanguageModel,
+      LanguageModel.make({
+        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+        streamText: () =>
+          Stream.unwrap(
+            Deferred.await(readFailed).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  calls.count += 1;
+                }),
+              ),
+              Effect.as(Stream.fromIterable(says('after watcher failure'))),
+            ),
+          ),
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      agent
+        .recordingTo(CONVERSATION)
+        .run('hi')
+        .pipe(
+          Effect.provide(waitingProvider),
+          Effect.provide(instrumented),
+          Effect.scoped,
+        ),
+    );
+    await Effect.runPromise(
+      Deferred.await(stopped).pipe(Effect.timeout('1 second')),
+    );
+
+    expect(result.text).toBe('after watcher failure');
+    expect(calls.count).toBe(1);
+  });
+
+  it('scopes the change-feed watcher to the provider stream', async () => {
+    const scripted = model();
+
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const stopped = yield* Deferred.make<void>();
+        const instrumented = Layer.effect(
+          LogStore.Service,
+          Effect.map(LogStore.Service, (store) =>
+            LogStore.Service.of({
+              ...store,
+              changes: (path) =>
+                store
+                  .changes(path)
+                  .pipe(Stream.ensuring(Deferred.succeed(stopped, undefined))),
+            }),
+          ),
+        ).pipe(Layer.provide(LogStoreMemory.layer));
+
+        yield* agent
+          .recordingTo(CONVERSATION)
+          .run('hi')
+          .pipe(Effect.provide(scripted.layer), Effect.provide(instrumented));
+        yield* Deferred.await(stopped).pipe(Effect.timeout('1 second'));
+      }).pipe(Effect.scoped),
+    );
   });
 });
 
@@ -459,6 +831,7 @@ const signallingAgent = (sendOn: ReadonlyMap<number, AgentSignals.Signal>) => {
   const turns = { count: 0 };
   return Agent.make({
     name: 'test',
+    revision: '1',
     instructions: 'be terse',
     toolkit: Toolkit.make(work),
     // The default policy with a lower ceiling: a turn that asks for a tool
@@ -543,6 +916,57 @@ describe('a signal that arrives while the run is in flight', () => {
     // step ceiling is 6. One step means the cancel ended it.
     expect(result.steps).toBe(1);
     expect(scripted.prompts).toHaveLength(1);
+  });
+
+  it('preempts a stalled provider after dispatch commits and its outcome is durable', async () => {
+    const scripted: Model = {
+      prompts: [],
+      layer: Layer.effect(
+        LanguageModel.LanguageModel,
+        LanguageModel.make({
+          generateText: () =>
+            Effect.succeed<Response.PartEncoded[]>([finish()]),
+          streamText: (options) => {
+            scripted.prompts.push(JSON.stringify(options.prompt));
+            return Stream.concat(
+              Stream.make(CALL('call-1', 'work')),
+              Stream.never,
+            );
+          },
+        }),
+      ),
+    };
+
+    const observed = await run(
+      Effect.gen(function* () {
+        const result = yield* signallingAgent(
+          new Map([
+            [
+              1,
+              {
+                kind: 'cancel',
+                text: 'stop after work',
+                source: 'ui',
+              } satisfies AgentSignals.Signal,
+            ],
+          ]),
+        )
+          .recordingTo(CONVERSATION)
+          .run('hi')
+          .pipe(Effect.timeout('2 seconds'));
+        return { result, records: yield* readAll() };
+      }),
+      scripted,
+    );
+
+    expect(observed.result.steps).toBe(1);
+    const tags = observed.records.map(({ record }) => record._tag);
+    expect(tags.indexOf('ToolOutcome')).toBeLessThan(
+      tags.indexOf('SignalReceived'),
+    );
+    expect(settlement(observed.records)).toMatchObject([
+      { outcome: 'cancelled' },
+    ]);
   });
 
   it('leaves the run alone when nothing is sent mid-flight', async () => {

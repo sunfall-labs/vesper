@@ -1,5 +1,5 @@
 import { Context } from 'effect';
-import type { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/unstable/ai';
 
 // How full the context window is, and whether that is too full.
 //
@@ -8,21 +8,16 @@ import type { Prompt } from 'effect/unstable/ai';
 // to the ceiling to act. Both are heuristics somebody else maintains against
 // real providers.
 //
-// So they are a seam rather than a constant. `@sunfall/vesper-agent` must not import
-// `@sunfall/vesper-pi` — that rule is what keeps the loop provider-agnostic — so the
-// loop states the *question* here and `@sunfall/vesper-pi/compaction` answers it with
-// Pi's maintained implementations, which `@sunfall/vesper-runtime` wires as the
-// default. Nothing in this file knows Pi exists, and nothing in Pi's adapter
-// imports this file: it produces a value of this shape structurally, and
-// `runtime` is where the two are checked against each other. That is the same
-// arrangement `Compaction.CONTEXT_OVERFLOW` already uses, for the same reason.
+// So they are a seam rather than a constant. The loop states the question here
+// and exports both provider-independent implementations. Provider packages stay
+// outside this module.
 //
 // ## Why a `Context.Reference` and not a service
 //
 // Because the safe default is real. {@link pure} is a complete, correct
 // implementation — it is precisely what this package did before the seam
 // existed — so an agent that never wires a provider still compacts, and a test
-// still runs without Pi in scope. That is the same argument `Subagent.Depth`
+// still runs without runtime policy in scope. That is the same argument `Subagent.Depth`
 // rests on, and it is *not* the argument the family rejects elsewhere: a
 // defaulted `LogStore` would hide persistence behind plausible behaviour,
 // whereas a defaulted estimate hides nothing — the run works, the guess is
@@ -72,9 +67,8 @@ export interface Estimate {
 /**
  * The part of a compaction policy the trigger actually reads.
  *
- * Structural and minimal on purpose: `Compaction.Policy` satisfies it, and so
- * does Pi's `CompactionSettings`, so neither side has to import the other's
- * type to talk about headroom.
+ * Structural and minimal on purpose: `Compaction.Policy` satisfies it without
+ * importing the trigger implementation.
  */
 export interface Settings {
   readonly reserveTokens: number;
@@ -84,19 +78,11 @@ export interface Settings {
  * The maintained answers to the two questions above.
  *
  * One service rather than two because they are one algorithm: a trigger is
- * meaningless apart from the estimate it reads, and the two disagreeing about
- * what a token is — Pi counts an image at 4,800 characters, a character count
- * at zero — is a compaction that fires at the wrong size in a way nothing
- * reports. Splitting them would let one be replaced and the other silently
- * left behind.
+ * meaningless apart from the estimate it reads. Splitting them would let one
+ * be replaced and the other silently left behind.
  *
- * The summarizer's system prompt is deliberately *not* here. It looked like
- * the third member of this set, and Pi does maintain one — but
- * `pi-agent-core@0.80.2` does not re-export `SUMMARIZATION_SYSTEM_PROMPT` from
- * its entry point and its `exports` map admits no deep import, so no adapter
- * can supply Pi's. Putting an unfillable slot on this interface would make
- * every implementation invent one. It lives on `Compaction.Policy` instead,
- * where a caller can override it.
+ * The summarizer's system prompt is deliberately *not* here. It is policy, not
+ * estimation, and lives on `Compaction.Policy` where a caller can override it.
  */
 export interface Heuristics {
   /**
@@ -159,6 +145,36 @@ export const pure: Heuristics = {
   },
   shouldCompact: (contextTokens, contextWindow, settings) =>
     contextTokens > Math.max(0, contextWindow - settings.reserveTokens),
+};
+
+/**
+ * Anchor completed history on provider-reported usage and estimate only the
+ * messages after its assistant response.
+ *
+ * This remains provider-independent: every official Effect AI model reports
+ * the same usage shape to the loop. Without an assistant anchor or reported
+ * usage it deliberately degrades to {@link pure}'s character count.
+ */
+export const usageAnchored: Heuristics = {
+  estimate: (prompt, usage) => {
+    if (usage !== undefined) {
+      for (let index = prompt.content.length - 1; index >= 0; index -= 1) {
+        if (prompt.content[index]?.role !== 'assistant') continue;
+        const usageTokens = usage.inputTokens + usage.outputTokens;
+        const trailingTokens = estimateTokens(
+          Prompt.make(prompt.content.slice(index + 1)),
+        );
+        return {
+          tokens: usageTokens + trailingTokens,
+          usageTokens,
+          trailingTokens,
+        };
+      }
+    }
+
+    return pure.estimate(prompt);
+  },
+  shouldCompact: pure.shouldCompact,
 };
 
 /**

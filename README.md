@@ -3,93 +3,82 @@
 An Effect-first agent harness built on `effect/unstable/ai`.
 
 `effect/unstable/ai` supplies `LanguageModel`, `Tool`, `Toolkit`, `Prompt`,
-`Response`, and `Chat`. What it does not supply is an agent loop —
-`generateText` is one round trip — or a provider for Pi. Vesper fills those two
-gaps, and adds two things that are hard to get any other way: **agent
+`Response`, and `Chat`. What it does not supply is an agent loop:
+`generateText` is one round trip. Vesper adds that loop and two things that are
+hard to get any other way: **agent
 definitions whose unmet service requirements are a compile error**, and an
 **event-sourced conversation log** a run is recorded to, resumed from, and
 steered through.
 
-It leans on `@earendil-works/pi-agent-core` and `@earendil-works/pi-ai`
-wherever those already have an answer, and differs only where they structurally
-cannot follow. [`Design.md`](Design.md) says what is taken, what is not, and
-why.
+Provider integration comes directly from official Effect AI packages. Vesper
+does not wrap provider SDKs or maintain a second provider registry.
+[`Design.md`](Design.md) explains the boundary.
 
-**Status: pre-1.0, published as `alpha`.** It was extracted from the system it
-was built for, and the [known gaps](#known-gaps) below are not a formality —
-read them before picking this up.
+**Status: pre-1.0, preparing its first `alpha` publish.** It was extracted from
+the system it was built for, and the [known gaps](#known-gaps) below are not a
+formality — read them before picking this up.
 
 ## Packages
 
-| Package                                               | What it does                                                       |
-| ----------------------------------------------------- | ------------------------------------------------------------------ |
-| [`@sunfall/vesper-agent`](packages/agent)             | The loop, subagents, skills, interception, recording, resumption   |
-| [`@sunfall/vesper-pi`](packages/pi)                   | `LanguageModel` over `@earendil-works/pi-ai`, retry, Pi heuristics |
-| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory + Postgres   |
-| [`@sunfall/vesper-runtime`](packages/runtime)         | Composition, config, worked example                                |
-| [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                     |
-| [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                          |
+Vesper publishes four packages:
 
-`workspace` and `attachments` are standalone: nothing in `agent` or `runtime`
-composes them, and no tool here reaches for either. They are buildable and
-tested, and they are not yet wired to anything.
+| Package                                               | What it does                                                     |
+| ----------------------------------------------------- | ---------------------------------------------------------------- |
+| [`@sunfall/vesper-agent`](packages/agent)             | The loop, subagents, skills, interception, recording, resumption |
+| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory + Postgres |
+| [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                   |
+| [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                        |
+
+`workspace` and `attachments` are standalone: nothing in `agent` composes
+them. Applications opt into either package directly.
 
 ## Install
 
 ```bash
-npm install @sunfall/vesper-runtime @sunfall/vesper-agent @sunfall/vesper-pi \
-            @earendil-works/pi-ai effect
+npm install @sunfall/vesper-agent \
+            @effect/ai-anthropic@4.0.0-rc.109 \
+            @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
 ```
 
-`effect` is `4.0.0-beta.103` and both Pi packages are pinned to `0.80.2`.
-`pi-agent-core@X` requires `pi-ai@^X`; letting them drift resolves two copies
-of `pi-ai` and breaks type identity exactly at the provider seam.
+Effect and its provider packages are pinned together at `4.0.0-rc.109` while
+the APIs are release candidates. Every Vesper package peers on that exact
+`effect` version so an application has one Effect service identity.
 
 ## A worked example
 
-The code below is `packages/runtime/src/example.ts`, which is compiled and
-exercised by its own test, so it cannot drift from the API it documents.
+The code below is `examples/support-agent/src/main.ts`, a compiled example with
+requirement-channel assertions, so it cannot drift from the API it documents.
 
 ### Wiring
 
 ```ts
-import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
-import { PiProvider } from '@sunfall/vesper-pi/provider';
-import { AiRuntime } from '@sunfall/vesper-runtime/runtime';
+import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
+import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
+import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { Config, Layer } from 'effect';
 
-export const AiLive = AiRuntime.model({
-  provider: 'anthropic',
-  model: 'claude-sonnet-4-6',
-}).pipe(
+const Anthropic = AnthropicLanguageModel.model('claude-sonnet-4-6').pipe(
   Layer.provide(
-    PiProvider.layerConfig({
-      provider: anthropicProvider(),
+    AnthropicClient.layerConfig({
       apiKey: Config.redacted('ANTHROPIC_API_KEY'),
     }),
   ),
+  Layer.provide(NodeHttpClient.layerUndici),
 );
+
+const ContextPolicy = Layer.succeed(
+  ContextWindow.Service,
+  ContextWindow.usageAnchored,
+);
+
+export const AiLive = Layer.merge(Anthropic, ContextPolicy);
 ```
 
-`PiProvider.layerConfig` registers the provider and seeds its credential — two
-steps that are never useful apart, and the second of which otherwise only fails
-on the first real request. The key is a `Config<Redacted<string>>`, so it never
-becomes a value in application code.
-
-`AiRuntime.model` returns Effect's `Model`, which extends `Layer`, so it
-provides `LanguageModel` exactly as a layer would and adds `ProviderName` and
-`ModelName` to context. It also merges in Pi's context-window heuristics over
-`@sunfall/vesper-agent`'s character-count fallback, because "wired the Pi model
-and kept the crude estimate" is a silent half-configuration.
-
-Transient provider failures are retried inside the model call by default;
-`retry: false` turns that off and `retry: { maxAttempts, baseDelay }` tunes it.
-Retrying there rather than around the run is the point: a 429 absorbed inside
-one model call costs a wait, while the same 429 reaching the loop costs a
-re-run of the turn and everything the turn did.
-
-Options can come from configuration instead of literals with
-`AiRuntime.modelConfig({ provider: Config.string('AI_PROVIDER'), … })`.
+The official provider owns prompt conversion, tools, streaming, usage,
+credentials, telemetry, and errors. Its `Model` provides `LanguageModel`,
+`ProviderName`, and `ModelName`. `ContextWindow.usageAnchored` is separate,
+provider-independent policy: it anchors completed history on reported usage
+and estimates only the messages after it.
 
 ### Defining the agent
 
@@ -138,6 +127,7 @@ const refundPolicy: Skill.Skill = {
 /** A specialist the support agent can hand bounded work to. */
 export const researcher = Agent.make({
   name: 'researcher',
+  revision: '1',
   description: 'Digs through documentation to answer a specific question.',
   instructions: 'Answer the question directly. Cite nothing you did not read.',
   toolkit: Toolkit.make(),
@@ -145,6 +135,7 @@ export const researcher = Agent.make({
 
 export const supportAgent = Agent.make({
   name: 'support',
+  revision: '1',
   instructions: [
     'You handle customer support for an online store.',
     'Check order status before making promises.',
@@ -172,6 +163,16 @@ export const supportAgent = Agent.make({
     reserveTokens: 8_000,
     keepRecentTokens: 4_000,
     instructions: 'Summarise the customer’s issue and what has been tried.',
+  },
+
+  // Hard and shared by this root run, the researcher, and all descendants.
+  runPolicy: {
+    maxTurns: 24,
+    maxModelCalls: 32,
+    maxDelegatedTasks: 8,
+    maxInputTokens: 250_000,
+    maxOutputTokens: 32_000,
+    wallClockMillis: 120_000,
   },
 }).withHandlers({
   lookup_order: ({ orderId }) =>
@@ -201,6 +202,14 @@ and a blocking one take the same path through the loop. `streamIn` and `runIn`
 are the same two against a `Chat` the caller already holds. A run stops when
 its `stopWhen` condition holds; the default is "the model asked for no tools",
 and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`, `any`, `all`.
+`Result.outcome` distinguishes `success` from `cancelled`; `steps` counts model
+turns that actually started, so a queued cancellation can return zero while an
+in-flight cancellation preserves its partial text, usage, and one started turn.
+These are soft stops: a steer may request another turn. `runPolicy` is the hard
+boundary and cannot be overridden. Its runtime is created once per root run and
+passed into every descendant, so delegation cannot reset turn, model-call,
+token, deadline, depth, breadth, or concurrent-child accounting. Requested
+tool concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
 
 Handlers attach as a method rather than a `Definition` field, mirroring
 `toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
@@ -226,8 +235,8 @@ delegated.
 misspelled terminal tool never matches, so the run stops later than intended
 and looks like a model behaving oddly rather than a typo.
 
-Both are pinned by mutation-checked type tests (`propagation.test.ts`,
-`assertions.test.ts`, `types.test.ts`): reverting the fix in the source fails
+Both are pinned by mutation-checked type tests in `type-tests/` and
+`packages/agent/test/assertions.test.ts`: reverting the fix in the source fails
 the build, not just the assertion.
 
 None of it is expressible over an agent API whose `execute` returns a
@@ -237,7 +246,8 @@ None of it is expressible over an agent API whose `execute` returns a
 
 A subagent is an agent definition compiled to a tool named `task_<child>` on
 its parent, so delegation composes through the ordinary toolkit machinery.
-Delegation depth caps at `Subagent.MAX_DEPTH`, which is 4.
+Delegation depth defaults to 4 and is controlled by
+`RunPolicy.Limits.maxDelegationDepth` with the other shared hard limits.
 
 A skill is a `{ name, description, instructions }` value. The catalog — names
 and one-line descriptions — is appended to the agent's instructions so the
@@ -246,9 +256,7 @@ bodies load through a `load_skill` tool. The parameter schema is a literal
 union of the skill names, so asking for one that does not exist fails
 validation rather than returning an empty string the model may not notice.
 
-Skills here are values passed to `Agent.make`. There is no discovery from disk;
-Pi's `loadSkills` reads `SKILL.md` files from directories, and Vesper has no
-equivalent.
+Skills here are values passed to `Agent.make`; there is no discovery from disk.
 
 ## Compaction and the context window
 
@@ -261,13 +269,10 @@ turn that would not have fit — but only when the caller sets
 tag and that tag does not carry a window.
 
 The estimate comes from `ContextWindow.Service`, a `Context.Reference` whose
-default counts four characters per token and whose production value is Pi's.
-Pi's `estimateContextTokens` walks back to the most recent assistant message
-carrying provider-reported usage, takes that figure as exact, and estimates
-only what came after it, so the guesswork is bounded by one turn's text rather
-than the whole conversation. `@sunfall/vesper-agent` states the shape and
-`@sunfall/vesper-pi/compaction` produces a value of it without either importing
-the other; the assignment in `runtime.ts` is where a compiler compares them.
+default counts four characters per token. Applications can install
+`ContextWindow.usageAnchored`, which takes the latest turn's reported usage as
+exact and estimates only messages after that assistant response, so guesswork
+is bounded by one turn's text rather than the whole conversation.
 
 Compaction splits on whole messages rather than tokens, so a tool call is never
 cut away from its result, and the agent's own system message always survives
@@ -286,12 +291,32 @@ const records = Agent.streamFrom(conversationId, lastOffsetSeen);
 ```
 
 `recordingTo` returns an agent that writes each run into
-`@sunfall/vesper-log` as it happens: the run's input, model text, tool calls
-and their outcomes, turn boundaries, compactions, signals taken, completion,
-settlement. `streamFrom` replays those and then follows live, which is
+`@sunfall/vesper-log` as it happens: the run's input, model text, tool calls,
+durable handler starts and outcomes, turn boundaries, compactions, signals
+taken, completion, settlement. `streamFrom` replays those and then follows live, which is
 `Tail.from` with a path convention rather than a second read-then-follow loop.
 It yields records, not events — synthesising events would mean inventing text
 deltas nobody sent.
+
+Raw persistence is the explicit default. An application can filter only the
+recorded representation without changing the values the live model and tools
+see:
+
+```ts
+const recording = supportAgent.recordingTo(conversationId, {
+  prompt: (prompt) => Redaction.redactPrompt(prompt),
+  toolParameters: (params, call) => Redaction.redactTool(call.name, params),
+  toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
+  signal: (signal) => Redaction.redactSignal(signal),
+  cause: (rendered) => Redaction.redactCause(rendered),
+});
+```
+
+Any Effect services those functions use are added to the returned agent's
+`Requires`; raw recording adds only `LogStore.Service`. The compiled filter is
+carried into child sessions. Since records are also the resumption source,
+future resumed prompts and recovered tool outcomes use the filtered values;
+filters should preserve enough shape for the tool and prompt codecs involved.
 
 **Logging is optional, and the type says which you have.** `run` does not
 require a `LogStore` and every non-recording call site is unchanged; the agent
@@ -319,9 +344,9 @@ and whose history does not.
 Two backends implement `LogStore`: an in-memory one, and Postgres. The Postgres
 backend imports nothing but `effect` and takes a structurally `pg.Pool`-shaped
 client, so `pg` stays out of the package. It never issues DDL: the schema is
-the application's to own and migrate, and the DDL it expects is spelled out in
-`packages/log/test/pg-test-harness.ts`, which is also what the integration
-suite applies. Wake-ups cross processes through `LISTEN`/`NOTIFY`, and its
+the application's to own and migrate. The authoritative DDL is published as
+`packages/log/migrations/001-initial.sql`; the integration harness applies that
+same asset. Wake-ups cross processes through `LISTEN`/`NOTIFY`, and its
 `changes` stream fails rather than going quiet, because a dead feed that looks
 healthy is indistinguishable from a conversation where nothing is happening.
 
@@ -339,6 +364,14 @@ and continuing from the next turn. A conversation that does not exist yet
 starts as one. The returned `usage` is cumulative across the whole conversation
 rather than this run alone.
 
+Every `Agent.make` definition requires a non-empty application revision. Vesper
+persists that revision, the agent name, and its conversation-format version in
+`RunStarted` and bounded resume aggregates. Resume, branch, fork, and child
+session entry reject missing, unsupported, or mismatched metadata before a
+model or tool call. Bump the revision whenever instructions, tools, schemas, or
+other behavior make existing durable history unsafe; old unrevisioned history
+must be migrated explicitly rather than adopted silently.
+
 **This is what makes the log a durability mechanism and not an audit trail.** A
 run that crashed mid-conversation resumes without re-asking the provider for
 turns it completed and without re-running the tool calls those turns made.
@@ -348,11 +381,16 @@ was handed, the tool handler counts its own invocations.
 `AgentHistory.messagesFrom(records)` is the reconstruction on its own, for a
 reader that has records and no agent. Two rules in it are worth knowing:
 
-- **An unanswered tool call is dropped.** A crash between a tool call and its
-  outcome leaves a call nothing answered, and providers reject an assistant
-  tool call with no matching result rather than degrade. Dropping it lets the
-  model ask again — which re-runs the tool if it had in fact already run.
-  Nothing in the log can distinguish those two cases.
+- **An unanswered tool call is dropped from the prompt, but not forgotten by
+  dispatch.** Providers reject an assistant tool call with no matching result.
+  A `ToolStarted` without `ToolOutcome` records that its handler may already
+  have committed; recovery refuses to dispatch it unless
+  `onIndeterminateToolCall` explicitly returns `Retry`, or reconciles it with
+  an explicit answer.
+- **Recovered results must still decode through the current tool result
+  schema.** A changed schema fails with an actionable `AiError` before the
+  stored value can masquerade as a typed success. Explicit indeterminate-call
+  reconciliation answers are checked the same way.
 - **The latest `Compacted` replaces the history before it.** The record carries
   the summary and `firstKept`, the offset of the first record that survived, so
   a rebuild is the summary as a user message, then the tail compaction kept,
@@ -381,13 +419,15 @@ conversation id, and one `ChildSession` record is written into **both** logs —
 so whichever end a reader opens, it finds the same statement of who delegated
 what to whom.
 
-The child id is derived from the parent's id and the tool call id
-(`${parentId}/${toolCallId}`), so a re-run of the same delegation resumes the
-child it already started instead of orphaning it.
+The child id is unambiguously derived from the parent's id and tool call id, so
+a re-run of the same delegation resumes the child it already started instead of
+orphaning it.
 
-The session is passed, not looked up: `Agent.runInSession(session, input)` is
-how a parent runs a child, and running into a session does not widen anybody's
-requirement channel, because the session already holds the store.
+The session and shared root runtime are passed through an internal symbol
+protocol while Vesper compiles delegation. They are not public Agent methods,
+so consumers cannot invoke a packed child with an arbitrary session or budget.
+The child's ordinary requirement channel remains exact because the session
+already holds the store.
 
 ### Signals
 
@@ -407,11 +447,26 @@ conversation itself would fence the run you are trying to steer. The run drains
 them at each turn boundary, mirrors delivery into its own log as
 `SignalReceived`, and emits a `Signalled` event so a consumer can render it.
 
-A `cancel` ends the run at that boundary and settles it as `cancelled` —
-cancellation ends a run, it does not fail one, so the work already done still
+A valid `cancel` in the next bounded page can interrupt an in-flight provider
+stream before that boundary when no real tool or delegation handler has begun.
+The boundary remains the sole durable acknowledgement and ordering point. Once
+a real handler begins, cancellation waits for its durable outcome and the
+normal boundary. The run settles as `cancelled` — cancellation ends a run, it
+does not fail one, so partial work already done still
 comes back. A `steer` becomes a user message on the next turn and **outranks
 the stop condition** for that turn, including a step ceiling: a run that
 consumed an instruction and stopped anyway has silently ignored it.
+It never outranks a hard run budget.
+
+Signal reads are bounded by `maxSignalsPerBoundary`; a backlog emits
+`SignalBacklog` and remains after the durable cursor for a later boundary.
+Oversized signals and steers over the run's cumulative byte budget emit
+`SignalRejected` and are persisted as rejected `SignalReceived` records, so
+advancing the cursor never silently discards them.
+`AgentSignals.send` persists its separate incoming record raw. A queued signal
+cannot be both recoverable with its original text and redacted at rest; apply
+ingress protection before calling `send` when the sender intentionally wants
+the delivered value transformed as well.
 
 Delivery is resumable and at-least-once. `SignalReceived` records the offset it
 consumed, so a signal queued before a run began is still delivered and one
@@ -426,9 +481,14 @@ A read from a cursor has no such count.
 
 ### Resuming a tool call after a crash
 
-When a session opens, it indexes the tool outcomes of a run that started and
-never settled, and the toolkit the loop dispatches through serves those instead
-of re-running the tool. Nothing in `LanguageModel` had to change: its `toolkit`
+When a session opens, it indexes both tool outcomes and unresolved
+`ToolStarted` records from orphaned runs. Completed outcomes are served instead
+of re-running the tool. An unresolved start is never dispatched silently: the
+dedicated `onIndeterminateToolCall` interceptor must explicitly return
+`Interception.retry`, `Interception.reconcile(result)`, or
+`Interception.reconcileFailure(result)`; without it the run fails safely and
+remains orphaned. Ordinary `beforeToolCall` dispatch permission is not a retry
+decision. Nothing in `LanguageModel` had to change: its `toolkit`
 option already accepts an `Effect` producing a resolved toolkit, which is what
 a `Toolkit` is.
 
@@ -456,14 +516,15 @@ const guarded = supportAgent.intercepting({
 });
 ```
 
-Three seams, named rather than general, each with a type that admits exactly
+Four seams, named rather than general, each with a type that admits exactly
 what it is for:
 
-| seam              | observe | change the input | answer instead | fail |
-| ----------------- | ------- | ---------------- | -------------- | ---- |
-| `beforeTurn`      | yes     | yes              | no             | yes  |
-| `beforeModelCall` | yes     | no               | no             | yes  |
-| `beforeToolCall`  | yes     | no               | yes            | yes  |
+| seam                      | observe | change the input | answer instead | fail |
+| ------------------------- | ------- | ---------------- | -------------- | ---- |
+| `beforeTurn`              | yes     | yes              | no             | yes  |
+| `beforeModelCall`         | yes     | no               | no             | yes  |
+| `beforeToolCall`          | yes     | no               | yes            | yes  |
+| `onIndeterminateToolCall` | yes     | no               | answer/retry   | yes  |
 
 The alternative — a service holding one `(Effect) => Effect` applied wherever
 the loop does something interesting — was rejected. It has no name and no
@@ -483,9 +544,10 @@ need an order and every order is wrong for somebody.
 
 ### When the log and an interceptor disagree
 
-Both have a view of a tool call, so the order is fixed: the recovery index
-first, then the interceptor, then the tool. A call an unsettled earlier run
-already completed is served from the log and the interceptor is **not**
+Both have a view of a tool call, so the order is fixed: a completed recovery
+outcome, an indeterminate-resolution callback, `beforeToolCall`, then the tool.
+A call an unsettled earlier run already completed is served from the log and
+the interceptor is **not**
 consulted — that call already ran, and refusing it now would show the model a
 refusal for work that actually happened. Stated as a limit: an interceptor
 cannot revoke permission for a tool call a crashed run completed. Settling the
@@ -514,16 +576,7 @@ the way.
 `examples/live-smoke` is the broader one: it drives tools, delegation, skills,
 logging, branching, forking, the workspace toolkit, and both compaction
 triggers against a real provider. Everything else in the repository runs
-against Pi's faux provider.
-
-The compliance example paid for itself on its first run. The context-overflow
-classifier in `@sunfall/vesper-pi/errors` was a regex written without a
-provider to check it against, and it recognised about seven of the sixteen
-phrasings Pi already handles — including, it turned out, **not** Anthropic's
-own `prompt is too long: X tokens > Y maximum`. Every miss was silent: no
-overflow constraint means the loop never compacts, so a long conversation just
-starts failing and looks like a provider fault. It now delegates to Pi's
-maintained `isContextOverflow`, and `errors.test.ts` pins nine real phrasings.
+against scripted Effect `LanguageModel` implementations.
 
 Neither example has been run against a live provider since the persistence
 mechanisms were pruned to one.
@@ -555,7 +608,7 @@ anything.
   and this repository are all newer than that. The last three things that
   genuinely improved this library came from running it rather than planning it.
 - **No branch summarization.** Switching away from a branch records no summary
-  of what it contained, which Pi's `generateBranchSummary` does.
+  of what it contained.
 
   The concurrency half of this gap is closed. `agent.branchFrom(id, at, input)`
   re-runs a conversation from an earlier record in the same stream — a
@@ -570,19 +623,14 @@ input)` is the other trade: it seeds a **new** conversation from the same
   one — and it leaves the ancestor untouched, so the relationship is not
   navigable from the ancestor's side.
 
-- **No harness toolkit and no prompt templates.** Nothing here ships shell,
-  read, or edit tools to an agent by default, and there is no equivalent of
-  Pi's `loadPromptTemplates`. `@sunfall/vesper-workspace` is the seam such tools
-  sit behind, and nothing in `agent` composes it yet.
+- **No default harness toolkit or prompt templates.** Nothing here ships shell,
+  read, or edit tools to an agent by default. `@sunfall/vesper-workspace` is the
+  seam such tools sit behind, and nothing in `agent` composes it yet.
 - **The proactive compaction path is exercised only by tests.**
   `Compaction.Policy.contextWindow` is opt-in and nothing in this repository
   sets it, so in practice only the reactive overflow path runs.
-- **`Compaction.defaultSystem` is a transcription, and drift is undetectable.**
-  `pi-agent-core@0.80.2` defines `SUMMARIZATION_SYSTEM_PROMPT` but does not
-  export it — it is absent from `dist/index.d.ts` and the `exports` map admits
-  no deep import. Re-check the constant on any Pi bump.
 - **Estimation accuracy against a real tokenizer is untested.** The fixture in
-  `packages/pi/test/compaction.test.ts` stipulates its truth figure; what it
+  `packages/agent/test/context-window.test.ts` stipulates its truth figure; what it
   demonstrates is that anchoring on reported usage beats a character count, not
   how close either lands to a tokenizer.
 - **The `Compacted` schema is not stable yet.** The record used to carry counts
@@ -594,26 +642,20 @@ input)` is the other trade: it seeds a **new** conversation from the same
   into `firstKept` via `AgentHistory.boundaryFor`. That rests on the record
   rebuild and the live history being the same sequence of messages. Drift moves
   the boundary by a message or two rather than corrupting anything.
-- **A file part in a run's input does not survive a round trip.**
-  `RunStarted.prompt` stores decoded messages in a `Schema.Unknown` field, so a
-  `FilePart` holding raw bytes is written as whatever `JSON.stringify` makes of
-  a `Uint8Array` and will not decode back. Text and images-as-URLs are fine.
-- **Documents cannot be sent through Pi at all.** Pi 0.80.2's content union is
-  `TextContent | ThinkingContent | ImageContent | ToolCall`; there is no
-  document member and no adapter mentions `application/pdf`. An unsendable
-  attachment leaves a one-line marker naming the file and the reason rather
-  than vanishing, because a model given no sign a document was intended answers
-  from imagination. Closing this needs a change in Pi.
-- **Signals only reach a run that is recording**, and only at a turn boundary,
-  so a cancel waits for the current turn to finish.
-- **`@sunfall/vesper-runtime` only wires the Pi provider.** `AiRuntime.model`
-  builds its `LanguageModel` from `PiModel.hooks`; another provider means
-  another variant. The shape generalises and is not generic yet.
-- **Opening a session reads the whole conversation.** Resumption and the
-  recovery index are both O(records) per run. That is fine for the
-  conversations this has held and is the first thing that will hurt on a long
-  one; the answer is a fold checkpoint over the log, and it must be a cache
-  validated on format version and offset rather than a second source of truth.
+- **Signals only reach a run that is recording.** Steers apply only at turn
+  boundaries. Cancels can preempt provider streaming, but not after a real tool
+  or delegation handler has begun; backlog and rejected cancels never leapfrog
+  the boundary drain.
+- **Indeterminate recovery needs application knowledge.** `ToolStarted` closes
+  the dangerous ambiguity but cannot determine whether an external system
+  committed. Vesper deliberately has no default: applications must query or
+  reconcile that system and explicitly Answer, or knowingly Retry.
+- **History without a resume aggregate requires a full compatibility scan.**
+  `RunSettled.resume` is the only bounded cumulative aggregate. Opening a
+  compatible history without one writes no intermediate checkpoint, so later
+  opens remain unbounded until a new run settles. Compacted prompts still page
+  only their live suffix; orphaned and uncompacted prompt state remains
+  proportional to the records it genuinely needs.
 - **Performance is reasoned about more than it is measured.** `benchmarks/`
   covers turn cost, conversation growth, scaling, startup, and memory, with and
   without recording. One real problem was found and fixed before it existed:

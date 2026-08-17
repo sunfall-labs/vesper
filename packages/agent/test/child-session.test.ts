@@ -1,12 +1,20 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Effect, Layer, Option, Ref, Stream } from 'effect';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
+import {
+  AiError,
+  LanguageModel,
+  Prompt,
+  type Response,
+  Toolkit,
+} from 'effect/unstable/ai';
 import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
+import { protocolOf } from '../src/internal.js';
 import { AgentLog } from '../src/log.js';
+import { RunPolicy } from '../src/run-policy.js';
 import { MAX_DEPTH } from '../src/subagent.js';
 
 // Child sessions.
@@ -61,16 +69,20 @@ const delegates = (id: string, child: string): Response.StreamPartEncoded[] => [
  * production and a child that silently reused its parent's `Chat` would show
  * up here.
  */
-const scripted = (turns: ReadonlyArray<Response.StreamPartEncoded[]>) =>
+const scripted = (
+  turns: ReadonlyArray<Response.StreamPartEncoded[]>,
+  prompts: Prompt.Prompt[] = [],
+) =>
   Layer.effect(
     LanguageModel.LanguageModel,
     Effect.gen(function* () {
       const calls = yield* Ref.make(0);
       return yield* LanguageModel.make({
         generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
-        streamText: () =>
+        streamText: (options) =>
           Stream.unwrap(
             Effect.gen(function* () {
+              prompts.push(options.prompt);
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
               return Stream.fromIterable(
                 turns[Math.min(index, turns.length - 1)]!,
@@ -82,9 +94,11 @@ const scripted = (turns: ReadonlyArray<Response.StreamPartEncoded[]>) =>
   );
 
 const PARENT = 'parent-conversation';
+const CHILD = AgentLog.childIdFor(PARENT, 'call-a');
 
 const researcher = Agent.make({
   name: 'researcher',
+  revision: '1',
   description: 'Looks things up.',
   instructions: 'Answer concisely.',
   toolkit: Toolkit.make(),
@@ -103,6 +117,15 @@ const run = <A, E>(
     ),
   );
 
+const runInSession = <R>(
+  child: Agent.Named<string, R>,
+  session: AgentLog.Session,
+  input: string,
+) =>
+  Effect.flatMap(RunPolicy.create(RunPolicy.defaultLimits), (runtime) =>
+    protocolOf<R>(child)!.run(runtime, session, input),
+  );
+
 const readAll = Effect.fn('test.readAll')(function* (conversationId: string) {
   const store = yield* LogStore.Service;
   const page = yield* store
@@ -119,8 +142,60 @@ const childSessions = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
     envelope.record._tag === 'ChildSession' ? [envelope.record] : [],
   );
 
+const failsOnceAfterChildStage = (
+  stage: 'parent-link' | 'child-open' | 'child-link',
+  childId: string,
+): Layer.Layer<LogStore.Service> =>
+  Layer.effect(
+    LogStore.Service,
+    Effect.gen(function* () {
+      const store = yield* LogStore.Service;
+      const failed = yield* Ref.make(false);
+      const inject = <A>(
+        operation: LogStore.LogStoreError['operation'],
+        path: string,
+        effect: Effect.Effect<A, LogStore.LogStoreError>,
+      ) =>
+        Effect.gen(function* () {
+          const value = yield* effect;
+          if (!(yield* Ref.getAndSet(failed, true))) {
+            return yield* Effect.fail(
+              new LogStore.LogStoreError({
+                path,
+                operation,
+                reason: 'storage',
+                detail: `crashed after ${stage}`,
+              }),
+            );
+          }
+          return value;
+        });
+
+      return LogStore.Service.of({
+        ...store,
+        create: (path, identity) =>
+          stage === 'child-open' && path === AgentLog.pathFor(childId)
+            ? inject('create', path, store.create(path, identity))
+            : store.create(path, identity),
+        append: (input) => {
+          const isLink = input.records.some(
+            ({ record }) => record._tag === 'ChildSession',
+          );
+          const target =
+            stage === 'parent-link'
+              ? AgentLog.pathFor(PARENT)
+              : AgentLog.pathFor(childId);
+          return stage !== 'child-open' && input.path === target && isLink
+            ? inject('append', input.path, store.append(input))
+            : store.append(input);
+        },
+      });
+    }),
+  ).pipe(Layer.provide(LogStoreMemory.layer));
+
 const supervisor = Agent.make({
   name: 'supervisor',
+  revision: '1',
   instructions: 'delegate',
   toolkit: Toolkit.make(),
   subagents: [researcher],
@@ -132,7 +207,66 @@ const oneDelegation = [
   says('summarised'),
 ];
 
+describe('child conversation ids', () => {
+  it('cannot collide when separators occur in either input', () => {
+    expect(AgentLog.childIdFor('a/b', 'c')).not.toBe(
+      AgentLog.childIdFor('a', 'b/c'),
+    );
+  });
+
+  it('is deterministic and preserves distinct Unicode strings', () => {
+    const composed = AgentLog.childIdFor('café/親', '工具/é');
+    expect(AgentLog.childIdFor('café/親', '工具/é')).toBe(composed);
+    expect(AgentLog.childIdFor('cafe\u0301/親', '工具/é')).not.toBe(composed);
+    expect(AgentLog.childIdFor('café/親', '工具/e\u0301')).not.toBe(composed);
+  });
+});
+
 describe('a recorded delegation', () => {
+  for (const stage of ['parent-link', 'child-open', 'child-link'] as const) {
+    it(`repairs both links after a crash following ${stage}`, async () => {
+      const childId = AgentLog.childIdFor(PARENT, `call-${stage}`);
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const firstParent = yield* AgentLog.open(PARENT, {
+            compatibility: { agent: 'test', revision: '1' },
+          });
+          const first = yield* firstParent
+            .child({
+              toolCallId: `call-${stage}`,
+              agent: researcher.name,
+              revision: researcher.revision,
+              depth: 1,
+            })
+            .pipe(Effect.exit);
+
+          const retryParent = yield* AgentLog.open(PARENT, {
+            compatibility: { agent: 'test', revision: '1' },
+          });
+          yield* retryParent.child({
+            toolCallId: `call-${stage}`,
+            agent: researcher.name,
+            revision: researcher.revision,
+            depth: 1,
+          });
+          return {
+            first,
+            parent: childSessions(yield* readAll(PARENT)),
+            child: childSessions(yield* readAll(childId)),
+          };
+        }).pipe(
+          Effect.provide(failsOnceAfterChildStage(stage, childId)),
+          Effect.scoped,
+        ),
+      );
+
+      expect(Exit.isFailure(result.first)).toBe(true);
+      expect(result.parent).toHaveLength(1);
+      expect(result.child).toHaveLength(1);
+      expect(result.parent[0]).toEqual(result.child[0]);
+    });
+  }
+
   it('names the child conversation in the parent’s log', async () => {
     const written = await run(
       Effect.gen(function* () {
@@ -148,7 +282,7 @@ describe('a recorded delegation', () => {
         toolCallId: 'call-a',
         agent: 'researcher',
         parentConversationId: PARENT,
-        childConversationId: `${PARENT}/call-a`,
+        childConversationId: CHILD,
         depth: 1,
       },
     ]);
@@ -158,7 +292,7 @@ describe('a recorded delegation', () => {
     const written = await run(
       Effect.gen(function* () {
         yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
-        return yield* readAll(`${PARENT}/call-a`);
+        return yield* readAll(CHILD);
       }),
       oneDelegation,
     );
@@ -171,7 +305,7 @@ describe('a recorded delegation', () => {
       toolCallId: 'call-a',
       agent: 'researcher',
       parentConversationId: PARENT,
-      childConversationId: `${PARENT}/call-a`,
+      childConversationId: CHILD,
       depth: 1,
     });
   });
@@ -180,7 +314,7 @@ describe('a recorded delegation', () => {
     const written = await run(
       Effect.gen(function* () {
         yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
-        return yield* readAll(`${PARENT}/call-a`);
+        return yield* readAll(CHILD);
       }),
       oneDelegation,
     );
@@ -202,9 +336,7 @@ describe('a recorded delegation', () => {
         yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
         yield* supervisor.recordingTo(PARENT).run('again').pipe(Effect.orDie);
         const store = yield* LogStore.Service;
-        return yield* store
-          .meta(AgentLog.pathFor(`${PARENT}/call-a`))
-          .pipe(Effect.orDie);
+        return yield* store.meta(AgentLog.pathFor(CHILD)).pipe(Effect.orDie);
       }),
       [...oneDelegation, ...oneDelegation],
     );
@@ -222,11 +354,197 @@ describe('a recorded delegation', () => {
 
     expect(result.text).toBe('summarised');
   });
+
+  it('returns a completed reopened child without repeating model work', async () => {
+    const prompts: Prompt.Prompt[] = [];
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const parent = yield* AgentLog.open(PARENT, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
+        const first = yield* parent.child({
+          toolCallId: 'call-a',
+          agent: researcher.name,
+          revision: researcher.revision,
+          depth: 1,
+        });
+        yield* runInSession(researcher, first, 'do the work');
+
+        const reopened = yield* parent.child({
+          toolCallId: 'call-a',
+          agent: researcher.name,
+          revision: researcher.revision,
+          depth: 1,
+        });
+        const resumed = yield* runInSession(
+          researcher,
+          reopened,
+          'do the work',
+        );
+        return { resumed, records: yield* readAll(CHILD) };
+      }).pipe(
+        Effect.orDie,
+        Effect.provide(
+          scripted([says('researched'), says('repeated')], prompts),
+        ),
+        Effect.provide(LogStoreMemory.layer),
+        Effect.scoped,
+      ),
+    );
+
+    expect(result.resumed.text).toBe('researched');
+    expect(prompts).toHaveLength(1);
+    expect(
+      result.records.filter(
+        (envelope) => envelope.record._tag === 'RunStarted',
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('does not rerun a completed child when the parent outcome was never written', async () => {
+    const prompts: Prompt.Prompt[] = [];
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const parent = yield* AgentLog.open(PARENT, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
+        yield* parent.append([
+          {
+            _tag: 'RunStarted',
+            agent: supervisor.name,
+            formatVersion: 1,
+            agentRevision: '1',
+            prompt: Prompt.make('go').content,
+          },
+          {
+            _tag: 'ToolCall',
+            step: 1,
+            id: 'call-a',
+            name: 'task_researcher',
+            params: { prompt: 'do the researcher part' },
+          },
+        ]);
+        const child = yield* parent.child({
+          toolCallId: 'call-a',
+          agent: researcher.name,
+          revision: researcher.revision,
+          depth: 1,
+        });
+        yield* runInSession(
+          researcher,
+          {
+            ...child,
+            settlementTimeoutMillis: 10,
+            append: (records) =>
+              records.some((record) => record._tag === 'RunSettled')
+                ? Effect.never
+                : child.append(records),
+          },
+          'do the researcher part',
+        );
+
+        const resumed = yield* supervisor.resume(PARENT, 'continue');
+        return { resumed, childRecords: yield* readAll(CHILD) };
+      }).pipe(
+        Effect.orDie,
+        Effect.provide(
+          scripted(
+            [
+              says('child side effect'),
+              delegates('call-a', 'researcher'),
+              says('parent finished'),
+            ],
+            prompts,
+          ),
+        ),
+        Effect.provide(LogStoreMemory.layer),
+        Effect.scoped,
+      ),
+    );
+
+    expect(result.resumed.text).toBe('parent finished');
+    expect(prompts).toHaveLength(3);
+    expect(
+      result.childRecords.filter(({ record }) => record._tag === 'RunStarted'),
+    ).toHaveLength(1);
+    expect(
+      result.childRecords.filter(({ record }) => record._tag === 'RunSettled'),
+    ).toHaveLength(0);
+  });
+
+  it('continues a crashed child from its recorded next turn', async () => {
+    const prompts: Prompt.Prompt[] = [];
+    let calls = 0;
+    const crash = new AiError.AiError({
+      module: 'test',
+      method: 'streamText',
+      reason: new AiError.ContentPolicyError({ description: 'crash' }),
+    });
+    const worker = Agent.make({
+      name: 'worker',
+      revision: '1',
+      instructions: 'work',
+      toolkit: Toolkit.make(),
+      compaction: false,
+      stopWhen: () => Effect.sync(() => calls >= 3),
+    });
+    const models = Layer.effect(
+      LanguageModel.LanguageModel,
+      LanguageModel.make({
+        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+        streamText: (options) => {
+          prompts.push(options.prompt);
+          calls += 1;
+          if (calls === 2) return Stream.fail(crash);
+          return Stream.fromIterable(
+            calls === 1 ? says('first turn survived') : says('resumed turn'),
+          );
+        },
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      Effect.gen(function* () {
+        const parent = yield* AgentLog.open(PARENT, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
+        const first = yield* parent.child({
+          toolCallId: 'call-crash',
+          agent: worker.name,
+          revision: worker.revision,
+          depth: 1,
+        });
+        const failed = yield* runInSession(worker, first, 'start').pipe(
+          Effect.exit,
+        );
+
+        const reopened = yield* parent.child({
+          toolCallId: 'call-crash',
+          agent: worker.name,
+          revision: worker.revision,
+          depth: 1,
+        });
+        const resumed = yield* runInSession(worker, reopened, 'continue');
+        return { failed, resumed };
+      }).pipe(
+        Effect.provide(models),
+        Effect.provide(LogStoreMemory.layer),
+        Effect.scoped,
+      ),
+    );
+
+    expect(result.failed._tag).toBe('Failure');
+    expect(result.resumed.text).toBe('resumed turn');
+    expect(calls).toBe(3);
+    expect(JSON.stringify(prompts[2])).toContain('first turn survived');
+    expect(JSON.stringify(prompts[2])).toContain('continue');
+  });
 });
 
 describe('depth', () => {
   const junior = Agent.make({
     name: 'junior',
+    revision: '1',
     description: 'Does the legwork.',
     instructions: 'work',
     toolkit: Toolkit.make(),
@@ -234,6 +552,7 @@ describe('depth', () => {
 
   const senior = Agent.make({
     name: 'senior',
+    revision: '1',
     description: 'Delegates further.',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
@@ -242,6 +561,7 @@ describe('depth', () => {
 
   const chief = Agent.make({
     name: 'chief',
+    revision: '1',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
     subagents: [senior],
@@ -259,7 +579,7 @@ describe('depth', () => {
     const written = await run(
       Effect.gen(function* () {
         yield* chief.recordingTo(PARENT).run('go').pipe(Effect.orDie);
-        return yield* readAll(`${PARENT}/call-a`);
+        return yield* readAll(CHILD);
       }),
       twoLevels,
     );
@@ -272,8 +592,8 @@ describe('depth', () => {
         _tag: 'ChildSession',
         toolCallId: 'call-b',
         agent: 'junior',
-        parentConversationId: `${PARENT}/call-a`,
-        childConversationId: `${PARENT}/call-a/call-b`,
+        parentConversationId: CHILD,
+        childConversationId: AgentLog.childIdFor(CHILD, 'call-b'),
         depth: 2,
       },
     ]);
@@ -307,6 +627,7 @@ describe('a delegation chain that reaches the cap', () => {
   // the depth check.
   const sink = Agent.make({
     name: 'sink',
+    revision: '1',
     description: 'The one that never gets to run.',
     instructions: 'work',
     toolkit: Toolkit.make(),
@@ -314,6 +635,7 @@ describe('a delegation chain that reaches the cap', () => {
 
   const l4 = Agent.make({
     name: 'l4',
+    revision: '1',
     description: 'Delegates to sink.',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
@@ -322,6 +644,7 @@ describe('a delegation chain that reaches the cap', () => {
 
   const l3 = Agent.make({
     name: 'l3',
+    revision: '1',
     description: 'Delegates to l4.',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
@@ -330,6 +653,7 @@ describe('a delegation chain that reaches the cap', () => {
 
   const l2 = Agent.make({
     name: 'l2',
+    revision: '1',
     description: 'Delegates to l3.',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
@@ -338,6 +662,7 @@ describe('a delegation chain that reaches the cap', () => {
 
   const l1 = Agent.make({
     name: 'l1',
+    revision: '1',
     description: 'Delegates to l2.',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
@@ -348,6 +673,7 @@ describe('a delegation chain that reaches the cap', () => {
   // and then l4's own attempt to delegate is the fifth.
   const top = Agent.make({
     name: 'top',
+    revision: '1',
     instructions: 'delegate',
     toolkit: Toolkit.make(),
     subagents: [l1],
@@ -374,7 +700,10 @@ describe('a delegation chain that reaches the cap', () => {
           .run('go')
           .pipe(Effect.orDie);
 
-        const deepest = `${PARENT}/call-1/call-2/call-3/call-4`;
+        const l1Id = AgentLog.childIdFor(PARENT, 'call-1');
+        const l2Id = AgentLog.childIdFor(l1Id, 'call-2');
+        const l3Id = AgentLog.childIdFor(l2Id, 'call-3');
+        const deepest = AgentLog.childIdFor(l3Id, 'call-4');
         const records = yield* readAll(deepest);
 
         return {
@@ -382,9 +711,9 @@ describe('a delegation chain that reaches the cap', () => {
           deepest,
           depths: [
             ...childSessions(yield* readAll(PARENT)),
-            ...childSessions(yield* readAll(`${PARENT}/call-1`)),
-            ...childSessions(yield* readAll(`${PARENT}/call-1/call-2`)),
-            ...childSessions(yield* readAll(`${PARENT}/call-1/call-2/call-3`)),
+            ...childSessions(yield* readAll(l1Id)),
+            ...childSessions(yield* readAll(l2Id)),
+            ...childSessions(yield* readAll(l3Id)),
           ].map((record) => record.depth),
           outcomes: records.flatMap((envelope) =>
             envelope.record._tag === 'ToolOutcome' ? [envelope.record] : [],
@@ -432,9 +761,7 @@ describe('delegation without recording', () => {
           parent: yield* store
             .meta(AgentLog.pathFor(PARENT))
             .pipe(Effect.orDie),
-          child: yield* store
-            .meta(AgentLog.pathFor(`${PARENT}/call-a`))
-            .pipe(Effect.orDie),
+          child: yield* store.meta(AgentLog.pathFor(CHILD)).pipe(Effect.orDie),
         };
       }),
       oneDelegation,

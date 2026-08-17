@@ -8,17 +8,21 @@ on:
 
 jobs:
   verify:
-    name: nub verify
+    name: nub verify (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 25
+          node-version: ${{ matrix.node }}
 
       # The version comes from devDependencies so the bootstrap nub and the
       # pinned one are the same by construction; a bump is one edit, not two.
@@ -29,10 +33,10 @@ jobs:
           nub --version
 
       - name: Cache the nub store
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.local/share/nub/store
-          key: nub-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          key: nub-store-${{ runner.os }}-${{ hashFiles('nub.lock') }}
           restore-keys: nub-store-${{ runner.os }}-
 
       - name: Install dependencies
@@ -47,12 +51,12 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
-          node-version: 25
+          node-version: 22
 
       - name: Setup nub
         run: |
@@ -61,10 +65,10 @@ jobs:
           nub --version
 
       - name: Cache the nub store
-        uses: actions/cache@v4
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ~/.local/share/nub/store
-          key: nub-store-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          key: nub-store-${{ runner.os }}-${{ hashFiles('nub.lock') }}
           restore-keys: nub-store-${{ runner.os }}-
 
       - name: Install dependencies

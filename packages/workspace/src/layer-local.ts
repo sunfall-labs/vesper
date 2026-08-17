@@ -6,6 +6,7 @@ import type { PlatformError } from 'effect/PlatformError';
 import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process';
 
 import { WorkspaceDriver } from './driver.js';
+import { DEFAULT_MAX_BYTES } from './output.js';
 
 // The local driver: `node:fs/promises` for files, Effect's
 // `ChildProcessSpawner` for commands.
@@ -64,6 +65,97 @@ const fsFailure =
     });
   };
 
+class ReadLimitExceeded extends Error {
+  readonly code = 'ERR_FILE_READ_LIMIT';
+}
+
+const boundedRead = async (
+  path: string,
+  maxBytes: number,
+  signal: AbortSignal,
+): Promise<Buffer> => {
+  const limit = Math.max(0, Math.trunc(maxBytes));
+  const handle = await fs.open(path, 'r');
+  try {
+    const bytes = Buffer.allocUnsafe(limit + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      signal.throwIfAborted();
+      const read = await handle.read(
+        bytes,
+        offset,
+        bytes.length - offset,
+        null,
+      );
+      if (read.bytesRead === 0) break;
+      offset += read.bytesRead;
+    }
+    if (offset > limit) throw new ReadLimitExceeded();
+    return bytes.subarray(0, offset);
+  } finally {
+    await handle.close();
+  }
+};
+
+const readFailure =
+  (
+    operation: 'readFile' | 'readFileBuffer',
+    path: string,
+    maxBytes: number | undefined,
+  ) =>
+  (error: unknown): WorkspaceDriver.FileError =>
+    error instanceof ReadLimitExceeded && maxBytes !== undefined
+      ? new WorkspaceDriver.FileReadLimitExceeded({
+          path,
+          operation,
+          maxBytes,
+        })
+      : fsFailure(operation, path)(error);
+
+/** Fixed-size byte ring that keeps draining while retaining only the tail. */
+class ByteTail {
+  readonly #bytes: Uint8Array;
+  #length = 0;
+  #start = 0;
+  truncated = false;
+
+  constructor(readonly capacity: number) {
+    this.#bytes = new Uint8Array(capacity);
+  }
+
+  append(chunk: Uint8Array): void {
+    if (chunk.length === 0) return;
+    if (chunk.length >= this.capacity) {
+      const discarded = this.#length > 0 || chunk.length > this.capacity;
+      this.#bytes.set(chunk.subarray(chunk.length - this.capacity));
+      this.#start = 0;
+      this.#length = this.capacity;
+      this.truncated = this.truncated || discarded;
+      return;
+    }
+
+    const overflow = Math.max(0, this.#length + chunk.length - this.capacity);
+    if (overflow > 0) {
+      this.#start = (this.#start + overflow) % this.capacity;
+      this.#length -= overflow;
+      this.truncated = true;
+    }
+    const end = (this.#start + this.#length) % this.capacity;
+    const first = Math.min(chunk.length, this.capacity - end);
+    this.#bytes.set(chunk.subarray(0, first), end);
+    this.#bytes.set(chunk.subarray(first), 0);
+    this.#length += chunk.length;
+  }
+
+  text(): string {
+    const output = new Uint8Array(this.#length);
+    const first = Math.min(this.#length, this.capacity - this.#start);
+    output.set(this.#bytes.subarray(this.#start, this.#start + first));
+    output.set(this.#bytes.subarray(0, this.#length - first), first);
+    return new TextDecoder().decode(output);
+  }
+}
+
 /**
  * Classify a spawner failure — a command that never started.
  *
@@ -106,19 +198,29 @@ export const layer: Layer.Layer<
 
     // `Effect.fn` with plain functions rather than generators wherever the
     // body has nothing to yield: an empty generator trips `require-yield`.
-    const readFile = Effect.fn('AiWorkspace.readFile')((path: string) =>
-      Effect.tryPromise({
-        try: (signal): Promise<string> =>
-          fs.readFile(path, { encoding: 'utf8', signal }),
-        catch: fsFailure('readFile', path),
-      }),
+    const readFile = Effect.fn('AiWorkspace.readFile')(
+      (path: string, options?: WorkspaceDriver.ReadFileOptions) =>
+        Effect.tryPromise({
+          try: async (signal): Promise<string> => {
+            if (options?.maxBytes === undefined) {
+              return fs.readFile(path, { encoding: 'utf8', signal });
+            }
+            return new TextDecoder().decode(
+              await boundedRead(path, options.maxBytes, signal),
+            );
+          },
+          catch: readFailure('readFile', path, options?.maxBytes),
+        }),
     );
 
     const readFileBuffer = Effect.fn('AiWorkspace.readFileBuffer')(
-      (path: string) =>
+      (path: string, options?: WorkspaceDriver.ReadFileOptions) =>
         Effect.tryPromise({
-          try: (signal): Promise<Buffer> => fs.readFile(path, { signal }),
-          catch: fsFailure('readFileBuffer', path),
+          try: (signal): Promise<Buffer> =>
+            options?.maxBytes === undefined
+              ? fs.readFile(path, { signal })
+              : boundedRead(path, options.maxBytes, signal),
+          catch: readFailure('readFileBuffer', path, options?.maxBytes),
         }).pipe(
           // A Node `Buffer` is a `Uint8Array` view over a pooled allocation.
           // Copying it out keeps the returned bytes from aliasing a buffer
@@ -227,16 +329,28 @@ export const layer: Layer.Layer<
         // process, and a process writing more than a pipe buffer blocks
         // until someone drains it. Awaiting the exit first would deadlock
         // on any command with substantial output.
-        const [exitCode, stdout, stderr] = yield* Effect.all(
+        const stdout = new ByteTail(DEFAULT_MAX_BYTES);
+        const stderr = new ByteTail(DEFAULT_MAX_BYTES);
+        const [exitCode] = yield* Effect.all(
           [
             handle.exitCode,
-            Stream.mkString(Stream.decodeText(handle.stdout)),
-            Stream.mkString(Stream.decodeText(handle.stderr)),
+            Stream.runForEach(handle.stdout, (chunk) =>
+              Effect.sync(() => stdout.append(chunk)),
+            ),
+            Stream.runForEach(handle.stderr, (chunk) =>
+              Effect.sync(() => stderr.append(chunk)),
+            ),
           ],
           { concurrency: 'unbounded' },
         );
 
-        return { exitCode: exitCode as number, stdout, stderr };
+        return {
+          exitCode: exitCode as number,
+          stdout: stdout.text(),
+          stderr: stderr.text(),
+          stdoutTruncated: stdout.truncated,
+          stderrTruncated: stderr.truncated,
+        };
       }).pipe(
         Effect.scoped,
         Effect.mapError(execFailure(command, options?.cwd)),

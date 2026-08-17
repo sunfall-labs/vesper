@@ -18,80 +18,36 @@ design:
   persistence mechanism.** A run is recorded to it, resumed from it, and
   steered through it. There is deliberately not a second one.
 
-A third decision is negative and does as much work as either: wherever
-`@earendil-works/pi-agent-core` already has an answer, take it rather than
-write one. The sections below are the argument for each, and the last two are
-what is missing.
+The third decision is negative: **Vesper does not adapt provider SDKs.** Effect
+AI already owns prompt conversion, tool schemas, streaming protocols, usage,
+telemetry, credentials, HTTP failures, and provider-specific options. An
+adapter here would duplicate that work and lag the same API it targets.
 
-## Leaning on pi-agent-core
+## Providers belong to Effect
 
-Most of what an agent harness does has been done already in
-`@earendil-works/pi-agent-core`, and the evidence that it is easy not to
-notice is precise: the `Compacted` record here carries `summary` and
-`firstKept`, and that is character-for-character
-`Session.appendCompaction(summary, firstKeptEntryId, …)` in pi-agent-core.
-Convergence that exact on a published signature is the signal that the work
-being done is reimplementation of an importable package.
+Applications provide `LanguageModel` directly from official packages such as
+`@effect/ai-anthropic` and `@effect/ai-openai`. Vesper's loop sees only
+`effect/unstable/ai`; provider choice therefore changes application wiring, not
+the loop or a Vesper registry.
 
-So the rule is to lean on Pi as hard as possible, and to differentiate only
-where Pi structurally cannot follow.
+This also keeps provider-specific capabilities where they can evolve:
+Anthropic document input, OpenAI response options, cache metadata, streaming
+tool arguments, and typed errors arrive from the package that implements the
+protocol rather than through a lowest-common-denominator model catalog.
 
-What makes that workable is that Pi's _algorithms_ are separable from Pi's
-_runtime_. `shouldCompact`, `estimateContextTokens`, and `loadSkills` take
-messages, numbers, or an injectable environment; none of them touches
-`AgentTool` or typebox. typebox is confined to `agentLoop` and the harness
-tools. So the question for each piece of Pi is not "does it fit this runtime"
-but "is it an algorithm, or is it welded to the loop".
+Tests use `LanguageModel.make` scripts. They exercise the seam the loop owns
+without importing a second provider abstraction or teaching production code
+about a faux provider.
 
-## What is taken from Pi
+## Context policy
 
-**Providers**, through `packages/pi`. `@sunfall/vesper-pi` adapts
-`@earendil-works/pi-ai` to Effect's `LanguageModel`, so every provider Pi
-maintains is one Vesper can use, and the error classification Pi maintains
-against real providers comes with it. `PiErrors.isContextOverflow` is the case
-that proves the point: the hand-rolled regex it replaced recognised about
-seven of the sixteen phrasings Pi already handled, and not Anthropic's own.
+`@sunfall/vesper-agent/context-window` exports a provider-independent policy
+richer than its default: `usageAnchored` anchors completed history on the usage
+the provider reported for the last turn and estimates only messages after that
+assistant response. Without usage it degrades to four characters per token.
+Provider model construction itself stays in `@effect/ai-*`.
 
-**Context-window heuristics**, through `packages/pi/src/compaction.ts`.
-`estimateContextTokens` is the real win. Pi's raw `estimateTokens` is the
-_identical_ four-characters-per-token guess `@sunfall/vesper-agent` already
-had, so the estimate alone changes nothing; the anchoring is the improvement.
-It walks back to the most recent assistant message carrying provider-reported
-usage, takes that as exact, and estimates only what came after. On a long
-conversation that is the difference between guessing about eighty thousand
-tokens and guessing about two hundred.
-
-**Version lockstep.** `pi-agent-core@X` needs `pi-ai@^X`. The repository pins
-`pi-ai` at 0.80.2, so `pi-agent-core` is 0.80.2 too. A mismatch means two
-copies of `pi-ai` in the graph and broken type identity at the seam — the
-`Message` a `pi-agent-core` function accepts stops being the `Message` the
-adapter produces. Do not bump either in isolation.
-
-## What is deliberately not taken
-
-**`generateSummary` and `generateSummaryWithUsage`.** Pi's _prompt_ is worth
-having; Pi's _execution_ would cost Vesper's spans, retry policy, and typed
-errors, because those calls run through Pi's own provider path.
-`@sunfall/vesper-agent` runs the summarization call through Effect's
-`LanguageModel` instead.
-
-**`findCutPoint`, `prepareCompaction`, `compact`, and `Session`.** All written
-against `SessionTreeEntry[]` — Pi's session tree, which Vesper does not have.
-`@sunfall/vesper-log` answers the question that tree answers, differently.
-
-**`agentLoop`, `Agent`, and the harness tools.** Welded to typebox. Taking
-them would mean taking a second schema library alongside `effect/schema` and
-losing the typed requirement channel that is the whole reason this exists.
-
-**`SUMMARIZATION_SYSTEM_PROMPT`** — wanted, and unavailable.
-`pi-agent-core@0.80.2` defines it in `harness/compaction/compaction.ts`, but it
-is absent from `dist/index.d.ts` and the package's `exports` map lists only
-`.`, `./node`, and `./package.json`, so no import reaches it.
-`Compaction.defaultSystem` holds a transcribed copy, and nothing can notice Pi
-changing it. Re-check on a bump; delete the copy the moment Pi exports the
-real one.
-
-## What is ours, because Pi has no answer
+## What is ours
 
 **Typed requirements.** `Agent.Instance<Name, Tools, Requires>` puts a
 subagent's service keys into its parent's requirement channel, so "you forgot
@@ -99,15 +55,13 @@ the database" is a compile error rather than a runtime failure the first time
 the model delegates.
 
 **The log.** Postgres with producer fencing, per-record offsets, and
-`LISTEN`/`NOTIFY`. Pi ships jsonl and in-memory session repositories and
-nothing else, which is not enough for a multi-process deployment where one
-process must wake on another process's append. Fencing is the other half: a
+`LISTEN`/`NOTIFY`, for a multi-process deployment where one process must wake
+on another process's append. Fencing is the other half: a
 conversation has one writer, and a second concurrent run must fail its next
 append rather than interleave two runs into one history.
 
 Everything else in `@sunfall/vesper-agent` — the loop, subagents, skills,
-interception, resumption — exists to serve those two, and should be
-re-examined against Pi whenever Pi grows an answer.
+interception, resumption — exists to serve those two.
 
 ### Why a `Promise`-returning `execute` cannot express the first one
 
@@ -170,6 +124,18 @@ a turn on resume. The cost is a row per record; the mitigation is that the
 agent loop **coalesces text deltas before appending**. The log exists for
 durability and resumption, not byte-exact replay of the provider wire.
 
+**Durable history has an explicit compatibility identity.** Every agent
+definition declares a non-empty revision. `RunStarted` persists conversation
+format version, agent name, and revision; `RunSettled.resume` is the single
+bounded cumulative resume aggregate. `Compacted` also carries compatibility so
+a branch into an active compacted run can validate without relying on a later
+settlement. Resume checks every retained compatibility-bearing record against
+the requested identity and rejects unsupported formats, missing metadata, and
+contradictions before model or tool dispatch. Branches validate the retained
+path, forks copy and reseat the identity-bearing records, and child sessions
+validate against the child definition independently. This is deliberately
+rejection rather than guessed pre-1.0 compatibility.
+
 This has one concrete consequence in the Postgres backend. A batch-granular
 store's uniqueness index is
 `(path, producer_id, producer_epoch, producer_sequence)` — four columns, which
@@ -219,33 +185,32 @@ for a specific reason:
 There were three, and the argument for collapsing them is worth keeping,
 because it is the argument any future proposal to add a fourth has to beat.
 
-Provider-seam checkpointing content-addressed each model call. Within a run it
-was never a cache hit — each turn appends to history, so two calls in one run
-cannot be byte-identical — and `forRun` gave unrelated runs disjoint
-namespaces, so the **only** time a checkpoint was ever read was a replay of the
-same run after a crash. That is exactly the scenario resumption exists for, and
-resumption reaches it without the replay: it rebuilds the prompt from records
-and starts the next turn.
+Provider-seam checkpointing content-addressed each model call, while `forRun`
+gave unrelated runs disjoint namespaces. The **only** time a checkpoint was
+ever read was a replay of the same run after a crash. That is exactly the
+scenario resumption exists for, and resumption reaches it without the replay:
+it rebuilds the prompt from records and starts the next turn.
 
 Worse, checkpointing did not cover the case it was defended with.
 `Durable.wrap` wrapped `generateText` and `streamText`; tool execution happens
 inside `LanguageModel`'s resolution of the turn, past every checkpoint. A run
 that died after tool A and before tool B replayed the model call for free and
-**re-ran tool A**. The log has `ToolOutcome`, one record per settled call, and
-`packages/agent/src/dispatch.ts` serves them — so the named case is covered by
-the mechanism that was supposed to be insufficient for it.
+**re-ran tool A**. The log has `ToolStarted`, written immediately before a real
+handler, and `ToolOutcome`, one per settled call. `dispatch.ts` serves completed
+outcomes and refuses to guess when a start has no outcome: only the dedicated
+indeterminate interceptor may explicitly Retry or Answer. The named case is
+therefore covered by the mechanism that was supposed to be insufficient for it.
 
 Whole-conversation snapshots were the third, and were a second way to answer
 the question the log answers. Neither mechanism saves an in-flight turn: a turn
 interrupted halfway is re-paid under both, and the crash-mid-turn story is
 about not repeating tool **side effects**, not about provider spend.
 
-What survived is the retry, in `@sunfall/vesper-pi/retry`: jittered exponential
-backoff honouring `retryAfter`, gated on `isRetryable`, absorbed inside the
-attempt so a 429 never becomes recorded state. Two streaming rules ride with
-it — a retry stops once a delta has reached the consumer, and a stream with no
-content and no finish fails retryably rather than settling as a permanent empty
-success.
+Provider retries belong below the model seam, in the official client's
+`HttpClient` transformation. That is the only place an initial transport fault
+or 429 can be retried without re-running a turn or duplicating streamed output.
+Vesper does not wrap an entire `LanguageModel` call, because Effect resolves
+tools inside that call.
 
 Durable-workflow step idempotency — DBOS, for instance — is a separate seam,
 not a competitor. Steps make **effects** exactly-once; the log makes
@@ -256,10 +221,9 @@ a stream, not whether work re-runs.
 ## Not built, and why
 
 **Branch summarization.** Branching is built: `agent.branchFrom(id, at, input)`
-re-runs a conversation from an earlier record, and it cost one record case
-rather than a parent pointer per record, because offsets are a total order and
-Pi's `SessionTreeEntry.parentId` is compensating for a JSONL file that has
-none. Concurrency is built too, as the deliberately different thing it is:
+re-runs a conversation from an earlier record, and it costs one record case
+rather than a parent pointer per record because offsets are a total order.
+Concurrency is built too, as the deliberately different thing it is:
 `agent.forkFrom(id, at, forkId, input)` seeds a new conversation from the same
 prefix, so two forks are two streams and two producer claims and can run at
 once, where two branches share one writer and cannot. The cost of the second
@@ -270,14 +234,12 @@ fork graph: the ancestor records nothing about having been forked, which keeps
 a fork from disturbing a run that is live on it.
 
 What is _not_ built is summarization. Switching away from a branch records
-nothing about what it held, where Pi has `generateBranchSummary`; its
-common-ancestor walk in `collectEntriesForBranchSummary` is the part worth
-porting if that is ever wanted.
+nothing about what it held; adding that requires a common-ancestor walk and a
+model call before changing the active path.
 
-**A harness toolkit** (shell, read, edit) and **prompt templates**. Pi has
-both, and `loadSkills` and `loadPromptTemplates` both take an injectable
-`ExecutionEnv`, so both are separable. `@sunfall/vesper-workspace` is the seam
-such tools would sit behind. Nothing sits behind it yet.
+**A default harness toolkit** and **prompt templates**.
+`@sunfall/vesper-workspace` is the seam shell, read, and edit tools sit behind,
+but nothing in `agent` composes it automatically.
 
 **Routing.** Making agents addressable — a registry, a router, identity
 resolution — is the usual design once agents are served over a network. Here
@@ -290,15 +252,25 @@ loop, and it is also a second durability story with its own semantics to keep
 aligned with the log's. Postgres already answers the question it would answer,
 and the section above is the argument it has to beat.
 
-**A fold checkpoint over the log.** Opening a session reads the whole
-conversation, so resumption and the recovery index are O(records) per run. That
-is the first thing that will hurt on a long conversation, and the answer is a
-checkpoint validated on format version and offset, discardable, rebuilt by
-replay. A cache built before the cost it avoids is measured is a second source
-of truth with extra steps; the `growth` scenario in `benchmarks/` is where that
-cost would first become visible.
+**Another fold checkpoint over the log.** Settled runs already carry bounded
+resume aggregates, and compacted prompts page only their live suffix. Legacy,
+orphaned, and uncompacted prompt state still scales with the records it
+genuinely needs. A second cache built before that remaining cost is measured is
+a second source of truth with extra steps; the `growth` scenario in
+`benchmarks/` is where that cost would first become visible.
+
+A compatible history with no `RunSettled.resume` aggregate is scanned in full.
+Opening it does not write an intermediate checkpoint, so repeated opens remain
+unbounded until a later run reaches settlement and writes the sole aggregate.
 
 ## Where this is honestly unproven
+
+`ToolStarted` narrows crash recovery to the honest distributed-systems limit;
+it does not make an external side effect atomic with the conversation log. A
+start without an outcome means the handler may or may not have committed. The
+application must reconcile against its external system and explicitly Answer,
+or accept duplicate-side-effect risk by explicitly Retry. There is no broad
+workflow engine or implicit retry policy here.
 
 This is pre-1.0. It was extracted from the system it was built for, and that
 system did not come with it, so the open questions below are real rather than
@@ -312,9 +284,9 @@ rhetorical.
   from running it rather than planning it.
 - **Only the examples talk to a real provider.** `examples/live-smoke` and
   `examples/compliance-relay` are the whole of the live-provider coverage;
-  every test runs against Pi's faux one. That distinction has already cost
-  something once: the context-overflow classifier was a regex written without
-  a provider to check it against, and the first live run is what exposed it.
+  every test runs against a scripted `LanguageModel`. Provider translation is
+  covered upstream by Effect AI; the examples cover this repository's real
+  composition with those packages.
 - **Encode `RunStarted.prompt` through `Prompt`'s own codec.** It is stored as
   decoded messages in a `Schema.Unknown` field, so a `FilePart` holding raw
   bytes does not survive a round trip.
@@ -324,5 +296,3 @@ rhetorical.
 - **Add a filesystem or object-store attachment backend.**
   `AttachmentStoreError` is declared for one and is unreachable from the memory
   backend.
-- **Get document input into Pi.** Pi 0.80.2's content union has no document
-  member, so this cannot be closed here — it is a change in Pi.

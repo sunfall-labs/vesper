@@ -43,14 +43,12 @@ export const DIGEST_PREFIX = 'sha256';
  *
  * Branded rather than a bare `string` so a conversation id, a media type, or
  * a filename cannot be passed where an address is expected. The brand adds no
- * runtime check and none is needed: {@link digestOf} is the only thing that
- * computes one, and a digest arriving from outside is checked by the only
- * check that means anything — whether the stored bytes hash to it, which every
- * `get` performs anyway.
+ * runtime representation, but the schema validates the wire format before a
+ * reference can enter the system. Stored bytes are still re-hashed by `get`.
  */
-export const Digest = Schema.String.pipe(
-  Schema.brand('@sunfall/vesper-attachments/Digest'),
-);
+export const Digest = Schema.String.check(
+  Schema.isPattern(/^sha256:[0-9a-f]{64}$/),
+).pipe(Schema.brand('@sunfall/vesper-attachments/Digest'));
 export type Digest = typeof Digest.Type;
 
 /** A reference to stored bytes. */
@@ -59,7 +57,7 @@ export const Ref = Schema.Struct({
   /** How to interpret the bytes. Not part of the address; see above. */
   mediaType: Schema.String,
   /** Length of the referenced bytes. Redundant with the digest, and cheap. */
-  byteLength: Schema.Number,
+  byteLength: Schema.Natural,
 });
 
 export interface Ref extends Schema.Struct.Type<typeof Ref.fields> {}

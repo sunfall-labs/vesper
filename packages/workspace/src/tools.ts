@@ -29,29 +29,9 @@ import { WorkspacePath } from './path.js';
 // the type, and whether the agent is pointed at a container or at the
 // developer's home directory becomes a runtime fact nobody can see.
 //
-// ## What we took from Pi, and what we did not
-//
-// Pi's `harness/utils/truncate.ts` is genuinely good, typebox-free logic, and
-// `output.ts` reimplements its shape rather than importing it. Two reasons,
-// and the second is the decisive one:
-//
-// 1. `pi-agent-core`'s `exports` map has exactly two entries, `.` and
-//    `./node`. There is no subpath for `dist/harness/utils/truncate.js`, so
-//    "import `truncateHead`" means importing the package index — which is
-//    `export *` over the agent harness, the JSONL session repository, the
-//    skills loader (typebox and yaml), the proxy, and `pi-ai`. That is Pi's
-//    storage and agent types, which is the case the brief said to write our
-//    own for.
-// 2. `docs/contributing.md` states the layering as `workspace -> effect`,
-//    with `@earendil-works/*` admitted only under `@sunfall/vesper-pi`. Taking a
-//    dependency here would be a change to that rule, not an application of it.
-//
-// `harness/utils/shell-output.ts` was not a candidate either way: it is built
-// around Pi's `ExecutionEnv` — `onStdout` chunk callbacks, `createTempFile`,
-// `appendFile` — and Pi's `Result` ok/err type. Our driver reports a finished
-// `ShellResult`, so the streaming spill-to-tempfile machinery has nothing to
-// attach to. Its one piece of portable logic is tail-truncation, which is
-// `WorkspaceOutput.tail`.
+// Output truncation stays behind `WorkspaceOutput`, where file reads and shell
+// results can share byte and line budgets without coupling this package to a
+// provider or an agent runtime.
 
 // ----------------------------------------------------------------- the root
 
@@ -78,10 +58,45 @@ export class Root extends Context.Service<Root, { readonly path: string }>()(
 export const rootLayer = (path: string): Layer.Layer<Root> =>
   Layer.succeed(Root, { path });
 
+export interface CommandPolicyConfig {
+  readonly defaultTimeoutMs: number;
+  readonly maxTimeoutMs: number;
+}
+
+/** Application-owned limits for model-supplied command deadlines. */
+export class CommandPolicy extends Context.Service<
+  CommandPolicy,
+  CommandPolicyConfig
+>()('@sunfall/vesper-workspace/CommandPolicy') {}
+
+export const commandPolicyLayer = (
+  config: CommandPolicyConfig,
+): Layer.Layer<CommandPolicy> => {
+  const valid = (value: number): boolean =>
+    Number.isFinite(value) && Number.isInteger(value) && value > 0;
+  if (
+    !valid(config.defaultTimeoutMs) ||
+    !valid(config.maxTimeoutMs) ||
+    config.defaultTimeoutMs > config.maxTimeoutMs
+  ) {
+    throw new RangeError(
+      'command timeouts must be positive integers with defaultTimeoutMs <= maxTimeoutMs',
+    );
+  }
+  return Layer.succeed(CommandPolicy, config);
+};
+
 // --------------------------------------------------------------- the limits
 
 /** How long a command may run when the model does not say. */
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+export const DEFAULT_MAX_COMMAND_TIMEOUT_MS = 120_000;
+
+export const defaultCommandPolicyLayer: Layer.Layer<CommandPolicy> =
+  commandPolicyLayer({
+    defaultTimeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
+    maxTimeoutMs: DEFAULT_MAX_COMMAND_TIMEOUT_MS,
+  });
 
 /** Directory names the walk does not descend into, and reports skipping. */
 export const IGNORED_DIRECTORIES: ReadonlyArray<string> = [
@@ -104,9 +119,20 @@ const MATCH_LINE_MAX_CHARS = 500;
  */
 const MAX_SEARCHABLE_BYTES = 2 * 1024 * 1024;
 
+/** A single model-driven file read never materializes more than this. */
+const MAX_READABLE_BYTES = 2 * 1024 * 1024;
+
+/** Total bytes search may read across files in one call. */
+const MAX_SEARCH_BYTES = 16 * 1024 * 1024;
+
+const MAX_REGEX_PATTERN_CHARS = 1000;
+const MAX_REGEX_LINE_CHARS = 10_000;
+const STAT_CONCURRENCY = 16;
+const READ_CONCURRENCY = 4;
+
 // --------------------------------------------------------------- the errors
 //
-// Modelled with `Schema.TaggedErrorClass` because every one of them is
+// Modelled with `Schema.TaggedError` because every one of them is
 // encoded into a tool result and handed to a model: the tag is what the model
 // reads, and the fields are what it needs to retry differently. A single
 // `ToolFailed { message }` would compile and would put the whole diagnosis
@@ -121,7 +147,7 @@ const ToolOperation = Schema.Literals([
 ]);
 
 /** The path resolved to somewhere outside the workspace root. */
-export class PathOutsideWorkspace extends Schema.TaggedErrorClass<PathOutsideWorkspace>()(
+export class PathOutsideWorkspace extends Schema.TaggedError<PathOutsideWorkspace>()(
   '@sunfall/vesper-workspace/PathOutsideWorkspace',
   {
     path: Schema.String,
@@ -131,19 +157,19 @@ export class PathOutsideWorkspace extends Schema.TaggedErrorClass<PathOutsideWor
 ) {}
 
 /** Nothing exists at the path. */
-export class FileNotFound extends Schema.TaggedErrorClass<FileNotFound>()(
+export class FileNotFound extends Schema.TaggedError<FileNotFound>()(
   '@sunfall/vesper-workspace/FileNotFound',
   { path: Schema.String },
 ) {}
 
 /** Something exists at the path, but it is not a regular file. */
-export class NotAFile extends Schema.TaggedErrorClass<NotAFile>()(
+export class NotAFile extends Schema.TaggedError<NotAFile>()(
   '@sunfall/vesper-workspace/NotAFile',
   { path: Schema.String },
 ) {}
 
 /** Something exists at the path, but it is not a directory. */
-export class NotADirectory extends Schema.TaggedErrorClass<NotADirectory>()(
+export class NotADirectory extends Schema.TaggedError<NotADirectory>()(
   '@sunfall/vesper-workspace/NotADirectory',
   { path: Schema.String },
 ) {}
@@ -155,12 +181,18 @@ export class NotADirectory extends Schema.TaggedErrorClass<NotADirectory>()(
  * returns a string of replacement characters that looks like content, and a
  * model has no way to tell that from a file of unusual glyphs.
  */
-export class BinaryContent extends Schema.TaggedErrorClass<BinaryContent>()(
+export class BinaryContent extends Schema.TaggedError<BinaryContent>()(
   '@sunfall/vesper-workspace/BinaryContent',
   {
     path: Schema.String,
     reason: Schema.Literals(['nul-byte', 'invalid-utf8']),
   },
+) {}
+
+/** A file exceeds the bounded read budget for model-visible content. */
+export class FileTooLarge extends Schema.TaggedError<FileTooLarge>()(
+  '@sunfall/vesper-workspace/FileTooLarge',
+  { path: Schema.String, maxBytes: Schema.Number },
 ) {}
 
 /**
@@ -170,7 +202,7 @@ export class BinaryContent extends Schema.TaggedErrorClass<BinaryContent>()(
  * back unchanged and reports success teaches the model its change landed, and
  * everything it concludes afterwards is built on that.
  */
-export class EditTargetMissing extends Schema.TaggedErrorClass<EditTargetMissing>()(
+export class EditTargetMissing extends Schema.TaggedError<EditTargetMissing>()(
   '@sunfall/vesper-workspace/EditTargetMissing',
   { path: Schema.String, target: Schema.String },
 ) {}
@@ -181,7 +213,7 @@ export class EditTargetMissing extends Schema.TaggedErrorClass<EditTargetMissing
  * Refusing beats replacing the first: "the first one" is not a thing the model
  * asked for, and the edit it wanted may be the third.
  */
-export class EditTargetAmbiguous extends Schema.TaggedErrorClass<EditTargetAmbiguous>()(
+export class EditTargetAmbiguous extends Schema.TaggedError<EditTargetAmbiguous>()(
   '@sunfall/vesper-workspace/EditTargetAmbiguous',
   {
     path: Schema.String,
@@ -191,19 +223,19 @@ export class EditTargetAmbiguous extends Schema.TaggedErrorClass<EditTargetAmbig
 ) {}
 
 /** The workspace refused the access. */
-export class AccessDenied extends Schema.TaggedErrorClass<AccessDenied>()(
+export class AccessDenied extends Schema.TaggedError<AccessDenied>()(
   '@sunfall/vesper-workspace/AccessDenied',
   { path: Schema.String, operation: WorkspaceDriver.Operation },
 ) {}
 
 /** The search pattern is not a valid regular expression. */
-export class InvalidPattern extends Schema.TaggedErrorClass<InvalidPattern>()(
+export class InvalidPattern extends Schema.TaggedError<InvalidPattern>()(
   '@sunfall/vesper-workspace/InvalidPattern',
   { pattern: Schema.String, reason: Schema.String },
 ) {}
 
 /** The command was killed at its deadline. */
-export class CommandTimedOut extends Schema.TaggedErrorClass<CommandTimedOut>()(
+export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>()(
   '@sunfall/vesper-workspace/CommandTimedOut',
   { command: Schema.String, timeoutMs: Schema.Number },
 ) {}
@@ -215,7 +247,7 @@ export class CommandTimedOut extends Schema.TaggedErrorClass<CommandTimedOut>()(
  * reaches the model as something it can quote rather than as a defect that
  * kills the run.
  */
-export class WorkspaceUnavailable extends Schema.TaggedErrorClass<WorkspaceUnavailable>()(
+export class WorkspaceUnavailable extends Schema.TaggedError<WorkspaceUnavailable>()(
   '@sunfall/vesper-workspace/WorkspaceUnavailable',
   {
     tool: ToolOperation,
@@ -240,6 +272,7 @@ const pathFailureSchemas = [
   FileNotFound,
   NotAFile,
   NotADirectory,
+  FileTooLarge,
   AccessDenied,
   WorkspaceUnavailable,
 ] as const;
@@ -247,6 +280,7 @@ const pathFailureSchemas = [
 type PathFailure =
   | AccessDenied
   | FileNotFound
+  | FileTooLarge
   | NotADirectory
   | NotAFile
   | WorkspaceUnavailable;
@@ -266,6 +300,9 @@ const fromFileError =
     }
     if (error._tag === '@sunfall/vesper-workspace/PermissionDenied') {
       return new AccessDenied({ path, operation: error.operation });
+    }
+    if (error._tag === '@sunfall/vesper-workspace/FileReadLimitExceeded') {
+      return new FileTooLarge({ path, maxBytes: error.maxBytes });
     }
     if (error.code === 'EISDIR') {
       return new NotAFile({ path });
@@ -312,7 +349,7 @@ const readText = (
   Effect.gen(function* () {
     const driver = yield* WorkspaceDriver.Service;
     const bytes = yield* driver
-      .readFileBuffer(absolute)
+      .readFileBuffer(absolute, { maxBytes: MAX_READABLE_BYTES })
       .pipe(Effect.mapError(fromFileError(tool, absolute)));
     const decoded = WorkspaceOutput.decodeText(bytes);
     return decoded.ok
@@ -332,6 +369,7 @@ interface WalkResult {
   readonly entries: ReadonlyArray<WalkEntry>;
   readonly ignoredDirectories: ReadonlyArray<string>;
   readonly unreadableDirectories: ReadonlyArray<string>;
+  readonly unreadableEntries: ReadonlyArray<string>;
   readonly truncated: boolean;
 }
 
@@ -362,12 +400,15 @@ const walk = (
     const entries: Array<WalkEntry> = [];
     const ignoredDirectories: Array<string> = [];
     const unreadableDirectories: Array<string> = [];
+    const unreadableEntries: Array<string> = [];
     const pending: Array<string> = [''];
+    let pendingIndex = 0;
     let truncated = false;
     let isRoot = true;
 
-    while (pending.length > 0 && !truncated) {
-      const relative = pending.shift() ?? '';
+    while (pendingIndex < pending.length && !truncated) {
+      const relative = pending[pendingIndex] ?? '';
+      pendingIndex += 1;
       const absolute = relative === '' ? directory : `${directory}/${relative}`;
 
       const listing = yield* driver
@@ -383,31 +424,43 @@ const walk = (
       }
       isRoot = false;
 
-      for (const name of [...listing.success].sort()) {
+      const remainingEntries = MAX_WALK_ENTRIES - entries.length;
+      const sortedNames = [...listing.success].sort();
+      const names = sortedNames.slice(0, remainingEntries);
+      if (sortedNames.length > names.length) truncated = true;
+      const stats = yield* Effect.forEach(
+        names,
+        (name) => driver.stat(`${absolute}/${name}`).pipe(Effect.result),
+        { concurrency: STAT_CONCURRENCY },
+      );
+
+      for (let nameIndex = 0; nameIndex < names.length; nameIndex += 1) {
+        const name = names[nameIndex] ?? '';
         if (entries.length >= MAX_WALK_ENTRIES) {
           truncated = true;
           break;
         }
 
         const childRelative = relative === '' ? name : `${relative}/${name}`;
-        const stat = yield* driver
-          .stat(`${absolute}/${name}`)
-          .pipe(Effect.option);
+        const stat = stats[nameIndex]!;
 
         // A `stat` that failed is an entry that vanished between the listing
         // and the check, or one we may not look at. Either way it is not
         // something to report a type for.
-        if (stat._tag === 'None') {
+        if (stat._tag === 'Failure') {
+          if (stat.failure._tag !== '@sunfall/vesper-workspace/PathNotFound') {
+            unreadableEntries.push(childRelative);
+          }
           continue;
         }
 
-        const type = stat.value.isSymbolicLink
+        const type = stat.success.isSymbolicLink
           ? 'symlink'
-          : stat.value.isDirectory
+          : stat.success.isDirectory
             ? 'directory'
             : 'file';
 
-        entries.push({ path: childRelative, type, size: stat.value.size });
+        entries.push({ path: childRelative, type, size: stat.success.size });
 
         if (type === 'directory') {
           if (IGNORED_DIRECTORIES.includes(name)) {
@@ -419,7 +472,94 @@ const walk = (
       }
     }
 
-    return { entries, ignoredDirectories, unreadableDirectories, truncated };
+    return {
+      entries,
+      ignoredDirectories,
+      unreadableDirectories,
+      unreadableEntries,
+      truncated,
+    };
+  });
+
+const unsafeRegexReason = (pattern: string): string | undefined => {
+  if (pattern.length > MAX_REGEX_PATTERN_CHARS) {
+    return `pattern exceeds ${String(MAX_REGEX_PATTERN_CHARS)} characters`;
+  }
+  if (/(^|[^\\])\\[1-9]/u.test(pattern)) {
+    return 'backreferences are not supported by bounded search';
+  }
+  if (/(?:\.\*|\.\+).*(?:\.\*|\.\+)/u.test(pattern)) {
+    return 'multiple unbounded wildcards are not supported by bounded search';
+  }
+
+  const groups: Array<{
+    containsAlternation: boolean;
+    containsQuantifier: boolean;
+  }> = [];
+  let unboundedQuantifiers = 0;
+  let escaped = false;
+  let inClass = false;
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index] ?? '';
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (character === '[') inClass = true;
+    if (character === ']' && inClass) inClass = false;
+    if (inClass) continue;
+    if (character === '(') {
+      groups.push({ containsAlternation: false, containsQuantifier: false });
+      continue;
+    }
+    if (character === '|' && groups.length > 0) {
+      groups[groups.length - 1]!.containsAlternation = true;
+      continue;
+    }
+    const quantified =
+      character === '*' || character === '+' || character === '{';
+    if (character === '*' || character === '+') unboundedQuantifiers += 1;
+    if (quantified && groups.length > 0) {
+      groups[groups.length - 1]!.containsQuantifier = true;
+    }
+    if (character !== ')') continue;
+
+    const group = groups.pop() ?? {
+      containsAlternation: false,
+      containsQuantifier: false,
+    };
+    const next = pattern[index + 1];
+    const groupQuantified = next === '*' || next === '+' || next === '{';
+    if (
+      groupQuantified &&
+      (group.containsQuantifier || group.containsAlternation)
+    ) {
+      return 'ambiguous or nested quantified groups are not supported by bounded search';
+    }
+    if ((group.containsQuantifier || groupQuantified) && groups.length > 0) {
+      groups[groups.length - 1]!.containsQuantifier = true;
+    }
+  }
+  if (unboundedQuantifiers > 4) {
+    return 'too many unbounded quantifiers for bounded search';
+  }
+  return undefined;
+};
+
+const invalidPattern = (pattern: string, error: unknown): InvalidPattern =>
+  new InvalidPattern({
+    pattern,
+    reason: error instanceof Error ? error.message : String(error),
+  });
+
+const compileGlob = (pattern: string): Effect.Effect<RegExp, InvalidPattern> =>
+  Effect.try({
+    try: () => WorkspaceGlob.compile(pattern),
+    catch: (error) => invalidPattern(pattern, error),
   });
 
 // ----------------------------------------------------------------- the tools
@@ -443,7 +583,7 @@ const TruncatedBy = Schema.NullOr(Schema.Literals(['lines', 'bytes']));
  * then failed `LanguageModel`'s decode with `Expected number at
  * ["params"]["limit"]`. That failure is an `InvalidOutputError` on the stream
  * rather than a tool result the model could correct, so it does not degrade the
- * turn — it kills the run. Found by `@sunfall/vesper-runtime`'s live smoke script the
+ * turn — it kills the run. Found by the live smoke script the
  * first time this toolkit met a non-Anthropic provider.
  *
  * `Schema.Int` renders as `{"type":"integer"}`, which is both what these
@@ -559,7 +699,11 @@ const listFilesTool = Tool.make('list_files', {
     ignoredDirectories: Schema.Array(Schema.String),
     unreadableDirectories: Schema.Array(Schema.String),
   }),
-  failure: Schema.Union([PathOutsideWorkspace, ...pathFailureSchemas]),
+  failure: Schema.Union([
+    PathOutsideWorkspace,
+    InvalidPattern,
+    ...pathFailureSchemas,
+  ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service],
 });
@@ -592,6 +736,11 @@ const searchFilesTool = Tool.make('search_files', {
     filesSearched: Schema.Number,
     binaryFilesSkipped: Schema.Number,
     largeFilesSkipped: Schema.Number,
+    aggregateBudgetFilesSkipped: Schema.Number,
+    longLinesSkipped: Schema.Number,
+    unreadableFiles: Schema.Array(Schema.String),
+    unreadableDirectories: Schema.Array(Schema.String),
+    unreadableEntries: Schema.Array(Schema.String),
   }),
   failure: Schema.Union([
     PathOutsideWorkspace,
@@ -628,7 +777,7 @@ const runShellTool = Tool.make('run_shell', {
     ...pathFailureSchemas,
   ]),
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service],
+  dependencies: [Root, WorkspaceDriver.Service, CommandPolicy],
 });
 
 /**
@@ -637,6 +786,7 @@ const runShellTool = Tool.make('run_shell', {
  * ```ts
  * const agent = Agent.make({
  *   name: 'coder',
+ *   revision: '1',
  *   instructions: '…',
  *   toolkit: WorkspaceTools.toolkit,
  * });
@@ -665,7 +815,10 @@ const handleRead = Effect.fnUntraced(function* (params: {
   const text = yield* readText('read', absolute);
 
   const allLines = text.split('\n');
-  const firstLine = Math.max(1, Math.trunc(params.offset ?? 1));
+  const firstLine = Math.min(
+    allLines.length + 1,
+    Math.max(1, Math.trunc(params.offset ?? 1)),
+  );
   const window = allLines.slice(
     firstLine - 1,
     params.limit === undefined
@@ -677,17 +830,21 @@ const handleRead = Effect.fnUntraced(function* (params: {
     maxLines: params.limit,
   });
 
+  const omittedPrefix = firstLine > 1;
+  const omittedSuffix = firstLine - 1 + window.length < allLines.length;
+  const windowed = omittedPrefix || omittedSuffix;
+
   return {
     path: WorkspacePath.relative(root, absolute),
     content: truncation.content,
     firstLine,
-    lineCount: truncation.outputLines,
+    lineCount: window.length === 0 ? 0 : truncation.outputLines,
     totalLines: allLines.length,
     // Slicing to a window is itself a truncation, and reporting `false`
     // because the *window* fit would tell the model it had seen the file.
-    truncated:
-      truncation.truncated || firstLine - 1 + window.length < allLines.length,
-    truncatedBy: truncation.truncatedBy,
+    truncated: truncation.truncated || windowed,
+    truncatedBy:
+      truncation.truncatedBy ?? (windowed ? ('lines' as const) : null),
   };
 });
 
@@ -777,13 +934,13 @@ const handleList = Effect.fnUntraced(function* (params: {
   readonly limit?: number;
 }) {
   const { absolute, root } = yield* resolvePath(params.path ?? '.');
+  const expression =
+    params.pattern === undefined
+      ? undefined
+      : yield* compileGlob(params.pattern);
   const walked = yield* walk('list', absolute);
 
-  const match =
-    params.pattern === undefined
-      ? () => true
-      : (path: string): boolean =>
-          WorkspaceGlob.matches(params.pattern ?? '', path);
+  const match = (path: string): boolean => expression?.test(path) ?? true;
 
   const limit = Math.max(0, Math.trunc(params.limit ?? 1000));
   const matched = walked.entries.filter((entry) => match(entry.path));
@@ -808,24 +965,26 @@ const handleSearch = Effect.fnUntraced(function* (params: {
   const driver = yield* WorkspaceDriver.Service;
   const { absolute, root } = yield* resolvePath(params.path ?? '.');
 
+  const unsafe = unsafeRegexReason(params.pattern);
+  if (unsafe !== undefined) {
+    return yield* Effect.fail(
+      new InvalidPattern({ pattern: params.pattern, reason: unsafe }),
+    );
+  }
   const expression = yield* Effect.try({
     try: () =>
       new RegExp(params.pattern, params.ignoreCase === true ? 'iu' : 'u'),
-    catch: (error) =>
-      new InvalidPattern({
-        pattern: params.pattern,
-        reason: error instanceof Error ? error.message : String(error),
-      }),
+    catch: (error) => invalidPattern(params.pattern, error),
   });
+  const glob =
+    params.glob === undefined ? undefined : yield* compileGlob(params.glob);
 
   const walked = yield* walk('search', absolute);
   const limit = Math.max(0, Math.trunc(params.limit ?? 200));
 
   const candidates = walked.entries.filter(
     (entry) =>
-      entry.type === 'file' &&
-      (params.glob === undefined ||
-        WorkspaceGlob.matches(params.glob, entry.path)),
+      entry.type === 'file' && (glob === undefined || glob.test(entry.path)),
   );
 
   const matches: Array<{
@@ -836,26 +995,61 @@ const handleSearch = Effect.fnUntraced(function* (params: {
   let filesSearched = 0;
   let binaryFilesSkipped = 0;
   let largeFilesSkipped = 0;
+  let aggregateBudgetFilesSkipped = 0;
+  let longLinesSkipped = 0;
   let truncated = walked.truncated;
+  const unreadableFiles: Array<string> = [];
+  const selected: Array<WalkEntry & { readonly budget: number }> = [];
+  let remainingBytes = MAX_SEARCH_BYTES;
 
   for (const candidate of candidates) {
-    if (matches.length >= limit) {
-      truncated = true;
-      break;
-    }
     if (candidate.size !== undefined && candidate.size > MAX_SEARCHABLE_BYTES) {
       largeFilesSkipped += 1;
       continue;
     }
+    const budget = Math.min(
+      MAX_SEARCHABLE_BYTES,
+      candidate.size ?? MAX_SEARCHABLE_BYTES,
+    );
+    if (budget > remainingBytes) {
+      aggregateBudgetFilesSkipped += 1;
+      truncated = true;
+      continue;
+    }
+    remainingBytes -= budget;
+    selected.push({ ...candidate, budget });
+  }
 
-    const bytes = yield* driver
-      .readFileBuffer(`${absolute}/${candidate.path}`)
-      .pipe(Effect.option);
-    if (bytes._tag === 'None') {
+  const reads = yield* Effect.forEach(
+    selected,
+    (candidate) =>
+      driver
+        .readFileBuffer(`${absolute}/${candidate.path}`, {
+          maxBytes: candidate.budget,
+        })
+        .pipe(Effect.result),
+    { concurrency: READ_CONCURRENCY },
+  );
+
+  for (
+    let candidateIndex = 0;
+    candidateIndex < selected.length;
+    candidateIndex += 1
+  ) {
+    const candidate = selected[candidateIndex]!;
+    const bytes = reads[candidateIndex]!;
+    if (bytes._tag === 'Failure') {
+      if (
+        bytes.failure._tag === '@sunfall/vesper-workspace/FileReadLimitExceeded'
+      ) {
+        largeFilesSkipped += 1;
+      } else {
+        unreadableFiles.push(candidate.path);
+      }
       continue;
     }
 
-    const decoded = WorkspaceOutput.decodeText(bytes.value);
+    const decoded = WorkspaceOutput.decodeText(bytes.success);
     if (!decoded.ok) {
       binaryFilesSkipped += 1;
       continue;
@@ -869,6 +1063,10 @@ const handleSearch = Effect.fnUntraced(function* (params: {
         break;
       }
       const line = lines[index]!;
+      if (line.length > MAX_REGEX_LINE_CHARS) {
+        longLinesSkipped += 1;
+        continue;
+      }
       // `lastIndex` is not carried between calls because the expression is
       // built without `g`, so this stays a plain per-line predicate.
       if (expression.test(line)) {
@@ -891,6 +1089,11 @@ const handleSearch = Effect.fnUntraced(function* (params: {
     filesSearched,
     binaryFilesSkipped,
     largeFilesSkipped,
+    aggregateBudgetFilesSkipped,
+    longLinesSkipped,
+    unreadableFiles,
+    unreadableDirectories: walked.unreadableDirectories,
+    unreadableEntries: walked.unreadableEntries,
   };
 });
 
@@ -900,8 +1103,13 @@ const handleRun = Effect.fnUntraced(function* (params: {
   readonly timeoutMs?: number;
 }) {
   const driver = yield* WorkspaceDriver.Service;
+  const policy = yield* CommandPolicy;
   const { absolute } = yield* resolvePath(params.cwd ?? '.');
-  const timeoutMs = params.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+  const requestedTimeoutMs = params.timeoutMs ?? policy.defaultTimeoutMs;
+  const timeoutMs = Math.min(
+    policy.maxTimeoutMs,
+    Math.max(1, Math.trunc(requestedTimeoutMs)),
+  );
 
   const result = yield* driver
     .exec(params.command, { cwd: absolute, timeoutMs })
@@ -923,8 +1131,8 @@ const handleRun = Effect.fnUntraced(function* (params: {
     exitCode: result.exitCode,
     stdout: stdout.content,
     stderr: stderr.content,
-    stdoutTruncated: stdout.truncated,
-    stderrTruncated: stderr.truncated,
+    stdoutTruncated: result.stdoutTruncated || stdout.truncated,
+    stderrTruncated: result.stderrTruncated || stderr.truncated,
   };
 });
 

@@ -87,6 +87,8 @@ export interface FileStat extends Schema.Struct.Type<typeof FileStat.fields> {}
 export const ShellResult = Schema.Struct({
   stdout: Schema.String,
   stderr: Schema.String,
+  stdoutTruncated: Schema.Boolean,
+  stderrTruncated: Schema.Boolean,
   exitCode: Schema.Number,
 });
 export interface ShellResult extends Schema.Struct.Type<
@@ -94,7 +96,7 @@ export interface ShellResult extends Schema.Struct.Type<
 > {}
 
 /** The path does not exist. */
-export class PathNotFound extends Schema.TaggedErrorClass<PathNotFound>()(
+export class PathNotFound extends Schema.TaggedError<PathNotFound>()(
   '@sunfall/vesper-workspace/PathNotFound',
   {
     path: Schema.String,
@@ -103,11 +105,21 @@ export class PathNotFound extends Schema.TaggedErrorClass<PathNotFound>()(
 ) {}
 
 /** The path exists but the driver is not allowed to touch it that way. */
-export class PermissionDenied extends Schema.TaggedErrorClass<PermissionDenied>()(
+export class PermissionDenied extends Schema.TaggedError<PermissionDenied>()(
   '@sunfall/vesper-workspace/PermissionDenied',
   {
     path: Schema.String,
     operation: Operation,
+  },
+) {}
+
+/** A bounded read found more bytes than the caller allowed it to retain. */
+export class FileReadLimitExceeded extends Schema.TaggedError<FileReadLimitExceeded>()(
+  '@sunfall/vesper-workspace/FileReadLimitExceeded',
+  {
+    path: Schema.String,
+    operation: Schema.Literals(['readFile', 'readFileBuffer']),
+    maxBytes: Schema.Number,
   },
 ) {}
 
@@ -119,7 +131,7 @@ export class PermissionDenied extends Schema.TaggedErrorClass<PermissionDenied>(
  * output is however far it happened to get. That is not something a caller
  * can read as data the way a non-zero exit is.
  */
-export class CommandTimeout extends Schema.TaggedErrorClass<CommandTimeout>()(
+export class CommandTimeout extends Schema.TaggedError<CommandTimeout>()(
   '@sunfall/vesper-workspace/CommandTimeout',
   {
     command: Schema.String,
@@ -136,7 +148,7 @@ export class CommandTimeout extends Schema.TaggedErrorClass<CommandTimeout>()(
  * driver — so an unmodelled failure is still diagnosable without reading the
  * defect.
  */
-export class WorkspaceFailure extends Schema.TaggedErrorClass<WorkspaceFailure>()(
+export class WorkspaceFailure extends Schema.TaggedError<WorkspaceFailure>()(
   '@sunfall/vesper-workspace/WorkspaceFailure',
   {
     operation: Operation,
@@ -147,7 +159,11 @@ export class WorkspaceFailure extends Schema.TaggedErrorClass<WorkspaceFailure>(
 ) {}
 
 /** Everything a filesystem operation can fail with. */
-export type FileError = PathNotFound | PermissionDenied | WorkspaceFailure;
+export type FileError =
+  | FileReadLimitExceeded
+  | PathNotFound
+  | PermissionDenied
+  | WorkspaceFailure;
 
 /**
  * Everything {@link Interface.exec} can fail with.
@@ -205,13 +221,25 @@ export interface ExecOptions {
   readonly timeoutMs?: number | undefined;
 }
 
+export interface ReadFileOptions {
+  /**
+   * Refuse the read when the file contains more bytes than this value.
+   * Drivers must not materialize the remainder merely to discover that fact.
+   */
+  readonly maxBytes?: number | undefined;
+}
+
 export interface Interface {
   /** Read a file as UTF-8 text. */
-  readonly readFile: (path: string) => Effect.Effect<string, FileError>;
+  readonly readFile: (
+    path: string,
+    options?: ReadFileOptions,
+  ) => Effect.Effect<string, FileError>;
 
   /** Read a file as raw bytes, for content that is not text. */
   readonly readFileBuffer: (
     path: string,
+    options?: ReadFileOptions,
   ) => Effect.Effect<Uint8Array, FileError>;
 
   /** Write a file, creating or truncating it. Parent directories must exist. */

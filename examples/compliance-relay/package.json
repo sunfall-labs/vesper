@@ -20,11 +20,9 @@
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
-    "effect": "^4.0.0-beta.103",
-    "@earendil-works/pi-ai": "0.80.2",
-    "@effect/platform-node": "4.0.0-beta.103",
-    "@sunfall/vesper-agent": "workspace:*",
-    "@sunfall/vesper-pi": "workspace:*",
-    "@sunfall/vesper-runtime": "workspace:*"
+    "effect": "4.0.0-rc.109",
+    "@effect/ai-anthropic": "4.0.0-rc.109",
+    "@effect/platform-node": "4.0.0-rc.109",
+    "@sunfall/vesper-agent": "workspace:*"
   }
 }

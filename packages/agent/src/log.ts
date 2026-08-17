@@ -1,22 +1,34 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Cause, Clock, Effect, Exit, Option, Ref, Stream } from 'effect';
+import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
+import {
+  Cause,
+  Clock,
+  Effect,
+  Exit,
+  Option,
+  Ref,
+  Schema,
+  Semaphore,
+  Stream,
+} from 'effect';
 import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
 import type { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
+import { PromptTransport } from './prompt-transport.js';
 import { AgentSignals } from './signal.js';
 import type { Stop } from './stop.js';
+import { RecordingPolicy } from './recording-policy.js';
 
 // The sink that turns a run into records, and the handle it writes through.
 //
 // The loop already emits everything the log needs, so this is a sink and not
 // new bookkeeping: `AgentEvents.Event` in, the same events out, records
-// written on the way past. It is reached by `agent.recordingTo(id)` and by a
-// parent delegating into `agent.runInSession(session, input)` — an agent that
-// does neither never opens a {@link Session} and never touches this file.
+// written on the way past. It is reached by `agent.recordingTo(id)` and by the
+// internal delegation protocol opening a child session. An agent that does
+// neither never opens a {@link Session} and never touches this file.
 //
 // ## Two ordering properties, both load-bearing
 //
@@ -82,18 +94,35 @@ export const pathFor = (conversationId: string): string =>
  * no reference to it from anywhere; deriving it means the retry lands on the
  * same stream, so the child's own log — and its own resumption — carries on
  * rather than starting again beside itself. Tool call ids are unique within a
- * conversation, which is what makes this collision-free.
+ * conversation. Both inputs are arbitrary strings, so separators alone are
+ * not sufficient: `a/b` + `c` and `a` + `b/c` used to name the same child.
+ * The parent's UTF-16 length makes the boundary unambiguous without assuming
+ * anything about provider ids, including their Unicode normalization.
  */
 export const childIdFor = (
   parentConversationId: string,
   toolCallId: string,
-): string => `${parentConversationId}/${toolCallId}`;
+): string =>
+  `child-v1:${parentConversationId.length}:${parentConversationId}${toolCallId}`;
 
 /** How a tool call ended, as a previous run recorded it. */
 export interface Settled {
   readonly outcome: 'success' | 'failure';
   /** The encoded result, in the form the provider was shown it. */
   readonly result: unknown;
+}
+
+/** What an orphaned run durably established about a tool call. */
+export type Recovery =
+  | { readonly _tag: 'Indeterminate' }
+  | ({ readonly _tag: 'Settled' } & Settled);
+
+/** An orphaned handler start and the provider call that originally caused it. */
+export interface IndeterminateToolCall {
+  readonly step: number;
+  readonly name: string;
+  readonly toolCallId: string;
+  readonly params: unknown;
 }
 
 /** A signal this run has taken delivery of. */
@@ -105,8 +134,16 @@ export interface Delivered {
   readonly at: string;
 }
 
+export interface SignalDrain {
+  readonly signals: ReadonlyArray<Delivered>;
+  /** More signals remain after this bounded page. */
+  readonly backlog: boolean;
+}
+
 /** Where a run picks a conversation up, when not at its end. */
 export interface OpenOptions {
+  /** The agent definition that will continue this conversation. */
+  readonly compatibility: Compatibility;
   /**
    * Continue from this record instead of from the conversation's last one.
    *
@@ -115,7 +152,7 @@ export interface OpenOptions {
    * marker is written as part of claiming — see {@link open} — which is what
    * lets every reader below stay unaware that branching exists.
    */
-  readonly branchFrom: LogOffset.Offset;
+  readonly branchFrom?: LogOffset.Offset;
 }
 
 /**
@@ -135,16 +172,62 @@ export interface OpenOptions {
 interface ClaimOptions {
   readonly branchFrom?: LogOffset.Offset;
   readonly seed?: ReadonlyArray<ConversationRecord.Envelope>;
+  readonly identity?: string;
+  readonly compatibility: Compatibility;
 }
+
+/** Durable identity required before a definition may continue history. */
+export interface Compatibility {
+  readonly agent: string;
+  readonly revision: string;
+}
+
+/** A durable conversation cannot be opened by this compatibility identity. */
+export class CompatibilityError extends Schema.TaggedError<CompatibilityError>()(
+  '@sunfall/vesper-agent/CompatibilityError',
+  {
+    message: Schema.String,
+    expectedAgent: Schema.String,
+    expectedRevision: Schema.String,
+    persistedFormat: Schema.optional(Schema.Number),
+    persistedAgent: Schema.optional(Schema.String),
+    persistedRevision: Schema.optional(Schema.String),
+  },
+) {}
+
+/** Ensure a claimed session is handed only to the definition that claimed it. */
+export const assertCompatible = (
+  session: Session,
+  expected: Compatibility,
+): Effect.Effect<void, CompatibilityError> =>
+  session.compatibility.agent === expected.agent &&
+  session.compatibility.revision === expected.revision
+    ? Effect.void
+    : Effect.fail(
+        compatibilityError(
+          expected,
+          {
+            formatVersion: FORMAT_VERSION,
+            agent: session.compatibility.agent,
+            agentRevision: session.compatibility.revision,
+          },
+          `session was claimed for agent "${session.compatibility.agent}" revision "${session.compatibility.revision}"`,
+        ),
+      );
 
 export interface ChildOptions {
   /** The delegation tool call the child answers. */
   readonly toolCallId: string;
   /** The child agent's name. */
   readonly agent: string;
+  readonly revision: string;
   /** The child's delegation depth; 1 for a top-level agent's child. */
   readonly depth: number;
 }
+
+const SessionTypeId: unique symbol = Symbol.for(
+  '@sunfall/vesper-agent/AgentLog.Session',
+);
 
 /**
  * One run's claim on a conversation, and everything it can do with it.
@@ -164,35 +247,51 @@ export interface ChildOptions {
  * while its history does not is the exact divergence the log removes.
  */
 export interface Session {
+  /** @internal Prevents structural fabrication outside this module. */
+  readonly [SessionTypeId]: typeof SessionTypeId;
   readonly conversationId: string;
+  readonly compatibility: Compatibility;
+
+  /** Usage copied from an ancestor when this conversation was forked. */
+  readonly inheritedUsage: Stop.Usage;
+
+  /** Cumulative physical-log usage through the point this session opened. */
+  readonly usage: Stop.Usage;
+
+  /** Provider usage for the latest uncompacted completed turn. */
+  readonly latestTurnUsage: Stop.Usage | undefined;
+
+  /** Latest completed result on the active path, including anchored history. */
+  readonly completed: ReturnType<typeof AgentHistory.completedFrom>;
+
+  /** How long teardown waits for this session's settlement append. */
+  readonly settlementTimeoutMillis: number;
+
+  /** @internal Persistence-only filtering inherited by child sessions. */
+  readonly recordingPolicy: RecordingPolicy.Runtime;
 
   /**
-   * Everything the conversation contained when this run claimed it.
+   * The records required to rebuild the live prompt when this run claimed it.
    *
-   * Read once at {@link open}, which already pays for the full scan to build
-   * the recovery index and the signal cursor, and held rather than re-read:
+   * Read once at {@link open} and held rather than re-read:
    * a second read would race this run's own appends and hand back a history
    * that includes what this run has already written. `AgentHistory` turns it
    * into a `Prompt`, which is how a run continues a conversation instead of
    * restarting it.
    *
-   * The **whole log**, including any branch this conversation has abandoned.
-   * It is deliberately not pre-filtered to the active path: two of the folds
-   * over it must see what physically happened rather than what the
-   * conversation now says, and `branch.ts` holds the table of which are which.
-   * A caller building a prompt goes through `AgentHistory`, which filters.
+   * Compacted conversations retain only the active live tail from the latest
+   * compaction boundary. Cumulative physical facts are exposed separately by
+   * {@link usage} and the session's durable signal cursor.
    *
-   * A run that claimed the conversation at an earlier point — `branchFrom` —
-   * finds its own `BranchedFrom` marker as the last entry here. The marker is
-   * written during {@link open} precisely so that it is: it has to be in this
-   * array for the prompt and the recovery index to describe the branch rather
-   * than the conversation it came from.
+   * A run claimed with `branchFrom` follows that marker while paging and does
+   * not retain the marker or the abandoned physical range in this array.
    */
+  /** @internal Raw recovery snapshot used to rebuild the prompt. */
   readonly history: ReadonlyArray<ConversationRecord.Envelope>;
 
   /**
-   * Everything the conversation contains **now**, including what this run has
-   * already written.
+   * The active records required to rebuild the conversation **now**, including
+   * what this run has already written.
    *
    * The deliberate opposite of {@link history}, and the reason both exist. A
    * reader that must not see this run's own records reads `history`; a writer
@@ -200,34 +299,51 @@ export interface Session {
    * compaction does — the `Compacted` record names the record its summary
    * stops replacing, and that record is usually one this run appended.
    *
-   * A fresh scan every call, which is affordable because compaction is the
-   * only caller and a conversation compacts once in a very long while. The
-   * alternative — a ledger of offsets kept alongside the appends — would mean
-   * inferring each record's offset from the last one in its batch, and that
-   * is store-internal arithmetic this side has no business knowing.
+   * A backwards active-path read that stops at the latest compaction boundary.
+   * Uncompacted history remains proportional to the prompt it must rebuild.
    */
+  /** @internal Raw active-path persistence view. */
   readonly recorded: Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>>;
 
-  /** Append a batch. An empty batch is a no-op, not an empty write. */
+  /** @internal Append plumbing for the run recorder. */
   readonly append: (
     records: ReadonlyArray<ConversationRecord.Record>,
+    timeoutMillis?: number,
   ) => Effect.Effect<void>;
 
   /**
-   * The outcome an **unsettled earlier run** already recorded for this call.
+   * The state an **unsettled earlier run** recorded for this call: either a
+   * completed outcome or a handler start with no outcome.
    *
    * Synchronous, because it is a lookup in an index built when the session
    * opened, and that timing is the safety property: everything in it predates
-   * anything this run writes, so a run can never serve itself its own result.
+   * anything this run writes, so a run can never recover its own result.
    *
    * Empty unless the conversation's last `RunStarted` has no `RunSettled`
    * after it. A run that ended — successfully, in failure, or cancelled — has
-   * nothing to recover, so its tool outcomes are not offered to a later one.
+   * nothing to recover, so its tool state is not offered to a later one.
    */
-  readonly settled: (
+  /** @internal Recovery index for tool dispatch. */
+  readonly recovery: (
     name: string,
     toolCallId: string,
-  ) => Option.Option<Settled>;
+  ) => Option.Option<Recovery>;
+
+  /** @internal Orphaned calls in their original durable ToolCall order. */
+  readonly indeterminateToolCalls: ReadonlyArray<IndeterminateToolCall>;
+
+  /** @internal Corrupt recovery state that cannot be safely reconciled. */
+  readonly recoveryCorruption: string | undefined;
+
+  /** @internal Whether a durable handler start still lacks an outcome. */
+  readonly hasPendingToolCalls: Effect.Effect<boolean>;
+
+  /** @internal Register work released after an outcome is durable. */
+  readonly onToolSettled: (
+    name: string,
+    toolCallId: string,
+    effect: Effect.Effect<void>,
+  ) => void;
 
   /**
    * Signals that have arrived since the last drain.
@@ -237,7 +353,22 @@ export interface Session {
    * nothing here promises to deliver a backlog atomically — and it keeps the
    * drain a single bounded read.
    */
+  /** @internal Compatibility drain. Policies use {@link drainSignalsBounded}. */
   readonly drainSignals: Effect.Effect<ReadonlyArray<Delivered>>;
+  /** @internal Bounded authoritative signal drain. */
+  readonly drainSignalsBounded: (limit: number) => Effect.Effect<SignalDrain>;
+
+  /**
+   * Hint-only views of the next bounded signal page.
+   *
+   * Each change-feed tick re-reads from the authoritative delivery cursor but
+   * never advances it. The opening tick closes the subscribe/read race. Only
+   * {@link drainSignalsBounded} acknowledges records at a turn boundary.
+   */
+  /** @internal Hint-only signal watcher. */
+  readonly signalPages: (
+    limit: number,
+  ) => Stream.Stream<SignalDrain, LogStore.LogStoreError>;
 
   /**
    * Record a delegation and open the child's own conversation.
@@ -247,23 +378,27 @@ export interface Session {
    * child it is. See the record's own documentation for why one record type
    * rather than two conventions.
    */
-  readonly child: (options: ChildOptions) => Effect.Effect<Session>;
+  /** @internal Open a recorded child session for delegation. */
+  readonly child: (
+    options: ChildOptions,
+  ) => Effect.Effect<Session, CompatibilityError>;
 }
 
 /**
  * Claim a conversation and read back what a previous run left.
  *
  * `create` tolerates `conflict` — a second run on an existing conversation is
- * the normal case, not an error — and `acquire` then fences whoever wrote
- * last. Fencing is the intended behaviour: a conversation has one writer, and
- * a second concurrent run should fail on its next append rather than
- * interleave two runs into one history.
+ * the normal case, not an error. Existing history is compatibility-validated
+ * before `acquire`, because an incompatible reader has no right to fence its
+ * writer. A compatible open then acquires normally, preserving the single
+ * writer race: a second concurrent run fails on its next append rather than
+ * interleaving two runs into one history.
  *
- * The history read is a full scan of the conversation. That is O(records) per
- * run, which is the cost of the two things it produces — the unsettled-run
- * index and the signal delivery cursor — and it is the point at which
- * `@sunfall/vesper-store`'s snapshot stops being merely a cache. Nothing here is
- * tuned for a very long conversation yet.
+ * History is read backwards in two bounded views. Physical cumulative state
+ * stops at the newest durable resume aggregate; prompt state follows branch
+ * jumps and stops at the latest compaction's kept boundary. An uncompacted
+ * prompt, a fork prefix, and compatible history without a resume aggregate
+ * still read every record they require.
  *
  * ## Branching happens here, before anything is read
  *
@@ -277,17 +412,19 @@ export interface Session {
  * branching exists.
  *
  * Doing it any later would be wrong in a way that is quiet. A marker appended
- * after `unsettledOutcomes` ran would leave the crashed run the user branched
+ * after `unsettledTools` ran would leave the crashed run the user branched
  * *away from* still holding the recovery index, and the new run would be
  * served tool results answering calls that are no longer in its prompt.
  */
 export const open = Effect.fn('AgentLog.open')(function* (
   conversationId: string,
-  options?: OpenOptions,
+  options: OpenOptions,
 ) {
   const store = yield* LogStore.Service;
   return yield* openWith(store, conversationId, options);
 });
+
+const ACQUIRE_ATTEMPTS = 4;
 
 /**
  * Start a **new** conversation from a prefix of an existing one.
@@ -344,20 +481,20 @@ export const open = Effect.fn('AgentLog.open')(function* (
  * conversation that really exists, over there; rewriting them to the fork
  * would name one that does not exist anywhere.
  *
- * Forking into an id that already holds a conversation is a defect, not a
- * merge: the `create` below does not tolerate the conflict that {@link open}
- * does.
+ * Fork provenance lives in the destination stream's identity. That makes an
+ * empty or partially seeded destination distinguishable from an unrelated
+ * conversation after a crash, without introducing a second persistence
+ * mechanism. A retry with the same source and boundary resumes its copy;
+ * every other non-empty destination is rejected.
  */
 export const fork = Effect.fn('AgentLog.fork')(function* (
   conversationId: string,
   at: LogOffset.Offset,
   forkConversationId: string,
+  compatibility: Compatibility,
 ) {
+  yield* validateCompatibilityInput(compatibility);
   const store = yield* LogStore.Service;
-
-  yield* orDie(
-    store.create(pathFor(forkConversationId), forkConversationId),
-  ).pipe(Effect.asVoid);
 
   const ancestor = yield* readAll(store, pathFor(conversationId));
   // Cut first, then fold: this is exactly the sequence `activePath` would
@@ -366,19 +503,32 @@ export const fork = Effect.fn('AgentLog.fork')(function* (
   const prefix = AgentBranch.activePath(
     ancestor.filter((envelope) => !LogOffset.isAfter(envelope.offset, at)),
   );
+  yield* validateCompatibility(prefix, compatibility);
+  const identity = forkIdentity({
+    sourceConversationId: conversationId,
+    at,
+    records: prefix.length,
+    inheritedUsage: AgentHistory.usageFrom(prefix),
+  });
 
-  return yield* openWith(store, forkConversationId, { seed: prefix });
+  return yield* openWith(store, forkConversationId, {
+    seed: prefix,
+    identity,
+    compatibility,
+  });
 });
 
 const openWith = (
   store: LogStore.Interface,
   conversationId: string,
-  options?: ClaimOptions,
-): Effect.Effect<Session> =>
+  options: ClaimOptions,
+): Effect.Effect<Session, CompatibilityError> =>
   Effect.gen(function* () {
+    yield* validateCompatibilityInput(options.compatibility);
     const path = pathFor(conversationId);
+    const identity = options?.identity ?? conversationId;
 
-    yield* store.create(path, conversationId).pipe(
+    yield* store.create(path, identity).pipe(
       Effect.asVoid,
       Effect.catchIf(
         (error) => error.reason === 'conflict',
@@ -387,124 +537,396 @@ const openWith = (
       orDie,
     );
 
-    const claim = yield* orDie(store.acquire(path, crypto.randomUUID()));
-    const sequence = yield* Ref.make(claim.nextSequence);
+    if (options?.identity !== undefined) {
+      const meta = yield* orDie(store.meta(path));
+      if (Option.isNone(meta) || meta.value.identity !== options.identity) {
+        return yield* Effect.die(
+          new Error(
+            `Conversation log ${path} is occupied by a different conversation or fork`,
+          ),
+        );
+      }
+    }
 
-    const append: Session['append'] = (records) =>
+    // Validate and claim one exact stream position. If a compatible writer
+    // changes it between the read and acquisition, retry from the new position;
+    // if that change is incompatible, validation fails before any epoch bump.
+    let claim: LogStore.ProducerClaim | undefined;
+    let lastConflict: LogStore.LogStoreError | undefined;
+    for (let attempt = 0; attempt < ACQUIRE_ATTEMPTS; attempt += 1) {
+      const observed = Option.getOrThrow(yield* orDie(store.meta(path)));
+      const existing = yield* options.branchFrom === undefined
+        ? readAggregateSuffix(store, path)
+        : readAll(store, path);
+      const retainedBeforeClaim =
+        options.branchFrom === undefined
+          ? AgentBranch.activePath(existing)
+          : AgentBranch.activePath(
+              existing.filter(
+                (envelope) =>
+                  !LogOffset.isAfter(envelope.offset, options.branchFrom!),
+              ),
+            );
+      yield* validateCompatibility(retainedBeforeClaim, options.compatibility);
+      const acquired = yield* store
+        .acquire(path, crypto.randomUUID(), {
+          epoch: observed.epoch,
+          head: observed.head,
+        })
+        .pipe(Effect.exit);
+      if (Exit.isSuccess(acquired)) {
+        claim = acquired.value;
+        break;
+      } else {
+        const error = Exit.findErrorOption(acquired);
+        if (Option.isNone(error) || error.value.reason !== 'conflict') {
+          return yield* Effect.die(acquired.cause);
+        }
+        lastConflict = error.value;
+      }
+    }
+    if (claim === undefined) {
+      return yield* Effect.die(
+        lastConflict ?? new Error('compare-and-acquire retry exhausted'),
+      );
+    }
+    const sequence = yield* Ref.make(claim.nextSequence);
+    const appendLock = yield* Semaphore.make(1);
+    const childLock = yield* Semaphore.make(1);
+
+    const append: Session['append'] = (records, timeoutMillis) =>
       records.length === 0
         ? Effect.void
-        : Effect.gen(function* () {
-            const timestamp = yield* Clock.currentTimeMillis;
-            const next = yield* Ref.get(sequence);
+        : appendLock.withPermits(1)(
+            Effect.uninterruptibleMask((restore) =>
+              Effect.gen(function* () {
+                const timestamp = yield* Clock.currentTimeMillis;
+                const next = yield* Ref.get(sequence);
+                const persist = orDie(
+                  store.append({
+                    path,
+                    producerId: claim.producerId,
+                    epoch: claim.epoch,
+                    sequence: next,
+                    records: records.map((record) => ({
+                      conversationId,
+                      timestamp,
+                      // Policy wrappers run outside this append; transport is
+                      // therefore the last step before store preparation.
+                      record:
+                        record._tag === 'RunStarted'
+                          ? {
+                              ...record,
+                              prompt: PromptTransport.encode(record.prompt),
+                            }
+                          : record,
+                    })),
+                  }),
+                );
 
-            yield* orDie(
-              store.append({
-                path,
-                producerId: claim.producerId,
-                epoch: claim.epoch,
-                sequence: next,
-                records: records.map((record) => ({
-                  conversationId,
-                  timestamp,
-                  record,
-                })),
+                // Keep the backend interruptible (and optionally bounded),
+                // then resume masking before advancing the local sequence.
+                yield* timeoutMillis === undefined
+                  ? restore(persist)
+                  : restore(persist).pipe(
+                      Effect.timeout(Math.max(1, timeoutMillis - 1)),
+                      Effect.orDie,
+                    );
+
+                // Advanced only on success, so a caller that retries a failed
+                // append reuses the sequence — which the store answers
+                // idempotently when the batch digest matches, and rejects when
+                // it does not. The permit covers both operations: without it,
+                // concurrent signal, event, and child writes can read the same
+                // sequence and submit different batches under one producer key.
+                yield* Ref.set(sequence, next + 1);
               }),
-            );
+            ),
+          );
 
-            // Advanced only on success, so a caller that retries a failed
-            // append reuses the sequence — which the store answers
-            // idempotently when the batch digest matches, and rejects when it
-            // does not.
-            yield* Ref.set(sequence, next + 1);
-          });
-
-    if (options?.branchFrom !== undefined) {
-      yield* append([{ _tag: 'BranchedFrom', at: options.branchFrom }]);
+    if (options.branchFrom !== undefined) {
+      const branchFrom = options.branchFrom;
+      const prefix = AgentBranch.activePath(
+        (yield* readAll(store, path)).filter(
+          (envelope) => !LogOffset.isAfter(envelope.offset, branchFrom),
+        ),
+      );
+      yield* validateCompatibility(prefix, options.compatibility);
+      yield* append([{ _tag: 'BranchedFrom', at: branchFrom }]);
     }
     if (options?.seed !== undefined) {
       yield* seedInto(options.seed, append, readAll(store, path));
     }
 
-    const history = yield* readAll(store, path);
+    const opened = yield* loadOpenState(store, path);
+    const history = opened.history;
+    yield* validateCompatibility(
+      options.branchFrom === undefined
+        ? mergeByOffset(opened.aggregateSuffix, history)
+        : history,
+      options.compatibility,
+    );
     // Scoped to the active path: a run this conversation branched away from
     // recorded tool outcomes for calls that are no longer in anyone's prompt,
     // and serving those back would answer questions the resumed run never
     // asked. The signal cursor immediately below is the opposite case, and
     // `branch.ts` says why.
-    const recoverable = unsettledOutcomes(AgentBranch.activePath(history));
-    const signalCursor = yield* Ref.make(deliveredThrough(history));
-
-    const drainSignals = Effect.gen(function* () {
-      const after = yield* Ref.get(signalCursor);
-      const signalPath = AgentSignals.pathFor(conversationId);
-
-      const page = yield* store.read(signalPath, { after }).pipe(
-        // No stream at all is the ordinary case: nobody has ever signalled
-        // this conversation. It is not an empty page — the store
-        // distinguishes those deliberately — so it is caught here rather than
-        // by creating the stream from the reading side, which would leave an
-        // empty signal stream behind every run that was never steered.
-        Effect.catchIf(
-          (error) => error.reason === 'not_found',
-          () =>
-            Effect.succeed({
-              records: [],
-              cursor: after,
-              upToDate: true,
-            } satisfies LogStore.Page),
+    const recovered = unsettledTools(
+      AgentBranch.activePath(opened.aggregateSuffix),
+    );
+    const recoverable = recovered.recoveries;
+    const pendingToolCalls = yield* Ref.make(
+      new Set(
+        [...recoverable].flatMap(([key, recovery]) =>
+          recovery._tag === 'Indeterminate' ? [key] : [],
         ),
-        orDie,
-      );
+      ),
+    );
+    const toolSettled = new Map<string, Array<Effect.Effect<void>>>();
+    const signalCursor = yield* Ref.make(opened.signalCursor);
 
-      yield* Ref.set(signalCursor, page.cursor);
-
-      return page.records.flatMap(
-        (envelope): ReadonlyArray<Delivered> =>
-          envelope.record._tag === 'Signal'
-            ? [
-                {
-                  kind: envelope.record.kind,
-                  text: envelope.record.text,
-                  source: envelope.record.source,
-                  at: envelope.offset,
-                },
-              ]
-            : [],
-      );
-    });
-
-    const child = (options: ChildOptions): Effect.Effect<Session> =>
+    const readSignalPage = (
+      limit: number,
+    ): Effect.Effect<
+      { readonly page: LogStore.Page; readonly drain: SignalDrain },
+      LogStore.LogStoreError
+    > =>
       Effect.gen(function* () {
-        const childConversationId = childIdFor(
-          conversationId,
-          options.toolCallId,
-        );
-        const reference: ConversationRecord.Record = {
-          _tag: 'ChildSession',
-          toolCallId: options.toolCallId,
-          agent: options.agent,
-          parentConversationId: conversationId,
-          childConversationId,
-          depth: options.depth,
-        };
+        const after = yield* Ref.get(signalCursor);
+        const signalPath = AgentSignals.pathFor(conversationId);
 
-        yield* append([reference]);
-        const session = yield* openWith(store, childConversationId);
-        yield* session.append([reference]);
-        return session;
-      }).pipe(Effect.withSpan('AgentLog.Session.child'));
+        const page = yield* store.read(signalPath, { after, limit }).pipe(
+          // No stream at all is the ordinary case: nobody has ever signalled
+          // this conversation. It is not an empty page — the store
+          // distinguishes those deliberately — so it is caught here rather than
+          // by creating the stream from the reading side, which would leave an
+          // empty signal stream behind every run that was never steered.
+          Effect.catchIf(
+            (error) => error.reason === 'not_found',
+            () =>
+              Effect.succeed({
+                records: [],
+                cursor: after,
+                upToDate: true,
+              } satisfies LogStore.Page),
+          ),
+        );
+
+        const signals = page.records.flatMap(
+          (envelope): ReadonlyArray<Delivered> =>
+            envelope.record._tag === 'Signal'
+              ? [
+                  {
+                    kind: envelope.record.kind,
+                    text: envelope.record.text,
+                    source: envelope.record.source,
+                    at: envelope.offset,
+                  },
+                ]
+              : [],
+        );
+        return { page, drain: { signals, backlog: !page.upToDate } };
+      });
+
+    const drainSignalsBounded = (limit: number) =>
+      Effect.gen(function* () {
+        // Boundary persistence remains fatal: advancing the live conversation
+        // after a failed authoritative drain would diverge signal delivery.
+        const { page, drain } = yield* orDie(readSignalPage(limit));
+        yield* Ref.set(signalCursor, page.cursor);
+        return drain;
+      });
+
+    const signalPages = (
+      limit: number,
+    ): Stream.Stream<SignalDrain, LogStore.LogStoreError> =>
+      store
+        .changes(AgentSignals.pathFor(conversationId))
+        .pipe(
+          Stream.mapEffect(() =>
+            Effect.map(readSignalPage(limit), (result) => result.drain),
+          ),
+        );
+
+    const child = (
+      options: ChildOptions,
+    ): Effect.Effect<Session, CompatibilityError> =>
+      childLock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            const childConversationId = childIdFor(
+              conversationId,
+              options.toolCallId,
+            );
+            const reference: ConversationRecord.Record = {
+              _tag: 'ChildSession',
+              toolCallId: options.toolCallId,
+              agent: options.agent,
+              parentConversationId: conversationId,
+              childConversationId,
+              depth: options.depth,
+            };
+
+            yield* ensureChildReference(
+              conversationId,
+              yield* readAll(store, path),
+              reference,
+              append,
+            );
+            const session = yield* openWith(store, childConversationId, {
+              compatibility: {
+                agent: options.agent,
+                revision: options.revision,
+              },
+            });
+            yield* ensureChildReference(
+              childConversationId,
+              session.history,
+              reference,
+              session.append,
+            );
+            return session;
+          }),
+        )
+        .pipe(Effect.withSpan('AgentLog.Session.child'));
+
+    const meta = yield* orDie(store.meta(path));
+    const inheritedUsage = Option.isSome(meta)
+      ? (parseForkIdentity(meta.value.identity)?.inheritedUsage ?? {
+          input: 0,
+          output: 0,
+        })
+      : { input: 0, output: 0 };
+
+    const completed = yield* Ref.make(AgentHistory.completedFrom(history));
+    const latestTurn = yield* Ref.make<Stop.Usage | undefined>(
+      AgentHistory.latestTurnUsageFrom(history),
+    );
+    const previousTurn = yield* Ref.make<Stop.Usage>({ input: 0, output: 0 });
+    const compactedSinceTurn = yield* Ref.make(false);
+
+    const trackedAppend: Session['append'] = (records, timeoutMillis) =>
+      Effect.gen(function* () {
+        let persisted = records;
+        const settlement = records.find(
+          (record): record is ConversationRecord.RecordOf<'RunSettled'> =>
+            record._tag === 'RunSettled',
+        );
+        if (settlement !== undefined) {
+          const cursor = yield* Ref.get(signalCursor);
+          const state = resumeState(
+            options.compatibility,
+            addUsage(opened.usage, settlement.usage),
+            cursor,
+            yield* Ref.get(completed),
+            yield* Ref.get(latestTurn),
+          );
+          persisted = records.map((record) =>
+            record === settlement ? { ...settlement, resume: state } : record,
+          );
+        }
+
+        yield* append(persisted, timeoutMillis);
+        for (const record of records) {
+          if (record._tag === 'ToolStarted') {
+            recoverable.set(settledKey(record.name, record.id), {
+              _tag: 'Indeterminate',
+            });
+          } else if (record._tag === 'ToolOutcome') {
+            recoverable.set(settledKey(record.name, record.id), {
+              _tag: 'Settled',
+              outcome: record.outcome,
+              result: record.result,
+            });
+          }
+        }
+        yield* Effect.forEach(records, (record) =>
+          updateResumeState(
+            record,
+            completed,
+            latestTurn,
+            previousTurn,
+            compactedSinceTurn,
+          ),
+        );
+        yield* Effect.gen(function* () {
+          yield* Ref.update(pendingToolCalls, (current) => {
+            const next = new Set(current);
+            for (const record of records) {
+              if (record._tag === 'ToolStarted') {
+                next.add(settledKey(record.name, record.id));
+              } else if (record._tag === 'ToolOutcome') {
+                next.delete(settledKey(record.name, record.id));
+              }
+            }
+            return next;
+          });
+          for (const record of records) {
+            if (record._tag !== 'ToolOutcome') continue;
+            const key = settledKey(record.name, record.id);
+            const callbacks = toolSettled.get(key) ?? [];
+            toolSettled.delete(key);
+            yield* Effect.forEach(callbacks, (callback) => callback, {
+              discard: true,
+            });
+          }
+        });
+      });
 
     return {
+      [SessionTypeId]: SessionTypeId,
       conversationId,
+      compatibility: options.compatibility,
+      inheritedUsage,
+      usage: opened.usage,
+      latestTurnUsage: AgentHistory.latestTurnUsageFrom(history),
+      completed: AgentHistory.completedFrom(history),
+      settlementTimeoutMillis: SETTLEMENT_TIMEOUT_MILLIS,
+      recordingPolicy: RecordingPolicy.raw,
       history,
-      recorded: readAll(store, path),
-      append,
-      settled: (name, toolCallId) =>
+      recorded: readResumeHistory(store, path),
+      append: trackedAppend,
+      recovery: (name, toolCallId) =>
         Option.fromUndefinedOr(recoverable.get(settledKey(name, toolCallId))),
-      drainSignals,
+      indeterminateToolCalls: recovered.indeterminate,
+      recoveryCorruption: recovered.corruption,
+      hasPendingToolCalls: Effect.map(
+        Ref.get(pendingToolCalls),
+        (pending) => pending.size > 0,
+      ),
+      onToolSettled: (name, toolCallId, effect) => {
+        const key = settledKey(name, toolCallId);
+        toolSettled.set(key, [...(toolSettled.get(key) ?? []), effect]);
+      },
+      drainSignals: Effect.map(
+        drainSignalsBounded(1_000),
+        (page) => page.signals,
+      ),
+      drainSignalsBounded,
+      signalPages,
       child,
     } satisfies Session;
   });
+
+/** Attach a compiled persistence policy without changing the run's live values. */
+export const withRecordingPolicy = (
+  session: Session,
+  recordingPolicy: RecordingPolicy.Runtime,
+): Session => {
+  const append: Session['append'] = (records) =>
+    Effect.forEach(records, recordingPolicy.filter).pipe(
+      Effect.flatMap(session.append),
+    );
+  return {
+    ...session,
+    recordingPolicy,
+    append,
+    child: (options) =>
+      Effect.map(session.child(options), (child) =>
+        withRecordingPolicy(child, recordingPolicy),
+      ),
+  };
+};
 
 const readAll = (
   store: LogStore.Interface,
@@ -524,6 +946,385 @@ const readAll = (
 
     return all;
   });
+
+interface OpenState {
+  readonly history: ReadonlyArray<ConversationRecord.Envelope>;
+  readonly aggregateSuffix: ReadonlyArray<ConversationRecord.Envelope>;
+  readonly usage: Stop.Usage;
+  readonly signalCursor: LogOffset.Offset;
+}
+
+/** Read only the physical suffix needed to resume cumulative state. */
+const loadOpenState = (
+  store: LogStore.Interface,
+  path: string,
+): Effect.Effect<OpenState> =>
+  Effect.gen(function* () {
+    const aggregateSuffix = yield* readAggregateSuffix(store, path);
+    return {
+      history: yield* readResumeHistory(store, path),
+      aggregateSuffix,
+      usage: AgentHistory.usageFrom(aggregateSuffix),
+      signalCursor: deliveredThrough(aggregateSuffix),
+    };
+  });
+
+/** Read through the newest aggregate, or the full physical log when none exists. */
+const readAggregateSuffix = (
+  store: LogStore.Interface,
+  path: string,
+): Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>> =>
+  Effect.gen(function* () {
+    const newest: ConversationRecord.Envelope[] = [];
+    let before: LogOffset.Offset | undefined;
+    let done = false;
+    while (!done) {
+      const page = yield* orDie(
+        store.readBackwards(path, {
+          ...(before === undefined ? {} : { before }),
+          limit: RESUME_READ_LIMIT,
+        }),
+      );
+      for (const envelope of page.records) {
+        newest.push(envelope);
+        if (
+          envelope.record._tag === 'RunSettled' &&
+          envelope.record.resume !== undefined
+        ) {
+          done = true;
+          break;
+        }
+      }
+      if (done || page.upToDate) break;
+      before = page.cursor;
+    }
+    return newest.reverse();
+  });
+
+const mergeByOffset = (
+  left: ReadonlyArray<ConversationRecord.Envelope>,
+  right: ReadonlyArray<ConversationRecord.Envelope>,
+): ReadonlyArray<ConversationRecord.Envelope> => {
+  const retained = new Map(
+    left.map((envelope) => [envelope.offset, envelope] as const),
+  );
+  for (const envelope of right) retained.set(envelope.offset, envelope);
+  return [...retained.values()].sort((a, b) =>
+    a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0,
+  );
+};
+
+interface PersistedCompatibility {
+  readonly formatVersion?: number | undefined;
+  readonly agent?: string | undefined;
+  readonly agentRevision?: string | undefined;
+}
+
+/** Validate every retained durable definition identity against one authority. */
+const validateCompatibility = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+  expected: Compatibility,
+): Effect.Effect<void, CompatibilityError> => {
+  const identities: PersistedCompatibility[] = [];
+  for (const { record } of history) {
+    if (record._tag === 'RunStarted') {
+      identities.push({
+        formatVersion: record.formatVersion,
+        agent: record.agent,
+        agentRevision: record.agentRevision,
+      });
+    } else if (record._tag === 'Compacted') {
+      identities.push(record);
+    } else if (record._tag === 'RunSettled' && record.resume !== undefined) {
+      identities.push(record.resume);
+    }
+  }
+
+  // A newly-created stream, or a child stream containing only links/signals,
+  // has no definition identity to compare yet. Any actual conversation state
+  // without one is legacy history and must not be adopted silently.
+  if (identities.length === 0) {
+    const hasConversationState = history.some(({ record }) =>
+      record._tag === 'ChildSession' || record._tag === 'Signal' ? false : true,
+    );
+    return hasConversationState
+      ? Effect.fail(
+          compatibilityError(
+            expected,
+            {},
+            'history predates explicit compatibility metadata',
+          ),
+        )
+      : Effect.void;
+  }
+
+  for (const persisted of identities) {
+    const problem =
+      persisted.formatVersion === undefined ||
+      persisted.agentRevision === undefined ||
+      persisted.agent === undefined
+        ? 'history predates explicit compatibility metadata'
+        : persisted.formatVersion !== FORMAT_VERSION
+          ? `conversation format ${persisted.formatVersion} is unsupported; this release supports format ${FORMAT_VERSION}`
+          : persisted.agent !== expected.agent
+            ? `history contains contradictory agent "${persisted.agent}", not "${expected.agent}"`
+            : persisted.agentRevision !== expected.revision
+              ? `history contains contradictory revision "${persisted.agentRevision}", not "${expected.revision}"`
+              : undefined;
+    if (problem !== undefined) {
+      return Effect.fail(compatibilityError(expected, persisted, problem));
+    }
+  }
+  return Effect.void;
+};
+
+const validateCompatibilityInput = (
+  compatibility: Compatibility,
+): Effect.Effect<void, CompatibilityError> => {
+  const problem =
+    compatibility.agent.trim() === ''
+      ? 'agent name must be non-empty'
+      : compatibility.revision.trim() === ''
+        ? 'revision must be non-empty'
+        : undefined;
+  return problem === undefined
+    ? Effect.void
+    : Effect.fail(compatibilityError(compatibility, {}, problem));
+};
+
+/** An actionable error for incompatible durable history. */
+const compatibilityError = (
+  expected: Compatibility,
+  persisted: PersistedCompatibility,
+  problem: string,
+): CompatibilityError =>
+  new CompatibilityError({
+    message:
+      `Cannot resume durable conversation: ${problem}. ` +
+      'Use the matching agent definition or explicitly migrate the history and its compatibility metadata.',
+    expectedAgent: expected.agent,
+    expectedRevision: expected.revision,
+    ...(persisted.formatVersion === undefined
+      ? {}
+      : { persistedFormat: persisted.formatVersion }),
+    ...(persisted.agent === undefined
+      ? {}
+      : { persistedAgent: persisted.agent }),
+    ...(persisted.agentRevision === undefined
+      ? {}
+      : { persistedRevision: persisted.agentRevision }),
+  });
+
+/**
+ * Walk the active path backwards, jumping over abandoned branches and stopping
+ * once the latest compaction's kept boundary has been retained.
+ */
+const readResumeHistory = (
+  store: LogStore.Interface,
+  path: string,
+): Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>> =>
+  Effect.gen(function* () {
+    const newest: ConversationRecord.Envelope[] = [];
+    let before: LogOffset.Offset | undefined;
+    let boundary: LogOffset.Offset | undefined;
+    let done = false;
+
+    while (!done) {
+      const page = yield* orDie(
+        store.readBackwards(path, {
+          ...(before === undefined ? {} : { before }),
+          limit: RESUME_READ_LIMIT,
+        }),
+      );
+      let jumped = false;
+      for (const envelope of page.records) {
+        if (envelope.record._tag === 'BranchedFrom') {
+          if (
+            envelope.record.at === LogOffset.START ||
+            !LogOffset.isAfter(envelope.offset, envelope.record.at)
+          ) {
+            if (envelope.record.at === LogOffset.START) done = true;
+            continue;
+          }
+          before = yield* offsetAfter(envelope.record.at);
+          jumped = true;
+          break;
+        }
+
+        newest.push(envelope);
+        if (
+          boundary !== undefined &&
+          !LogOffset.isAfter(envelope.offset, boundary)
+        ) {
+          done = true;
+          break;
+        }
+        if (boundary === undefined && envelope.record._tag === 'Compacted') {
+          boundary = envelope.record.firstKept;
+          if (boundary === LogOffset.START) {
+            done = true;
+            break;
+          }
+        }
+      }
+      if (done) break;
+      if (jumped) continue;
+      if (page.upToDate) break;
+      before = page.cursor;
+    }
+    return newest.reverse();
+  });
+
+const RESUME_READ_LIMIT = 32;
+
+const offsetAfter = (
+  offset: LogOffset.Offset,
+): Effect.Effect<LogOffset.Offset> =>
+  LogOffset.toSeq(offset).pipe(
+    Effect.map((sequence) => LogOffset.fromSeq(sequence + 1n)),
+    Effect.orDie,
+  );
+
+const resumeState = (
+  compatibility: Compatibility,
+  usage: Stop.Usage,
+  signalCursor: LogOffset.Offset,
+  completed: ReturnType<typeof AgentHistory.completedFrom>,
+  latestTurnUsage: Stop.Usage | undefined,
+) => ({
+  formatVersion: FORMAT_VERSION,
+  agent: compatibility.agent,
+  agentRevision: compatibility.revision,
+  usage,
+  signalCursor,
+  ...(completed === undefined ? {} : { completed }),
+  ...(latestTurnUsage === undefined ? {} : { latestTurnUsage }),
+});
+
+const addUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
+  input: left.input + right.input,
+  output: left.output + right.output,
+});
+
+const updateResumeState = (
+  record: ConversationRecord.Record,
+  completed: Ref.Ref<ReturnType<typeof AgentHistory.completedFrom>>,
+  latestTurn: Ref.Ref<Stop.Usage | undefined>,
+  previousTurn: Ref.Ref<Stop.Usage>,
+  compactedSinceTurn: Ref.Ref<boolean>,
+): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    switch (record._tag) {
+      case 'RunStarted':
+        yield* Ref.set(completed, undefined);
+        yield* Ref.set(previousTurn, { input: 0, output: 0 });
+        break;
+      case 'Completed':
+        yield* Ref.set(completed, {
+          ...record,
+          outcome: record.outcome ?? 'success',
+        });
+        break;
+      case 'Compacted':
+        yield* Ref.set(compactedSinceTurn, true);
+        break;
+      case 'TurnFinished': {
+        const previous = yield* Ref.get(previousTurn);
+        const compacted = yield* Ref.get(compactedSinceTurn);
+        yield* Ref.set(
+          latestTurn,
+          compacted
+            ? undefined
+            : {
+                input: record.usage.input - previous.input,
+                output: record.usage.output - previous.output,
+              },
+        );
+        yield* Ref.set(previousTurn, record.usage);
+        yield* Ref.set(compactedSinceTurn, false);
+        break;
+      }
+      default:
+        break;
+    }
+  });
+
+const FORK_IDENTITY_PREFIX = '@sunfall/vesper-agent/fork/v1:';
+
+interface ForkIdentity {
+  readonly sourceConversationId: string;
+  readonly at: LogOffset.Offset;
+  readonly records: number;
+  readonly inheritedUsage: Stop.Usage;
+}
+
+const forkIdentity = (identity: ForkIdentity): string =>
+  `${FORK_IDENTITY_PREFIX}${JSON.stringify([
+    identity.sourceConversationId,
+    identity.at,
+    identity.records,
+    identity.inheritedUsage.input,
+    identity.inheritedUsage.output,
+  ])}`;
+
+const parseForkIdentity = (identity: string): ForkIdentity | undefined => {
+  if (!identity.startsWith(FORK_IDENTITY_PREFIX)) return undefined;
+  try {
+    const value: unknown = JSON.parse(
+      identity.slice(FORK_IDENTITY_PREFIX.length),
+    );
+    if (
+      !Array.isArray(value) ||
+      value.length !== 5 ||
+      typeof value[0] !== 'string' ||
+      typeof value[1] !== 'string' ||
+      typeof value[2] !== 'number' ||
+      typeof value[3] !== 'number' ||
+      typeof value[4] !== 'number'
+    ) {
+      return undefined;
+    }
+    return {
+      sourceConversationId: value[0],
+      at: LogOffset.Offset.make(value[1]),
+      records: value[2],
+      inheritedUsage: { input: value[3], output: value[4] },
+    };
+  } catch {
+    return undefined;
+  }
+};
+
+const ensureChildReference = (
+  conversationId: string,
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+  reference: ConversationRecord.RecordOf<'ChildSession'>,
+  append: Session['append'],
+): Effect.Effect<void> => {
+  const parentSide = conversationId === reference.parentConversationId;
+  const links = history.flatMap(({ record }) =>
+    record._tag === 'ChildSession' &&
+    (parentSide
+      ? record.parentConversationId === conversationId &&
+        record.toolCallId === reference.toolCallId
+      : record.childConversationId === conversationId)
+      ? [record]
+      : [],
+  );
+  if (
+    links.some((link) => JSON.stringify(link) === JSON.stringify(reference))
+  ) {
+    return Effect.void;
+  }
+  if (links.length > 0) {
+    return Effect.die(
+      new Error(
+        `Conversation ${conversationId} has a conflicting child-session link for tool call ${reference.toolCallId}`,
+      ),
+    );
+  }
+  return append([reference]);
+};
 
 /**
  * Copy an ancestor's prefix into a freshly claimed stream.
@@ -545,7 +1346,25 @@ const seedInto = (
 ): Effect.Effect<void> =>
   Effect.gen(function* () {
     const reseated = new Map<LogOffset.Offset, LogOffset.Offset>();
-    const sources: Array<LogOffset.Offset> = [];
+    let written = yield* recorded;
+    if (written.length > prefix.length) {
+      return yield* Effect.die(
+        new Error('Fork destination contains records beyond its seed prefix'),
+      );
+    }
+
+    for (let index = 0; index < written.length; index += 1) {
+      const source = prefix[index]!;
+      const expected = reseat(source.record, reseated);
+      if (JSON.stringify(written[index]!.record) !== JSON.stringify(expected)) {
+        return yield* Effect.die(
+          new Error(`Fork destination seed differs at record ${index}`),
+        );
+      }
+      reseated.set(source.offset, written[index]!.offset);
+    }
+
+    let copied = written.length;
     let pending: Array<ConversationRecord.Record> = [];
 
     const flush = Effect.gen(function* () {
@@ -553,14 +1372,15 @@ const seedInto = (
       yield* append(pending);
       pending = [];
 
-      const written = yield* recorded;
-      written.forEach((envelope, index) => {
-        const source = sources[index];
-        if (source !== undefined) reseated.set(source, envelope.offset);
-      });
+      written = yield* recorded;
+      while (copied < written.length) {
+        reseated.set(prefix[copied]!.offset, written[copied]!.offset);
+        copied += 1;
+      }
     });
 
-    for (const { offset, record } of prefix) {
+    for (let index = written.length; index < prefix.length; index += 1) {
+      const { record } = prefix[index]!;
       // Flushed *before* any record whose pointer is rewritten through the
       // map, so that the offsets it may name are in it. `Compacted` is the
       // only such case today, and {@link reseat} is the tripwire: adding a
@@ -569,7 +1389,6 @@ const seedInto = (
       if (record._tag === 'Compacted') yield* flush;
 
       pending.push(reseat(record, reseated));
-      sources.push(offset);
     }
 
     yield* flush;
@@ -608,16 +1427,24 @@ const reseat = (
       // corresponds to one in the ancestor's. See {@link fork}.
       return { ...record, at: LogOffset.START };
 
+    case 'RunSettled':
+      return record.resume === undefined
+        ? record
+        : {
+            ...record,
+            resume: { ...record.resume, signalCursor: LogOffset.START },
+          };
+
     case 'RunStarted':
     case 'Text':
     case 'ToolCall':
+    case 'ToolStarted':
     case 'ToolOutcome':
     case 'TurnFinished':
     case 'BranchedFrom':
     case 'Completed':
     case 'ChildSession':
     case 'Signal':
-    case 'RunSettled':
       return record;
 
     default: {
@@ -646,13 +1473,13 @@ const settledKey = (name: string, toolCallId: string): string =>
   `${name}\u001f${toolCallId}`;
 
 /**
- * Tool outcomes belonging to a run that started and never settled.
+ * Tool states belonging to runs that started and never settled.
  *
- * The gate on resuming dispatch, and the reason `RunSettled` exists. Both
- * `RunStarted` and `RunSettled` clear the map, so what survives the scan is
- * exactly the outcomes recorded after the last `RunStarted` when no
- * `RunSettled` followed it — a crash. A conversation whose last run finished
- * yields an empty map, and dispatch behaves as it always did.
+ * The gate on resuming dispatch, and the reason `RunSettled` exists.
+ * `RunSettled` clears the map. A later `RunStarted` does not: recovery attempts
+ * may themselves crash before reconciling the earlier start, and forgetting it
+ * would turn the next attempt into an implicit redispatch. A conversation whose
+ * last run finished yields an empty map, and dispatch behaves as it always did.
  *
  * Given the **active path**, not the log. A crashed run the conversation has
  * since branched away from is not a run this one is recovering; its outcomes
@@ -661,25 +1488,59 @@ const settledKey = (name: string, toolCallId: string): string =>
  * filters rather than this function, so that the two full-log folds nearby are
  * visibly a different decision and not an omission.
  */
-const unsettledOutcomes = (
+const unsettledTools = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
-): ReadonlyMap<string, Settled> => {
-  const outcomes = new Map<string, Settled>();
+): {
+  readonly recoveries: Map<string, Recovery>;
+  readonly indeterminate: ReadonlyArray<IndeterminateToolCall>;
+  readonly corruption: string | undefined;
+} => {
+  const recoveries = new Map<string, Recovery>();
+  const calls = new Map<string, IndeterminateToolCall>();
+  const starts = new Map<
+    string,
+    { readonly name: string; readonly id: string }
+  >();
+  const order: string[] = [];
   let running = false;
 
   for (const { record } of history) {
     switch (record._tag) {
       case 'RunStarted':
-        outcomes.clear();
         running = true;
         break;
       case 'RunSettled':
-        outcomes.clear();
+        recoveries.clear();
+        calls.clear();
+        starts.clear();
+        order.length = 0;
         running = false;
+        break;
+      case 'ToolCall':
+        if (running) {
+          const key = settledKey(record.name, record.id);
+          if (!calls.has(key)) order.push(key);
+          calls.set(key, {
+            step: record.step,
+            name: record.name,
+            toolCallId: record.id,
+            params: record.params,
+          });
+        }
+        break;
+      case 'ToolStarted':
+        if (running) {
+          const key = settledKey(record.name, record.id);
+          recoveries.set(key, {
+            _tag: 'Indeterminate',
+          });
+          starts.set(key, { name: record.name, id: record.id });
+        }
         break;
       case 'ToolOutcome':
         if (running) {
-          outcomes.set(settledKey(record.name, record.id), {
+          recoveries.set(settledKey(record.name, record.id), {
+            _tag: 'Settled',
             outcome: record.outcome,
             result: record.result,
           });
@@ -690,7 +1551,26 @@ const unsettledOutcomes = (
     }
   }
 
-  return outcomes;
+  // Dispatch commits before entering the handler, while ToolCall arrives via
+  // the provider event stream. Either record can therefore win the append
+  // race. Diagnose corruption only after the complete orphan suffix is folded.
+  const unmatched = [...starts].find(
+    ([key]) => recoveries.get(key)?._tag === 'Indeterminate' && !calls.has(key),
+  )?.[1];
+
+  return {
+    recoveries,
+    corruption:
+      unmatched === undefined
+        ? undefined
+        : `Cannot recover indeterminate tool ${unmatched.name} (${unmatched.id}): ` +
+          'durable ToolStarted has no matching ToolCall',
+    indeterminate: order.flatMap((key) =>
+      recoveries.get(key)?._tag === 'Indeterminate' && calls.has(key)
+        ? [calls.get(key)!]
+        : [],
+    ),
+  };
 };
 
 /**
@@ -714,6 +1594,13 @@ const deliveredThrough = (
     if (record._tag === 'SignalReceived' && LogOffset.isAfter(record.at, at)) {
       at = record.at;
     }
+    if (
+      record._tag === 'RunSettled' &&
+      record.resume !== undefined &&
+      LogOffset.isAfter(record.resume.signalCursor, at)
+    ) {
+      at = record.resume.signalCursor;
+    }
   }
   return at;
 };
@@ -721,9 +1608,27 @@ const deliveredThrough = (
 export interface Options {
   /** Agent name, written into `RunStarted`. */
   readonly agent: string;
+  readonly revision: string;
   /** The run's input, written into `RunStarted` as prompt messages. */
   readonly input: Prompt.RawInput;
 }
+
+/** Persist the effective input before any event from the run can escape. */
+export const start = (
+  session: Session,
+  options: Options,
+): Effect.Effect<void> =>
+  session.append([
+    {
+      _tag: 'RunStarted',
+      agent: options.agent,
+      agentRevision: options.revision,
+      formatVersion: FORMAT_VERSION,
+      // `beforeTurn` has already run when this is called. Persisting here is
+      // what makes reconstruction use the same input the provider saw.
+      prompt: Prompt.make(options.input).content,
+    },
+  ]);
 
 /**
  * Record a run's events into the session's conversation.
@@ -742,22 +1647,10 @@ export interface Options {
  */
 export const record = <Tools extends Record<string, Tool.Any>, E, R>(
   session: Session,
-  options: Options,
   events: Stream.Stream<AgentEvents.Event<Tools>, E, R>,
 ): Stream.Stream<AgentEvents.Event<Tools>, E, R> =>
   Stream.unwrap(
-    Effect.gen(function* () {
-      yield* session.append([
-        {
-          _tag: 'RunStarted',
-          agent: options.agent,
-          // Messages rather than the raw input: `RawInput` is a string, a
-          // `Prompt`, or an array of messages, and a reader should not have
-          // to re-implement that normalisation to find out what was asked.
-          prompt: Prompt.make(options.input).content,
-        },
-      ]);
-
+    Effect.sync(() => {
       const pending: Pending = {
         step: 0,
         text: '',
@@ -809,6 +1702,9 @@ const compaction = (
     yield* session.append([
       {
         _tag: 'Compacted',
+        formatVersion: FORMAT_VERSION,
+        agent: session.compatibility.agent,
+        agentRevision: session.compatibility.revision,
         step: event.step,
         summary: event.summary,
         firstKept: AgentHistory.boundaryFor(recorded, event.keptMessages),
@@ -818,11 +1714,15 @@ const compaction = (
     ]);
   });
 
+/** Maximum time run teardown waits for the settlement append. */
+export const SETTLEMENT_TIMEOUT_MILLIS = 5_000;
+
 /**
  * Write down how the run ended, including the ways that end no stream.
  *
- * Uninterruptible, because the interesting case is an interrupted run and a
- * finalizer that is itself interrupted records nothing about it.
+ * Teardown is uninterruptible, but the backend operation and the wait for its
+ * serialization permit are interruptible and bounded. Timing out
+ * intentionally leaves the orphan shape below.
  *
  * Failures here are swallowed after being logged, which is the opposite of
  * every other write in this file and is the only defensible option. There is
@@ -831,7 +1731,8 @@ const compaction = (
  * replace whatever actually went wrong with a complaint about the log. What
  * it leaves behind is a `RunStarted` with no `RunSettled` — which is exactly
  * the orphan shape a reader is told to look for, and which the resuming
- * dispatch treats conservatively by re-offering that run's tool outcomes.
+ * dispatch treats conservatively by serving completed outcomes and refusing
+ * to guess about indeterminate starts.
  */
 const settle = (
   session: Session,
@@ -846,14 +1747,32 @@ const settle = (
       usage: pending.usage,
     };
 
-    return session.append([settlement]).pipe(
+    const write = Effect.flatMap(session.hasPendingToolCalls, (pending) =>
+      pending
+        ? Effect.logError(
+            `Conversation ${session.conversationId} has indeterminate tool execution; leaving the run orphaned`,
+          )
+        : session.append([settlement], session.settlementTimeoutMillis),
+    ).pipe(
       Effect.catchCause((cause) =>
         Effect.logError(
           `Conversation ${session.conversationId} could not record how its run settled`,
           cause,
         ),
       ),
-      Effect.uninterruptible,
+    );
+
+    return Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const completed = yield* restore(write).pipe(
+          Effect.timeoutOption(session.settlementTimeoutMillis),
+        );
+        if (Option.isNone(completed)) {
+          yield* Effect.logError(
+            `Conversation ${session.conversationId} settlement append timed out after ${session.settlementTimeoutMillis}ms; leaving the run orphaned`,
+          );
+        }
+      }),
     );
   });
 
@@ -942,6 +1861,22 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
           at: LogOffset.Offset.make(event.at),
         },
       ];
+    case 'SignalRejected':
+      return [
+        ...flush(pending),
+        {
+          _tag: 'SignalReceived',
+          kind: event.kind,
+          text: event.text,
+          source: event.source,
+          step: event.step,
+          at: LogOffset.Offset.make(event.at),
+          disposition: 'rejected',
+          reason: event.reason,
+        },
+      ];
+    case 'SignalBacklog':
+      return [];
     case 'Completed':
       pending.completed = true;
       pending.steps = event.steps;
@@ -950,6 +1885,7 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
         ...flush(pending),
         {
           _tag: 'Completed',
+          outcome: event.outcome,
           text: event.text,
           steps: event.steps,
           usage: event.usage,

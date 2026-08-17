@@ -150,6 +150,9 @@ const main = async () => {
     concurrency,
   );
 
+  process.stdout.write('\n== packed consumer ==\n');
+  await run('packed-consumer preflight', 'preflight:pack:built');
+
   process.stdout.write('\n== tests ==\n');
   await run('workspace tests', 'test');
 };

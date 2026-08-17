@@ -18,10 +18,6 @@ const alias = {
     './packages/agent/src/context-window.ts',
     import.meta.url,
   ).pathname,
-  '@sunfall/vesper-agent/dispatch': new URL(
-    './packages/agent/src/dispatch.ts',
-    import.meta.url,
-  ).pathname,
   '@sunfall/vesper-agent/event': new URL(
     './packages/agent/src/event.ts',
     import.meta.url,
@@ -36,6 +32,14 @@ const alias = {
   ).pathname,
   '@sunfall/vesper-agent/log': new URL(
     './packages/agent/src/log.ts',
+    import.meta.url,
+  ).pathname,
+  '@sunfall/vesper-agent/recording-policy': new URL(
+    './packages/agent/src/recording-policy.ts',
+    import.meta.url,
+  ).pathname,
+  '@sunfall/vesper-agent/run-policy': new URL(
+    './packages/agent/src/run-policy.ts',
     import.meta.url,
   ).pathname,
   '@sunfall/vesper-agent/signal': new URL(
@@ -84,38 +88,6 @@ const alias = {
   ).pathname,
   '@sunfall/vesper-log/layer-pg': new URL(
     './packages/log/src/layer-pg.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/compaction': new URL(
-    './packages/pi/src/compaction.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/credentials': new URL(
-    './packages/pi/src/credentials.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/errors': new URL(
-    './packages/pi/src/errors.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/model': new URL(
-    './packages/pi/src/model.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/provider': new URL(
-    './packages/pi/src/provider.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/registry': new URL(
-    './packages/pi/src/registry.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-pi/retry': new URL(
-    './packages/pi/src/retry.ts',
-    import.meta.url,
-  ).pathname,
-  '@sunfall/vesper-runtime/runtime': new URL(
-    './packages/runtime/src/runtime.ts',
     import.meta.url,
   ).pathname,
   '@sunfall/vesper-workspace/driver': new URL(
@@ -170,7 +142,7 @@ export default defineConfig({
     name: 'vesper',
     globals: true,
     environment: 'node',
-    include: ['packages/*/test/**/*.test.ts'],
+    include: ['packages/*/test/**/*.test.ts', 'examples/*/src/**/*.test.ts'],
     // The Postgres suite provisions and drops a real database in
     // beforeAll/afterAll. Vitest's 10s hook default is not enough for that
     // under parallel load, and afterAll hooks rarely pass their own timeout.

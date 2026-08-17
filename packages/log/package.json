@@ -22,9 +22,13 @@
   },
   "files": [
     "dist",
+    "migrations",
     "LICENSE"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "sideEffects": false,
   "exports": {
     "./offset": {
@@ -54,7 +58,8 @@
     "./layer-pg": {
       "types": "./dist/layer-pg.d.ts",
       "default": "./dist/layer-pg.js"
-    }
+    },
+    "./migrations/001-initial.sql": "./migrations/001-initial.sql"
   },
   "publishConfig": {
     "access": "public"
@@ -63,7 +68,17 @@
     "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
-  "dependencies": {
-    "effect": "^4.0.0-beta.103"
+  "peerDependencies": {
+    "effect": "4.0.0-rc.109",
+    "vitest": ">=4.1.9 <5"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "effect": "4.0.0-rc.109",
+    "vitest": "^4.1.9"
   }
 }

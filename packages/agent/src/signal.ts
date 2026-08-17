@@ -71,34 +71,45 @@ export interface Signal {
  *
  * A signal sent while nothing is running is not lost. The next run resumes
  * draining from where its conversation says delivery got to, so a steer
- * queued in advance is delivered at that run's first turn boundary.
+ * queued in advance is delivered by the next run. A valid queued cancel may
+ * stop its first provider call before it begins; its durable acknowledgement
+ * still occurs through the ordinary first-turn boundary drain.
  */
 export const send = Effect.fn('AgentSignals.send')(function* (
   conversationId: string,
   signal: Signal,
 ) {
   const store = yield* LogStore.Service;
+  yield* append(store, conversationId, { _tag: 'Signal', ...signal });
+});
+
+const append = (
+  store: LogStore.Interface,
+  conversationId: string,
+  record: ConversationRecord.RecordOf<'Signal'>,
+): Effect.Effect<void, LogStore.LogStoreError> => {
   const path = pathFor(conversationId);
 
-  yield* store.create(path, conversationId).pipe(
-    Effect.asVoid,
-    Effect.catchIf(
-      (error) => error.reason === 'conflict',
-      () => Effect.void,
-    ),
-  );
+  return Effect.gen(function* () {
+    yield* store.create(path, conversationId).pipe(
+      Effect.asVoid,
+      Effect.catchIf(
+        (error) => error.reason === 'conflict',
+        () => Effect.void,
+      ),
+    );
 
-  const claim = yield* store.acquire(path, crypto.randomUUID());
-  const timestamp = yield* Clock.currentTimeMillis;
-  const record: ConversationRecord.Record = { _tag: 'Signal', ...signal };
+    const claim = yield* store.acquire(path, crypto.randomUUID());
+    const timestamp = yield* Clock.currentTimeMillis;
 
-  yield* store.append({
-    path,
-    producerId: claim.producerId,
-    epoch: claim.epoch,
-    sequence: claim.nextSequence,
-    records: [{ conversationId, timestamp, record }],
+    yield* store.append({
+      path,
+      producerId: claim.producerId,
+      epoch: claim.epoch,
+      sequence: claim.nextSequence,
+      records: [{ conversationId, timestamp, record }],
+    });
   });
-});
+};
 
 export * as AgentSignals from './signal.js';

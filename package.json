@@ -12,6 +12,9 @@
     "url": "git+https://github.com/sunfall-labs/vesper.git"
   },
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "nub run -r --filter './packages/*' build",
     "benchmark": "nub run --filter @sunfall/vesper-benchmarks bench",
@@ -25,25 +28,52 @@
     "lint": "oxlint . --deny-warnings --no-error-on-unmatched-pattern",
     "lint:fix": "oxlint . --fix --no-error-on-unmatched-pattern",
     "publish:npm": "node scripts/publish-npm.mjs",
+    "preflight:pack": "node scripts/preflight-packages.mjs",
+    "preflight:pack:built": "node scripts/preflight-packages.mjs --skip-build",
     "verify": "node scripts/verify.mjs",
     "verify:serial": "node scripts/verify.mjs --concurrency=1"
   },
-  "dependencies": {
-    "effect": "4.0.0-beta.103"
-  },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.80.2",
-    "@earendil-works/pi-ai": "0.80.2",
-    "@effect/platform-node": "4.0.0-beta.103",
+    "@effect/ai-anthropic": "4.0.0-rc.109",
+    "@effect/ai-openai": "4.0.0-rc.109",
+    "@effect/platform-node": "4.0.0-rc.109",
     "@nubjs/nub": "0.7.5",
     "@testcontainers/postgresql": "^11.14.0",
-    "@types/node": "^25.7.0",
+    "@types/node": "^24.0.0",
     "@types/pg": "^8.20.0",
     "@typescript/native-preview": "7.0.0-dev.20260513.1",
+    "effect": "4.0.0-rc.109",
     "oxfmt": "0.55.0",
     "oxlint": "1.75.0",
     "pg": "8.20.0",
     "typescript": "^5.9.3",
     "vitest": "^4.1.9"
+  },
+  "devEngines": {
+    "packageManager": {
+      "name": "nub",
+      "version": "^0.7.5",
+      "onFail": "ignore"
+    }
+  },
+  "workspaces": [
+    "packages/*",
+    "examples/*",
+    "benchmarks"
+  ],
+  "overrides": {
+    "@effect/platform-node": {
+      "@effect/platform-node-shared": "4.0.0-rc.109"
+    },
+    "effect": "4.0.0-rc.109"
+  },
+  "allowBuilds": {
+    "esbuild": true,
+    "@nubjs/nub": false,
+    "@google/genai": false,
+    "cpu-features": false,
+    "msgpackr-extract": false,
+    "protobufjs": false,
+    "ssh2": false
   }
 }

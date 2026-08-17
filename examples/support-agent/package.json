@@ -1,0 +1,15 @@
+{
+  "name": "@sunfall/vesper-example-support-agent",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "A compiled support-agent composition demonstrating tools, requirements, subagents, skills, and stop conditions.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@sunfall/vesper-agent": "workspace:*",
+    "effect": "4.0.0-rc.109"
+  }
+}

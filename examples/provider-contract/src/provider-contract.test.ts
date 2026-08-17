@@ -1,0 +1,497 @@
+import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
+import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { Compaction } from '@sunfall/vesper-agent/compaction';
+import { Effect, Layer, Schema, Stream } from 'effect';
+import { Tool, Toolkit, type AiError } from 'effect/unstable/ai';
+import {
+  HttpClient,
+  HttpClientError,
+  HttpClientResponse,
+  type HttpClientRequest,
+} from 'effect/unstable/http';
+import { describe, expect, it } from 'vitest';
+
+type Reply =
+  | {
+      readonly status: number;
+      readonly body: string;
+      readonly headers?: Readonly<Record<string, string>>;
+    }
+  | { readonly transport: string };
+
+const decoder = new TextDecoder();
+
+const requestJson = (request: HttpClientRequest.HttpClientRequest): unknown => {
+  if (request.body._tag !== 'Uint8Array') return undefined;
+  return JSON.parse(decoder.decode(request.body.body));
+};
+
+const fakeHttp = (replies: ReadonlyArray<Reply>) => {
+  const requests: HttpClientRequest.HttpClientRequest[] = [];
+  let index = 0;
+  const client = HttpClient.make((request) =>
+    Effect.suspend(() => {
+      requests.push(request);
+      const reply = replies[Math.min(index++, replies.length - 1)]!;
+      if ('transport' in reply) {
+        return Effect.fail(
+          new HttpClientError.HttpClientError({
+            reason: new HttpClientError.TransportError({
+              request,
+              description: reply.transport,
+            }),
+          }),
+        );
+      }
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(
+          request,
+          new Response(reply.body, {
+            status: reply.status,
+            ...(reply.headers === undefined ? {} : { headers: reply.headers }),
+          }),
+        ),
+      );
+    }),
+  );
+  return { requests, layer: Layer.succeed(HttpClient.HttpClient, client) };
+};
+
+const sse = (...events: ReadonlyArray<unknown>): string =>
+  events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join('');
+
+const anthropicMessage = {
+  id: 'msg_fixture',
+  type: 'message',
+  role: 'assistant',
+  content: [],
+  model: 'claude-fixture',
+  stop_reason: null,
+  stop_sequence: null,
+  usage: {
+    cache_creation: null,
+    cache_creation_input_tokens: 3,
+    cache_read_input_tokens: 5,
+    inference_geo: null,
+    input_tokens: 11,
+    output_tokens: 0,
+    service_tier: 'standard',
+  },
+} as const;
+
+const anthropicSuccess = sse(
+  { type: 'message_start', message: anthropicMessage },
+  {
+    type: 'content_block_start',
+    index: 0,
+    content_block: { type: 'text', text: '' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'text_delta', text: 'hel' },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'text_delta', text: 'lo' },
+  },
+  { type: 'content_block_stop', index: 0 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'end_turn', stop_sequence: null },
+    usage: {
+      cache_creation_input_tokens: 3,
+      cache_read_input_tokens: 5,
+      input_tokens: 11,
+      output_tokens: 7,
+    },
+  },
+  { type: 'message_stop' },
+);
+
+const openAiResponse = {
+  id: 'resp_fixture',
+  object: 'response',
+  model: 'gpt-fixture',
+  created_at: 1_700_000_000,
+  output: [],
+  usage: {
+    input_tokens: 17,
+    output_tokens: 9,
+    total_tokens: 26,
+    input_tokens_details: { cached_tokens: 4 },
+    output_tokens_details: { reasoning_tokens: 2 },
+  },
+  error: null,
+  incomplete_details: null,
+} as const;
+
+const openAiSuccess = sse(
+  { type: 'response.created', response: openAiResponse, sequence_number: 0 },
+  {
+    type: 'response.output_item.added',
+    output_index: 0,
+    sequence_number: 1,
+    item: {
+      id: 'item_fixture',
+      type: 'message',
+      role: 'assistant',
+      content: [],
+      status: 'in_progress',
+    },
+  },
+  {
+    type: 'response.output_text.delta',
+    item_id: 'item_fixture',
+    output_index: 0,
+    content_index: 0,
+    delta: 'wor',
+    sequence_number: 2,
+  },
+  {
+    type: 'response.output_text.delta',
+    item_id: 'item_fixture',
+    output_index: 0,
+    content_index: 0,
+    delta: 'ld',
+    sequence_number: 3,
+  },
+  {
+    type: 'response.output_item.done',
+    output_index: 0,
+    sequence_number: 4,
+    item: {
+      id: 'item_fixture',
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'world', annotations: [] }],
+      status: 'completed',
+    },
+  },
+  { type: 'response.completed', response: openAiResponse, sequence_number: 5 },
+);
+
+const lookup = Tool.make('lookup', {
+  description: 'look up a deterministic value',
+  parameters: Schema.Struct({ key: Schema.String }),
+  success: Schema.Struct({ value: Schema.String }),
+});
+const toolkit = Toolkit.make(lookup);
+const handlers = toolkit.toLayer({
+  lookup: ({ key }) => Effect.succeed({ value: key }),
+});
+const agent = Agent.make({
+  name: 'provider-contract',
+  revision: '1',
+  instructions: 'Answer using the lookup tool when needed.',
+  toolkit,
+  compaction: false,
+});
+
+const anthropicLayer = (
+  http: Layer.Layer<HttpClient.HttpClient>,
+  transformClient?: (client: HttpClient.HttpClient) => HttpClient.HttpClient,
+) =>
+  AnthropicLanguageModel.model('claude-fixture', { max_tokens: 64 }).pipe(
+    Layer.provide(
+      AnthropicClient.layer({
+        apiUrl: 'https://anthropic.invalid',
+        transformClient,
+      }),
+    ),
+    Layer.provide(http),
+  );
+
+const openAiLayer = (
+  http: Layer.Layer<HttpClient.HttpClient>,
+  transformClient?: (client: HttpClient.HttpClient) => HttpClient.HttpClient,
+) =>
+  OpenAiLanguageModel.model('gpt-fixture', { max_output_tokens: 64 }).pipe(
+    Layer.provide(
+      OpenAiClient.layer({
+        apiUrl: 'https://openai.invalid/v1',
+        transformClient,
+      }),
+    ),
+    Layer.provide(http),
+  );
+
+const runAgent = (model: Layer.Layer<any, any, never>) =>
+  agent
+    .stream('Find sun')
+    .pipe(
+      Stream.runCollect,
+      Effect.provide(Layer.merge(model, handlers)),
+      Effect.orDie,
+      Effect.runPromise,
+    );
+
+const failureOf = async (
+  model: Layer.Layer<any, any, never>,
+): Promise<AiError.AiError> => {
+  const result = await Effect.runPromise(
+    agent
+      .stream('overflow')
+      .pipe(
+        Stream.runDrain,
+        Effect.provide(Layer.merge(model, handlers)),
+        Effect.result,
+      ),
+  );
+  if (result._tag === 'Success') throw new Error('expected provider failure');
+  return result.failure;
+};
+
+const textAndCompleted = (
+  events: Iterable<{ readonly _tag: string; readonly [key: string]: unknown }>,
+) => {
+  let text = '';
+  let completed: unknown;
+  for (const event of events) {
+    if (event._tag === 'Part') {
+      const part = event.part as {
+        readonly type: string;
+        readonly delta?: string;
+      };
+      if (part.type === 'text-delta') text += part.delta;
+    }
+    if (event._tag === 'Completed') completed = event;
+  }
+  return { text, completed };
+};
+
+describe('official Effect provider seam', () => {
+  it('runs Anthropic request conversion and SSE parsing through one Vesper turn', async () => {
+    const fake = fakeHttp([{ status: 200, body: anthropicSuccess }]);
+    const events = await runAgent(anthropicLayer(fake.layer));
+    const observed = textAndCompleted(events);
+    const request = fake.requests[0]!;
+    const body = requestJson(request) as Record<string, unknown>;
+
+    expect(request.url).toBe('https://anthropic.invalid/v1/messages');
+    expect(body).toMatchObject({
+      model: 'claude-fixture',
+      max_tokens: 64,
+      stream: true,
+      system: [
+        { type: 'text', text: 'Answer using the lookup tool when needed.' },
+      ],
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'Find sun' }] },
+      ],
+      tools: [{ name: 'lookup', description: 'look up a deterministic value' }],
+    });
+    expect(observed.text).toBe('hello');
+    expect(observed.completed).toMatchObject({
+      usage: { input: 19, output: 7 },
+    });
+  });
+
+  it('runs OpenAI request conversion and SSE parsing through one Vesper turn', async () => {
+    const fake = fakeHttp([{ status: 200, body: openAiSuccess }]);
+    const events = await runAgent(openAiLayer(fake.layer));
+    const observed = textAndCompleted(events);
+    const request = fake.requests[0]!;
+    const body = requestJson(request) as Record<string, unknown>;
+
+    expect(request.url).toBe('https://openai.invalid/v1/responses');
+    expect(body).toMatchObject({
+      model: 'gpt-fixture',
+      max_output_tokens: 64,
+      stream: true,
+      input: [
+        {
+          role: 'system',
+          content: [
+            {
+              type: 'input_text',
+              text: 'Answer using the lookup tool when needed.',
+            },
+          ],
+        },
+        { role: 'user', content: [{ type: 'input_text', text: 'Find sun' }] },
+      ],
+      tools: [
+        {
+          type: 'function',
+          name: 'lookup',
+          description: 'look up a deterministic value',
+        },
+      ],
+    });
+    expect(observed.text).toBe('world');
+    expect(observed.completed).toMatchObject({
+      usage: { input: 17, output: 9 },
+    });
+  });
+
+  it.each([
+    [
+      'Anthropic',
+      anthropicLayer,
+      {
+        type: 'error',
+        error: { type: 'invalid_request_error', message: 'prompt is too long' },
+      },
+    ],
+    [
+      'OpenAI',
+      openAiLayer,
+      {
+        error: {
+          message: 'maximum context length exceeded',
+          type: 'invalid_request_error',
+          code: 'context_length_exceeded',
+        },
+      },
+    ],
+  ] as const)(
+    'recognizes a real %s client overflow error but not an unrelated 400',
+    async (_name, makeLayer, overflowBody) => {
+      const overflow = fakeHttp([
+        { status: 400, body: JSON.stringify(overflowBody) },
+      ]);
+      const overflowError = await failureOf(makeLayer(overflow.layer));
+      expect(overflowError.reason._tag).toBe('InvalidRequestError');
+      expect(Compaction.isContextOverflow(overflowError)).toBe(true);
+
+      const other = fakeHttp([
+        {
+          status: 400,
+          body: JSON.stringify(
+            'type' in overflowBody
+              ? {
+                  type: 'error',
+                  error: {
+                    type: 'invalid_request_error',
+                    message: 'tool schema is invalid',
+                  },
+                }
+              : {
+                  error: {
+                    message: 'tool schema is invalid',
+                    type: 'invalid_request_error',
+                    code: 'invalid_tool',
+                  },
+                },
+          ),
+        },
+      ]);
+      expect(
+        Compaction.isContextOverflow(await failureOf(makeLayer(other.layer))),
+      ).toBe(false);
+      expect(other.requests).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    [
+      'Anthropic',
+      anthropicLayer,
+      sse({
+        type: 'error',
+        error: { type: 'overloaded_error', message: 'capacity exhausted' },
+        request_id: 'req_anthropic',
+      }),
+      'overloaded_error',
+      'type',
+      'req_anthropic',
+    ],
+    [
+      'OpenAI',
+      openAiLayer,
+      sse({
+        type: 'error',
+        code: 'server_error',
+        message: 'capacity exhausted',
+        param: null,
+        sequence_number: 0,
+        status: 500,
+      }),
+      'server_error',
+      'code',
+      undefined,
+    ],
+  ] as const)(
+    'preserves %s in-band structured error details',
+    async (_name, makeLayer, body, code, codeField, requestId) => {
+      const fake = fakeHttp([{ status: 200, body }]);
+      const error = await failureOf(makeLayer(fake.layer));
+      expect(error.reason._tag).toBe('UnknownError');
+      if (error.reason._tag !== 'UnknownError')
+        throw new Error('expected normalized provider error');
+      expect(error.reason.description).toContain(code);
+      expect(error.reason.description).toContain('capacity exhausted');
+      expect(error.reason.description).not.toContain('[object Object]');
+      expect(error.reason.metadata).toMatchObject({ [codeField]: code });
+      if (requestId !== undefined) {
+        expect(error.reason.metadata).toMatchObject({
+          anthropic: { requestId },
+        });
+      }
+    },
+  );
+
+  it('retries one Anthropic 429 response below SSE parsing without duplicate output', async () => {
+    const fake = fakeHttp([
+      {
+        status: 429,
+        body: JSON.stringify({
+          type: 'error',
+          error: { type: 'rate_limit_error', message: 'slow down' },
+        }),
+      },
+      { status: 200, body: anthropicSuccess },
+    ]);
+    const events = await runAgent(
+      anthropicLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
+    );
+    expect(fake.requests).toHaveLength(2);
+    expect(textAndCompleted(events).text).toBe('hello');
+  });
+
+  it('retries one OpenAI transport error below SSE parsing without duplicate output', async () => {
+    const fake = fakeHttp([
+      { transport: 'connection reset' },
+      { status: 200, body: openAiSuccess },
+    ]);
+    const events = await runAgent(
+      openAiLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
+    );
+    expect(fake.requests).toHaveLength(2);
+    expect(textAndCompleted(events).text).toBe('world');
+  });
+
+  it.each([
+    [
+      'Anthropic',
+      anthropicLayer,
+      {
+        type: 'error',
+        error: { type: 'invalid_request_error', message: 'bad request' },
+      },
+    ],
+    [
+      'OpenAI',
+      openAiLayer,
+      {
+        error: {
+          message: 'bad request',
+          type: 'invalid_request_error',
+          code: 'bad_request',
+        },
+      },
+    ],
+  ] as const)('does not retry a %s 400', async (_name, makeLayer, body) => {
+    const fake = fakeHttp([
+      { status: 400, body: JSON.stringify(body) },
+      { status: 200, body: anthropicSuccess },
+    ]);
+    await failureOf(
+      makeLayer(fake.layer, HttpClient.retryTransient({ times: 1 })),
+    );
+    expect(fake.requests).toHaveLength(1);
+  });
+});

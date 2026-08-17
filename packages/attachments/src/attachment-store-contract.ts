@@ -32,8 +32,8 @@ const ABSENT: AttachmentRef.Ref = AttachmentRef.Ref.make({
   byteLength: 4,
 });
 
-export interface ContractOptions<E, R> {
-  readonly layer: Layer.Layer<AttachmentStore.Service, E, R>;
+export interface ContractOptions<E> {
+  readonly layer: Layer.Layer<AttachmentStore.Service, E>;
   /**
    * Replace the stored payload at `ref` with bytes that do not match it,
    * bypassing `put`.
@@ -46,18 +46,14 @@ export interface ContractOptions<E, R> {
   ) => Effect.Effect<void>;
 }
 
-export const attachmentStoreContract = <E, R>(
+export const attachmentStoreContract = <E>(
   name: string,
-  options: ContractOptions<E, R>,
+  options: ContractOptions<E>,
 ): void => {
   const run = <A>(
     effect: Effect.Effect<A, unknown, AttachmentStore.Service>,
   ): Promise<A> =>
-    Effect.runPromise(
-      effect.pipe(
-        Effect.provide(options.layer as Layer.Layer<AttachmentStore.Service>),
-      ) as Effect.Effect<A>,
-    );
+    Effect.runPromise(effect.pipe(Effect.provide(options.layer)));
 
   describe(`AttachmentStore contract: ${name}`, () => {
     it('round-trips stored bytes', async () => {

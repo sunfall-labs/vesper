@@ -23,6 +23,18 @@
 // answer nobody checks.
 
 const REGEXP_METACHARACTERS = /[.*+?^${}()|[\]\\]/;
+const MAX_PATTERN_LENGTH = 4096;
+
+export class InvalidGlobPattern extends Error {
+  readonly name = 'InvalidGlobPattern';
+
+  constructor(
+    readonly pattern: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 const escapeLiteral = (character: string): string =>
   REGEXP_METACHARACTERS.test(character) ? `\\${character}` : character;
@@ -58,8 +70,19 @@ const readClass = (
   }
 
   const body = pattern.slice(start + 1, index).replace(/^[!^]/, '');
+  const source = `[${negated ? '^' : ''}${body.replace(/\\/g, '\\\\')}]`;
+  try {
+    // Let the engine validate range ordering and other class grammar once,
+    // during compilation rather than while walking paths.
+    new RegExp(source);
+  } catch (error) {
+    throw new InvalidGlobPattern(
+      pattern,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
   return {
-    source: `[${negated ? '^' : ''}${body.replace(/\\/g, '\\\\')}]`,
+    source,
     next: index + 1,
   };
 };
@@ -71,6 +94,12 @@ const readClass = (
  * `notes.tsx`, and a model reading that list has no way to tell.
  */
 export const compile = (pattern: string): RegExp => {
+  if (pattern.length > MAX_PATTERN_LENGTH) {
+    throw new InvalidGlobPattern(
+      pattern,
+      `glob exceeds ${String(MAX_PATTERN_LENGTH)} characters`,
+    );
+  }
   let source = '';
   let index = 0;
 
@@ -114,7 +143,14 @@ export const compile = (pattern: string): RegExp => {
     source += escapeLiteral(character);
   }
 
-  return new RegExp(`^${source}$`);
+  try {
+    return new RegExp(`^${source}$`);
+  } catch (error) {
+    throw new InvalidGlobPattern(
+      pattern,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 };
 
 /** Whether one `/`-separated path matches one glob. */

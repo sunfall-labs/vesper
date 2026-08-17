@@ -91,6 +91,35 @@ describe('AttachmentRef', () => {
     });
   });
 
+  it.each([
+    `sha512:${'0'.repeat(64)}`,
+    `sha256:${'0'.repeat(63)}`,
+    `sha256:${'0'.repeat(65)}`,
+    `sha256:${'A'.repeat(64)}`,
+    `sha256:${'g'.repeat(64)}`,
+  ])('rejects malformed digest %s', (digest) => {
+    expect(() =>
+      Schema.decodeUnknownSync(AttachmentRef.Ref)({
+        digest,
+        mediaType: 'application/octet-stream',
+        byteLength: 0,
+      }),
+    ).toThrow();
+  });
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects invalid byteLength %s',
+    (byteLength) => {
+      expect(() =>
+        Schema.decodeUnknownSync(AttachmentRef.Ref)({
+          digest: `sha256:${'0'.repeat(64)}`,
+          mediaType: 'application/octet-stream',
+          byteLength,
+        }),
+      ).toThrow();
+    },
+  );
+
   // The media type is on the reference, not in the address.
   it('addresses the same bytes identically under different media types', async () => {
     const [asText, asBinary] = await run(

@@ -9,6 +9,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { WorkspaceDriver } from '../src/driver.js';
 import { layer as localLayer } from '../src/layer-local.js';
 import { workspaceContract } from '../src/workspace-contract.js';
+import type { ContractOptions as WorkspaceContractOptions } from '../src/workspace-contract.js';
 
 // The local driver against a real temp directory and a real shell. Nothing is
 // faked: a stubbed `node:fs` would pass every case here and still get the
@@ -23,6 +24,12 @@ afterAll(() => {
 });
 
 workspaceContract('local', { layer, root });
+
+const _unprovidedWorkspaceContract: WorkspaceContractOptions<never> = {
+  // @ts-expect-error contract helpers must not erase unprovided layer requirements
+  layer: localLayer,
+  root,
+};
 
 const run = <A>(
   effect: Effect.Effect<A, unknown, WorkspaceDriver.Service>,
@@ -139,19 +146,42 @@ describe('local driver specifics', () => {
     expect(result.exitCode).toBe(127);
   });
 
+  it('enforces read limits without returning a partial file', async () => {
+    const outcome = await run(
+      Effect.gen(function* () {
+        const driver = yield* WorkspaceDriver.Service;
+        yield* driver.writeFile(`${root}/bounded-read`, '123456');
+        return yield* driver
+          .readFileBuffer(`${root}/bounded-read`, { maxBytes: 5 })
+          .pipe(Effect.result);
+      }),
+    );
+
+    expect(outcome._tag).toBe('Failure');
+    if (outcome._tag === 'Failure') {
+      expect(outcome.failure).toBeInstanceOf(
+        WorkspaceDriver.FileReadLimitExceeded,
+      );
+      expect(outcome.failure).toMatchObject({ maxBytes: 5 });
+    }
+  });
+
   // Output larger than a pipe buffer. If the driver awaited the exit before
   // draining stdout, this would deadlock rather than fail — the reason the
   // three reads run concurrently.
-  it('collects output larger than a pipe buffer', async () => {
+  it('drains output larger than a pipe buffer while retaining only its tail', async () => {
     const result = await run(
       Effect.gen(function* () {
         const driver = yield* WorkspaceDriver.Service;
         return yield* driver.exec(
-          'i=0; while [ $i -lt 2000 ]; do echo "0123456789012345678901234567890123456789"; i=$((i+1)); done',
+          'i=0; while [ $i -lt 2000 ]; do echo "line-$i 0123456789012345678901234567890123456789"; i=$((i+1)); done; echo FINAL',
         );
       }),
     );
 
-    expect(result.stdout.length).toBeGreaterThan(80_000);
+    expect(result.stdoutTruncated).toBe(true);
+    expect(Buffer.byteLength(result.stdout)).toBeLessThanOrEqual(50 * 1024 + 3);
+    expect(result.stdout.trimEnd().endsWith('FINAL')).toBe(true);
+    expect(result.stdout).not.toContain('line-0 ');
   });
 });

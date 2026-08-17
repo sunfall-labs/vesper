@@ -6,13 +6,7 @@
       "path": "./packages/log"
     },
     {
-      "path": "./packages/pi"
-    },
-    {
       "path": "./packages/agent"
-    },
-    {
-      "path": "./packages/runtime"
     },
     {
       "path": "./packages/workspace"

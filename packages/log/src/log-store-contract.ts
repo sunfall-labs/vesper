@@ -125,11 +125,28 @@ export const logStoreContract = <E, R>(
     // and would encode under almost any mistake. This is the test that fails
     // when the record union grows a case the codec cannot carry.
     it('round-trips every record case', async () => {
-      const cases: ReadonlyArray<ConversationRecord.Record> = [
-        { _tag: 'RunStarted', agent: 'a', prompt: [{ role: 'user' }] },
-        { _tag: 'Text', step: 1, text: 'hello' },
-        { _tag: 'ToolCall', step: 1, id: 'c1', name: 't', params: { a: 1 } },
-        {
+      const casesByTag = {
+        RunStarted: {
+          _tag: 'RunStarted',
+          agent: 'a',
+          formatVersion: 1,
+          agentRevision: '1',
+          prompt: [{ role: 'user' }],
+        },
+        Text: { _tag: 'Text', step: 1, text: 'hello' },
+        ToolCall: {
+          _tag: 'ToolCall',
+          step: 1,
+          id: 'c1',
+          name: 't',
+          params: { a: 1 },
+        },
+        ToolStarted: {
+          _tag: 'ToolStarted',
+          id: 'c1',
+          name: 't',
+        },
+        ToolOutcome: {
           _tag: 'ToolOutcome',
           step: 1,
           id: 'c1',
@@ -137,26 +154,33 @@ export const logStoreContract = <E, R>(
           outcome: 'failure',
           result: { why: 'no' },
         },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 2 } },
-        {
+        TurnFinished: {
+          _tag: 'TurnFinished',
+          step: 1,
+          usage: { input: 1, output: 2 },
+        },
+        Compacted: {
           _tag: 'Compacted',
+          formatVersion: 1,
+          agent: 'test',
+          agentRevision: '1',
           step: 1,
           summary: 'the user asked about order 42',
           firstKept: LogOffset.Offset.make('0000000000000000_0000000000000003'),
           summarizedMessages: 4,
           keptMessages: 2,
         },
-        {
+        BranchedFrom: {
           _tag: 'BranchedFrom',
           at: LogOffset.Offset.make('0000000000000000_0000000000000002'),
         },
-        {
+        Completed: {
           _tag: 'Completed',
           text: 'done',
           steps: 2,
           usage: { input: 1, output: 2 },
         },
-        {
+        ChildSession: {
           _tag: 'ChildSession',
           toolCallId: 'c1',
           agent: 'child',
@@ -164,8 +188,13 @@ export const logStoreContract = <E, R>(
           childConversationId: 'conversation-1/c1',
           depth: 1,
         },
-        { _tag: 'Signal', kind: 'steer', text: 'go on', source: 'operator' },
-        {
+        Signal: {
+          _tag: 'Signal',
+          kind: 'steer',
+          text: 'go on',
+          source: 'operator',
+        },
+        SignalReceived: {
           _tag: 'SignalReceived',
           kind: 'cancel',
           text: 'stop',
@@ -173,14 +202,25 @@ export const logStoreContract = <E, R>(
           step: 3,
           at: LogOffset.fromSeq(7n),
         },
-        {
+        RunSettled: {
           _tag: 'RunSettled',
           outcome: 'interrupted',
           detail: 'the run was interrupted',
           steps: 3,
           usage: { input: 9, output: 8 },
+          resume: {
+            formatVersion: 1,
+            agent: 'test',
+            agentRevision: '1',
+            usage: { input: 20, output: 10 },
+            signalCursor: LogOffset.fromSeq(7n),
+          },
         },
-      ];
+      } satisfies {
+        [Tag in ConversationRecord.Record['_tag']]: ConversationRecord.RecordOf<Tag>;
+      };
+      const cases: ReadonlyArray<ConversationRecord.Record> =
+        Object.values(casesByTag);
 
       const page = await run(
         Effect.gen(function* () {
@@ -311,6 +351,83 @@ export const logStoreContract = <E, R>(
       expect(page.upToDate).toBe(true);
     });
 
+    describe('backwards paging', () => {
+      it('reports backwards reads in not-found errors', async () => {
+        const outcome = await run(
+          Effect.flatMap(LogStore.Service, (store) =>
+            store.readBackwards('missing-backwards').pipe(Effect.result),
+          ),
+        );
+        expect(outcome).toMatchObject({
+          _tag: 'Failure',
+          failure: {
+            operation: 'readBackwards',
+            reason: 'not_found',
+          },
+        });
+      });
+
+      it('reads newest first and resumes before its oldest record', async () => {
+        const pages = await run(
+          Effect.gen(function* () {
+            const { store, append } = yield* open('backwards');
+            yield* append(0, [text('one'), text('two'), text('three')]);
+            const first = yield* store.readBackwards('backwards', { limit: 2 });
+            const second = yield* store.readBackwards('backwards', {
+              before: first.cursor,
+              limit: 2,
+            });
+            return { first, second };
+          }),
+        );
+        expect(texts(pages.first.records)).toEqual(['three', 'two']);
+        expect(pages.first.upToDate).toBe(false);
+        expect(texts(pages.second.records)).toEqual(['one']);
+        expect(pages.second.upToDate).toBe(true);
+      });
+
+      it('uses an exclusive upper bound, including in the middle of a batch', async () => {
+        const page = await run(
+          Effect.gen(function* () {
+            const { store, append } = yield* open('backwards-exclusive');
+            yield* append(0, [text('one'), text('two'), text('three')]);
+            const all = yield* store.read('backwards-exclusive');
+            return yield* store.readBackwards('backwards-exclusive', {
+              before: all.records[2]!.offset,
+            });
+          }),
+        );
+        expect(texts(page.records)).toEqual(['two', 'one']);
+      });
+
+      it('validates backwards limits and offsets', async () => {
+        const outcomes = await run(
+          Effect.gen(function* () {
+            const { store } = yield* open('invalid-backwards');
+            return yield* Effect.all([
+              store
+                .readBackwards('invalid-backwards', { limit: 0 })
+                .pipe(Effect.result),
+              store
+                .readBackwards('invalid-backwards', {
+                  before: LogOffset.Offset.make('malformed'),
+                })
+                .pipe(Effect.result),
+            ]);
+          }),
+        );
+        for (const outcome of outcomes) {
+          expect(outcome._tag).toBe('Failure');
+          if (outcome._tag === 'Failure') {
+            expect(outcome.failure).toMatchObject({
+              operation: 'readBackwards',
+              reason: 'invalid',
+            });
+          }
+        }
+      });
+    });
+
     // Atomicity. A rejected batch must leave the log exactly as it was — a
     // half-written turn is worse than no turn, because replay would produce
     // a tool call with no outcome and no way to tell that is what happened.
@@ -350,6 +467,123 @@ export const logStoreContract = <E, R>(
     });
 
     describe('producer fencing', () => {
+      it('compare-and-acquire does not fence a producer after an observed read changes', async () => {
+        const result = await run(
+          Effect.gen(function* () {
+            const { store, claim, append } = yield* open('cas-acquire');
+            const before = yield* store.meta('cas-acquire');
+            yield* store.read('cas-acquire');
+            yield* append(0, [text('landed')]);
+            const attempted = yield* store
+              .acquire('cas-acquire', 'producer-2', {
+                epoch: Option.getOrThrow(before).epoch,
+                head: Option.getOrThrow(before).head,
+              })
+              .pipe(Effect.result);
+            const stillWritable = yield* store.append({
+              path: 'cas-acquire',
+              producerId: claim.producerId,
+              epoch: claim.epoch,
+              sequence: 1,
+              records: [text('still-owner')],
+            });
+            return { attempted, stillWritable };
+          }),
+        );
+
+        expect(result.attempted).toMatchObject({
+          _tag: 'Failure',
+          failure: { operation: 'acquire', reason: 'conflict' },
+        });
+        expect(result.stillWritable).not.toBe(LogOffset.START);
+      });
+
+      it('rejects a stale epoch even when the head still matches', async () => {
+        const result = await run(
+          Effect.gen(function* () {
+            const { store } = yield* open('cas-stale-epoch');
+            const before = Option.getOrThrow(
+              yield* store.meta('cas-stale-epoch'),
+            );
+            const current = yield* store.acquire(
+              'cas-stale-epoch',
+              'producer-2',
+            );
+            const attempted = yield* store
+              .acquire('cas-stale-epoch', 'producer-3', {
+                epoch: before.epoch,
+                head: before.head,
+              })
+              .pipe(Effect.result);
+            const stillWritable = yield* store.append({
+              path: 'cas-stale-epoch',
+              producerId: current.producerId,
+              epoch: current.epoch,
+              sequence: 0,
+              records: [text('still-owner')],
+            });
+            return { attempted, stillWritable };
+          }),
+        );
+
+        expect(result.attempted).toMatchObject({
+          _tag: 'Failure',
+          failure: { operation: 'acquire', reason: 'conflict' },
+        });
+        expect(result.stillWritable).not.toBe(LogOffset.START);
+      });
+
+      it('compare-and-acquire fences normally when the expected position matches', async () => {
+        const outcome = await run(
+          Effect.gen(function* () {
+            const { store, claim } = yield* open('cas-match');
+            const before = Option.getOrThrow(yield* store.meta('cas-match'));
+            yield* store.acquire('cas-match', 'producer-2', {
+              epoch: before.epoch,
+              head: before.head,
+            });
+            return yield* store
+              .append({
+                path: 'cas-match',
+                producerId: claim.producerId,
+                epoch: claim.epoch,
+                sequence: 0,
+                records: [text('stale')],
+              })
+              .pipe(Effect.result);
+          }),
+        );
+
+        expect(outcome).toMatchObject({
+          _tag: 'Failure',
+          failure: { operation: 'append', reason: 'fenced' },
+        });
+      });
+
+      it('keeps legacy acquire fencing semantics without an expected position', async () => {
+        const outcome = await run(
+          Effect.gen(function* () {
+            const { store, claim, append } = yield* open('legacy-acquire');
+            yield* append(0, [text('landed')]);
+            yield* store.acquire('legacy-acquire', 'producer-2');
+            return yield* store
+              .append({
+                path: 'legacy-acquire',
+                producerId: claim.producerId,
+                epoch: claim.epoch,
+                sequence: 1,
+                records: [text('stale')],
+              })
+              .pipe(Effect.result);
+          }),
+        );
+
+        expect(outcome).toMatchObject({
+          _tag: 'Failure',
+          failure: { operation: 'append', reason: 'fenced' },
+        });
+      });
+
       // Outcome 1. A producer whose epoch has been superseded must be told,
       // not allowed to interleave writes with the producer that replaced it.
       it('fences a producer holding a stale epoch', async () => {
@@ -604,6 +838,156 @@ export const logStoreContract = <E, R>(
           operation: 'append',
           reason: 'encoding',
         });
+      }
+    });
+
+    it('rejects every value JSON would alter or discard', async () => {
+      const cyclic: { self?: unknown } = {};
+      cyclic.self = cyclic;
+      const sparse: unknown[] = [];
+      sparse.length = 1;
+      const symbolProperty = { okay: true } as Record<PropertyKey, unknown>;
+      symbolProperty[Symbol('hidden')] = true;
+      const lossy: ReadonlyArray<unknown> = [
+        undefined,
+        () => undefined,
+        Symbol('value'),
+        1n,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+        Number.NEGATIVE_INFINITY,
+        -0,
+        sparse,
+        cyclic,
+        symbolProperty,
+        new Date(0),
+      ];
+
+      const outcomes = await run(
+        Effect.gen(function* () {
+          const { append } = yield* open('all-lossy-values');
+          return yield* Effect.forEach(lossy, (params) =>
+            append(0, [
+              {
+                conversationId: 'conversation-1',
+                timestamp: TIMESTAMP,
+                record: {
+                  _tag: 'ToolCall',
+                  step: 1,
+                  id: 'call-1',
+                  name: 'search',
+                  params,
+                },
+              },
+            ]).pipe(Effect.result),
+          );
+        }),
+      );
+
+      expect(outcomes).toHaveLength(lossy.length);
+      for (const outcome of outcomes) {
+        expect(outcome._tag).toBe('Failure');
+        if (outcome._tag === 'Failure') {
+          expect(outcome.failure).toMatchObject({ reason: 'encoding' });
+        }
+      }
+    });
+
+    it('stores an encoded clone rather than caller-owned objects', async () => {
+      const params = {
+        nested: { value: 'before' },
+        ['__proto__']: { retained: true },
+      };
+      const read = await run(
+        Effect.gen(function* () {
+          const { store, append } = yield* open('encoded-clone');
+          yield* append(0, [
+            {
+              conversationId: 'conversation-1',
+              timestamp: TIMESTAMP,
+              record: {
+                _tag: 'ToolCall',
+                step: 1,
+                id: 'call-1',
+                name: 'search',
+                params,
+              },
+            },
+          ]);
+          params.nested.value = 'after';
+          return yield* store.read('encoded-clone');
+        }),
+      );
+
+      expect(read.records[0]?.record).toMatchObject({
+        params: { nested: { value: 'before' } },
+      });
+      const record = read.records[0]?.record;
+      expect(record?._tag).toBe('ToolCall');
+      if (record?._tag === 'ToolCall') {
+        const stored = record.params as Record<string, unknown>;
+        expect(Object.hasOwn(stored, '__proto__')).toBe(true);
+        expect(stored['__proto__']).toEqual({ retained: true });
+      }
+    });
+
+    it('treats object insertion order as irrelevant to retry identity', async () => {
+      const result = await run(
+        Effect.gen(function* () {
+          const { append } = yield* open('canonical-key-order');
+          const entry = (params: Record<string, number>) => ({
+            conversationId: 'conversation-1',
+            timestamp: TIMESTAMP,
+            record: {
+              _tag: 'ToolCall' as const,
+              step: 1,
+              id: 'call-1',
+              name: 'search',
+              params,
+            },
+          });
+          const first = yield* append(0, [entry({ a: 1, b: 2 })]);
+          const retry = yield* append(0, [entry({ b: 2, a: 1 })]);
+          return { first, retry };
+        }),
+      );
+
+      expect(result.retry).toBe(result.first);
+    });
+
+    it('rejects invalid read limits and malformed offsets', async () => {
+      const outcomes = await run(
+        Effect.gen(function* () {
+          const { store } = yield* open('invalid-read-options');
+          return yield* Effect.all([
+            store
+              .read('invalid-read-options', { limit: 0 })
+              .pipe(Effect.result),
+            store
+              .read('invalid-read-options', { limit: 1.5 })
+              .pipe(Effect.result),
+            store
+              .read('invalid-read-options', {
+                limit: LogStore.MAX_READ_LIMIT + 1,
+              })
+              .pipe(Effect.result),
+            store
+              .read('invalid-read-options', {
+                after: LogOffset.Offset.make('malformed'),
+              })
+              .pipe(Effect.result),
+          ]);
+        }),
+      );
+
+      for (const outcome of outcomes) {
+        expect(outcome._tag).toBe('Failure');
+        if (outcome._tag === 'Failure') {
+          expect(outcome.failure).toMatchObject({
+            operation: 'read',
+            reason: 'invalid',
+          });
+        }
       }
     });
 

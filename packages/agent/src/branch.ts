@@ -44,13 +44,13 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 // | `boundaryFor`            | `history.ts`         | active path | it must resolve against the same messages `messagesFrom` builds, or a compaction points `firstKept` at a record the reader cannot see |
 // | `rebuild` / `lastCompaction` / `keptFrom` / `fold` | `history.ts` | active path | private to the two above; they receive an already-filtered array and never filter themselves |
 // | `usageFrom`              | `history.ts`         | **full log**| tokens spent on a branch that was abandoned were still spent. Scoping this to the path makes a branched conversation under-report its own cost, and the number never comes back |
-// | `unsettledOutcomes`      | `log.ts`             | active path | crash recovery serves a dead run's tool results back to its successor. If the user branched *away* from the crashed run, those outcomes answer tool calls that are no longer in the prompt — the successor would be handed results for questions it never asked |
+// | `unsettledTools`         | `log.ts`             | active path | crash recovery serves a dead run's tool state back to its successor. If the user branched *away* from the crashed run, those recoveries answer tool calls that are no longer in the prompt — the successor would be handed results or indeterminate calls for questions it never asked |
 // | `deliveredThrough`       | `log.ts`             | **full log**| the signal-delivery cursor. A steer is delivered at most once, and the record of taking it may sit on a branch that was later abandoned. Scoping this to the path rewinds the cursor and **re-delivers a steer the agent already acted on** — the one failure this cursor exists to prevent |
 // | `activePath`             | here                 | **full log**| it is the filter; it has to see what it is filtering |
 //
-// The two full-log rows are not an oversight to be tidied up later. They are
-// the reason `AgentLog.Session` keeps handing whole-log arrays around and
-// filters at each fold instead of once at the source.
+// The two full-log rows are not an oversight to be tidied up later. Resume
+// aggregates preserve them across compacted-away history; active-path folds
+// consume only the records required to rebuild the live prompt.
 
 /**
  * The records that are still part of the conversation, in order.

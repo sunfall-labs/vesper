@@ -40,7 +40,7 @@ export const Offset = Schema.String.pipe(
 );
 export type Offset = typeof Offset.Type;
 
-export class OffsetError extends Schema.TaggedErrorClass<OffsetError>()(
+export class OffsetError extends Schema.TaggedError<OffsetError>()(
   '@sunfall/vesper-log/OffsetError',
   {
     offset: Schema.String,

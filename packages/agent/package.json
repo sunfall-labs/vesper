@@ -25,6 +25,9 @@
     "LICENSE"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "sideEffects": false,
   "exports": {
     "./agent": {
@@ -38,10 +41,6 @@
     "./context-window": {
       "types": "./dist/context-window.d.ts",
       "default": "./dist/context-window.js"
-    },
-    "./dispatch": {
-      "types": "./dist/dispatch.d.ts",
-      "default": "./dist/dispatch.js"
     },
     "./event": {
       "types": "./dist/event.d.ts",
@@ -58,6 +57,14 @@
     "./log": {
       "types": "./dist/log.d.ts",
       "default": "./dist/log.js"
+    },
+    "./recording-policy": {
+      "types": "./dist/recording-policy.d.ts",
+      "default": "./dist/recording-policy.js"
+    },
+    "./run-policy": {
+      "types": "./dist/run-policy.d.ts",
+      "default": "./dist/run-policy.js"
     },
     "./signal": {
       "types": "./dist/signal.d.ts",
@@ -88,7 +95,12 @@
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
-    "@sunfall/vesper-log": "workspace:*",
-    "effect": "^4.0.0-beta.103"
+    "@sunfall/vesper-log": "0.1.0-alpha.1"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-rc.109"
+  },
+  "devDependencies": {
+    "effect": "4.0.0-rc.109"
   }
 }

@@ -1,14 +1,14 @@
 import { Context, Effect, Option, Schema, Stream } from 'effect';
 
-import type { LogOffset } from './offset.js';
+import { LogOffset } from './offset.js';
 import type { ConversationRecord } from './record.js';
 
 // The append-only log every conversation is written to.
 //
-// Two primitives and nothing else: `read`, which pages history, and
-// `changes`, which says "something arrived". Resumable tailing is derived
+// History pages forwards with `read` and backwards with `readBackwards`;
+// `changes` says "something arrived". Resumable tailing is derived
 // from those in `./tail.ts` rather than being a third method, so a backend
-// implements two things and gets tailing that is tested once. The contract
+// implements these primitives and gets tailing that is tested once. The contract
 // suite in `./log-store-contract.ts` holds every backend to the same
 // behaviour; per `docs/contributing.md` it lives here, in the package that
 // owns the interface, not in a testkit package that would cycle.
@@ -47,7 +47,7 @@ import type { ConversationRecord } from './record.js';
  * the log rather than retry; `offset_gone` means the reader has fallen off
  * the retained window and must restart from a snapshot.
  */
-export class LogStoreError extends Schema.TaggedErrorClass<LogStoreError>()(
+export class LogStoreError extends Schema.TaggedError<LogStoreError>()(
   '@sunfall/vesper-log/LogStoreError',
   {
     path: Schema.String,
@@ -56,6 +56,7 @@ export class LogStoreError extends Schema.TaggedErrorClass<LogStoreError>()(
       'acquire',
       'append',
       'read',
+      'readBackwards',
       'meta',
       'changes',
     ]),
@@ -83,6 +84,8 @@ export class LogStoreError extends Schema.TaggedErrorClass<LogStoreError>()(
        * folded into `storage`.
        */
       'encoding',
+      /** A read limit or offset is not valid at the wire boundary. */
+      'invalid',
       /** The backend itself failed. */
       'storage',
     ]),
@@ -118,6 +121,12 @@ export interface ProducerClaim {
   readonly nextSequence: number;
 }
 
+/** Optional stream position that must still be current when a producer claims. */
+export interface AcquireExpected {
+  readonly epoch: number;
+  readonly head: LogOffset.Offset;
+}
+
 export interface AppendInput {
   readonly path: string;
   readonly producerId: string;
@@ -134,6 +143,13 @@ export interface AppendInput {
 export interface ReadOptions {
   /** Exclusive lower bound. Defaults to {@link LogOffset.START}. */
   readonly after?: LogOffset.Offset;
+  /** Defaults to {@link DEFAULT_READ_LIMIT}. */
+  readonly limit?: number;
+}
+
+export interface ReadBackwardsOptions {
+  /** Exclusive upper bound. Omit to start at the stream head. */
+  readonly before?: LogOffset.Offset;
   /** Defaults to {@link DEFAULT_READ_LIMIT}. */
   readonly limit?: number;
 }
@@ -162,7 +178,90 @@ export interface Page {
   readonly upToDate: boolean;
 }
 
+/**
+ * One backwards page. Records are ordered newest first.
+ *
+ * `cursor` is the oldest returned offset; pass it as the next call's
+ * exclusive `before`. It is the supplied `before`, or the stream head for an
+ * unbounded empty read, when no records are returned. `upToDate` means the
+ * beginning of the stream has been reached, not its head.
+ */
+export interface BackwardsPage {
+  readonly records: ReadonlyArray<ConversationRecord.Envelope>;
+  readonly cursor: LogOffset.Offset;
+  readonly upToDate: boolean;
+}
+
 export const DEFAULT_READ_LIMIT = 256;
+/** A page is bounded so one read cannot allocate an unbounded result. */
+export const MAX_READ_LIMIT = 10_000;
+
+export interface NormalizedReadOptions {
+  readonly after: LogOffset.Offset;
+  readonly limit: number;
+}
+
+export interface NormalizedReadBackwardsOptions {
+  readonly before: Option.Option<LogOffset.Offset>;
+  readonly limit: number;
+}
+
+export class ReadOptionsError extends Schema.TaggedError<ReadOptionsError>()(
+  '@sunfall/vesper-log/ReadOptionsError',
+  { detail: Schema.String },
+) {}
+
+/** Validate the read wire values identically before either backend is entered. */
+export const normalizeReadOptions = (
+  options?: ReadOptions,
+): Effect.Effect<NormalizedReadOptions, ReadOptionsError> =>
+  Effect.gen(function* () {
+    const after = options?.after ?? LogOffset.START;
+    yield* LogOffset.toSeq(after).pipe(
+      Effect.mapError(
+        () => new ReadOptionsError({ detail: `malformed offset: ${after}` }),
+      ),
+    );
+
+    const limit = options?.limit ?? DEFAULT_READ_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) {
+      return yield* Effect.fail(
+        new ReadOptionsError({
+          detail: `limit must be an integer from 1 through ${MAX_READ_LIMIT}, got ${limit}`,
+        }),
+      );
+    }
+    return { after, limit };
+  });
+
+/** Validate backwards-read wire values identically for every backend. */
+export const normalizeReadBackwardsOptions = (
+  options?: ReadBackwardsOptions,
+): Effect.Effect<NormalizedReadBackwardsOptions, ReadOptionsError> =>
+  Effect.gen(function* () {
+    if (options?.before !== undefined) {
+      yield* LogOffset.toSeq(options.before).pipe(
+        Effect.mapError(
+          () =>
+            new ReadOptionsError({
+              detail: `malformed offset: ${options.before}`,
+            }),
+        ),
+      );
+    }
+    const limit = options?.limit ?? DEFAULT_READ_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) {
+      return yield* Effect.fail(
+        new ReadOptionsError({
+          detail: `limit must be an integer from 1 through ${MAX_READ_LIMIT}, got ${limit}`,
+        }),
+      );
+    }
+    return {
+      before: Option.fromUndefinedOr(options?.before),
+      limit,
+    };
+  });
 
 export interface Interface {
   /**
@@ -183,11 +282,14 @@ export interface Interface {
    *
    * Bumps the epoch and resets the producer sequence, so the previous
    * holder's next append fails `fenced` rather than interleaving with this
-   * one's. Safe to call on a stream nobody is writing to.
+   * one's. Safe to call on a stream nobody is writing to. When `expected` is
+   * supplied, the check and epoch bump are one atomic operation and a changed
+   * epoch or head fails with `conflict` without fencing the current producer.
    */
   readonly acquire: (
     path: string,
     producerId: string,
+    expected?: AcquireExpected,
   ) => Effect.Effect<ProducerClaim, LogStoreError>;
 
   /**
@@ -213,6 +315,12 @@ export interface Interface {
     path: string,
     options?: ReadOptions,
   ) => Effect.Effect<Page, LogStoreError>;
+
+  /** Page history backwards from an exclusive upper bound, newest first. */
+  readonly readBackwards: (
+    path: string,
+    options?: ReadBackwardsOptions,
+  ) => Effect.Effect<BackwardsPage, LogStoreError>;
 
   readonly meta: (
     path: string,

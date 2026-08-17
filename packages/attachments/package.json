@@ -25,6 +25,9 @@
     "LICENSE"
   ],
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "sideEffects": false,
   "exports": {
     "./ref": {
@@ -51,7 +54,17 @@
     "build": "rm -rf dist .tsbuildinfo && tsgo -p tsconfig.json",
     "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
   },
-  "dependencies": {
-    "effect": "^4.0.0-beta.103"
+  "peerDependencies": {
+    "effect": "4.0.0-rc.109",
+    "vitest": ">=4.1.9 <5"
+  },
+  "peerDependenciesMeta": {
+    "vitest": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "effect": "4.0.0-rc.109",
+    "vitest": "^4.1.9"
   }
 }

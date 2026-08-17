@@ -117,6 +117,7 @@ const dispatched = { count: 0 };
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(lookup),
 }).withHandlers({
@@ -185,6 +186,8 @@ const at = (index: number) => LogOffset.fromSeq(BigInt(index));
 const started = (text: string): ConversationRecord.Record => ({
   _tag: 'RunStarted',
   agent: 'test',
+  formatVersion: 1,
+  agentRevision: '1',
   prompt: Prompt.make(text).content,
 });
 
@@ -709,6 +712,7 @@ const crashed: ReadonlyArray<ConversationRecord.Record> = [
     name: 'lookup',
     params: { id: '42' },
   },
+  { _tag: 'ToolStarted', id: 'call-1', name: 'lookup' },
   {
     _tag: 'ToolOutcome',
     step: 1,
@@ -727,7 +731,7 @@ describe('a crashed run on the abandoned branch', () => {
   // user made.
   //
   // Mutation-checked: dropping `AgentBranch.activePath` from the
-  // `unsettledOutcomes` call in `log.ts` leaves the handler un-run and puts
+  // `unsettledTools` call in `log.ts` leaves the handler un-run and puts
   // 'from-log' back into the branched run's prompt.
   it('does not serve its tool outcomes to the branched run', async () => {
     const models = provider([callingTurn, says('done')]);

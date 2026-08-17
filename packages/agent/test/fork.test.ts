@@ -117,6 +117,7 @@ const lookup = Tool.make('lookup', {
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(lookup),
 }).withHandlers({
@@ -156,6 +157,50 @@ const readSignals = Effect.fn('test.readSignals')(function* (
   return page.records;
 });
 
+const failsOnceAfter = (
+  operation: 'create' | 'acquire' | 'append',
+  conversationId: string,
+): Layer.Layer<LogStore.Service> =>
+  Layer.effect(
+    LogStore.Service,
+    Effect.gen(function* () {
+      const store = yield* LogStore.Service;
+      const failed = yield* Ref.make(false);
+      const path = AgentLog.pathFor(conversationId);
+      const inject = <A>(effect: Effect.Effect<A, LogStore.LogStoreError>) =>
+        Effect.gen(function* () {
+          const value = yield* effect;
+          if (!(yield* Ref.getAndSet(failed, true))) {
+            return yield* Effect.fail(
+              new LogStore.LogStoreError({
+                path,
+                operation,
+                reason: 'storage',
+                detail: `crashed after ${operation}`,
+              }),
+            );
+          }
+          return value;
+        });
+
+      return LogStore.Service.of({
+        ...store,
+        create: (requested, identity) =>
+          operation === 'create' && requested === path
+            ? inject(store.create(requested, identity))
+            : store.create(requested, identity),
+        acquire: (requested, producerId, expected) =>
+          operation === 'acquire' && requested === path
+            ? inject(store.acquire(requested, producerId, expected))
+            : store.acquire(requested, producerId, expected),
+        append: (input) =>
+          operation === 'append' && input.path === path
+            ? inject(store.append(input))
+            : store.append(input),
+      });
+    }),
+  ).pipe(Layer.provide(LogStoreMemory.layer));
+
 const tags = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   records.map((envelope) => envelope.record._tag);
 
@@ -165,6 +210,8 @@ const textIn = (prompt: Prompt.Prompt): string =>
 const started = (text: string): ConversationRecord.Record => ({
   _tag: 'RunStarted',
   agent: 'test',
+  formatVersion: 1,
+  agentRevision: '1',
   prompt: Prompt.make(text).content,
 });
 
@@ -204,7 +251,9 @@ describe('two forks of one conversation', () => {
       Effect.gen(function* () {
         // Built by hand rather than by a run, so the ancestor does not have to
         // pass through the provider that is about to block on a rendezvous.
-        const session = yield* AgentLog.open(ANCESTOR);
+        const session = yield* AgentLog.open(ANCESTOR, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
         yield* session.append([
           started('what is the status?'),
           said('checking now'),
@@ -269,12 +318,47 @@ describe('two forks of one conversation', () => {
 });
 
 describe('a fork and the conversation it came from', () => {
+  it('reports only fork-billed usage across later resumes', async () => {
+    const models = provider([
+      says('first fork turn'),
+      says('second fork turn'),
+    ]);
+    const observed = await run(
+      Effect.gen(function* () {
+        const session = yield* AgentLog.open(ANCESTOR, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
+        yield* session.append([
+          started('original'),
+          said('ancestor answer'),
+          { ...turn, usage: { input: 31, output: 17 } },
+          { ...settled, usage: { input: 31, output: 17 } },
+        ]);
+        const tip = (yield* session.recorded).at(-1)!.offset;
+
+        const first = yield* agent
+          .forkFrom(ANCESTOR, tip, 'usage-fork', 'fork once')
+          .pipe(Effect.orDie);
+        const second = yield* agent
+          .resume('usage-fork', 'fork twice')
+          .pipe(Effect.orDie);
+        return { first, second };
+      }),
+      models.layer,
+    );
+
+    expect(observed.first.usage).toEqual({ input: 10, output: 4 });
+    expect(observed.second.usage).toEqual({ input: 20, output: 8 });
+  });
+
   it('leaves the ancestor exactly as it was', async () => {
     const models = provider([says('fork answer')]);
 
     const observed = await run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR);
+        const session = yield* AgentLog.open(ANCESTOR, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
         yield* session.append([
           started('original'),
           said('first'),
@@ -307,7 +391,9 @@ describe('a fork and the conversation it came from', () => {
 
     const observed = await run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR);
+        const session = yield* AgentLog.open(ANCESTOR, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
         yield* session.append([
           started('original'),
           said('shared past'),
@@ -365,7 +451,9 @@ describe('a fork and the conversation it came from', () => {
 const branchedAncestor = Effect.fn('test.branchedAncestor')(function* (
   deliveredAt: LogOffset.Offset,
 ) {
-  const session = yield* AgentLog.open(ANCESTOR);
+  const session = yield* AgentLog.open(ANCESTOR, {
+    compatibility: { agent: 'test', revision: '1' },
+  });
 
   yield* session.append([started('original'), said('abandoned answer'), turn]);
   const opening = (yield* session.recorded)[0]!;
@@ -388,6 +476,9 @@ const branchedAncestor = Effect.fn('test.branchedAncestor')(function* (
     },
     {
       _tag: 'Compacted',
+      formatVersion: 1,
+      agent: 'test',
+      agentRevision: '1',
       step: 1,
       summary: 'the story so far',
       firstKept: answerA.offset,
@@ -415,7 +506,10 @@ describe('the offset pointers in a copied prefix', () => {
     const observed = await run(
       Effect.gen(function* () {
         const ancestor = yield* branchedAncestor(LogOffset.START);
-        const fork = yield* AgentLog.fork(ANCESTOR, ancestor.tip, 'a-fork');
+        const fork = yield* AgentLog.fork(ANCESTOR, ancestor.tip, 'a-fork', {
+          agent: 'test',
+          revision: '1',
+        });
 
         const copied = fork.history.find(
           (envelope) => envelope.record._tag === 'Compacted',
@@ -484,7 +578,10 @@ describe('the offset pointers in a copied prefix', () => {
         const ancestorSignals = yield* readSignals(ANCESTOR);
         const ancestor = yield* branchedAncestor(ancestorSignals[1]!.offset);
 
-        const fork = yield* AgentLog.fork(ANCESTOR, ancestor.tip, 'a-fork');
+        const fork = yield* AgentLog.fork(ANCESTOR, ancestor.tip, 'a-fork', {
+          agent: 'test',
+          revision: '1',
+        });
 
         yield* AgentSignals.send('a-fork', {
           kind: 'steer',
@@ -541,7 +638,9 @@ describe('forking into an id that is already a conversation', () => {
 
     const outcome = await run(
       Effect.gen(function* () {
-        const session = yield* AgentLog.open(ANCESTOR);
+        const session = yield* AgentLog.open(ANCESTOR, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
         yield* session.append([
           started('original'),
           said('first'),
@@ -550,11 +649,16 @@ describe('forking into an id that is already a conversation', () => {
         ]);
         const tip = (yield* session.recorded).at(-1)!.offset;
 
-        const occupied = yield* AgentLog.open('already-here');
+        const occupied = yield* AgentLog.open('already-here', {
+          compatibility: { agent: 'test', revision: '1' },
+        });
         yield* occupied.append([started('a life of its own')]);
 
         const exit = yield* Effect.exit(
-          AgentLog.fork(ANCESTOR, tip, 'already-here'),
+          AgentLog.fork(ANCESTOR, tip, 'already-here', {
+            agent: 'test',
+            revision: '1',
+          }),
         );
 
         return {
@@ -570,4 +674,63 @@ describe('forking into an id that is already a conversation', () => {
     expect(outcome.failed).toBe(true);
     expect(outcome.occupiedLog).toEqual(['RunStarted']);
   });
+});
+
+describe('fork seeding recovery', () => {
+  for (const operation of ['create', 'acquire', 'append'] as const) {
+    it(`converges after a crash following ${operation}`, async () => {
+      const destination = `retry-${operation}`;
+      const layer = failsOnceAfter(operation, destination);
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const ancestor = yield* AgentLog.open(ANCESTOR, {
+            compatibility: { agent: 'test', revision: '1' },
+          });
+          yield* ancestor.append([
+            started('original'),
+            said('copied once'),
+            { _tag: 'ToolStarted', id: 'copied-call', name: 'lookup' },
+            turn,
+          ]);
+          const copiedText = (yield* ancestor.recorded)[1]!;
+          yield* ancestor.append([
+            {
+              _tag: 'Compacted',
+              formatVersion: 1,
+              agent: 'test',
+              agentRevision: '1',
+              step: 1,
+              summary: 'seed summary',
+              firstKept: copiedText.offset,
+              summarizedMessages: 1,
+              keptMessages: 1,
+            },
+            settled,
+          ]);
+          const tip = (yield* ancestor.recorded).at(-1)!.offset;
+
+          const first = yield* AgentLog.fork(ANCESTOR, tip, destination, {
+            agent: 'test',
+            revision: '1',
+          }).pipe(Effect.exit);
+          const retried = yield* AgentLog.fork(ANCESTOR, tip, destination, {
+            agent: 'test',
+            revision: '1',
+          });
+          return { first, records: retried.history };
+        }).pipe(Effect.provide(layer), Effect.scoped),
+      );
+
+      expect(Exit.isFailure(result.first)).toBe(true);
+      // Session history is the retained resume view: the compacted-away
+      // RunStarted was copied physically, but is not materialized on open.
+      expect(tags(result.records)).toEqual([
+        'Text',
+        'ToolStarted',
+        'TurnFinished',
+        'Compacted',
+        'RunSettled',
+      ]);
+    });
+  }
 });

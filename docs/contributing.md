@@ -38,7 +38,7 @@ one edit apart. Four lanes run at once by default; `nub run verify:serial`,
 
 `nub run example:compliance-relay` and `nub run example:live-smoke` run the two
 programs under `examples/`. Both reach a real provider and need an API key in
-the environment; nothing else does, and every test runs against Pi's faux one.
+the environment; nothing else does, and tests use scripted `LanguageModel`s.
 
 `nub run typecheck` uses `tsgo -b` rather than a per-package `--noEmit` pass
 because the packages are TypeScript project references: `agent` resolves
@@ -63,21 +63,19 @@ After that `node_modules/.bin/nub` exists, and `npm install -g @nubjs/nub@0.7.5`
 having `nub` on `PATH` for daily use. CI does exactly this, reading the version
 out of `devDependencies` so the bootstrap and the pin cannot drift apart.
 
-The version is deliberately **not** declared in `package.json#packageManager`.
-Nub reads `pnpm-workspace.yaml` — the workspace globs, `overrides`,
-`onlyBuiltDependencies`, `allowBuilds` — only while the project claims no
-package-manager identity. Setting `packageManager: nub@x`, or a
-`devEngines.packageManager` named `nub`, flips it into "nub identity": the file
-is ignored, the workspace collapses to the root package alone, and `nub install`
-rewrites `pnpm-lock.yaml` with every importer and every override silently
-dropped. `nub pm use nub` performs that migration properly — moving the globs to
-`package.json#workspaces` and renaming the lockfile to `nub.lock` — but the
-rename buys nothing: `nub.lock` is byte-for-byte the same pnpm-v9 format, and
-adopting it makes real pnpm refuse to run and stops update bots from
-regenerating the lockfile. So the pnpm file names stay, and the pin lives in
-`devDependencies`.
+The repository declares Nub as its package manager through
+`devEngines.packageManager`, keeps workspace configuration in the root
+`package.json`, and commits `nub.lock`. The exact executable version is also a
+dev dependency so nested scripts use the same Nub that bootstrapped the
+workspace. Run `nub pm which` to inspect the active package-manager identity.
 
-CI runs Node 25.
+Publishable packages use exact versions for dependencies on sibling Vesper
+packages rather than `workspace:*`. Nub 0.7.5 preserves the workspace protocol
+in packed manifests, which npm consumers reject with `EUNSUPPORTEDPROTOCOL`.
+Private examples and benchmarks retain `workspace:*` because they are never
+packed.
+
+CI runs Node 22 and 24; publishing uses Node 24.
 
 ## Module organization
 
@@ -139,9 +137,10 @@ default" does not mean "never run".
 
 Each package builds with `tsgo -p tsconfig.json` after deleting `dist` and
 `.tsbuildinfo`, so a renamed or removed module never survives in the output.
-`files` is `["dist", "LICENSE"]` and every `exports` entry names `./dist/*.js`
-and `./dist/*.d.ts`: sources are not published, and a module absent from
-`exports` is unreachable to a consumer however it got into `dist`.
+Packages publish `dist` and `LICENSE`; `@sunfall/vesper-log` also publishes its
+authoritative `migrations` directory. Every `exports` entry names
+`./dist/*.js` and `./dist/*.d.ts`: sources are not published, and a module
+absent from `exports` is unreachable to a consumer however it got into `dist`.
 
 `nub run publish:npm` publishes from there. It defaults to the `alpha` dist-tag,
 takes `--dry-run` and `--package <name>`, and is idempotent — a version
@@ -151,35 +150,23 @@ half-finished release finishes it.
 ## The layering rule
 
 ```
-runtime     -> pi, agent, log                (composition — the only one)
 agent       -> effect, @sunfall/vesper-log
-pi          -> effect, @earendil-works/pi-ai, @earendil-works/pi-agent-core
 log         -> effect
 workspace   -> effect
 attachments -> effect
 ```
 
-**`@sunfall/vesper-agent` must not depend on `@sunfall/vesper-pi`, and
-`@sunfall/vesper-pi` must not depend on `@sunfall/vesper-agent`.** This is the
-property that makes the package count worth paying for: the loop targets the
-`LanguageModel` service tag from `effect` itself, so provider choice and retry
-policy are decided once, at application wiring.
+**No Vesper package depends on a provider SDK.** The loop targets Effect's
+`LanguageModel` service, and applications provide it from official packages
+such as `@effect/ai-anthropic` or `@effect/ai-openai`. Do not add a Vesper
+provider registry or duplicate their prompt, tool, stream, usage, credential,
+or error adapters.
 
-Where the two must agree on something — the context-overflow marker, the shape
-of a context-window estimator — each states it independently and
-`@sunfall/vesper-runtime` is where a compiler compares them.
-`agent/src/context-window.ts` states the estimator's shape,
-`pi/src/compaction.ts` produces a value of it without importing the statement,
-and the assignment in `runtime.ts` is the check;
-`runtime/test/protocol.test.ts` covers the rest. Do not "simplify" this into
-an import in either direction. The point is that a second provider adapter can
-satisfy the same shape without either package learning about it.
+The provider-independent context policies live at the seam that consumes them:
+`@sunfall/vesper-agent/context-window`. `pure` is the default and
+`usageAnchored` is an explicit application wiring choice.
 
-`@sunfall/vesper-runtime` is the single exception, and it exists so the rule
-can hold. It is not a barrel: it re-exports nothing and instead decides
-defaults and layer order.
-
-`agent -> log` is the one edge below `runtime`, admitted on a narrow argument.
+`agent -> log` is the one Vesper-package edge, admitted on a narrow argument.
 `log` depends on nothing but `effect`, and what it supplies is a data
 vocabulary — records, offsets, a store interface — not a provider and not a
 durability strategy. Recording is opt-in through `agent.recordingTo(id)` and
@@ -188,19 +175,6 @@ calls neither requires no new service and writes nothing. Do not read this as
 a precedent for `agent -> workspace`: the test it passed is that the
 dependency cannot reintroduce provider knowledge and leaves the ordinary path
 requiring exactly what it required before.
-
-## Pi version lockstep
-
-`pi-agent-core@X` requires `pi-ai@^X`. `@sunfall/vesper-pi` depends on both at
-0.80.2 and `pnpm-workspace.yaml` pins both there through `overrides`. A
-mismatch puts two copies of `pi-ai` in the graph and breaks type identity at
-the adapter seam — the one place this repository cannot afford it, and one
-whose error points at the call site rather than at the duplication. Do not
-bump one without the other, and move both overrides in the same change.
-
-`Compaction.defaultSystem` is transcribed from Pi's unexported
-`SUMMARIZATION_SYSTEM_PROMPT`. Nothing can detect drift, so re-read it on any
-`pi-agent-core` bump.
 
 ## One durability mechanism: the conversation log
 
@@ -211,20 +185,20 @@ it completed and re-runs no tool call whose outcome was recorded. Do not add a
 second mechanism without beating the argument in
 [`../Design.md`](../Design.md) that removed the previous two.
 
-What remains at the provider seam is a **retry**, in `@sunfall/vesper-pi/retry`.
-It absorbs a transient failure inside one model call, which is the only
-granularity where a 429 costs a wait rather than a re-run of the turn and
-everything the turn did.
+Provider retries belong in the official client's `HttpClient` transformation,
+below streamed output and tool resolution. Wrapping a whole `LanguageModel`
+call risks duplicating output or re-running tools.
 
 A durable workflow engine's steps — DBOS's, for instance — are a separate seam
 and not a competitor: steps make **effects** exactly-once, the log makes
-**conversation state** durable and resumable, and the retry absorbs **provider
-blips**.
+**conversation state** durable and resumable, and provider HTTP policy absorbs
+**provider blips**.
 
 **A run's log claim is a value, not an ambient.** `AgentLog.Session` is what
 child sessions, signal delivery, and resuming tool dispatch all reach through,
 and it is threaded lexically: `agent.ts`'s `entryFor(session)` builds the loop
-around one, and `Agent.runInSession` hands one across a delegation boundary.
+around one, and an internal symbol protocol hands it across a delegation
+boundary without exposing a public session/runtime invocation method.
 It is deliberately not a `Context.Reference` defaulting to "not recording".
 Effect's guidance is not to hide persistence behind a defaulted reference, and
 the deleted `Checkpointer.RunId` was this repository's own instance of what
@@ -233,6 +207,21 @@ forgot to scope a run got plausible behaviour, someone else's answers, and no
 signal. `Compaction.Policy`'s estimator seam is the deliberate contrast — a
 defaulted estimate hides nothing, because the run still works and the reactive
 overflow path catches what a cruder guess misses.
+
+The hard run budget follows the same rule. `RunPolicy.Runtime` is one mutable
+ledger scoped to a root run and passed explicitly through generated delegation
+handlers into descendant loops. Never recreate it in a child, put it in a
+module global, or implement a hard limit as a `StopCondition`: steers may
+override stop conditions by design. Count provider calls before invocation,
+including compaction retries, and account provider-reported tokens after the
+finish part; token enforcement may therefore overshoot by one completed model
+call but never starts a later call after exhaustion is known.
+
+Recording filters belong at `AgentLog.Session.append`, after live model/tool
+behavior and before schema encoding. Compile an effectful application policy
+once against its context, carry the requirement-free runtime in the session,
+and inherit it into child sessions. The raw policy must remain explicit; do not
+hide persistence filtering behind an ambient default.
 
 ## Subagent services
 
@@ -256,8 +245,7 @@ the handler.
 Everything crossing the log is a `Schema` type, so an unserializable record is
 caught at the append rather than months later during a recovery nobody is
 watching. Model typed errors that cross that boundary with
-`Schema.TaggedErrorClass`; errors that never cross one may use
-`Data.TaggedError`.
+`Schema.TaggedError`; errors that never cross one may use `Data.TaggedError`.
 
 The three `Schema.Unknown` fields — `RunStarted.prompt`, `ToolCall.params`,
 `ToolOutcome.result` — are the exception, held that way because their real

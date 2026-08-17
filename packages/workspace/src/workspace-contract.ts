@@ -17,8 +17,8 @@ import { WorkspaceDriver } from './driver.js';
 // because the failures being pinned are the substrate's. It assumes a POSIX
 // shell and `/`-separated paths, which every driver in view provides.
 
-export interface ContractOptions<E, R> {
-  readonly layer: Layer.Layer<WorkspaceDriver.Service, E, R>;
+export interface ContractOptions<E> {
+  readonly layer: Layer.Layer<WorkspaceDriver.Service, E>;
   /**
    * An existing, writable directory inside the workspace. Each case creates its
    * own subdirectory under it and never touches a sibling's.
@@ -28,18 +28,14 @@ export interface ContractOptions<E, R> {
 
 let counter = 0;
 
-export const workspaceContract = <E, R>(
+export const workspaceContract = <E>(
   name: string,
-  options: ContractOptions<E, R>,
+  options: ContractOptions<E>,
 ): void => {
   const run = <A>(
     effect: Effect.Effect<A, unknown, WorkspaceDriver.Service>,
   ): Promise<A> =>
-    Effect.runPromise(
-      effect.pipe(
-        Effect.provide(options.layer as Layer.Layer<WorkspaceDriver.Service>),
-      ) as Effect.Effect<A>,
-    );
+    Effect.runPromise(effect.pipe(Effect.provide(options.layer)));
 
   /** A fresh directory for one case, created through the driver under test. */
   const scratch = Effect.fnUntraced(function* () {
@@ -316,14 +312,14 @@ export const workspaceContract = <E, R>(
     });
 
     it('exec fails with CommandTimeout and terminates the command', async () => {
-      const [outcome, finished] = await run(
+      const [outcome, started, finished] = await run(
         Effect.gen(function* () {
           const driver = yield* WorkspaceDriver.Service;
           const dir = yield* scratch();
 
           const outcome = yield* driver
             .exec(
-              `printf x > ${dir}/started; sleep 2; printf x > ${dir}/done`,
+              `(printf x > '${dir}/child-started'; sleep 2; printf x > '${dir}/child-done') & wait`,
               {
                 timeoutMs: 200,
               },
@@ -333,7 +329,11 @@ export const workspaceContract = <E, R>(
           // Past when the command would have written `done` had it survived.
           yield* Effect.sleep(Duration.seconds(3));
 
-          return [outcome, yield* driver.exists(`${dir}/done`)] as const;
+          return [
+            outcome,
+            yield* driver.exists(`${dir}/child-started`),
+            yield* driver.exists(`${dir}/child-done`),
+          ] as const;
         }),
       );
 
@@ -342,6 +342,7 @@ export const workspaceContract = <E, R>(
         expect(outcome.failure).toBeInstanceOf(WorkspaceDriver.CommandTimeout);
         expect(outcome.failure).toMatchObject({ timeoutMs: 200 });
       }
+      expect(started).toBe(true);
       expect(finished).toBe(false);
     });
 
@@ -352,17 +353,19 @@ export const workspaceContract = <E, R>(
           const dir = yield* scratch();
 
           const fiber = yield* driver
-            .exec(`printf x > ${dir}/started; sleep 2; printf x > ${dir}/done`)
+            .exec(
+              `(printf x > '${dir}/child-started'; sleep 2; printf x > '${dir}/child-done') & wait`,
+            )
             .pipe(Effect.forkChild);
 
-          yield* waitUntil(driver.exists(`${dir}/started`));
+          yield* waitUntil(driver.exists(`${dir}/child-started`));
           // `Fiber.interrupt` waits for finalizers, so the kill has happened
           // by the time this returns.
           yield* Fiber.interrupt(fiber);
 
           yield* Effect.sleep(Duration.seconds(3));
 
-          return yield* driver.exists(`${dir}/done`);
+          return yield* driver.exists(`${dir}/child-done`);
         }),
       );
 

@@ -60,11 +60,32 @@ const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(),
 });
 
 describe('Agent.stream', () => {
+  it('fails an in-band provider error instead of completing an empty turn', async () => {
+    const calls = await Effect.runPromise(Ref.make(0));
+    const outcome = await Effect.runPromise(
+      agent
+        .stream('hi')
+        .pipe(
+          Stream.runDrain,
+          Effect.provide(
+            scripted(
+              [[{ type: 'error', error: new Error('provider stream failed') }]],
+              calls,
+            ),
+          ),
+          Effect.result,
+        ),
+    );
+
+    expect(outcome._tag).toBe('Failure');
+  });
+
   it('emits turn boundaries around the model parts', async () => {
     const tags = await run(
       Effect.gen(function* () {
@@ -128,6 +149,7 @@ describe('Agent.stream', () => {
         const calls = yield* Ref.make(0);
         const twoTurns = Agent.make({
           name: 'two',
+          revision: '1',
           instructions: 'x',
           toolkit: Toolkit.make(),
           stopWhen: Stop.maxSteps(2),
@@ -156,6 +178,7 @@ describe('Agent.stream', () => {
         const calls = yield* Ref.make(0);
         const twoTurns = Agent.make({
           name: 'two',
+          revision: '1',
           instructions: 'x',
           toolkit: Toolkit.make(),
           stopWhen: Stop.maxSteps(2),

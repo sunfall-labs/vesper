@@ -9,7 +9,7 @@
 // Pure functions over strings and bytes. Nothing here touches a driver, a
 // filesystem, or Effect, so every case below is exercised directly.
 //
-// The shape mirrors Pi's `harness/utils/truncate.ts` — two independent limits,
+// Two independent limits,
 // whichever is hit first wins, and complete lines wherever possible — but the
 // code is ours. See `tools.ts` for why we did not import theirs.
 

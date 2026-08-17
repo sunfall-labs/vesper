@@ -35,6 +35,17 @@ export interface Skill {
 
 export const TOOL_NAME = 'load_skill';
 
+/** The tool record compiled into an agent that declares at least one skill. */
+export type Tools<
+  Skills extends ReadonlyArray<{
+    readonly name: string;
+    readonly description: string;
+    readonly instructions: string;
+  }>,
+> = Skills extends readonly []
+  ? {}
+  : Record<typeof TOOL_NAME, ReturnType<typeof makeTool>>;
+
 /**
  * The catalog line for each skill, for splicing into instructions.
  *
@@ -53,6 +64,24 @@ export const catalog = (skills: ReadonlyArray<Skill>): string =>
 
 const Success = Schema.Struct({ instructions: Schema.String });
 
+const makeTool = (names: ReadonlyArray<string>) =>
+  Tool.make(TOOL_NAME, {
+    description:
+      'Load the full instructions for one of the available skills. Do this ' +
+      'before attempting work the skill covers.',
+    parameters: Schema.Struct({
+      name: (names.length === 0
+        ? Schema.String
+        : Schema.Literals(names as [string, ...string[]])) as Schema.Codec<
+        string,
+        string
+      >,
+    }),
+    success: Success,
+    failure: Schema.Struct({ unknownSkill: Schema.String }),
+    failureMode: 'return',
+  });
+
 /**
  * The loading tool and its handler.
  *
@@ -65,26 +94,7 @@ export const loader = (skills: ReadonlyArray<Skill>) => {
   const byName = new Map(skills.map((skill) => [skill.name, skill]));
   const names = skills.map((skill) => skill.name);
 
-  const tool = Tool.make(TOOL_NAME, {
-    description:
-      'Load the full instructions for one of the available skills. Do this ' +
-      'before attempting work the skill covers.',
-    parameters: Schema.Struct({
-      // A literal union rather than a bare string: the set is known, so an
-      // invalid name should fail validation, not silently miss.
-      name: (names.length === 0
-        ? Schema.String
-        : Schema.Literals(names as [string, ...string[]])) as Schema.Codec<
-        string,
-        string
-      >,
-    }),
-    success: Success,
-    failure: Schema.Struct({ unknownSkill: Schema.String }),
-    // The model can recover from asking for a skill that does not exist, so
-    // the failure goes back to it rather than aborting the run.
-    failureMode: 'return',
-  });
+  const tool = makeTool(names);
 
   const handler = (input: { readonly name: string }) => {
     const skill = byName.get(input.name);

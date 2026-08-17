@@ -1,7 +1,8 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Deferred, Effect, Fiber, Layer, Stream } from 'effect';
+import { Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -11,7 +12,9 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
+import { protocolOf } from '../src/internal.js';
 import { AgentLog } from '../src/log.js';
+import { RunPolicy } from '../src/run-policy.js';
 
 // Settlement: the durable half of "how did this end".
 //
@@ -83,10 +86,27 @@ const blocking = (reached: Deferred.Deferred<void>) =>
     }),
   );
 
+const stallsSettlement = (interrupted: Ref.Ref<boolean>) =>
+  Layer.effect(
+    LogStore.Service,
+    Effect.map(LogStore.Service, (store) =>
+      LogStore.Service.of({
+        ...store,
+        append: (input) =>
+          input.records.some(({ record }) => record._tag === 'RunSettled')
+            ? Effect.never.pipe(
+                Effect.onInterrupt(() => Ref.set(interrupted, true)),
+              )
+            : store.append(input),
+      }),
+    ),
+  ).pipe(Layer.provide(LogStoreMemory.layer));
+
 const CONVERSATION = 'settling-conversation';
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(),
 });
@@ -117,6 +137,15 @@ const run = <A, E>(
     ),
   );
 
+const runInSession = <R>(
+  child: Agent.Named<string, R>,
+  session: AgentLog.Session,
+  input: string,
+) =>
+  Effect.flatMap(RunPolicy.create(RunPolicy.defaultLimits), (runtime) =>
+    protocolOf<R>(child)!.run(runtime, session, input),
+  );
+
 describe('how a run settles', () => {
   it('records a completed run as a success, with its totals', async () => {
     const written = await run(
@@ -133,6 +162,20 @@ describe('how a run settles', () => {
         detail: '',
         steps: 1,
         usage: { input: 5, output: 2 },
+        resume: {
+          formatVersion: 1,
+          agent: 'test',
+          agentRevision: '1',
+          usage: { input: 5, output: 2 },
+          signalCursor: LogOffset.START,
+          completed: {
+            outcome: 'success',
+            text: 'done',
+            steps: 1,
+            usage: { input: 5, output: 2 },
+          },
+          latestTurnUsage: { input: 5, output: 2 },
+        },
       },
     ]);
     // Last, so a reader tailing the log knows nothing more is coming.
@@ -218,6 +261,42 @@ describe('how a run settles', () => {
       },
     ]);
   });
+
+  it('bounds a stalled settlement append and leaves an orphan', async () => {
+    const interrupted = await Effect.runPromise(Ref.make(false));
+    const observed = await Effect.runPromise(
+      Effect.gen(function* () {
+        const session = yield* AgentLog.open(CONVERSATION, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
+        const stalled: AgentLog.Session = {
+          ...session,
+          settlementTimeoutMillis: 10,
+        };
+
+        const result = yield* runInSession(agent, stalled, 'hi').pipe(
+          Effect.timeout(1_000),
+          Effect.orDie,
+        );
+        return {
+          result,
+          written: yield* session.recorded,
+          interrupted: yield* Ref.get(interrupted),
+        };
+      }).pipe(
+        Effect.provide(answering),
+        Effect.provide(stallsSettlement(interrupted)),
+        Effect.scoped,
+      ),
+    );
+
+    expect(observed.result.text).toBe('done');
+    expect(observed.interrupted).toBe(true);
+    expect(settlement(observed.written)).toEqual([]);
+    expect(observed.written.map(({ record }) => record._tag)).toContain(
+      'Completed',
+    );
+  });
 });
 
 describe('orphans', () => {
@@ -238,7 +317,13 @@ describe('orphans', () => {
               {
                 conversationId: CONVERSATION,
                 timestamp: 1_700_000_000_000,
-                record: { _tag: 'RunStarted', agent: 'test', prompt: [] },
+                record: {
+                  _tag: 'RunStarted',
+                  agent: 'test',
+                  formatVersion: 1,
+                  agentRevision: '1',
+                  prompt: [],
+                },
               },
             ],
           })

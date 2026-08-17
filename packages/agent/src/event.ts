@@ -27,6 +27,7 @@ export const Lifecycle = Schema.Union([
     }),
   }),
   Schema.TaggedStruct('Completed', {
+    outcome: Schema.Literals(['success', 'cancelled']),
     text: Schema.String,
     steps: Schema.Number,
     usage: Schema.Struct({
@@ -37,11 +38,11 @@ export const Lifecycle = Schema.Union([
   /**
    * An out-of-band instruction reached the run and was acted on.
    *
-   * Emitted at the turn boundary that consumed it, before that turn's
-   * `TurnFinished`. A `cancel` is followed by `TurnFinished` and `Completed`
-   * like any other stopping turn — cancellation ends a run, it does not fail
-   * one, and a consumer that treated it as a failure would lose the work
-   * already done.
+   * Emitted when the authoritative boundary drain consumes it, before that
+   * turn's `TurnFinished`. A valid cancel may have already stopped the provider
+   * stream, but acknowledgement and ordering remain here. It is followed by
+   * `TurnFinished` and `Completed` like any other stopping turn: cancellation
+   * ends a run, it does not fail one, and partial work remains available.
    *
    * This is an event and not a private detail of the log sink on purpose.
    * Steering changes what the model is about to be asked, so a consumer
@@ -65,6 +66,24 @@ export const Lifecycle = Schema.Union([
      * so the brand is applied where the record is written instead.
      */
     at: Schema.String,
+  }),
+  Schema.TaggedStruct('SignalRejected', {
+    step: Schema.Number,
+    kind: Schema.Literals(['steer', 'cancel']),
+    text: Schema.String,
+    source: Schema.String,
+    at: Schema.String,
+    reason: Schema.Literals([
+      'signal_bytes',
+      'signals_per_boundary',
+      'steered_bytes',
+    ]),
+    used: Schema.Number,
+    maximum: Schema.Number,
+  }),
+  Schema.TaggedStruct('SignalBacklog', {
+    step: Schema.Number,
+    maximum: Schema.Number,
   }),
   /**
    * History was summarized to fit the context window.
@@ -112,12 +131,34 @@ export const Lifecycle = Schema.Union([
  */
 export type Lifecycle = typeof Lifecycle.Type;
 
+/** A result supplied by recovery or interception rather than a tool handler. */
+export type SubstitutedToolResult<
+  Name extends string = string,
+  Failure extends boolean = boolean,
+> = Response.ToolResultPart<Name, unknown, unknown> & {
+  readonly resultSource: 'substituted';
+  readonly isFailure: Failure;
+};
+
+export type StreamPart<Tools extends Record<string, Tool.Any>> =
+  | Response.StreamPart<Tools>
+  | SubstitutedToolResult<keyof Tools & string>;
+
 export type Event<Tools extends Record<string, Tool.Any>> =
   | Lifecycle
   | {
       readonly _tag: 'Part';
       readonly step: number;
       readonly part: Response.StreamPart<Tools>;
+    };
+
+/** Public events, including results that could not be schema-decoded. */
+export type ObservedEvent<Tools extends Record<string, Tool.Any>> =
+  | Lifecycle
+  | {
+      readonly _tag: 'Part';
+      readonly step: number;
+      readonly part: StreamPart<Tools>;
     };
 
 export const turnStarted = (step: number): Lifecycle => ({
@@ -135,7 +176,8 @@ export const completed = (
   text: string,
   steps: number,
   usage: Stop.Usage,
-): Lifecycle => ({ _tag: 'Completed', text, steps, usage });
+  outcome: 'success' | 'cancelled',
+): Lifecycle => ({ _tag: 'Completed', outcome, text, steps, usage });
 
 export const signalled = (
   step: number,
@@ -146,6 +188,34 @@ export const signalled = (
     readonly at: string;
   },
 ): Lifecycle => ({ _tag: 'Signalled', step, ...signal });
+
+export const signalRejected = (
+  step: number,
+  signal: {
+    readonly kind: 'steer' | 'cancel';
+    readonly text: string;
+    readonly source: string;
+    readonly at: string;
+  },
+  exhaustion: {
+    readonly limit: 'signal_bytes' | 'signals_per_boundary' | 'steered_bytes';
+    readonly used: number;
+    readonly maximum: number;
+  },
+): Lifecycle => ({
+  _tag: 'SignalRejected',
+  step,
+  ...signal,
+  reason: exhaustion.limit,
+  used: exhaustion.used,
+  maximum: exhaustion.maximum,
+});
+
+export const signalBacklog = (step: number, maximum: number): Lifecycle => ({
+  _tag: 'SignalBacklog',
+  step,
+  maximum,
+});
 
 export const compacted = (
   step: number,

@@ -6,8 +6,8 @@
     "lib": ["ES2022", "DOM"],
     "strict": true,
     "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
+    "declarationMap": false,
+    "sourceMap": false,
     "skipLibCheck": true,
     "verbatimModuleSyntax": true,
     "exactOptionalPropertyTypes": true,
@@ -19,13 +19,18 @@
       "@sunfall/vesper-agent/context-window": [
         "./packages/agent/src/context-window.ts"
       ],
-      "@sunfall/vesper-agent/dispatch": ["./packages/agent/src/dispatch.ts"],
       "@sunfall/vesper-agent/event": ["./packages/agent/src/event.ts"],
       "@sunfall/vesper-agent/history": ["./packages/agent/src/history.ts"],
       "@sunfall/vesper-agent/interception": [
         "./packages/agent/src/interception.ts"
       ],
       "@sunfall/vesper-agent/log": ["./packages/agent/src/log.ts"],
+      "@sunfall/vesper-agent/recording-policy": [
+        "./packages/agent/src/recording-policy.ts"
+      ],
+      "@sunfall/vesper-agent/run-policy": [
+        "./packages/agent/src/run-policy.ts"
+      ],
       "@sunfall/vesper-agent/signal": ["./packages/agent/src/signal.ts"],
       "@sunfall/vesper-agent/stop": ["./packages/agent/src/stop.ts"],
       "@sunfall/vesper-agent/subagent": ["./packages/agent/src/subagent.ts"],
@@ -44,14 +49,6 @@
         "./packages/log/src/log-store-contract.ts"
       ],
       "@sunfall/vesper-log/layer-pg": ["./packages/log/src/layer-pg.ts"],
-      "@sunfall/vesper-pi/compaction": ["./packages/pi/src/compaction.ts"],
-      "@sunfall/vesper-pi/credentials": ["./packages/pi/src/credentials.ts"],
-      "@sunfall/vesper-pi/errors": ["./packages/pi/src/errors.ts"],
-      "@sunfall/vesper-pi/model": ["./packages/pi/src/model.ts"],
-      "@sunfall/vesper-pi/provider": ["./packages/pi/src/provider.ts"],
-      "@sunfall/vesper-pi/registry": ["./packages/pi/src/registry.ts"],
-      "@sunfall/vesper-pi/retry": ["./packages/pi/src/retry.ts"],
-      "@sunfall/vesper-runtime/runtime": ["./packages/runtime/src/runtime.ts"],
       "@sunfall/vesper-workspace/driver": [
         "./packages/workspace/src/driver.ts"
       ],

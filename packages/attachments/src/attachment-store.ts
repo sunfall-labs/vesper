@@ -28,7 +28,7 @@ import { AttachmentRef } from './ref.js';
  * somewhere else. An integrity failure is a statement about this store, and
  * retrying it against the same backend is pointless.
  */
-export class AttachmentNotFound extends Schema.TaggedErrorClass<AttachmentNotFound>()(
+export class AttachmentNotFound extends Schema.TaggedError<AttachmentNotFound>()(
   '@sunfall/vesper-attachments/AttachmentNotFound',
   {
     ref: AttachmentRef.Ref,
@@ -47,7 +47,7 @@ export class AttachmentNotFound extends Schema.TaggedErrorClass<AttachmentNotFou
  * different digest is bit rot or a key collision, while a different length is
  * a truncated or partial read and is the one worth retrying at a lower layer.
  */
-export class AttachmentIntegrityError extends Schema.TaggedErrorClass<AttachmentIntegrityError>()(
+export class AttachmentIntegrityError extends Schema.TaggedError<AttachmentIntegrityError>()(
   '@sunfall/vesper-attachments/AttachmentIntegrityError',
   {
     ref: AttachmentRef.Ref,
@@ -64,7 +64,7 @@ export class AttachmentIntegrityError extends Schema.TaggedErrorClass<Attachment
  * after callers exist is a breaking change for every one of them; declaring it
  * now costs a `_tag` nobody matches yet.
  */
-export class AttachmentStoreError extends Schema.TaggedErrorClass<AttachmentStoreError>()(
+export class AttachmentStoreError extends Schema.TaggedError<AttachmentStoreError>()(
   '@sunfall/vesper-attachments/AttachmentStoreError',
   {
     operation: Schema.Literals(['put', 'get', 'has']),

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
 import pg from 'pg';
@@ -9,14 +10,8 @@ import pg from 'pg';
 // In the repository this package was extracted from, the `ai_log` tables were
 // owned by a central migration system and this file's job was done by a shared
 // testkit that shelled out to that system's schema tool. Standalone, there is
-// no central migration system to defer to, so the DDL below *is* the schema.
-//
-// That makes this file a second source of truth, which is normally the thing
-// to avoid: a store that carries its own schema is a migration system that
-// disagrees with the real one exactly once, in production. Here it is the
-// honest arrangement — this package ships a backend, not a database. An
-// application supplies its own migrations, and this DDL is the reference for
-// what they have to produce. `layer-pg.ts` still issues no DDL of its own.
+// no central migration system to defer to. The harness therefore applies the
+// exact SQL asset published with the package instead of carrying test-only DDL.
 
 /**
  * The tables `LogStorePg` reads and writes.
@@ -35,44 +30,10 @@ import pg from 'pg';
  *   reader. Without the matching collation here the index is merely unused;
  *   without it in the queries the result is wrong.
  */
-export const SCHEMA_DDL = `
-CREATE SCHEMA IF NOT EXISTS ai_log;
-
-CREATE TABLE IF NOT EXISTS ai_log.streams (
-  path                   text PRIMARY KEY,
-  identity               text NOT NULL,
-  epoch                  bigint NOT NULL DEFAULT 0,
-  producer_id            text,
-  next_sequence          bigint NOT NULL DEFAULT 0,
-  next_producer_sequence bigint NOT NULL DEFAULT 0,
-  last_fingerprint       text NOT NULL DEFAULT '',
-  last_offset            text NOT NULL DEFAULT '-1',
-  created_at             timestamptz NOT NULL DEFAULT now()
+export const SCHEMA_DDL = readFileSync(
+  new URL('../migrations/001-initial.sql', import.meta.url),
+  'utf8',
 );
-
-CREATE TABLE IF NOT EXISTS ai_log.records (
-  path              text NOT NULL,
-  seq               bigint NOT NULL,
-  record_offset     text NOT NULL,
-  producer_id       text NOT NULL,
-  producer_epoch    bigint NOT NULL,
-  producer_sequence bigint NOT NULL,
-  batch_index       integer NOT NULL,
-  conversation_id   text NOT NULL,
-  record_timestamp  bigint NOT NULL,
-  record            jsonb NOT NULL,
-  written_at        timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT ai_log_records_pkey PRIMARY KEY (path, seq)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS ai_log_records_producer_batch_unique
-  ON ai_log.records (
-    path, producer_id, producer_epoch, producer_sequence, batch_index
-  );
-
-CREATE INDEX IF NOT EXISTS ai_log_records_path_offset_idx
-  ON ai_log.records (path, record_offset COLLATE "C");
-`;
 
 const IMAGE = process.env['ARBOR_POSTGRES_TEST_IMAGE'] ?? 'postgres:16-alpine';
 

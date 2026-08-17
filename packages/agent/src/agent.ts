@@ -2,7 +2,7 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Tail } from '@sunfall/vesper-log/tail';
-import { Effect, Layer, Ref, Schema, Stream } from 'effect';
+import { Effect, Exit, Layer, Option, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
   Chat,
@@ -18,11 +18,15 @@ import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
+import { hasProtocol, register } from './internal.js';
 import type { Interception } from './interception.js';
 import { AgentLog } from './log.js';
+import { RecordingPolicy } from './recording-policy.js';
+import { RunPolicy } from './run-policy.js';
 import { Skill } from './skill.js';
 import { Stop } from './stop.js';
 import { Subagent } from './subagent.js';
+import { SubagentRuntime } from './subagent-runtime.js';
 
 // The loop. This is the piece `effect/unstable/ai` does not have:
 // `LanguageModel.generateText` performs exactly one turn — prompt, model,
@@ -36,8 +40,8 @@ import { Subagent } from './subagent.js';
 // boundaries, usage accounting, and the stop decision interleave, is the
 // easier one to get subtly wrong.
 //
-// This module must not import `@sunfall/vesper-pi`. It targets the `LanguageModel`
-// tag, so the provider and its retry policy are chosen at application wiring.
+// This module targets the `LanguageModel` tag, so the official provider package
+// and its HTTP policy are chosen at application wiring.
 // See `docs/contributing.md`.
 //
 // It does import `@sunfall/vesper-log`, which depends on nothing but `effect`. That
@@ -72,13 +76,20 @@ export interface Definition<
   Name extends string,
   Tools extends Record<string, Tool.Any>,
   Children extends ReadonlyArray<Named> = readonly [],
+  Skills extends ReadonlyArray<Skill.Skill> = readonly [],
+  StopR = never,
 > {
   readonly name: Name;
+  /** Stable application-defined compatibility revision for durable history. */
+  readonly revision: string;
   readonly description?: string;
   /** Prepended as a system message on every run. */
   readonly instructions: string;
   readonly toolkit: Toolkit.Toolkit<Tools>;
-  readonly stopWhen?: Stop.StopCondition<Tools>;
+  readonly stopWhen?: Stop.StopCondition<
+    CompiledTools<Tools, Children, Skills>,
+    StopR
+  >;
   /** Concurrency for resolving the tool calls within one turn. */
   readonly concurrency?: number | 'unbounded';
 
@@ -98,7 +109,7 @@ export interface Definition<
    * `instructions` (so it stays in the cacheable prefix) while the bodies
    * load through a tool.
    */
-  readonly skills?: ReadonlyArray<Skill.Skill>;
+  readonly skills?: Skills;
 
   /**
    * Automatic compaction when a turn overflows the context window. Defaults
@@ -109,6 +120,8 @@ export interface Definition<
    * and the recovery is always the same.
    */
   readonly compaction?: Compaction.Policy | false;
+  /** Hard limits shared by this run and every descendant delegation. */
+  readonly runPolicy?: Partial<RunPolicy.Limits>;
 }
 
 /**
@@ -119,6 +132,7 @@ export interface Definition<
  * codec rather than a bare interface.
  */
 export const Result = Schema.Struct({
+  outcome: Schema.Literals(['success', 'cancelled']),
   /** Concatenated text of the final turn. */
   text: Schema.String,
   steps: Schema.Number,
@@ -196,7 +210,7 @@ export type WithoutOwnHandlers<
  */
 export interface Instance<
   out Name extends string,
-  in out Tools extends Record<string, Tool.Any>,
+  in out OwnTools extends Record<string, Tool.Any>,
   /**
    * What a caller must supply to run this agent.
    *
@@ -205,13 +219,19 @@ export interface Instance<
    * {@link WithOwnHandlers} and attaching handlers changes nothing a caller can
    * observe.
    */
-  out Requires = WithOwnHandlers<Tools>,
+  out Requires = WithOwnHandlers<OwnTools>,
+  in out RuntimeTools extends Record<string, Tool.Any> = OwnTools,
+  out BaseRequires = Requires,
+  out InterceptorRequires = never,
+  out RunError extends AiError.AiError | AgentLog.CompatibilityError =
+    AiError.AiError,
 > {
   readonly [TypeId]: TypeId;
   readonly name: Name;
+  readonly revision: string;
   /** Shown to a parent when this agent is used as a subagent. */
   readonly description?: string | undefined;
-  readonly toolkit: Toolkit.Toolkit<Tools>;
+  readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
   /**
    * The system prompt this agent runs with, including any skill catalog.
    *
@@ -226,12 +246,16 @@ export interface Instance<
    */
   readonly stream: (
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.Event<Tools>, AiError.AiError, Requires>;
+  ) => Stream.Stream<
+    AgentEvents.ObservedEvent<RuntimeTools>,
+    RunError,
+    Requires
+  >;
 
   /** Run to completion. A fold of `stream`, not a second implementation. */
   readonly run: (
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires>;
+  ) => Effect.Effect<Result, RunError, Requires>;
 
   /**
    * Continue an existing conversation instead of starting one.
@@ -239,17 +263,21 @@ export interface Instance<
    * `stream` and `run` open a fresh `Chat` each time, which is right for a
    * one-shot. Resuming a stored session means handing back the `Chat` it was
    * restored into, so the loop appends to that history rather than a new
-   * one. See `@sunfall/vesper-runtime`'s session helpers.
+   * one. See the recording and resumption helpers below.
    */
   readonly streamIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.Event<Tools>, AiError.AiError, Requires>;
+  ) => Stream.Stream<
+    AgentEvents.ObservedEvent<RuntimeTools>,
+    RunError,
+    Requires
+  >;
 
   readonly runIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires>;
+  ) => Effect.Effect<Result, RunError, Requires>;
 
   /**
    * Declare handlers for this agent's tools without attaching them, purely
@@ -258,7 +286,7 @@ export interface Instance<
    * Mirrors `Toolkit.of`, and exists for the same reason: handlers defined
    * away from their agent otherwise get checked only at the point of use.
    */
-  of<Handlers extends Toolkit.HandlersFrom<Tools>>(
+  of<Handlers extends Toolkit.HandlersFrom<OwnTools>>(
     handlers: Handlers,
   ): Handlers;
 
@@ -281,9 +309,17 @@ export interface Instance<
    * Calling it again replaces the handlers rather than layering a second set
    * underneath, so the tools advertised always have exactly one handler each.
    */
-  withHandlers<Handlers extends Toolkit.HandlersFrom<Tools>>(
+  withHandlers<Handlers extends Toolkit.HandlersFrom<OwnTools>>(
     handlers: Handlers,
-  ): Instance<Name, Tools, WithoutOwnHandlers<Requires, Tools>>;
+  ): Instance<
+    Name,
+    OwnTools,
+    WithoutOwnHandlers<BaseRequires, OwnTools> | InterceptorRequires,
+    RuntimeTools,
+    WithoutOwnHandlers<BaseRequires, OwnTools>,
+    InterceptorRequires,
+    RunError
+  >;
 
   /**
    * Record every run into `conversationId`'s conversation log.
@@ -317,7 +353,30 @@ export interface Instance<
    */
   recordingTo(
     conversationId: string,
-  ): Instance<Name, Tools, Requires | LogStore.Service>;
+  ): Instance<
+    Name,
+    OwnTools,
+    BaseRequires | LogStore.Service | InterceptorRequires,
+    RuntimeTools,
+    BaseRequires | LogStore.Service,
+    InterceptorRequires,
+    RunError | AgentLog.CompatibilityError
+  >;
+  recordingTo<const P extends object>(
+    conversationId: string,
+    policy: P & RecordingPolicy.Policy<RecordingPolicy.Services<P>>,
+  ): Instance<
+    Name,
+    OwnTools,
+    | BaseRequires
+    | LogStore.Service
+    | InterceptorRequires
+    | RecordingPolicy.Services<P>,
+    RuntimeTools,
+    BaseRequires | LogStore.Service | RecordingPolicy.Services<P>,
+    InterceptorRequires,
+    RunError | AgentLog.CompatibilityError
+  >;
 
   /**
    * Continue a recorded conversation, rebuilding it from its own log.
@@ -346,13 +405,16 @@ export interface Instance<
    *
    * Call it on the agent, not on one already returned by {@link recordingTo}:
    * this names a conversation itself, so chaining the two would open two
-   * claims and write every record twice. That is the same shape as
-   * {@link runInSession}, which has always had it.
+   * claims and write every record twice.
    */
   readonly resume: (
     conversationId: string,
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires | LogStore.Service>;
+  ) => Effect.Effect<
+    Result,
+    RunError | AgentLog.CompatibilityError,
+    Requires | LogStore.Service
+  >;
 
   /**
    * Continue a recorded conversation from an **earlier point in it**.
@@ -388,7 +450,11 @@ export interface Instance<
     conversationId: string,
     at: LogOffset.Offset,
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires | LogStore.Service>;
+  ) => Effect.Effect<
+    Result,
+    RunError | AgentLog.CompatibilityError,
+    Requires | LogStore.Service
+  >;
 
   /**
    * Start a **new conversation** from a prefix of an existing one, and run it.
@@ -427,10 +493,14 @@ export interface Instance<
     at: LogOffset.Offset,
     forkConversationId: string,
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires | LogStore.Service>;
+  ) => Effect.Effect<
+    Result,
+    RunError | AgentLog.CompatibilityError,
+    Requires | LogStore.Service
+  >;
 
   /**
-   * Give something a say at the loop's three named seams.
+   * Give something a say at the loop's named seams.
    *
    * `interception.ts` is where the seams and their permissions are written
    * down; this is only how one is attached. Attaching is the same shape of
@@ -453,32 +523,17 @@ export interface Instance<
    * is wrong for somebody; composing them is the caller's job, where the
    * intent is known.
    */
-  intercepting<R = never>(
-    interceptor: Interception.Interceptor<R>,
-  ): Instance<Name, Tools, Requires | R>;
-
-  /**
-   * Run against a conversation someone else already claimed.
-   *
-   * This is how a parent runs a subagent as a **child session**: the parent
-   * opens the child's conversation through its own session — which is what
-   * writes the `ChildSession` reference into both logs — and hands the result
-   * here. The child records its own conversation under its own id, and the
-   * two are linked from either end.
-   *
-   * The requirement channel does not grow, unlike {@link recordingTo}'s. A
-   * `Session` is a claim that already holds the store, so nothing about
-   * running into one needs `LogStore.Service` from the caller. That is also
-   * why it can be handed across a delegation boundary at all: the child's
-   * declared services are exactly what they were.
-   *
-   * Signals reach a run through the session too, so a child session can be
-   * steered or cancelled independently of its parent.
-   */
-  readonly runInSession: (
-    session: AgentLog.Session,
-    input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires>;
+  intercepting<const I extends object>(
+    interceptor: I & Interception.Interceptor<Interception.Services<I>>,
+  ): Instance<
+    Name,
+    OwnTools,
+    BaseRequires | Interception.Services<I>,
+    RuntimeTools,
+    BaseRequires,
+    Interception.Services<I>,
+    RunError
+  >;
 }
 
 /**
@@ -507,31 +562,11 @@ export interface Instance<
  */
 export interface Named<Name extends string = string, R = unknown> {
   readonly name: Name;
+  readonly revision: string;
   readonly description?: string | undefined;
   readonly run: (
     input: Prompt.RawInput,
   ) => Effect.Effect<Result, AiError.AiError, R>;
-
-  /**
-   * How a parent runs this child as a recorded child session.
-   *
-   * Optional, so a hand-written `Named` — a stub, a fake in a test — is still
-   * one. Every `Agent` has it. A parent that is recording uses it when it is
-   * there and falls back to `run` when it is not, so a child that cannot
-   * record is a child whose conversation is not retained rather than a
-   * delegation that fails.
-   *
-   * Note what `R` does *not* pick up here: the session carries the store, so
-   * running into one requires exactly what running normally requires. That is
-   * what lets `Subagent.Services` keep reading a child's real services off
-   * `run` without child sessions widening every parent's channel.
-   */
-  readonly runInSession?:
-    | ((
-        session: AgentLog.Session,
-        input: Prompt.RawInput,
-      ) => Effect.Effect<Result, AiError.AiError, R>)
-    | undefined;
 }
 
 /**
@@ -552,7 +587,7 @@ export interface Named<Name extends string = string, R = unknown> {
  * @since 0.1.0
  */
 // oxlint-disable-next-line no-explicit-any
-export interface Any extends Instance<any, any, any> {}
+export interface Any extends Instance<any, any, any, any, any, any, any> {}
 
 /**
  * Extract an agent's name.
@@ -561,7 +596,17 @@ export interface Any extends Instance<any, any, any> {}
  * @since 0.1.0
  */
 export type Name<A> =
-  A extends Instance<infer _Name, infer _Tools, infer _R> ? _Name : never;
+  A extends Instance<
+    infer _Name,
+    infer _Own,
+    infer _R,
+    infer _Runtime,
+    infer _Base,
+    infer _Interceptor,
+    infer _Error
+  >
+    ? _Name
+    : never;
 
 /**
  * Extract an agent's tool record.
@@ -570,7 +615,31 @@ export type Name<A> =
  * @since 0.1.0
  */
 export type Tools<A> =
-  A extends Instance<infer _Name, infer _Tools, infer _R> ? _Tools : never;
+  A extends Instance<
+    infer _Name,
+    infer _Own,
+    infer _R,
+    infer _Runtime,
+    infer _Base,
+    infer _Interceptor,
+    infer _Error
+  >
+    ? _Runtime
+    : never;
+
+/** Extract only the tools supplied by the agent definition's toolkit. */
+export type OwnTools<A> =
+  A extends Instance<
+    infer _Name,
+    infer _Own,
+    infer _R,
+    infer _Runtime,
+    infer _Base,
+    infer _Interceptor,
+    infer _Error
+  >
+    ? _Own
+    : never;
 
 /**
  * Extract what still has to be provided to run an agent.
@@ -579,14 +648,86 @@ export type Tools<A> =
  * @since 0.1.0
  */
 export type Requires<A> =
-  A extends Instance<infer _Name, infer _Tools, infer _R> ? _R : never;
+  A extends Instance<
+    infer _Name,
+    infer _Own,
+    infer _R,
+    infer _Runtime,
+    infer _Base,
+    infer _Interceptor,
+    infer _Error
+  >
+    ? _R
+    : never;
 
 /**
  * @category guards
  * @since 0.1.0
  */
 export const isAgent = (u: unknown): u is Any =>
-  typeof u === 'object' && u !== null && TypeId in u;
+  typeof u === 'object' &&
+  u !== null &&
+  (u as { readonly [TypeId]?: unknown })[TypeId] === TypeId &&
+  hasProtocol(u);
+
+/** Every tool visible to the model after declarative capabilities compile. */
+export type CompiledTools<
+  Own extends Record<string, Tool.Any>,
+  Children extends ReadonlyArray<Named>,
+  Skills extends ReadonlyArray<Skill.Skill>,
+> = Own & Subagent.Tools<Children> & Skill.Tools<Skills>;
+
+type ChildNames<Children extends ReadonlyArray<Named>> = {
+  [K in keyof Children]: Children[K]['name'];
+};
+
+type HasDuplicates<Values extends ReadonlyArray<string>> =
+  Values extends readonly [
+    infer Head extends string,
+    ...infer Tail extends ReadonlyArray<string>,
+  ]
+    ? Head extends Tail[number]
+      ? true
+      : HasDuplicates<Tail>
+    : false;
+
+type GeneratedNames<
+  Children extends ReadonlyArray<Named>,
+  Skills extends ReadonlyArray<Skill.Skill>,
+> =
+  | (number extends Children['length']
+      ? never
+      : `task_${Children[number]['name']}`)
+  | (number extends Skills['length']
+      ? never
+      : Skills extends readonly []
+        ? never
+        : typeof Skill.TOOL_NAME);
+
+type DefinitionCollision<
+  Own extends Record<string, Tool.Any>,
+  Children extends ReadonlyArray<Named>,
+  Skills extends ReadonlyArray<Skill.Skill>,
+> =
+  HasDuplicates<ChildNames<Children>> extends true
+    ? 'duplicate subagent names'
+    : Extract<keyof Own, GeneratedNames<Children, Skills>> extends never
+      ? never
+      : Extract<keyof Own, GeneratedNames<Children, Skills>>;
+
+type CollisionFreeDefinition<
+  Own extends Record<string, Tool.Any>,
+  Children extends ReadonlyArray<Named>,
+  Skills extends ReadonlyArray<Skill.Skill>,
+> = [DefinitionCollision<Own, Children, Skills>] extends [never]
+  ? unknown
+  : {
+      readonly __generatedToolNameCollision__: DefinitionCollision<
+        Own,
+        Children,
+        Skills
+      >;
+    };
 
 /**
  * @category constructors
@@ -596,21 +737,59 @@ export const make = <
   const Name extends string,
   Tools extends Record<string, Tool.Any>,
   const Children extends ReadonlyArray<Named> = readonly [],
+  const Skills extends ReadonlyArray<Skill.Skill> = readonly [],
+  StopR = never,
 >(
-  definition: Definition<Name, Tools, Children>,
-) => {
-  const stopWhen = definition.stopWhen ?? Stop.defaultCondition<Tools>();
+  definition: Definition<Name, Tools, Children, Skills, StopR> &
+    CollisionFreeDefinition<Tools, Children, Skills>,
+): Instance<
+  Name,
+  Tools,
+  WithOwnHandlers<Tools> | Subagent.Services<Children> | StopR,
+  CompiledTools<Tools, Children, Skills>,
+  WithOwnHandlers<Tools> | Subagent.Services<Children> | StopR,
+  never
+> => {
+  type RuntimeTools = CompiledTools<Tools, Children, Skills>;
+  type BaseRequires =
+    | WithOwnHandlers<Tools>
+    | Subagent.Services<Children>
+    | StopR;
+
+  if (definition.revision.trim() === '') {
+    throw new Error(`Agent "${definition.name}" revision must be non-empty`);
+  }
+
+  const stopWhen = definition.stopWhen ?? Stop.defaultCondition<RuntimeTools>();
+  const runPolicy = RunPolicy.make(definition.runPolicy);
 
   // Subagents and skills are compiled into the toolkit here rather than by
   // the caller. Merging them by hand is mechanical, and the failure mode
   // when it is done wrong — a tool advertised with no handler, or a handler
   // for a tool nobody advertised — surfaces as a confusing model-facing
   // error rather than a compile error.
-  const children = definition.subagents ?? [];
-  const skills = definition.skills ?? [];
+  const children = (definition.subagents ?? []) as Children;
+  const skills = (definition.skills ?? []) as Skills;
+
+  for (const child of children) {
+    if (!isAgent(child)) {
+      throw new Error(
+        `Agent "${definition.name}" subagent "${child.name}" was not created by Agent.make`,
+      );
+    }
+  }
+  validateGeneratedToolNames(definition.toolkit, children, skills);
+  for (const child of children) {
+    if (child.revision.trim() === '') {
+      throw new Error(`Agent "${child.name}" revision must be non-empty`);
+    }
+  }
 
   const delegation =
-    children.length > 0 ? Subagent.delegateTo(...children) : undefined;
+    children.length > 0 ? SubagentRuntime.delegateTo(...children) : undefined;
+  const delegationToolNames = new Set(
+    children.map((child) => Subagent.toolName(child.name)),
+  );
   const loader = skills.length > 0 ? Skill.loader(skills) : undefined;
 
   // `Toolkit.merge` wants `Toolkit.Any`, and while `Children` is generic TS
@@ -626,7 +805,7 @@ export const make = <
       ? []
       : [delegation.toolkit as unknown as Toolkit.Any]),
     ...(loader === undefined ? [] : [loader.toolkit]),
-  ) as unknown as Toolkit.Toolkit<Tools>;
+  ) as unknown as Toolkit.Toolkit<RuntimeTools>;
 
   // The skill catalog joins the system prompt: a model cannot ask for a
   // skill it does not know exists. The bodies stay out, so the prefix is
@@ -654,43 +833,50 @@ export const make = <
   // A closure over `wiring` is how that stays lexical — both the session and
   // the interceptor are passed in, not looked up, so nothing here depends on
   // what happens to be in the context.
-  const entryFor = (wiring: Wiring) => {
+  const entryFor = (
+    wiring: Wiring,
+  ): Entry<RuntimeTools, BaseRequires, AiError.AiError> => {
     const session = wiring.session;
     const interceptor = wiring.interceptor;
+    const runtime = wiring.runtime;
 
     // A `Toolkit` already *is* an `Effect` producing a resolved toolkit, and
     // `streamText`'s `toolkit` option takes either form, so both branches have
     // one type and `LanguageModel` resolves them identically. That is the whole
     // reason the dispatch seam needs no change to the `LanguageModel` contract.
     //
-    // An agent that neither records nor intercepts takes the first branch and
-    // runs precisely the code it ran before either existed.
-    const dispatching: Effect.Effect<
-      Toolkit.WithHandler<Tools>,
+    // An agent with no dispatch seams takes the first branch. A root runtime
+    // is also a seam because its tool semaphore is shared by descendants.
+    const dispatching = (
+      arbitration: ToolDispatch.TurnArbitration,
+    ): Effect.Effect<
+      Toolkit.WithHandler<RuntimeTools>,
       never,
-      Tool.HandlersFor<Tools>
-    > = session === undefined && interceptor === undefined
-      ? toolkit
-      : ToolDispatch.gate(toolkit, {
-          agent: definition.name,
-          session,
-          interceptor,
-        });
+      Tool.HandlersFor<RuntimeTools>
+    > =>
+      ToolDispatch.gate(toolkit, {
+        agent: definition.name,
+        session,
+        interceptor,
+        runtime,
+        unmeteredToolNames: delegationToolNames,
+        arbitration,
+      });
 
     // Fixed arity rather than spreading `...(x ? [l] : [])`: the spread form
     // widens `mergeAll`'s result, which then leaks into anything that provides
     // this layer.
     const layer = Layer.mergeAll(
-      delegation === undefined ? Layer.empty : delegation.layer(session),
+      delegation === undefined
+        ? Layer.empty
+        : delegation.layer(session, runtime),
       loader === undefined ? Layer.empty : loader.layer,
     );
 
-    const turnOptions = {
-      toolkit: dispatching,
-      ...(definition.concurrency === undefined
-        ? {}
-        : { concurrency: definition.concurrency }),
-    };
+    const turnOptions = (arbitration: ToolDispatch.TurnArbitration) => ({
+      toolkit: dispatching(arbitration),
+      concurrency: definition.concurrency,
+    });
 
     /**
      * The provider call, and the seam that sits in front of it.
@@ -708,34 +894,76 @@ export const make = <
       step: number,
       input: Prompt.RawInput,
       attempt: Interception.Attempt,
-    ) =>
+      arbitration: ToolDispatch.TurnArbitration,
+    ): Stream.Stream<
+      AgentEvents.Event<RuntimeTools>,
+      AiError.AiError,
+      WithOwnHandlers<RuntimeTools>
+    > =>
       Stream.unwrap(
-        Effect.map(
-          interceptor?.beforeModelCall === undefined
-            ? Effect.void
-            : interceptor.beforeModelCall({
-                agent: definition.name,
-                conversationId: session?.conversationId,
-                step,
-                attempt,
-              }),
-          () =>
-            chat.streamText({ prompt: input, ...turnOptions }).pipe(
+        Effect.gen(function* () {
+          if (interceptor?.beforeModelCall !== undefined) {
+            yield* interceptor.beforeModelCall({
+              agent: definition.name,
+              conversationId: session?.conversationId,
+              step,
+              attempt,
+            });
+          }
+          if (runtime !== undefined) yield* runtime.modelCall;
+          const remaining =
+            runtime === undefined ? undefined : yield* runtime.remainingMillis;
+          const asked = chat
+            .streamText({ prompt: input, ...turnOptions(arbitration) })
+            .pipe(
+              Stream.mapEffect((part) =>
+                part.type === 'error'
+                  ? Effect.fail(
+                      normalizeProviderError(part.error, part.metadata),
+                    )
+                  : Effect.succeed(part),
+              ),
               Stream.tap((part) =>
                 Effect.sync(() => {
+                  seen.started = true;
                   observe(seen, part as Response.StreamPartEncoded);
-                }),
+                }).pipe(
+                  Effect.andThen(
+                    runtime === undefined
+                      ? Effect.void
+                      : runtime.remainingMillis,
+                  ),
+                ),
               ),
               Stream.map(
-                (part): AgentEvents.Event<Tools> => ({
+                (part): AgentEvents.Event<RuntimeTools> => ({
                   _tag: 'Part',
                   step,
-                  part: part as Response.StreamPart<Tools>,
+                  part: part as Response.StreamPart<RuntimeTools>,
                 }),
               ),
-            ),
-        ),
-      );
+            );
+          return remaining === undefined
+            ? asked
+            : asked.pipe(
+                Stream.timeoutOrElse({
+                  duration: remaining,
+                  orElse: () =>
+                    Stream.fail(
+                      RunPolicy.error({
+                        limit: 'deadline',
+                        used: runPolicy.wallClockMillis,
+                        maximum: runPolicy.wallClockMillis,
+                      }),
+                    ),
+                }),
+              );
+        }),
+      ) as Stream.Stream<
+        AgentEvents.Event<RuntimeTools>,
+        AiError.AiError,
+        WithOwnHandlers<RuntimeTools>
+      >;
 
     /**
      * The seam in front of a turn, resolved to the input the turn will use.
@@ -796,7 +1024,38 @@ export const make = <
           yield* Ref.get(lastTurn),
         );
 
-        return over ? yield* Compaction.compact(chat, compaction) : undefined;
+        if (!over) return undefined;
+        const summarized = yield* compactWithBudget(chat, compaction);
+        if (summarized !== undefined && runtime !== undefined) {
+          yield* runtime.addUsage(summarized.usage);
+        }
+        return summarized;
+      });
+
+    const compactWithBudget = (
+      chat: Chat.Service,
+      policy: Compaction.Policy,
+    ): Effect.Effect<
+      Compaction.Summarized | undefined,
+      AiError.AiError,
+      LanguageModel.LanguageModel
+    > =>
+      Effect.gen(function* () {
+        if (runtime === undefined)
+          return yield* Compaction.compact(chat, policy);
+        yield* runtime.modelCall;
+        const remaining = yield* runtime.remainingMillis;
+        return yield* Effect.timeoutOrElse(Compaction.compact(chat, policy), {
+          duration: remaining,
+          orElse: () =>
+            Effect.fail(
+              RunPolicy.error({
+                limit: 'deadline',
+                used: runPolicy.wallClockMillis,
+                maximum: runPolicy.wallClockMillis,
+              }),
+            ),
+        });
       });
 
     const turn = (
@@ -806,19 +1065,40 @@ export const make = <
       step: number,
       pending: Prompt.RawInput,
     ): Stream.Stream<
-      AgentEvents.Event<Tools>,
+      AgentEvents.Event<RuntimeTools>,
       AiError.AiError,
-      WithOwnHandlers<Tools>
+      WithOwnHandlers<RuntimeTools> | StopR
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
-          const input = yield* openTurn(step, yield* Ref.get(usage), pending);
+          const input = yield* openTurn(
+            step,
+            yield* Ref.get(usage),
+            pending,
+          ).pipe(
+            Effect.catch((error) =>
+              step === 1 && wiring.startRun !== undefined
+                ? wiring
+                    .startRun(pending)
+                    .pipe(Effect.andThen(Effect.fail(error)))
+                : Effect.fail(error),
+            ),
+          );
+          if (step === 1 && wiring.startRun !== undefined) {
+            yield* wiring.startRun(input);
+          }
+          if (runtime !== undefined) yield* runtime.turn;
 
           // Before the request, not after it is refused. Announced the same
           // way the reactive rewrite is, because from the log's point of view
           // the two are the same event: history was replaced by a summary, and
           // a reader rebuilding this conversation has to know that.
           const ahead = yield* compactAhead(chat, lastTurn, input);
+          if (ahead !== undefined) {
+            yield* Ref.update(usage, (current) =>
+              addStopUsage(current, ahead.usage),
+            );
+          }
 
           // A turn's outcome is only knowable once its parts have gone by, but
           // the stop decision needs it. Accumulating through a `tap` while the
@@ -826,16 +1106,24 @@ export const make = <
           // still have the decision made on complete information.
           //
           // Only what the stop condition and the result actually read is kept:
-          // text, tool calls, usage. Rebuilding whole content parts would mean
-          // a second copy of the fold `@sunfall/vesper-pi` already carries, for data
-          // nothing here consumes.
-          const seen: TurnState = { text: '', toolCalls: [], usage: undefined };
+          // text, tool calls, usage. Rebuilding whole content parts would retain
+          // data nothing here consumes.
+          const initial = emptyTurnState();
+          const active = yield* Ref.make(initial);
+          const arbitration = yield* ToolDispatch.makeTurnArbitration;
 
           // The conversation as it stood before this turn was attempted, kept
           // for the reactive path below. See the `catchIf` there for why.
           const historyBefore = yield* Ref.get(chat.history);
 
-          const parts = askModel(chat, seen, step, input, 'initial');
+          const parts = askModel(
+            chat,
+            initial,
+            step,
+            input,
+            'initial',
+            arbitration,
+          );
 
           const guarded =
             compaction === undefined
@@ -854,9 +1142,15 @@ export const make = <
                   // already replaced and compacted again on its first turn. A
                   // no-op compaction announces nothing, because nothing was
                   // replaced.
-                  Stream.catchIf(Compaction.isContextOverflow, () =>
+                  Stream.catchIf(Compaction.isContextOverflow, (error) =>
                     Stream.unwrap(
-                      Effect.map(
+                      Effect.gen(function* () {
+                        // Once a part escaped, retrying can duplicate visible
+                        // text or tool side effects. Provider retries belong
+                        // below this seam; compaction is safe only for a request
+                        // rejected before it produced anything.
+                        if (initial.emitted) return Stream.fail(error);
+
                         // State the history the summarizer should see rather
                         // than inherit whatever the rejected turn left behind.
                         //
@@ -874,48 +1168,65 @@ export const make = <
                         // finalizer that runs on failure too — but that is one
                         // implementation's detail and the retry below depends
                         // on it being exactly right, so it is not assumed.
-                        Effect.andThen(
-                          Ref.set(
-                            chat.history,
-                            Prompt.concat(historyBefore, Prompt.make(input)),
-                          ),
-                          Compaction.compact(chat, compaction),
-                        ),
-                        (summarized) => {
-                          // Empty, not `input`. The input is in the history
-                          // above and `Chat.streamText` appends whatever it is
-                          // given, so passing it again sent the overflowing
-                          // message twice — which, when that message was the
-                          // 136k tokens that caused the overflow, meant the
-                          // retry was refused for the same reason and the run
-                          // died having paid for a summary. A live 272k-token
-                          // rejection against Anthropic did precisely that.
-                          const retried = askModel(
-                            chat,
-                            seen,
-                            step,
-                            Prompt.empty,
-                            'after-compaction',
-                          );
-                          return summarized === undefined
-                            ? retried
-                            : Stream.concat(
-                                Stream.make(
-                                  AgentEvents.compacted(step, summarized),
-                                ),
-                                retried,
-                              );
-                        },
-                      ),
+                        yield* Ref.set(
+                          chat.history,
+                          Prompt.concat(historyBefore, Prompt.make(input)),
+                        );
+                        const summarized = yield* compactWithBudget(
+                          chat,
+                          compaction,
+                        );
+                        // Retrying an unchanged prompt repeats the same refusal
+                        // and can loop provider-side work for no gain.
+                        if (summarized === undefined) return Stream.fail(error);
+                        if (runtime !== undefined) {
+                          yield* runtime.addUsage(summarized.usage);
+                        }
+                        yield* Ref.update(usage, (current) =>
+                          addStopUsage(current, summarized.usage),
+                        );
+
+                        const retry = emptyTurnState();
+                        yield* Ref.set(active, retry);
+                        // Empty, not `input`. The input is in the history above
+                        // and `Chat.streamText` appends whatever it is given.
+                        const retried = askModel(
+                          chat,
+                          retry,
+                          step,
+                          Prompt.empty,
+                          'after-compaction',
+                          arbitration,
+                        );
+                        return Stream.concat(
+                          Stream.make(AgentEvents.compacted(step, summarized)),
+                          retried,
+                        );
+                      }),
                     ),
                   ),
                 );
 
           const decide = Stream.unwrap(
             Effect.gen(function* () {
+              const seen = yield* Ref.get(active);
               const totals = yield* Ref.updateAndGet(usage, (current) =>
                 addUsage(current, seen.usage),
               );
+              if (runtime !== undefined && seen.usage !== undefined) {
+                const accounted = yield* Effect.exit(
+                  runtime.addUsage({
+                    input: seen.usage.inputTokens.total ?? 0,
+                    output: seen.usage.outputTokens.total ?? 0,
+                  }),
+                );
+                if (Exit.isFailure(accounted)) {
+                  return Stream.concat(
+                    Stream.make(AgentEvents.turnFinished(step, totals)),
+                    Stream.failCause(accounted.cause),
+                  );
+                }
+              }
 
               // This turn's own figures, kept apart from the running totals.
               // The estimator needs what the provider counted for *one*
@@ -938,8 +1249,29 @@ export const make = <
               // the drain itself is one bounded read from a cursor — see
               // `signal.ts` on why anything resembling a blocking receive is
               // the wrong primitive for this.
-              const delivered =
-                session === undefined ? [] : yield* session.drainSignals;
+              const drained: AgentLog.SignalDrain =
+                session === undefined
+                  ? { signals: [], backlog: false }
+                  : yield* session.drainSignalsBounded(
+                      runtime?.limits.maxSignalsPerBoundary ??
+                        runPolicy.maxSignalsPerBoundary,
+                    );
+              type Decision = RunPolicy.SignalDecision & {
+                readonly signal: AgentLog.Delivered;
+              };
+              const decisions = yield* Effect.forEach(
+                drained.signals,
+                (signal, index): Effect.Effect<Decision> =>
+                  runtime === undefined
+                    ? Effect.succeed({ signal, accepted: true, bytes: 0 })
+                    : Effect.map(
+                        runtime.signal(signal.kind, signal.text, index),
+                        (decision) => ({ signal, ...decision }),
+                      ),
+              );
+              const delivered = decisions.flatMap((decision) =>
+                decision.accepted ? [decision.signal] : [],
+              );
 
               const cancelled = delivered.some(
                 (signal) => signal.kind === 'cancel',
@@ -950,9 +1282,27 @@ export const make = <
 
               const announced = Stream.concat(
                 Stream.fromIterable(
-                  delivered.map((signal) =>
-                    AgentEvents.signalled(step, signal),
-                  ),
+                  decisions
+                    .map((decision) =>
+                      decision.accepted
+                        ? AgentEvents.signalled(step, decision.signal)
+                        : AgentEvents.signalRejected(
+                            step,
+                            decision.signal,
+                            decision.exhaustion!,
+                          ),
+                    )
+                    .concat(
+                      drained.backlog
+                        ? [
+                            AgentEvents.signalBacklog(
+                              step,
+                              runtime?.limits.maxSignalsPerBoundary ??
+                                runPolicy.maxSignalsPerBoundary,
+                            ),
+                          ]
+                        : [],
+                    ),
                 ),
                 Stream.make(AgentEvents.turnFinished(step, totals)),
               );
@@ -968,12 +1318,22 @@ export const make = <
               // and a steer is a person asking for more work; stopping anyway
               // would consume the instruction and ignore it, which is the one
               // outcome nobody can debug. A cancel outranks everything.
-              const stop = cancelled || (wanted && steers.length === 0);
+              const stop =
+                cancelled ||
+                (wanted && steers.length === 0 && !drained.backlog);
+              const completedSteps = seen.started ? step : step - 1;
 
               return stop
                 ? Stream.concat(
                     announced,
-                    Stream.make(AgentEvents.completed(seen.text, step, totals)),
+                    Stream.make(
+                      AgentEvents.completed(
+                        seen.text,
+                        completedSteps,
+                        totals,
+                        cancelled ? 'cancelled' : 'success',
+                      ),
+                    ),
                   )
                 : Stream.concat(
                     announced,
@@ -991,6 +1351,44 @@ export const make = <
             }),
           );
 
+          const responsiveCancel =
+            session === undefined
+              ? Effect.never
+              : session
+                  .signalPages(
+                    runtime?.limits.maxSignalsPerBoundary ??
+                      runPolicy.maxSignalsPerBoundary,
+                  )
+                  .pipe(
+                    Stream.flatMap((page) =>
+                      Stream.fromIterable(
+                        page.signals.map((signal, index) => ({
+                          signal,
+                          index,
+                        })),
+                      ),
+                    ),
+                    Stream.filter(({ signal }) => signal.kind === 'cancel'),
+                    Stream.filter(({ signal, index }) =>
+                      RunPolicy.acceptsCancel(
+                        runtime?.limits ?? runPolicy,
+                        signal.text,
+                        index,
+                      ),
+                    ),
+                    Stream.tap(() => arbitration.cancel),
+                    Stream.runHead,
+                    Effect.flatMap((cancel) =>
+                      Option.isSome(cancel) ? Effect.void : Effect.never,
+                    ),
+                    Effect.catch((error) =>
+                      Effect.logError(
+                        `Conversation ${session.conversationId} responsive cancel watcher failed; cancellation remains available at the next turn boundary`,
+                        error,
+                      ).pipe(Effect.andThen(Effect.never)),
+                    ),
+                  );
+
           const opened =
             ahead === undefined
               ? Stream.make(AgentEvents.turnStarted(step))
@@ -999,18 +1397,253 @@ export const make = <
                   AgentEvents.compacted(step, ahead),
                 );
 
-          return opened.pipe(Stream.concat(guarded), Stream.concat(decide));
+          return opened.pipe(
+            Stream.concat(guarded.pipe(Stream.interruptWhen(responsiveCancel))),
+            Stream.concat(decide),
+          );
         }),
-      );
+      ) as Stream.Stream<
+        AgentEvents.Event<RuntimeTools>,
+        AiError.AiError,
+        WithOwnHandlers<RuntimeTools> | StopR
+      >;
 
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          const usage = yield* Ref.make<Stop.Usage>({ input: 0, output: 0 });
-          const lastTurn = yield* Ref.make<ContextWindow.TurnUsage | undefined>(
-            undefined,
+          if (runtime === undefined) {
+            const root = yield* RunPolicy.create(runPolicy);
+            return entryFor({ ...wiring, runtime: root }).streamIn(
+              chat,
+              input,
+            ) as Stream.Stream<
+              AgentEvents.Event<RuntimeTools>,
+              AiError.AiError,
+              WithOwnHandlers<RuntimeTools> | StopR
+            >;
+          }
+          if (session !== undefined && (yield* session.hasPendingToolCalls)) {
+            const drained = yield* session.drainSignalsBounded(
+              runtime.limits.maxSignalsPerBoundary,
+            );
+            const decisions = yield* Effect.forEach(
+              drained.signals,
+              (signal, index) =>
+                Effect.map(
+                  runtime.signal(signal.kind, signal.text, index),
+                  (decision) => ({ signal, ...decision }),
+                ),
+            );
+            const delivered = decisions.flatMap((decision) =>
+              decision.accepted ? [decision.signal] : [],
+            );
+            const steers = delivered.filter(
+              (signal) => signal.kind === 'steer',
+            );
+            const effective =
+              steers.length === 0
+                ? input
+                : Prompt.concat(
+                    Prompt.make(input),
+                    Prompt.make(steeringInput(steers)),
+                  );
+            const announced = Stream.fromIterable(
+              decisions
+                .map((decision) =>
+                  decision.accepted
+                    ? AgentEvents.signalled(0, decision.signal)
+                    : AgentEvents.signalRejected(
+                        0,
+                        decision.signal,
+                        decision.exhaustion!,
+                      ),
+                )
+                .concat(
+                  drained.backlog
+                    ? [
+                        AgentEvents.signalBacklog(
+                          0,
+                          runtime.limits.maxSignalsPerBoundary,
+                        ),
+                      ]
+                    : [],
+                ),
+            );
+            if (delivered.some((signal) => signal.kind === 'cancel')) {
+              if (wiring.startRun !== undefined)
+                yield* wiring.startRun(effective);
+              return Stream.concat(
+                announced,
+                Stream.make(
+                  AgentEvents.completed(
+                    '',
+                    0,
+                    wiring.initialUsage ?? { input: 0, output: 0 },
+                    'cancelled',
+                  ),
+                ),
+              );
+            }
+
+            const arbitration = yield* ToolDispatch.makeTurnArbitration;
+            const cancelObserved = yield* Ref.make(false);
+            const cancelDuringRecovery = session
+              .signalPages(runtime.limits.maxSignalsPerBoundary)
+              .pipe(
+                Stream.flatMap((page) =>
+                  Stream.fromIterable(
+                    page.signals.map((signal, index) => ({ signal, index })),
+                  ),
+                ),
+                Stream.filter(({ signal }) => signal.kind === 'cancel'),
+                Stream.filter(({ signal, index }) =>
+                  RunPolicy.acceptsCancel(runtime.limits, signal.text, index),
+                ),
+                Stream.tap(() => Ref.set(cancelObserved, true)),
+                Stream.tap(() => arbitration.cancel),
+                Stream.runHead,
+                Effect.flatMap((cancel) =>
+                  Option.isSome(cancel) ? Effect.void : Effect.never,
+                ),
+                Effect.catch((error) =>
+                  Effect.logError(
+                    `Conversation ${session.conversationId} recovery cancel watcher failed; cancellation remains available at the next boundary`,
+                    error,
+                  ).pipe(Effect.andThen(Effect.never)),
+                ),
+              );
+
+            return Stream.concat(
+              announced,
+              Stream.unwrap(
+                Effect.gen(function* () {
+                  const remaining = yield* runtime.remainingMillis;
+                  const recovery = ToolDispatch.resolveIndeterminate(toolkit, {
+                    agent: definition.name,
+                    session,
+                    interceptor,
+                    runtime,
+                    unmeteredToolNames: delegationToolNames,
+                    arbitration,
+                  }).pipe(
+                    Effect.timeoutOrElse({
+                      duration: remaining,
+                      orElse: () =>
+                        Effect.fail(
+                          RunPolicy.error({
+                            limit: 'deadline',
+                            used: runtime.limits.wallClockMillis,
+                            maximum: runtime.limits.wallClockMillis,
+                          }),
+                        ),
+                    }),
+                  );
+                  yield* Effect.raceFirst(recovery, cancelDuringRecovery);
+                  if (yield* Ref.get(cancelObserved)) {
+                    const after = yield* session.drainSignalsBounded(
+                      runtime.limits.maxSignalsPerBoundary,
+                    );
+                    const afterDecisions = yield* Effect.forEach(
+                      after.signals,
+                      (signal, index) =>
+                        Effect.map(
+                          runtime.signal(signal.kind, signal.text, index),
+                          (decision) => ({ signal, ...decision }),
+                        ),
+                    );
+                    const afterSteers = afterDecisions
+                      .filter(
+                        (decision) =>
+                          decision.accepted && decision.signal.kind === 'steer',
+                      )
+                      .map((decision) => decision.signal);
+                    const cancelledInput =
+                      afterSteers.length === 0
+                        ? effective
+                        : Prompt.concat(
+                            Prompt.make(effective),
+                            Prompt.make(steeringInput(afterSteers)),
+                          );
+                    if (wiring.startRun !== undefined) {
+                      yield* wiring.startRun(cancelledInput);
+                    }
+                    return Stream.concat(
+                      Stream.fromIterable(
+                        afterDecisions.map((decision) =>
+                          decision.accepted
+                            ? AgentEvents.signalled(0, decision.signal)
+                            : AgentEvents.signalRejected(
+                                0,
+                                decision.signal,
+                                decision.exhaustion!,
+                              ),
+                        ),
+                      ),
+                      Stream.make(
+                        AgentEvents.completed(
+                          '',
+                          0,
+                          wiring.initialUsage ?? { input: 0, output: 0 },
+                          'cancelled',
+                        ),
+                      ),
+                    );
+                  }
+                  yield* Ref.set(
+                    chat.history,
+                    Prompt.concat(
+                      Prompt.make([{ role: 'system', content: instructions }]),
+                      AgentHistory.messagesFrom(yield* session.recorded),
+                    ),
+                  );
+                  return entryFor({
+                    session: wiring.session,
+                    interceptor: wiring.interceptor,
+                    runtime,
+                    ...(wiring.startRun === undefined
+                      ? {}
+                      : { startRun: wiring.startRun }),
+                    ...(wiring.initialUsage === undefined
+                      ? {}
+                      : { initialUsage: wiring.initialUsage }),
+                    ...(wiring.lastTurn === undefined
+                      ? {}
+                      : { lastTurn: wiring.lastTurn }),
+                  }).streamIn(chat, effective) as Stream.Stream<
+                    AgentEvents.Event<RuntimeTools>,
+                    AiError.AiError,
+                    WithOwnHandlers<RuntimeTools> | StopR
+                  >;
+                }),
+              ),
+            ) as Stream.Stream<
+              AgentEvents.Event<RuntimeTools>,
+              AiError.AiError,
+              WithOwnHandlers<RuntimeTools> | StopR
+            >;
+          }
+          const usage = yield* Ref.make<Stop.Usage>(
+            wiring.initialUsage ?? { input: 0, output: 0 },
           );
-          return turn(chat, usage, lastTurn, 1, input);
+          const lastTurn = yield* Ref.make<ContextWindow.TurnUsage | undefined>(
+            wiring.lastTurn,
+          );
+          const remaining = yield* runtime.remainingMillis;
+          return turn(chat, usage, lastTurn, 1, input).pipe(
+            Stream.interruptWhen(
+              Effect.sleep(remaining).pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    RunPolicy.error({
+                      limit: 'deadline',
+                      used: runPolicy.wallClockMillis,
+                      maximum: runPolicy.wallClockMillis,
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          );
         }),
       );
 
@@ -1036,32 +1669,77 @@ export const make = <
     // The agent provides its own handlers — subagent delegation and skill
     // loading — so a call site never has to provide them.
     //
-    // Nothing below is asserted. These four used to carry hand-written `as`
-    // clauses naming the requirement channel, on the belief that `Effect.provide`
-    // reported `any` here. It does not — it computes the channel exactly, and the
-    // assertions were papering over an imprecision introduced upstream by
-    // widening `children` with `?? []`. Both instances of the drop-a-service bug
-    // this library has had lived inside such an assertion, so the types are left
-    // computed and `assertions.test.ts` pins what they must mean.
+    // Generated layers discharge generated handlers. TS cannot subtract those
+    // keys from an intersected compiled record, so these boundary assertions
+    // name the public requirement channel. Exact type tests pin all four.
 
     return {
-      stream: (input: Prompt.RawInput) => Stream.provide(stream(input), layer),
-      run: (input: Prompt.RawInput) => Effect.provide(run(input), layer),
+      stream: (input: Prompt.RawInput) =>
+        Stream.provide(stream(input), layer) as Stream.Stream<
+          AgentEvents.Event<RuntimeTools>,
+          AiError.AiError,
+          BaseRequires
+        >,
+      run: (input: Prompt.RawInput) =>
+        Effect.provide(run(input), layer) as Effect.Effect<
+          Result,
+          AiError.AiError,
+          BaseRequires
+        >,
       streamIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-        Stream.provide(streamIn(chat, input), layer),
+        Stream.provide(streamIn(chat, input), layer) as Stream.Stream<
+          AgentEvents.Event<RuntimeTools>,
+          AiError.AiError,
+          BaseRequires
+        >,
       runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-        Effect.provide(runIn(chat, input), layer),
+        Effect.provide(runIn(chat, input), layer) as Effect.Effect<
+          Result,
+          AiError.AiError,
+          BaseRequires
+        >,
     };
   };
 
-  return fromParts({
+  return fromParts<Name, Tools, RuntimeTools, BaseRequires, never>({
     name: definition.name,
+    revision: definition.revision,
     description: definition.description,
+    ownToolkit: definition.toolkit,
     toolkit,
     instructions,
     interceptor: undefined,
+    runPolicy,
     entry: entryFor,
   });
+};
+
+const validateGeneratedToolNames = (
+  own: Toolkit.Any,
+  children: ReadonlyArray<Named>,
+  skills: ReadonlyArray<Skill.Skill>,
+): void => {
+  const ownNames = new Set(Object.keys(own.tools));
+  const generated = new Set<string>();
+
+  const reserve = (name: string, source: string): void => {
+    if (ownNames.has(name)) {
+      throw new Error(
+        `Agent generated tool "${name}" from ${source}, but the toolkit already defines it`,
+      );
+    }
+    if (generated.has(name)) {
+      throw new Error(
+        `Agent generated duplicate tool "${name}" from ${source}`,
+      );
+    }
+    generated.add(name);
+  };
+
+  for (const child of children) {
+    reserve(Subagent.toolName(child.name), `subagent "${child.name}"`);
+  }
+  if (skills.length > 0) reserve(Skill.TOOL_NAME, 'skills');
 };
 
 /**
@@ -1116,6 +1794,7 @@ const foldToResult = <Tools extends Record<string, Tool.Any>, E, R>(
     }
 
     return {
+      outcome: completed.outcome,
       text: completed.text,
       steps: completed.steps,
       usage: completed.usage,
@@ -1160,21 +1839,21 @@ export const streamFrom = (
  * session and the rest is not. `withHandlers` composes over an entry;
  * `recordingTo` replaces one.
  */
-interface Entry<Tools extends Record<string, Tool.Any>, Requires> {
+interface Entry<Tools extends Record<string, Tool.Any>, Requires, Error> {
   readonly stream: (
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.Event<Tools>, AiError.AiError, Requires>;
+  ) => Stream.Stream<AgentEvents.Event<Tools>, Error, Requires>;
   readonly run: (
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires>;
+  ) => Effect.Effect<Result, Error, Requires>;
   readonly streamIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.Event<Tools>, AiError.AiError, Requires>;
+  ) => Stream.Stream<AgentEvents.Event<Tools>, Error, Requires>;
   readonly runIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, Requires>;
+  ) => Effect.Effect<Result, Error, Requires>;
 }
 
 /**
@@ -1188,6 +1867,12 @@ interface Entry<Tools extends Record<string, Tool.Any>, Requires> {
 interface Wiring {
   readonly session: AgentLog.Session | undefined;
   readonly interceptor: Interception.Interceptor | undefined;
+  readonly runtime?: RunPolicy.Runtime | undefined;
+  readonly startRun?:
+    | ((input: Prompt.RawInput) => Effect.Effect<void>)
+    | undefined;
+  readonly initialUsage?: Stop.Usage | undefined;
+  readonly lastTurn?: ContextWindow.TurnUsage | undefined;
 }
 
 /**
@@ -1210,15 +1895,22 @@ interface Wiring {
  */
 interface Parts<
   Name extends string,
-  Tools extends Record<string, Tool.Any>,
-  Requires,
+  OwnTools extends Record<string, Tool.Any>,
+  RuntimeTools extends Record<string, Tool.Any>,
+  BaseRequires,
+  RunError,
 > {
   readonly name: Name;
+  readonly revision: string;
   readonly description: string | undefined;
-  readonly toolkit: Toolkit.Toolkit<Tools>;
+  readonly ownToolkit: Toolkit.Toolkit<OwnTools>;
+  readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
   readonly instructions: string;
   readonly interceptor: Interception.Interceptor | undefined;
-  readonly entry: (wiring: Wiring) => Entry<Tools, Requires>;
+  readonly runPolicy: RunPolicy.Limits;
+  readonly entry: (
+    wiring: Wiring,
+  ) => Entry<RuntimeTools, BaseRequires, RunError>;
 }
 
 /**
@@ -1230,18 +1922,34 @@ interface Parts<
  */
 const fromParts = <
   Name extends string,
-  Tools extends Record<string, Tool.Any>,
-  Requires,
+  OwnTools extends Record<string, Tool.Any>,
+  RuntimeTools extends Record<string, Tool.Any>,
+  BaseRequires,
+  InterceptorRequires,
+  RunError extends AiError.AiError | AgentLog.CompatibilityError =
+    AiError.AiError,
 >(
-  parts: Parts<Name, Tools, Requires>,
-): Instance<Name, Tools, Requires> => {
+  parts: Parts<Name, OwnTools, RuntimeTools, BaseRequires, RunError>,
+): Instance<
+  Name,
+  OwnTools,
+  BaseRequires | InterceptorRequires,
+  RuntimeTools,
+  BaseRequires,
+  InterceptorRequires,
+  RunError
+> => {
   // How every entry point below reaches the loop: the agent's interceptor,
   // and whichever session that entry point has. Read from `parts` rather than
   // passed along, so the only way to be intercepted is to have said so on this
   // agent.
-  const wiring = (session: AgentLog.Session | undefined): Wiring => ({
+  const wiring = (
+    session: AgentLog.Session | undefined,
+    options?: Omit<Wiring, 'session' | 'interceptor'>,
+  ): Wiring => ({
     session,
     interceptor: parts.interceptor,
+    ...options,
   });
 
   // The unrecorded entry, which is what the four public entry points are.
@@ -1267,7 +1975,11 @@ const fromParts = <
   // `Chat` seeded with instructions alone, and this seeds one with the
   // conversation the records describe. Everything else — recording, signals,
   // the dispatch seam — is the same wiring `recordingTo` builds.
-  const continuing = (session: AgentLog.Session, input: Prompt.RawInput) =>
+  const continuing = (
+    session: AgentLog.Session,
+    input: Prompt.RawInput,
+    runtime?: RunPolicy.Runtime,
+  ) =>
     Effect.gen(function* () {
       // Read before the run writes anything. `session.history` is the scan
       // `open` already performed, so this cannot see this run's own records —
@@ -1278,7 +1990,12 @@ const fromParts = <
       // neither of them takes a pre-filtered array: an abandoned branch costs
       // money that still has to be reported and says nothing the model should
       // be shown. `branch.ts` carries the table.
-      const prior = AgentHistory.usageFrom(session.history);
+      const total = session.usage;
+      const prior = {
+        input: Math.max(0, total.input - session.inheritedUsage.input),
+        output: Math.max(0, total.output - session.inheritedUsage.output),
+      };
+      const latest = session.latestTurnUsage;
       const chat = yield* Chat.fromPrompt(
         Prompt.concat(
           Prompt.make([{ role: 'system', content: parts.instructions }]),
@@ -1289,8 +2006,26 @@ const fromParts = <
       const result = yield* foldToResult(
         AgentLog.record(
           session,
-          { agent: parts.name, input },
-          parts.entry(wiring(session)).streamIn(chat, input),
+          parts
+            .entry(
+              wiring(session, {
+                runtime,
+                startRun: (effective) =>
+                  AgentLog.start(session, {
+                    agent: parts.name,
+                    revision: parts.revision,
+                    input: effective,
+                  }),
+                lastTurn:
+                  latest === undefined
+                    ? undefined
+                    : {
+                        inputTokens: latest.input,
+                        outputTokens: latest.output,
+                      },
+              }),
+            )
+            .streamIn(chat, input),
         ),
       );
 
@@ -1303,9 +2038,18 @@ const fromParts = <
       } satisfies Result;
     });
 
-  return {
+  const agent: Instance<
+    Name,
+    OwnTools,
+    BaseRequires | InterceptorRequires,
+    RuntimeTools,
+    BaseRequires,
+    InterceptorRequires,
+    RunError
+  > = {
     [TypeId]: TypeId,
     name: parts.name,
+    revision: parts.revision,
     description: parts.description,
     toolkit: parts.toolkit,
     instructions: parts.instructions,
@@ -1313,23 +2057,15 @@ const fromParts = <
 
     of: (handlers) => handlers,
 
-    runInSession: (session: AgentLog.Session, input: Prompt.RawInput) =>
-      span(
-        foldToResult(
-          AgentLog.record(
-            session,
-            { agent: parts.name, input },
-            parts.entry(wiring(session)).stream(input),
-          ),
-        ),
-      ),
-
     // A resumed run is an ordinary recorded run that did not start empty. See
     // {@link continuing}, which is the whole of it.
     resume: (conversationId: string, input: Prompt.RawInput) =>
       span(
-        Effect.flatMap(AgentLog.open(conversationId), (session) =>
-          continuing(session, input),
+        Effect.flatMap(
+          AgentLog.open(conversationId, {
+            compatibility: { agent: parts.name, revision: parts.revision },
+          }),
+          (session) => continuing(session, input),
         ),
       ),
 
@@ -1345,7 +2081,10 @@ const fromParts = <
     ) =>
       span(
         Effect.flatMap(
-          AgentLog.open(conversationId, { branchFrom: at }),
+          AgentLog.open(conversationId, {
+            branchFrom: at,
+            compatibility: { agent: parts.name, revision: parts.revision },
+          }),
           (session) => continuing(session, input),
         ),
       ),
@@ -1365,7 +2104,10 @@ const fromParts = <
     ) =>
       span(
         Effect.flatMap(
-          AgentLog.fork(conversationId, at, forkConversationId),
+          AgentLog.fork(conversationId, at, forkConversationId, {
+            agent: parts.name,
+            revision: parts.revision,
+          }),
           (session) => continuing(session, input),
         ),
       ),
@@ -1384,51 +2126,115 @@ const fromParts = <
     // conversation explicitly is a stronger statement than inheriting a
     // parent's, and quietly recording somewhere else would make
     // `recordingTo` mean different things depending on who called it.
-    recordingTo: (conversationId: string) => {
+    recordingTo: (
+      conversationId: string,
+      policy?: RecordingPolicy.Policy<never>,
+    ) => {
       const recorded = (
         input: Prompt.RawInput,
         events: (
           session: AgentLog.Session,
-        ) => Stream.Stream<AgentEvents.Event<Tools>, AiError.AiError, Requires>,
+        ) => Stream.Stream<
+          AgentEvents.Event<RuntimeTools>,
+          RunError | AgentLog.CompatibilityError,
+          BaseRequires
+        >,
       ): Stream.Stream<
-        AgentEvents.Event<Tools>,
-        AiError.AiError,
-        Requires | LogStore.Service
+        AgentEvents.Event<RuntimeTools>,
+        RunError | AgentLog.CompatibilityError,
+        BaseRequires | LogStore.Service
       > =>
         Stream.unwrap(
-          Effect.map(AgentLog.open(conversationId), (session) =>
-            AgentLog.record(
-              session,
-              { agent: parts.name, input },
-              events(session),
-            ),
-          ),
+          Effect.gen(function* () {
+            let session = yield* AgentLog.open(conversationId, {
+              compatibility: { agent: parts.name, revision: parts.revision },
+            });
+            if (policy !== undefined) {
+              const context = yield* Effect.context<never>();
+              session = AgentLog.withRecordingPolicy(
+                session,
+                RecordingPolicy.compile(policy, context),
+              );
+            }
+            return AgentLog.record(session, events(session));
+          }),
         );
 
-      return fromParts({
+      return fromParts<
+        Name,
+        OwnTools,
+        RuntimeTools,
+        BaseRequires | LogStore.Service,
+        InterceptorRequires,
+        RunError | AgentLog.CompatibilityError
+      >({
         ...parts,
         entry: () => ({
           stream: (input: Prompt.RawInput) =>
             recorded(input, (session) =>
-              parts.entry(wiring(session)).stream(input),
+              parts
+                .entry(
+                  wiring(session, {
+                    startRun: (effective) =>
+                      AgentLog.start(session, {
+                        agent: parts.name,
+                        revision: parts.revision,
+                        input: effective,
+                      }),
+                  }),
+                )
+                .stream(input),
             ),
           run: (input: Prompt.RawInput) =>
             span(
               foldToResult(
                 recorded(input, (session) =>
-                  parts.entry(wiring(session)).stream(input),
+                  parts
+                    .entry(
+                      wiring(session, {
+                        startRun: (effective) =>
+                          AgentLog.start(session, {
+                            agent: parts.name,
+                            revision: parts.revision,
+                            input: effective,
+                          }),
+                      }),
+                    )
+                    .stream(input),
                 ),
               ),
             ),
           streamIn: (chat: Chat.Service, input: Prompt.RawInput) =>
             recorded(input, (session) =>
-              parts.entry(wiring(session)).streamIn(chat, input),
+              parts
+                .entry(
+                  wiring(session, {
+                    startRun: (effective) =>
+                      AgentLog.start(session, {
+                        agent: parts.name,
+                        revision: parts.revision,
+                        input: effective,
+                      }),
+                  }),
+                )
+                .streamIn(chat, input),
             ),
           runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
             span(
               foldToResult(
                 recorded(input, (session) =>
-                  parts.entry(wiring(session)).streamIn(chat, input),
+                  parts
+                    .entry(
+                      wiring(session, {
+                        startRun: (effective) =>
+                          AgentLog.start(session, {
+                            agent: parts.name,
+                            revision: parts.revision,
+                            input: effective,
+                          }),
+                      }),
+                    )
+                    .streamIn(chat, input),
                 ),
               ),
             ),
@@ -1450,14 +2256,23 @@ const fromParts = <
     // captured context inward because `handle`'s signature will not carry a
     // requirement. `assertions.test.ts`'s interception cases pin the widening,
     // because a silently-narrowed version of this would compile.
-    intercepting: <R>(interceptor: Interception.Interceptor<R>) =>
-      fromParts({
+    intercepting: <const I extends object>(
+      interceptor: I & Interception.Interceptor<Interception.Services<I>>,
+    ) =>
+      fromParts<
+        Name,
+        OwnTools,
+        RuntimeTools,
+        BaseRequires,
+        Interception.Services<I>,
+        RunError
+      >({
         ...parts,
-        interceptor: interceptor as Interception.Interceptor,
+        interceptor: interceptor as unknown as Interception.Interceptor,
       }),
 
     withHandlers: (handlers) => {
-      const own = parts.toolkit.toLayer(handlers);
+      const own = parts.ownToolkit.toLayer(handlers);
 
       // The same narrowing assertion `make` uses, for the same reason:
       // `Layer.provide` cannot show inference that the handler requirement is
@@ -1468,7 +2283,14 @@ const fromParts = <
       // this twice replaces the handlers instead of stacking a second set
       // beneath the first — and so a session reaches the loop through the
       // rebuilt entry rather than being sealed behind the old one.
-      return fromParts({
+      return fromParts<
+        Name,
+        OwnTools,
+        RuntimeTools,
+        WithoutOwnHandlers<BaseRequires, OwnTools>,
+        InterceptorRequires,
+        RunError
+      >({
         ...parts,
         entry: (incoming: Wiring) => {
           const inner = parts.entry(incoming);
@@ -1486,15 +2308,52 @@ const fromParts = <
       });
     },
   };
+  register(agent, {
+    run: (
+      runtime: RunPolicy.Runtime,
+      session: AgentLog.Session | undefined,
+      input: Prompt.RawInput,
+    ) =>
+      span(
+        session === undefined
+          ? foldToResult(
+              parts.entry(wiring(undefined, { runtime })).stream(input),
+            )
+          : Effect.andThen(
+              AgentLog.assertCompatible(session, {
+                agent: parts.name,
+                revision: parts.revision,
+              }),
+              Effect.suspend(() => {
+                const completed = session.completed;
+                return completed === undefined
+                  ? continuing(session, input, runtime)
+                  : Effect.succeed(completed);
+              }),
+            ),
+      ),
+  });
+  return agent;
 };
 
 interface TurnState {
   text: string;
   toolCalls: Response.ToolCallPartEncoded[];
   usage: Response.FinishPartEncoded['usage'] | undefined;
+  emitted: boolean;
+  started: boolean;
 }
 
+const emptyTurnState = (): TurnState => ({
+  text: '',
+  toolCalls: [],
+  usage: undefined,
+  emitted: false,
+  started: false,
+});
+
 const observe = (state: TurnState, part: Response.StreamPartEncoded): void => {
+  state.emitted = true;
   switch (part.type) {
     case 'text-delta':
       state.text += part.delta;
@@ -1510,6 +2369,86 @@ const observe = (state: TurnState, part: Response.StreamPartEncoded): void => {
   }
 };
 
+const normalizeProviderError = (
+  error: unknown,
+  partMetadata?: Record<string, unknown> | undefined,
+): AiError.AiError => {
+  if (AiError.isAiError(error)) return error;
+
+  const structured = describeProviderError(error, partMetadata);
+  const common = {
+    description: structured.description,
+    metadata: structured.metadata,
+  };
+
+  return new AiError.AiError({
+    module: 'Agent',
+    method: 'streamText',
+    reason:
+      /(?:context(?: length| window)?(?: is)?(?: exceeded| too long)|maximum context length|model_context_window_exceeded|prompt is too long|too many tokens|input is too long)/i.test(
+        structured.description,
+      )
+        ? new AiError.InvalidRequestError({
+            ...common,
+            constraint: Compaction.CONTEXT_OVERFLOW,
+          })
+        : new AiError.UnknownError(common),
+  });
+};
+
+const describeProviderError = (
+  error: unknown,
+  partMetadata?: Record<string, unknown> | undefined,
+): {
+  readonly description: string;
+  readonly metadata: Record<string, unknown>;
+} => {
+  if (typeof error !== 'object' || error === null) {
+    return { description: String(error), metadata: partMetadata ?? {} };
+  }
+
+  const value = error as Record<string, unknown>;
+  const metadata =
+    typeof value.metadata === 'object' && value.metadata !== null
+      ? (value.metadata as Record<string, unknown>)
+      : {};
+  const code =
+    value.code ??
+    (typeof value.type === 'string' && value.type !== 'error'
+      ? value.type
+      : undefined);
+  const details = [code, value.message, value.error]
+    .map((part) =>
+      typeof part === 'string'
+        ? part
+        : part === undefined
+          ? ''
+          : stringifyErrorPart(part),
+    )
+    .filter((part) => part !== '')
+    .join(': ');
+
+  return {
+    description: details === '' ? stringifyErrorPart(value) : details,
+    metadata: {
+      ...partMetadata,
+      ...metadata,
+      ...(value.code === undefined ? {} : { code: value.code }),
+      ...(typeof value.type !== 'string' || value.type === 'error'
+        ? {}
+        : { type: value.type }),
+    },
+  };
+};
+
+const stringifyErrorPart = (value: unknown): string => {
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+};
+
 const addUsage = (
   current: Stop.Usage,
   usage: Response.FinishPartEncoded['usage'] | undefined,
@@ -1520,5 +2459,10 @@ const addUsage = (
         input: current.input + (usage.inputTokens.total ?? 0),
         output: current.output + (usage.outputTokens.total ?? 0),
       };
+
+const addStopUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
+  input: left.input + right.input,
+  output: left.output + right.output,
+});
 
 export * as Agent from './agent.js';

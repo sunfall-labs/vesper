@@ -57,4 +57,10 @@ describe('matches', () => {
     expect(() => WorkspaceGlob.compile('a[bc')).not.toThrow();
     expect(WorkspaceGlob.matches('a[bc', 'a[bc')).toBe(true);
   });
+
+  it('rejects a malformed character range during compilation', () => {
+    expect(() => WorkspaceGlob.compile('[z-a]')).toThrow(
+      WorkspaceGlob.InvalidGlobPattern,
+    );
+  });
 });

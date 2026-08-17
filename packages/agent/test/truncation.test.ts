@@ -55,6 +55,7 @@ const scripted = (reason: 'stop' | 'length') =>
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(),
 });

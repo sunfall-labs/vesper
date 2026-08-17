@@ -5,6 +5,7 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
   "include": ["src/**/*.ts"]

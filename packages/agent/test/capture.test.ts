@@ -3,7 +3,7 @@ import { Tool, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
-import { handler } from '../src/subagent.js';
+import { handler } from '../src/subagent-runtime.js';
 
 // Proof that capture actually propagates a subagent's services.
 //
@@ -27,6 +27,7 @@ const write = Tool.make('write', {
 
 const scribe = Agent.make({
   name: 'scribe',
+  revision: '1',
   instructions: 'write it down',
   toolkit: Toolkit.make(write),
 });

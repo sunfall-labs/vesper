@@ -1,8 +1,14 @@
+import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { Context, Effect, Schema, type Stream } from 'effect';
-import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
+import { Interception } from '../src/interception.js';
+import type { AgentLog } from '../src/log.js';
+import { RecordingPolicy } from '../src/recording-policy.js';
+import { Stop } from '../src/stop.js';
+import { Subagent } from '../src/subagent.js';
 
 // The eight narrowing assertions.
 //
@@ -37,6 +43,7 @@ const write = Tool.make('write', {
 
 const child = Agent.make({
   name: 'child',
+  revision: '1',
   instructions: 'x',
   toolkit: Toolkit.make(write),
 }).withHandlers({ write: () => Effect.succeed({ ok: true }) });
@@ -53,6 +60,7 @@ const own = Tool.make('own', {
 // cannot tell "propagated correctly" from "happened to be the same type".
 const parent = Agent.make({
   name: 'parent',
+  revision: '1',
   instructions: 'x',
   toolkit: Toolkit.make(own),
   subagents: [child],
@@ -63,11 +71,38 @@ const handled = parent.withHandlers({
 });
 
 type EffR<T> = T extends Effect.Effect<infer _A, infer _E, infer R> ? R : never;
+type EffE<T> = T extends Effect.Effect<infer _A, infer E, infer _R> ? E : never;
 type StrR<T> = T extends Stream.Stream<infer _A, infer _E, infer R> ? R : never;
+type StrA<T> = T extends Stream.Stream<infer A, infer _E, infer _R> ? A : never;
 type Has<M, U> = [M] extends [U] ? 'yes' : 'no';
 type IsAny<T> = 0 extends 1 & T ? 'ANY' : 'not-any';
+type IsNever<T> = [T] extends [never] ? true : false;
+type IsUnknown<T> =
+  IsAny<T> extends 'ANY'
+    ? false
+    : unknown extends T
+      ? [keyof T] extends [never]
+        ? true
+        : false
+      : false;
+type Exact<A, B> =
+  IsAny<A> extends 'ANY'
+    ? false
+    : IsAny<B> extends 'ANY'
+      ? false
+      : IsNever<A> extends true
+        ? IsNever<B>
+        : IsNever<B> extends true
+          ? false
+          : IsUnknown<A> extends true
+            ? IsUnknown<B>
+            : IsUnknown<B> extends true
+              ? false
+              : [A, B] extends [B, A]
+                ? true
+                : false;
 
-type Handlers = Tool.HandlersFor<Agent.Tools<typeof parent>>;
+type Handlers = Tool.HandlersFor<Agent.OwnTools<typeof parent>>;
 
 // Guard first: `[M] extends [any]` is true for every M, so every membership
 // assertion below would pass vacuously against an `any` channel.
@@ -142,6 +177,146 @@ const _model: Has<
   EffR<ReturnType<typeof handled.run>>
 > = 'yes';
 
+type ParentBase = LanguageModel.LanguageModel | Handlers | Db | Notebook;
+type HandledBase = LanguageModel.LanguageModel | Db | Notebook;
+
+const _exactPlain: Exact<Agent.Requires<typeof parent>, ParentBase> = true;
+const _exactHandled: Exact<Agent.Requires<typeof handled>, HandledBase> = true;
+const _exactRecording: Exact<
+  Agent.Requires<ReturnType<typeof handled.recordingTo>>,
+  HandledBase | LogStore.Service
+> = true;
+const _exactPlainError: Exact<
+  EffE<ReturnType<typeof handled.run>>,
+  AiError.AiError
+> = true;
+const _exactRecordingError: Exact<
+  EffE<ReturnType<ReturnType<typeof handled.recordingTo>['run']>>,
+  AiError.AiError | AgentLog.CompatibilityError
+> = true;
+const _exactResume: Exact<
+  EffR<ReturnType<typeof handled.resume>>,
+  HandledBase | LogStore.Service
+> = true;
+const _exactBranch: Exact<
+  EffR<ReturnType<typeof handled.branchFrom>>,
+  HandledBase | LogStore.Service
+> = true;
+const _exactFork: Exact<
+  EffR<ReturnType<typeof handled.forkFrom>>,
+  HandledBase | LogStore.Service
+> = true;
+// @ts-expect-error Session/runtime invocation is not public Agent API.
+handled.runInSession;
+const _noPublicDelegationHandler: 'handler' extends keyof typeof Subagent
+  ? false
+  : true = true;
+const _noPublicDelegationCompiler: 'delegateTo' extends keyof typeof Subagent
+  ? false
+  : true = true;
+
+// @ts-expect-error Session values are created by AgentLog, not structurally.
+const _fabricatedSession: AgentLog.Session = { conversationId: 'forged' };
+
+class FirstPolicy extends Context.Service<
+  FirstPolicy,
+  { readonly first: true }
+>()('assertions-test/FirstPolicy') {}
+class SecondPolicy extends Context.Service<
+  SecondPolicy,
+  { readonly second: true }
+>()('assertions-test/SecondPolicy') {}
+
+const recordingPolicy = {
+  prompt: (prompt: unknown) => Effect.as(FirstPolicy, prompt),
+} satisfies RecordingPolicy.Policy<FirstPolicy>;
+const filteredRecording = handled.recordingTo('filtered', recordingPolicy);
+const _exactFilteredRecording: Exact<
+  Agent.Requires<typeof filteredRecording>,
+  HandledBase | LogStore.Service | FirstPolicy
+> = true;
+const firstInterceptor = {
+  beforeTurn: () =>
+    Effect.gen(function* () {
+      yield* FirstPolicy;
+      return Interception.proceed;
+    }),
+};
+const secondInterceptor = {
+  beforeTurn: () =>
+    Effect.gen(function* () {
+      yield* SecondPolicy;
+      return Interception.proceed;
+    }),
+};
+const first = handled.intercepting(firstInterceptor);
+const second = first.intercepting(secondInterceptor);
+
+type ReplacementRequires = Agent.Requires<typeof second>;
+const _serviceExtracted: Has<
+  SecondPolicy,
+  Interception.Services<typeof secondInterceptor>
+> = 'yes';
+const _replacementDropped: Has<FirstPolicy, ReplacementRequires> = 'no';
+const _replacementAdded: Has<SecondPolicy, ReplacementRequires> = 'yes';
+
+const _exactReplacement: Exact<
+  Agent.Requires<typeof second>,
+  HandledBase | SecondPolicy
+> = true;
+
+class StopService extends Context.Service<
+  StopService,
+  { readonly stop: true }
+>()('assertions-test/StopService') {}
+class OtherStopService extends Context.Service<
+  OtherStopService,
+  { readonly otherStop: true }
+>()('assertions-test/OtherStopService') {}
+
+const serviceStop: Stop.StopCondition<{}, StopService> = () =>
+  Effect.as(StopService, false);
+const otherStop: Stop.StopCondition<{}, OtherStopService> = () =>
+  Effect.as(OtherStopService, false);
+const stopped = Agent.make({
+  name: 'stopped',
+  revision: '1',
+  instructions: 'x',
+  toolkit: Toolkit.make(),
+  stopWhen: Stop.any(serviceStop, Stop.all(otherStop)),
+});
+
+const _exactStop: Exact<
+  Agent.Requires<typeof stopped>,
+  LanguageModel.LanguageModel | StopService | OtherStopService
+> = true;
+
+const compiled = Agent.make({
+  name: 'compiled',
+  revision: '1',
+  instructions: 'x',
+  toolkit: Toolkit.make(own),
+  subagents: [child],
+  skills: [{ name: 'guide', description: 'guide', instructions: 'guide' }],
+});
+const _exactOwnKeys: Exact<keyof Agent.OwnTools<typeof compiled>, 'own'> = true;
+const _exactCompiledKeys: Exact<
+  keyof Agent.Tools<typeof compiled>,
+  'own' | 'task_child' | 'load_skill'
+> = true;
+type CompiledEvent = StrA<ReturnType<typeof compiled.stream>>;
+type CompiledPart = Extract<CompiledEvent, { readonly _tag: 'Part' }>['part'];
+type Substituted = Extract<
+  CompiledPart,
+  { readonly resultSource: 'substituted' }
+>;
+const _exactSubstitutedResult: Exact<Substituted['result'], unknown> = true;
+
+// Meta-guards ensure `Exact` cannot pass vacuously on poisoned channels.
+const _rejectAny: Exact<any, HandledBase> = false;
+const _rejectNever: Exact<never, HandledBase> = false;
+const _rejectUnknown: Exact<unknown, HandledBase> = false;
+
 describe('the eight narrowing assertions', () => {
   it('keeps every entry point honest about what it still needs', () => {
     expect(_makeRun).toBe('yes');
@@ -151,5 +326,24 @@ describe('the eight narrowing assertions', () => {
       'own',
       'task_child',
     ]);
+    expect([
+      _exactPlain,
+      _exactHandled,
+      _exactRecording,
+      _exactPlainError,
+      _exactRecordingError,
+      _exactFilteredRecording,
+      _exactResume,
+      _exactBranch,
+      _exactFork,
+      _exactReplacement,
+      _exactStop,
+      _exactOwnKeys,
+      _exactCompiledKeys,
+      _exactSubstitutedResult,
+      _rejectAny,
+      _rejectNever,
+      _rejectUnknown,
+    ]).toBeDefined();
   });
 });

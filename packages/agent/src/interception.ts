@@ -3,7 +3,7 @@ import type { AiError, Prompt } from 'effect/unstable/ai';
 
 import type { Stop } from './stop.js';
 
-// Three named places in the loop where something other than the loop gets a
+// Four named places in the loop where something other than the loop gets a
 // say, and exactly what it may say at each.
 //
 // ## Why this is not `(Effect) => Effect`
@@ -28,6 +28,7 @@ import type { Stop } from './stop.js';
 // | `beforeTurn`       | yes     | yes              | no             | yes  |
 // | `beforeModelCall`  | yes     | no               | no             | yes  |
 // | `beforeToolCall`   | yes     | no               | yes            | yes  |
+// | `onIndeterminateToolCall` | yes | no            | yes/retry      | yes  |
 //
 // Each row is a decision, not an omission:
 //
@@ -164,6 +165,9 @@ export interface ToolCallContext extends Run {
   readonly params: unknown;
 }
 
+/** A prior run entered this handler but recorded no outcome. */
+export interface IndeterminateToolCallContext extends ToolCallContext {}
+
 /**
  * What an interceptor decided about a turn.
  *
@@ -224,11 +228,9 @@ export const dispatch: ToolDecision = { _tag: 'Dispatch' };
  *
  * `result` is the **encoded** form — what a tool-result message puts in front
  * of the model, and what a recording run writes into the log. It is not
- * validated against the tool's success schema, because the cases this exists
- * for (a refusal, a canned dry-run answer) usually cannot satisfy it. The live
- * event stream's decoded half is produced by running it back through the
- * tool's own codec and falling back to this value when it does not fit, which
- * is exactly what the log-recovery path does with a stored result.
+ * decoded through the tool's result schema for the live event when possible.
+ * Policy refusals may deliberately use a provider-facing shape outside that
+ * schema; crash-reconciliation answers are stricter and must decode.
  *
  * @category constructors
  * @since 0.1.0
@@ -255,11 +257,39 @@ export const refuse = (result: unknown): ToolDecision => ({
   isFailure: true,
 });
 
+/** An explicit reconciliation decision for indeterminate execution. */
+export type IndeterminateToolDecision =
+  | { readonly _tag: 'Retry' }
+  | {
+      readonly _tag: 'Answer';
+      readonly result: unknown;
+      readonly isFailure: boolean;
+    };
+
+/** Explicitly invoke an indeterminate call again. */
+export const retry: IndeterminateToolDecision = { _tag: 'Retry' };
+
+/** Reconcile an indeterminate call without invoking its handler again. */
+export const reconcile = (result: unknown): IndeterminateToolDecision => ({
+  _tag: 'Answer',
+  result,
+  isFailure: false,
+});
+
+/** Reconcile an indeterminate call as a failed tool result. */
+export const reconcileFailure = (
+  result: unknown,
+): IndeterminateToolDecision => ({
+  _tag: 'Answer',
+  result,
+  isFailure: true,
+});
+
 /**
  * Something with an opinion about what the loop is about to do.
  *
  * Every seam is optional, so an interceptor that cares about one thing
- * declares one thing and the other two seams cost nothing — the loop checks
+ * declares one thing and the other seams cost nothing — the loop checks
  * for the property and skips the effect entirely when it is absent.
  *
  * `R` is what the seams need from the context. Attaching an interceptor with
@@ -306,6 +336,34 @@ export interface Interceptor<R = never> {
   readonly beforeToolCall?: (
     context: ToolCallContext,
   ) => Effect.Effect<ToolDecision, AiError.AiError, R>;
+
+  /**
+   * Resolve a call whose handler may already have committed externally.
+   *
+   * This is deliberately separate from `beforeToolCall`: ordinary `Dispatch`
+   * is not permission to repeat an indeterminate side effect. Returning
+   * {@link retry} or a reconciliation answer is the required explicit choice.
+   */
+  readonly onIndeterminateToolCall?: (
+    context: IndeterminateToolCallContext,
+  ) => Effect.Effect<IndeterminateToolDecision, AiError.AiError, R>;
 }
+
+type FunctionServices<F> = F extends (...args: infer _Args) => infer Result
+  ? Result extends Effect.Effect<infer _A, infer _E, infer R>
+    ? R
+    : never
+  : never;
+
+/** Extract every service used by an interceptor's declared seams. */
+export type Services<I> =
+  | FunctionServices<I extends { readonly beforeTurn: infer F } ? F : never>
+  | FunctionServices<
+      I extends { readonly beforeModelCall: infer F } ? F : never
+    >
+  | FunctionServices<I extends { readonly beforeToolCall: infer F } ? F : never>
+  | FunctionServices<
+      I extends { readonly onIndeterminateToolCall: infer F } ? F : never
+    >;
 
 export * as Interception from './interception.js';

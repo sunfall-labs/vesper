@@ -72,10 +72,12 @@ describe('AttachmentStore.verified', () => {
         const measured = yield* AttachmentRef.fromBytes(bytes, {
           mediaType: 'text/plain',
         });
-        const claimed = AttachmentRef.Ref.make({
+        // Simulate data that bypassed schema decoding (for example a corrupt
+        // backend row) so the verifier still defends its own boundary.
+        const claimed: AttachmentRef.Ref = {
           ...measured,
           byteLength: measured.byteLength + 1,
-        });
+        };
         return yield* AttachmentStore.verified(claimed, bytes);
       }),
     );

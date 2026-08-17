@@ -18,7 +18,7 @@ import { Tail } from '../src/tail.js';
 //
 // The contract suite is imported unmodified — that is the point of it. What
 // this file adds is the two things a memory backend cannot demonstrate: that
-// the schema in `pg-test-harness.ts` is the schema the layer actually queries,
+// the published migration applied by the harness is what the layer queries,
 // and that a `LISTEN` connection dying reaches the consumer as a failure rather
 // than as a tail that looks healthy and delivers nothing.
 //
@@ -216,11 +216,6 @@ describeIntegration('LogStore Postgres backend', () => {
     // fresh reader. Delete the COLLATE and this fires.
     it('needs the pinned C collation for read-from-the-beginning', async () => {
       const zero = LogOffset.fromSeq(0n);
-      const database_ = await pool.query<{ datcollate: string }>(
-        'SELECT datcollate FROM pg_database WHERE datname = current_database()',
-      );
-      const collation = database_.rows[0]?.datcollate ?? 'unknown';
-
       const compared = await pool.query<{ db: boolean; c: boolean }>(
         `SELECT $1 < $2 AS db, ($1 COLLATE "C") < ($2 COLLATE "C") AS c`,
         [LogOffset.START, zero],
@@ -228,9 +223,8 @@ describeIntegration('LogStore Postgres backend', () => {
 
       // What the offset format promises, and what JavaScript's `<` does.
       expect(compared.rows[0]?.c).toBe(true);
-      if (collation !== 'C' && collation !== 'POSIX') {
-        expect(compared.rows[0]?.db).toBe(false);
-      }
+      // The database default is deliberately not asserted: libc, ICU, and
+      // musl can give the same catalog name different punctuation behavior.
     });
 
     // The idempotency mechanism is the unique index, not the code above it.
@@ -275,5 +269,56 @@ describeIntegration('LogStore Postgres backend', () => {
 
       await expect(duplicate).rejects.toMatchObject({ code: '23505' });
     });
+
+    it('atomically appends and idempotently retries 10,000 records', async () => {
+      const path = 'large-append';
+      const records = Array.from({ length: 10_000 }, (_, index) => ({
+        conversationId: 'conversation-1',
+        timestamp: 1_700_000_000_000 + index,
+        record: {
+          _tag: 'Text' as const,
+          step: index,
+          text: `record-${index}`,
+        },
+      }));
+      const result = await Effect.runPromise(
+        Effect.gen(function* () {
+          const store = yield* LogStore.Service;
+          yield* store.create(path, 'identity');
+          const claim = yield* store.acquire(path, 'producer');
+          const first = yield* store.append({
+            path,
+            producerId: claim.producerId,
+            epoch: claim.epoch,
+            sequence: 0,
+            records,
+          });
+          const retry = yield* store.append({
+            path,
+            producerId: claim.producerId,
+            epoch: claim.epoch,
+            sequence: 0,
+            records,
+          });
+          return {
+            first,
+            retry,
+            page: yield* store.read(path, { limit: 10_000 }),
+          };
+        }).pipe(Effect.provide(LogStorePg.layer(deferred))),
+      );
+
+      expect(result.first).toBe(LogOffset.fromSeq(9_999n));
+      expect(result.retry).toBe(result.first);
+      expect(result.page.records).toHaveLength(10_000);
+      expect(result.page.records[9_999]?.record).toMatchObject({
+        text: 'record-9999',
+      });
+      const count = await pool.query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM ai_log.records WHERE path = $1',
+        [path],
+      );
+      expect(count.rows[0]?.count).toBe('10000');
+    }, 120_000);
   });
 });

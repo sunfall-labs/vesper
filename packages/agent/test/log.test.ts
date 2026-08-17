@@ -92,6 +92,7 @@ const lookup = Tool.make('lookup', {
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(lookup),
 }).withHandlers({
@@ -129,6 +130,28 @@ const textsOf = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 describe('recording a run', () => {
+  it('serializes concurrent appends through one producer sequence', async () => {
+    const written = await run(
+      Effect.gen(function* () {
+        const session = yield* AgentLog.open(CONVERSATION, {
+          compatibility: { agent: 'test', revision: '1' },
+        });
+        yield* Effect.all(
+          Array.from({ length: 50 }, (_, index) =>
+            session.append([{ _tag: 'Text', step: 1, text: String(index) }]),
+          ),
+          { concurrency: 'unbounded' },
+        );
+        return yield* readAll();
+      }),
+    );
+
+    expect(written).toHaveLength(50);
+    expect(new Set(textsOf(written).map((record) => record.text)).size).toBe(
+      50,
+    );
+  });
+
   it('writes one record per thing that happened, in order', async () => {
     const written = await run(
       Effect.gen(function* () {
@@ -139,6 +162,7 @@ describe('recording a run', () => {
 
     expect(tags(written)).toEqual([
       'RunStarted',
+      'ToolStarted',
       'Text',
       'ToolCall',
       'ToolOutcome',
@@ -205,6 +229,8 @@ describe('recording a run', () => {
     expect(observed.written[0]?.record).toMatchObject({
       _tag: 'RunStarted',
       agent: 'test',
+      formatVersion: 1,
+      agentRevision: '1',
     });
     expect(observed.written.map((envelope) => envelope.record)).toContainEqual(
       expect.objectContaining({
@@ -246,7 +272,12 @@ describe('recording a run', () => {
       }),
     );
 
-    expect(atToolCall).toEqual(['RunStarted', 'Text', 'ToolCall']);
+    expect(atToolCall).toEqual([
+      'RunStarted',
+      'ToolStarted',
+      'Text',
+      'ToolCall',
+    ]);
   });
 });
 
@@ -301,7 +332,7 @@ describe('Agent.streamFrom', () => {
         yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
 
         return yield* Agent.streamFrom(CONVERSATION).pipe(
-          Stream.take(8),
+          Stream.take(9),
           Stream.runCollect,
           Effect.orDie,
         );
@@ -310,6 +341,7 @@ describe('Agent.streamFrom', () => {
 
     expect(tags(replayed)).toEqual([
       'RunStarted',
+      'ToolStarted',
       'Text',
       'ToolCall',
       'ToolOutcome',
@@ -326,7 +358,7 @@ describe('Agent.streamFrom', () => {
         yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
         const written = yield* readAll();
 
-        return yield* Agent.streamFrom(CONVERSATION, written[2]!.offset).pipe(
+        return yield* Agent.streamFrom(CONVERSATION, written[3]!.offset).pipe(
           Stream.take(1),
           Stream.runCollect,
           Effect.orDie,

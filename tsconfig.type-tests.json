@@ -5,11 +5,13 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
   "include": [
     "packages/*/test/**/*.ts",
     "benchmarks/**/*.ts",
-    "examples/*/src/**/*.ts"
+    "examples/*/src/**/*.ts",
+    "type-tests/**/*.ts"
   ]
 }

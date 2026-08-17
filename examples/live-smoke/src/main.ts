@@ -2,14 +2,15 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { Model as PiModelRecord, Provider } from '@earendil-works/pi-ai';
-import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
+import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
 // Subpath imports, not the barrel: the package root re-exports `NodeRedis`,
 // which imports `ioredis` at module load and is not installed here.
 import * as NodeRuntime from '@effect/platform-node/NodeRuntime';
+import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
+import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
 import { AgentLog } from '@sunfall/vesper-agent/log';
 import { Skill } from '@sunfall/vesper-agent/skill';
@@ -18,9 +19,6 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { CredentialStore } from '@sunfall/vesper-pi/credentials';
-import { PiProvider } from '@sunfall/vesper-pi/provider';
-import { PiRegistry } from '@sunfall/vesper-pi/registry';
 import {
   Config,
   Console,
@@ -39,18 +37,14 @@ import {
 } from 'effect/unstable/ai';
 import { Command, Flag } from 'effect/unstable/cli';
 
-// `@sunfall/vesper-workspace` is deliberately not a dependency of
-// `@sunfall/vesper-runtime` — the layering rule is `runtime -> pi, agent, log`.
-// This example depends on both directly, which is what an application does
-// when it wants the workspace toolkit: the runtime composes the model and the
-// log, and the toolkit is handed to the agent alongside it.
+// The workspace toolkit is an application dependency, not something the agent
+// package composes automatically.
 import { WorkspaceLocal } from '@sunfall/vesper-workspace/layer-local';
 import { WorkspaceTools } from '@sunfall/vesper-workspace/tools';
-import { AiRuntime } from '@sunfall/vesper-runtime/runtime';
 
-// Every test in this repository runs against Pi's faux provider. This drives a
-// real model — Anthropic or OpenAI, chosen with `--provider` — through the
-// parts of the loop the faux provider has never seen: a toolkit whose handlers
+// This drives a real Effect AI model — Anthropic or OpenAI, chosen with
+// `--provider` — through the parts of the loop scripted models have never seen:
+// a toolkit whose handlers
 // do work and one of whose tools fails, delegation to a child agent that needs
 // a service of its own, skills loaded on demand, the conversation log written
 // and read back, branching, forking two conversations that run at once, the
@@ -67,76 +61,41 @@ import { AiRuntime } from '@sunfall/vesper-runtime/runtime';
 //   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase all
 //   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase compaction-reactive
 //
-// `retry: false` by default, for the reason `compliance-demo.ts` gives: this
-// exists to show what the provider actually did, and a silently absorbed 429 is
-// a model call the output does not mention.
-
-const DEFAULT_PROVIDER = 'openai';
-const DEFAULT_MODEL = 'gpt-5.6-luna';
-
 /** Output cap on every call. Plumbing is what is under test, not prose. */
 const MAX_OUTPUT_TOKENS = 300;
 
-/**
- * Models this repo runs in production that `pi-ai@0.80.2` has never heard of.
- *
- * `PiRegistry.resolve` is a lookup in the provider's own catalog, and
- * `PiModel.hooks` turns a miss into a defect — so a model id the pinned Pi
- * predates is simply unreachable through `@sunfall/vesper-pi`, however well
- * the provider's API would handle it. `gpt-5.6-luna` is exactly that: Pi's
- * OpenAI catalog stops at `gpt-5.5-pro`.
- *
- * Every framework over a pinned catalog hits this wall and goes around it the
- * same way, by letting a caller register extra model records. Pi's `Provider`
- * is a plain interface whose `getModels()` is the whole catalog, so extending
- * one is a wrapper rather than a fork.
- *
- * `cost` is zeroed because nothing here knows this model's price and inventing
- * one would put a fabricated number in the run's cost line. Pass
- * `--input-usd` / `--output-usd` to get an estimate; the token counts are
- * reported either way.
- */
-const LATER_OPENAI_MODELS: ReadonlyArray<PiModelRecord<'openai-responses'>> = [
-  {
-    id: 'gpt-5.6-luna',
-    name: 'GPT-5.6 Luna',
-    api: 'openai-responses',
-    provider: 'openai',
-    baseUrl: 'https://api.openai.com/v1',
-    reasoning: true,
-    thinkingLevelMap: { off: null, xhigh: 'xhigh' },
-    input: ['text', 'image'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 1_050_000,
-    maxTokens: 128_000,
-  },
-];
+const PROVIDERS = ['anthropic', 'openai'] as const;
+type Provider = (typeof PROVIDERS)[number];
 
-/** OpenAI's provider with {@link LATER_OPENAI_MODELS} added to its catalog. */
-const openaiWithLaterModels = (): Provider<'openai-responses'> => {
-  const base = openaiProvider();
-  return {
-    ...base,
-    getModels: () => [...base.getModels(), ...LATER_OPENAI_MODELS],
-  };
-};
+const DEFAULT_PROVIDER: Provider = 'anthropic';
+const DEFAULT_MODELS = {
+  anthropic: 'claude-sonnet-4-6',
+  openai: 'gpt-5.6-luna',
+} satisfies Record<Provider, string>;
 
-/**
- * The Pi provider and the credential it reads, per provider id.
- *
- * Two providers rather than one because the point of the seam is that neither
- * `@sunfall/vesper-agent` nor this script knows which is in play — so running the same
- * phases against both is the only way to find out whether `@sunfall/vesper-pi` is
- * quietly Anthropic-shaped. Error phrasing, tool-call id format, and usage
- * reporting all differ, and every one of those crosses the adapter.
- */
-const PROVIDERS: Record<
-  string,
-  { readonly provider: () => Provider; readonly apiKey: string }
-> = {
-  anthropic: { provider: anthropicProvider, apiKey: 'ANTHROPIC_API_KEY' },
-  openai: { provider: openaiWithLaterModels, apiKey: 'OPENAI_API_KEY' },
-};
+const isProvider = (value: string): value is Provider =>
+  PROVIDERS.some((provider) => provider === value);
+
+const modelFor = (provider: Provider, model: string) =>
+  provider === 'anthropic'
+    ? AnthropicLanguageModel.model(model, {
+        max_tokens: MAX_OUTPUT_TOKENS,
+      }).pipe(
+        Layer.provide(
+          AnthropicClient.layerConfig({
+            apiKey: Config.redacted('ANTHROPIC_API_KEY'),
+          }),
+        ),
+      )
+    : OpenAiLanguageModel.model(model, {
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+      }).pipe(
+        Layer.provide(
+          OpenAiClient.layerConfig({
+            apiKey: Config.redacted('OPENAI_API_KEY'),
+          }),
+        ),
+      );
 
 // ---------------------------------------------------------------- reporting
 
@@ -326,9 +285,9 @@ const absorb = <Tools extends Record<string, Tool.Any>>(
   }
 };
 
-const observe = <Tools extends Record<string, Tool.Any>, R>(
-  events: Stream.Stream<AgentEvents.Event<Tools>, AiError.AiError, R>,
-): Effect.Effect<Trace, AiError.AiError, R> =>
+const observe = <Tools extends Record<string, Tool.Any>, E, R>(
+  events: Stream.Stream<AgentEvents.Event<Tools>, E, R>,
+): Effect.Effect<Trace, E, R> =>
   Effect.gen(function* () {
     const trace = emptyTrace();
     yield* Stream.runForEach(events, (event) =>
@@ -414,6 +373,7 @@ const chargeCard = Tool.make('charge_card', {
 
 const shopAgent = Agent.make({
   name: 'shop',
+  revision: '1',
   instructions: [
     'You are a warehouse assistant with two tools.',
     'Use them; never guess a stock level or invent an authorization code.',
@@ -472,7 +432,7 @@ const toolsPhase = Effect.gen(function* () {
   yield* check(
     trace.partTypes.includes('tool-params-start') &&
       trace.partTypes.includes('tool-params-delta'),
-    'the adapter fanned Pi’s single toolcall_end into Effect’s params parts',
+    'the official provider streamed Effect tool-parameter parts',
   );
 }).pipe(Effect.provide(catalogueLayer));
 
@@ -505,6 +465,7 @@ const lookupFact = Tool.make('lookup_fact', {
 
 const archivist = Agent.make({
   name: 'archivist',
+  revision: '1',
   description:
     'Answers one narrow question from the company archive. Give it a single ' +
     'topic and nothing else.',
@@ -522,6 +483,7 @@ const archivist = Agent.make({
 
 const curator = Agent.make({
   name: 'curator',
+  revision: '1',
   instructions: [
     'You write short museum labels.',
     'You have no archive access yourself — delegate every factual lookup to ' +
@@ -631,6 +593,7 @@ const refundPolicy: Skill.Skill = {
 
 const treasurer = Agent.make({
   name: 'treasurer',
+  revision: '1',
   instructions: [
     'You answer operations questions about payments.',
     'You do not know the policies by heart. Load the relevant skill before ' +
@@ -677,6 +640,7 @@ const skillsPhase = Effect.gen(function* () {
 
 const notetaker = Agent.make({
   name: 'notetaker',
+  revision: '1',
   instructions: [
     'You keep track of what the user tells you about one shipment.',
     'Answer in one short sentence, using only what you have been told in ' +
@@ -840,6 +804,7 @@ const logPhase = Effect.gen(function* () {
 
 const explorer = Agent.make({
   name: 'explorer',
+  revision: '1',
   instructions: [
     'You inspect a small code workspace with the tools you have been given.',
     'Paths are relative to the workspace root.',
@@ -906,7 +871,9 @@ const workspacePhase = Effect.gen(function* () {
   );
 }).pipe(
   Effect.scoped,
-  Effect.provide(WorkspaceTools.layer),
+  Effect.provide(
+    Layer.merge(WorkspaceTools.layer, WorkspaceTools.defaultCommandPolicyLayer),
+  ),
   // The local driver needs a process spawner, and it is provided here rather
   // than inherited from the program's `NodeServices` so this phase's
   // requirement channel is `LanguageModel` alone, like every other phase's.
@@ -940,16 +907,11 @@ const filler = (approximateTokens: number): string => {
 // ---------------------------------------------------------- phase: usage
 
 /**
- * What the provider reports once prompt caching is in play.
- *
- * Pi's Anthropic adapter puts a `cache_control` breakpoint on the last user
- * message, the system prompt, and the tool list on **every** request, so any
- * conversation above Anthropic's cache minimum is cached whether the caller
- * asked for it or not. Below that minimum nothing is cached, which is why every
- * short-prompt phase above reports usage that looks right.
+ * What the selected official provider reports for a long, resumed prompt.
  */
 const parrot = Agent.make({
   name: 'parrot',
+  revision: '1',
   instructions:
     'You repeat one word back. Never say anything else, ever, under any ' +
     'circumstances.',
@@ -958,7 +920,7 @@ const parrot = Agent.make({
 });
 
 const usagePhase = Effect.gen(function* () {
-  yield* heading('usage — what the adapter reports when the prompt is cached');
+  yield* heading('usage — what the provider reports for a long prompt');
 
   const bulk = filler(6_000);
   const conversationId = `smoke-usage-${Date.now()}`;
@@ -974,8 +936,7 @@ const usagePhase = Effect.gen(function* () {
   // cumulative figure the resumption reports is charged as a delta.
   cumulative.set(conversationId, first.usage);
 
-  // The second call rebuilds the first from records, so the long prefix is
-  // byte-identical and Anthropic serves it from the cache it just wrote.
+  // The second call rebuilds the first from records, preserving the long prefix.
   const second = yield* parrot.resume(conversationId, 'Say TWO.');
   spentByConversation(conversationId, second.usage);
   const secondRecords = yield* readAll(conversationId).pipe(Effect.orDie);
@@ -994,12 +955,8 @@ const usagePhase = Effect.gen(function* () {
   const cached = (input?.cacheRead ?? 0) + (input?.cacheWrite ?? 0);
 
   yield* check(
-    cached > 0,
-    'the request really was cached, so this phase is testing what it claims',
-  );
-  yield* check(
     (input?.total ?? 0) >= cached,
-    'inputTokens.total counts the cached tokens, as effect’s Usage says it must',
+    'inputTokens.total includes any cache usage the provider reports',
   );
   yield* check(
     first.usage.input > cached,
@@ -1023,6 +980,7 @@ const usagePhase = Effect.gen(function* () {
  */
 const rambler = Agent.make({
   name: 'rambler',
+  revision: '1',
   instructions:
     'You are a patient tour guide. Answer each question in about eighty ' +
     'words, in prose.',
@@ -1172,11 +1130,12 @@ const compactionProactivePhase = Effect.gen(function* () {
  * What it found — the retry re-sending the very input that overflowed — is
  * pinned by three faux-provider cases in `@sunfall/vesper-agent`'s `compaction.test.ts`,
  * so the fix does not need this phase re-run to stay honest. Run it when
- * `@sunfall/vesper-pi`'s error classification changes, which is the half only a real
+ * Effect AI's provider error mapping changes, which is the half only a real
  * provider can check.
  */
 const archivistOfLogs = Agent.make({
   name: 'log-reader',
+  revision: '1',
   instructions:
     'You read kiln logs. Answer in one short sentence and never repeat the ' +
     'log back.',
@@ -1257,7 +1216,7 @@ const phases: Record<
   string,
   Effect.Effect<
     void,
-    AiError.AiError,
+    AiError.AiError | AgentLog.CompatibilityError,
     LanguageModel.LanguageModel | LogStore.Service
   >
 > = {
@@ -1308,27 +1267,6 @@ const summarize = (
     );
   });
 
-/**
- * Register the selected provider and seed its key.
- *
- * An unknown provider id dies rather than falling back: silently running the
- * whole suite against a provider the caller did not name is the one outcome
- * that would make every result below meaningless.
- */
-const infrastructureFor = (chosen: {
-  readonly provider: () => Provider;
-  readonly apiKey: string;
-}): Layer.Layer<
-  PiRegistry.Service | CredentialStore.Service,
-  Config.ConfigError
-> =>
-  PiProvider.layerConfig({
-    provider: chosen.provider(),
-    // `Config.redacted`, so the key is resolved by the `ConfigProvider` and
-    // handed straight to Pi. It never becomes a value this file can print.
-    apiKey: Config.redacted(chosen.apiKey),
-  });
-
 const command = Command.make(
   'live-smoke',
   {
@@ -1340,20 +1278,14 @@ const command = Command.make(
       Flag.withDefault('all'),
     ),
     model: Flag.string('model').pipe(
-      Flag.withDescription('Model id within the provider.'),
-      Flag.withDefault(DEFAULT_MODEL),
+      Flag.withDescription(
+        'Model id within the provider; defaults per provider.',
+      ),
+      Flag.withDefault('default'),
     ),
     provider: Flag.string('provider').pipe(
-      Flag.withDescription(
-        `Pi provider id: ${Object.keys(PROVIDERS).join(' | ')}.`,
-      ),
+      Flag.withDescription(`Effect AI provider: ${PROVIDERS.join(' | ')}.`),
       Flag.withDefault(DEFAULT_PROVIDER),
-    ),
-    retry: Flag.boolean('retry').pipe(
-      Flag.withDescription(
-        'Absorb transient provider failures inside the model call. Off by ' +
-          'default so the output describes what the provider actually did.',
-      ),
     ),
     inputUsd: Flag.string('input-usd').pipe(
       Flag.withDescription(
@@ -1366,13 +1298,12 @@ const command = Command.make(
       Flag.withDefault('5'),
     ),
   },
-  ({ inputUsd, model, outputUsd, phase, provider, retry }) =>
+  ({ inputUsd, model, outputUsd, phase, provider }) =>
     Effect.gen(function* () {
-      const chosen = PROVIDERS[provider];
-      if (chosen === undefined) {
+      if (!isProvider(provider)) {
         return yield* Effect.die(
           new Error(
-            `Unknown provider "${provider}"; known: ${Object.keys(PROVIDERS).join(', ')}`,
+            `Unknown provider "${provider}"; known: ${PROVIDERS.join(', ')}`,
           ),
         );
       }
@@ -1395,21 +1326,15 @@ const command = Command.make(
       yield* chain.pipe(
         Effect.provide(LogStoreMemory.layer),
         Effect.provide(
-          AiRuntime.model({
+          modelFor(
             provider,
-            model,
-            ...(retry ? {} : { retry: false as const }),
-            // Every phase here is checking plumbing, not answer quality, and
-            // an uncapped model is happy to write six paragraphs about
-            // barometers. The cap is what keeps a whole run in single-digit
-            // cents.
-            modelOptions: { streamOptions: { maxTokens: MAX_OUTPUT_TOKENS } },
-          }),
+            model === 'default' ? DEFAULT_MODELS[provider] : model,
+          ),
         ),
-        // Resolved from the flag inside the handler rather than wired around
-        // `Command.run`, so only the selected provider is registered and only
-        // its credential is ever read.
-        Effect.provide(infrastructureFor(chosen)),
+        Effect.provideService(
+          ContextWindow.Service,
+          ContextWindow.usageAnchored,
+        ),
       );
 
       yield* summarize(Number(inputUsd), Number(outputUsd));
@@ -1433,6 +1358,8 @@ const command = Command.make(
 
 command.pipe(
   Command.run({ version: '0.1.0' }),
-  Effect.provide(NodeServices.layer),
+  Effect.provide(
+    Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici),
+  ),
   NodeRuntime.runMain,
 );

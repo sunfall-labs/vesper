@@ -1,12 +1,11 @@
-import { anthropicProvider } from '@earendil-works/pi-ai/providers/anthropic';
+import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
 // Subpath imports, not the barrel: the package root re-exports `NodeRedis`,
 // which imports `ioredis` at module load and is not installed here.
 import * as NodeRuntime from '@effect/platform-node/NodeRuntime';
+import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
-import { PiProvider } from '@sunfall/vesper-pi/provider';
-import { PiRegistry } from '@sunfall/vesper-pi/registry';
 import {
   Config,
   Console,
@@ -20,7 +19,7 @@ import {
 import { AiError, LanguageModel, type Tool, Toolkit } from 'effect/unstable/ai';
 import { Argument, Command, Flag } from 'effect/unstable/cli';
 
-import { AiRuntime } from '@sunfall/vesper-runtime/runtime';
+import { bySentence } from './sentences.js';
 
 // A speaker answers; a judge rewrites every sentence before anyone sees it.
 //
@@ -34,10 +33,8 @@ import { AiRuntime } from '@sunfall/vesper-runtime/runtime';
 // included, because "unchanged" is a rewrite that happens to match.
 //
 // It is one of the two things in this repository that talk to a real model —
-// `examples/live-smoke` is the other — and every test runs against Pi's faux
-// provider. Its first run caught the context-overflow classifier missing
-// Anthropic's own phrasing, so it is worth re-running after any change to
-// `@sunfall/vesper-pi`.
+// `examples/live-smoke` is the other. Provider translation belongs to Effect's
+// official Anthropic package; this example only composes its model and client.
 
 const POLICY = [
   'Never give medical, legal, or financial advice.',
@@ -47,6 +44,7 @@ const POLICY = [
 
 const speaker = Agent.make({
   name: 'speaker',
+  revision: '1',
   instructions:
     'You are a customer support assistant. Answer directly and helpfully ' +
     'in four to six short sentences. Use complete sentences.',
@@ -60,6 +58,7 @@ const speaker = Agent.make({
 // company's behalf — is what a cheap model needs stated and a large one infers.
 const judge = Agent.make({
   name: 'judge',
+  revision: '1',
   instructions: [
     'You rewrite ONE sentence so that it complies with a policy.',
     '',
@@ -107,30 +106,19 @@ class JudgeModel extends Context.Service<JudgeModel, LanguageModel.Service>()(
  * speaker's model, provided further out, is untouched — which is the point of
  * scoping it this way rather than juggling two layers by hand.
  */
-const judgeModelLayer = (
-  options: AiRuntime.Options,
-): Layer.Layer<JudgeModel, never, PiRegistry.Service> =>
-  Layer.effect(JudgeModel, LanguageModel.LanguageModel).pipe(
-    Layer.provide(AiRuntime.model(options)),
+const anthropicModel = (model: string) =>
+  AnthropicLanguageModel.model(model).pipe(
+    Layer.provide(
+      AnthropicClient.layerConfig({
+        apiKey: Config.redacted('ANTHROPIC_API_KEY'),
+      }),
+    ),
   );
 
-/**
- * Regroup token deltas into whole sentences, emitting each as it completes.
- *
- * Paragraph breaks split too. Splitting on sentence-enders alone glued
- * `Here are some steps you should take:` to the sentence after it, because a
- * colon is not `.!?` — so the judge was ruling on two-sentence chunks.
- */
-const bySentence = Stream.mapAccum(
-  (): string => '',
-  (buffer: string, delta: string) => {
-    const pending = buffer + delta;
-    const parts = pending.split(/(?<=[.!?])\s+|\n{2,}/);
-    // The last fragment is still being written; hold it back.
-    const rest = parts.pop() ?? '';
-    return [rest, parts.filter((s) => s.trim() !== '')] as const;
-  },
-);
+const judgeModelLayer = (model: string) =>
+  Layer.effect(JudgeModel, LanguageModel.LanguageModel).pipe(
+    Layer.provide(anthropicModel(model)),
+  );
 
 /** Model text only; turn boundaries and tool events are noise here. */
 const deltas = <Tools extends Record<string, Tool.Any>, E, R>(
@@ -220,29 +208,16 @@ const command = Command.make(
       ),
       Flag.withDefault('claude-haiku-4-5'),
     ),
-    provider: Flag.string('provider').pipe(
-      Flag.withDescription('Pi provider id.'),
-      Flag.withDefault('anthropic'),
-    ),
   },
-  ({ judgeModel, prompt, provider, speakerModel }) =>
+  ({ judgeModel, prompt, speakerModel }) =>
     review(prompt).pipe(
       // Each model is scoped where it is used: the judge's is bound to its own
       // tag, the speaker's stays on `LanguageModel`. Neither call site knows
       // the other exists.
       //
-      // `retry: false` on both. Retrying is right in production and wrong
-      // here: this script exists to show what the provider actually did, and
-      // a silently absorbed 429 is a model call the output does not mention.
-      Effect.provide(
-        judgeModelLayer({ provider, model: judgeModel, retry: false }),
-      ),
-      Effect.provide(
-        AiRuntime.model({ provider, model: speakerModel, retry: false }),
-      ),
-      // Print the classified reason rather than the raw error: a provider
-      // phrasing that `@sunfall/vesper-pi/errors` maps to the wrong type is then
-      // visible instead of merely fatal.
+      Effect.provide(judgeModelLayer(judgeModel)),
+      Effect.provide(anthropicModel(speakerModel)),
+      // Print Effect AI's classified reason rather than only the raw error.
       Effect.tapError((error: unknown) =>
         Console.error(
           AiError.isAiError(error)
@@ -259,13 +234,10 @@ const command = Command.make(
   ),
 );
 
-const infrastructure = PiProvider.layerConfig({
-  provider: anthropicProvider(),
-  apiKey: Config.redacted('ANTHROPIC_API_KEY'),
-});
-
 command.pipe(
   Command.run({ version: '0.1.0' }),
-  Effect.provide(Layer.mergeAll(infrastructure, NodeServices.layer)),
+  Effect.provide(
+    Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici),
+  ),
   NodeRuntime.runMain,
 );

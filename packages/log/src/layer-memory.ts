@@ -1,4 +1,12 @@
-import { Effect, Layer, MutableHashMap, Option, PubSub, Stream } from 'effect';
+import {
+  Effect,
+  Layer,
+  MutableHashMap,
+  Option,
+  PubSub,
+  Semaphore,
+  Stream,
+} from 'effect';
 
 import { LogStore } from './log-store.js';
 import { LogOffset } from './offset.js';
@@ -8,7 +16,7 @@ import { ConversationRecord } from './record.js';
 //
 // The reference implementation of the contract, and the one the contract
 // suite is developed against. It is not a fast path or a production
-// fallback: reads scan, everything lives in one process, and nothing
+// fallback: everything lives in one process, and nothing
 // survives a restart.
 //
 // Two things it does take seriously, because getting them wrong here would
@@ -36,6 +44,22 @@ interface StreamState {
   readonly records: ConversationRecord.Envelope[];
 }
 
+/** First record whose offset is strictly greater than the exclusive cursor. */
+const firstAfter = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+  after: LogOffset.Offset,
+): number => {
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    const held = records[middle]!;
+    if (LogOffset.isAfter(held.offset, after)) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+};
+
 type Operation = LogStore.LogStoreError['operation'];
 type Reason = LogStore.LogStoreError['reason'];
 
@@ -45,6 +69,10 @@ const build = (
   Layer.sync(LogStore.Service, () => {
     const streams = MutableHashMap.empty<string, StreamState>();
     const signals = MutableHashMap.empty<string, PubSub.PubSub<void>>();
+    // One short critical section is enough: this backend is process-local and
+    // every mutable invariant spans at least two fields on the same map entry.
+    const mutex = Semaphore.makeUnsafe(1);
+    const exclusive = mutex.withPermits(1);
 
     const failure = (
       path: string,
@@ -96,7 +124,7 @@ const build = (
       records: state.records.length,
     });
 
-    const create = Effect.fn('AiLog.LogStore.create')(function* (
+    const createUnlocked = Effect.fn('AiLog.LogStore.create')(function* (
       path: string,
       identity: string,
     ) {
@@ -119,12 +147,29 @@ const build = (
       MutableHashMap.set(streams, path, state);
       return metaOf(path, state);
     });
+    const create: LogStore.Interface['create'] = (path, identity) =>
+      exclusive(createUnlocked(path, identity));
 
-    const acquire = Effect.fn('AiLog.LogStore.acquire')(function* (
+    const acquireUnlocked = Effect.fn('AiLog.LogStore.acquire')(function* (
       path: string,
       producerId: string,
+      expected?: LogStore.AcquireExpected,
     ) {
       const state = yield* lookup(path, 'acquire');
+
+      if (
+        expected !== undefined &&
+        (state.epoch !== expected.epoch || state.lastOffset !== expected.head)
+      ) {
+        return yield* Effect.fail(
+          failure(
+            path,
+            'acquire',
+            'conflict',
+            `stream changed from epoch ${expected.epoch} at ${expected.head}`,
+          ),
+        );
+      }
 
       state.epoch += 1;
       state.producerId = producerId;
@@ -138,8 +183,13 @@ const build = (
         nextSequence: 0,
       } satisfies LogStore.ProducerClaim;
     });
+    const acquire: LogStore.Interface['acquire'] = (
+      path,
+      producerId,
+      expected,
+    ) => exclusive(acquireUnlocked(path, producerId, expected));
 
-    const append = Effect.fn('AiLog.LogStore.append')(function* (
+    const appendUnlocked = Effect.fn('AiLog.LogStore.append')(function* (
       input: LogStore.AppendInput,
     ) {
       const state = yield* lookup(input.path, 'append');
@@ -172,11 +222,12 @@ const build = (
       // expensive thing an append does, and it is worth it: it is what turns
       // "you asked about this slot before" into "you asked about these
       // records before".
-      const digest = yield* ConversationRecord.fingerprint(input.records).pipe(
+      const prepared = yield* ConversationRecord.prepare(input.records).pipe(
         Effect.mapError((error) =>
           failure(input.path, 'append', 'encoding', error.detail),
         ),
       );
+      const digest = prepared.fingerprint;
 
       if (input.sequence === state.lastSequence) {
         // A retry. Idempotent only if it repeats the same batch — a producer
@@ -202,7 +253,7 @@ const build = (
       // That is what makes the batch atomic, and it is why the validation is
       // exhaustive up front rather than interleaved with the writes.
       let offset = state.lastOffset;
-      for (const entry of input.records) {
+      for (const entry of prepared.entries) {
         offset = LogOffset.fromSeq(BigInt(state.records.length));
         state.records.push(ConversationRecord.envelope(offset, entry));
       }
@@ -214,21 +265,23 @@ const build = (
       yield* PubSub.publish(signal, undefined);
       return offset;
     });
+    const append: LogStore.Interface['append'] = (input) =>
+      exclusive(appendUnlocked(input));
 
-    const read = Effect.fn('AiLog.LogStore.read')(function* (
+    const readUnlocked = Effect.fn('AiLog.LogStore.read')(function* (
       path: string,
       options?: LogStore.ReadOptions,
     ) {
-      const state = yield* lookup(path, 'read');
-      const after = options?.after ?? LogOffset.START;
-      // A limit of zero would return an empty page that is not up to date,
-      // which `Tail` would page forever.
-      const limit = Math.max(1, options?.limit ?? LogStore.DEFAULT_READ_LIMIT);
-
-      const start = state.records.findIndex((held) =>
-        LogOffset.isAfter(held.offset, after),
+      const normalized = yield* LogStore.normalizeReadOptions(options).pipe(
+        Effect.mapError((error) =>
+          failure(path, 'read', 'invalid', error.detail),
+        ),
       );
-      if (start === -1) {
+      const state = yield* lookup(path, 'read');
+      const { after, limit } = normalized;
+
+      const start = firstAfter(state.records, after);
+      if (start === state.records.length) {
         return {
           records: [],
           cursor: after,
@@ -246,13 +299,53 @@ const build = (
         upToDate: end >= state.records.length,
       } satisfies LogStore.Page;
     });
+    const read: LogStore.Interface['read'] = (path, options) =>
+      exclusive(readUnlocked(path, options));
 
-    const meta = (path: string) =>
+    const readBackwardsUnlocked = Effect.fn('AiLog.LogStore.readBackwards')(
+      function* (path: string, options?: LogStore.ReadBackwardsOptions) {
+        const normalized = yield* LogStore.normalizeReadBackwardsOptions(
+          options,
+        ).pipe(
+          Effect.mapError((error) =>
+            failure(path, 'readBackwards', 'invalid', error.detail),
+          ),
+        );
+        const state = yield* lookup(path, 'readBackwards');
+        const end = Option.isSome(normalized.before)
+          ? firstAfter(state.records, normalized.before.value)
+          : state.records.length;
+        // `firstAfter` includes an exact match in the prefix; `before` does not.
+        const exclusiveEnd =
+          Option.isSome(normalized.before) &&
+          end > 0 &&
+          state.records[end - 1]?.offset === normalized.before.value
+            ? end - 1
+            : end;
+        const start = Math.max(0, exclusiveEnd - normalized.limit);
+        const records = state.records.slice(start, exclusiveEnd).reverse();
+        return {
+          records,
+          cursor:
+            records.at(-1)?.offset ??
+            Option.getOrElse(normalized.before, () => state.lastOffset),
+          upToDate: start === 0,
+        } satisfies LogStore.BackwardsPage;
+      },
+    );
+    const readBackwards: LogStore.Interface['readBackwards'] = (
+      path,
+      options,
+    ) => exclusive(readBackwardsUnlocked(path, options));
+
+    const metaUnlocked = (path: string) =>
       Effect.sync(() =>
         Option.map(MutableHashMap.get(streams, path), (state) =>
           metaOf(path, state),
         ),
       ).pipe(Effect.withSpan('AiLog.LogStore.meta'));
+    const meta: LogStore.Interface['meta'] = (path) =>
+      exclusive(metaUnlocked(path));
 
     // Subscribe, *then* emit the opening wake-up. The order is the contract:
     // a consumer that receives the first tick knows its subscription is
@@ -267,16 +360,18 @@ const build = (
             failure(path, 'changes', 'storage', 'change feed unavailable'),
           )
         : Stream.unwrap(
-            Effect.gen(function* () {
-              const subscription = yield* PubSub.subscribe(
-                yield* signalFor(path),
-              );
-              const opening: Stream.Stream<void> = Stream.make(undefined);
-              return Stream.concat(
-                opening,
-                Stream.fromSubscription(subscription),
-              );
-            }),
+            exclusive(
+              Effect.gen(function* () {
+                const subscription = yield* PubSub.subscribe(
+                  yield* signalFor(path),
+                );
+                const opening: Stream.Stream<void> = Stream.make(undefined);
+                return Stream.concat(
+                  opening,
+                  Stream.fromSubscription(subscription),
+                );
+              }),
+            ),
           );
 
     return LogStore.Service.of({
@@ -284,6 +379,7 @@ const build = (
       acquire,
       append,
       read,
+      readBackwards,
       meta,
       changes,
     });

@@ -3,14 +3,9 @@ import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
-import {
-  delegateTo,
-  Depth,
-  handler,
-  MAX_DEPTH,
-  tool,
-  toolName,
-} from '../src/subagent.js';
+import { Depth, MAX_DEPTH, tool, toolName } from '../src/subagent.js';
+import { delegateTo, handler } from '../src/subagent-runtime.js';
+import { RunPolicy } from '../src/run-policy.js';
 
 // A service only the child's work needs. Its presence in the parent's
 // requirement channel is the property this file exists to demonstrate: a
@@ -56,6 +51,7 @@ const runAny = <A, E, R>(effect: Effect.Effect<A, E, R>): Promise<A> =>
 
 const researcher = Agent.make({
   name: 'researcher',
+  revision: '1',
   description: 'Looks things up.',
   instructions: 'Answer concisely.',
   toolkit: Toolkit.make(),
@@ -76,6 +72,7 @@ describe('subagent tool', () => {
   it('falls back to a usable description when the child has none', () => {
     const anonymous = Agent.make({
       name: 'helper',
+      revision: '1',
       instructions: 'help',
       toolkit: Toolkit.make(),
     });
@@ -134,6 +131,7 @@ describe('delegation', () => {
     const notes = Toolkit.make();
     const scribe = Agent.make({
       name: 'scribe',
+      revision: '1',
       instructions: 'write it down',
       toolkit: notes,
     });
@@ -179,6 +177,32 @@ describe('delegation', () => {
 
     expect(result.outcome._tag).toBe('Failure');
     // Refused before the model was reached, which is the point.
+    expect(result.calls).toBe(0);
+  });
+
+  it('uses the shared application depth limit when one is present', async () => {
+    const result = await runAny(
+      Effect.gen(function* () {
+        const calls = yield* Ref.make(0);
+        const runtime = yield* RunPolicy.create(
+          RunPolicy.make({ maxDelegationDepth: 1 }),
+        );
+        const outcome = yield* handler(
+          researcher,
+          undefined,
+          runtime,
+        )({
+          prompt: 'go',
+        }).pipe(
+          Effect.provideService(Depth, 1),
+          Effect.provide(answering('never runs', calls)),
+          Effect.result,
+        );
+        return { outcome, calls: yield* Ref.get(calls) };
+      }),
+    );
+
+    expect(result.outcome._tag).toBe('Failure');
     expect(result.calls).toBe(0);
   });
 
@@ -233,6 +257,7 @@ describe('delegation', () => {
 
     const scribe = Agent.make({
       name: 'scribe',
+      revision: '1',
       instructions: 'write it down',
       toolkit: Toolkit.make(write),
     });
@@ -276,6 +301,7 @@ describe('delegation', () => {
 
     const scribe = Agent.make({
       name: 'scribe',
+      revision: '1',
       instructions: 'write it down',
       toolkit: notes,
     });

@@ -73,7 +73,7 @@ Every tool sets `failureMode: 'return'`, so a failure is encoded into the tool
 result and handed back to the model rather than thrown. A mistyped filename
 ends a turn, not a run.
 
-Each failure is a `Schema.TaggedErrorClass` with the fields needed to retry
+Each failure is a `Schema.TaggedError` with the fields needed to retry
 differently: `PathOutsideWorkspace`, `FileNotFound`, `NotAFile`,
 `NotADirectory`, `BinaryContent`, `EditTargetMissing`, `EditTargetAmbiguous`,
 `AccessDenied`, `InvalidPattern`, `CommandTimedOut`, `WorkspaceUnavailable`. A

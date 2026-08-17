@@ -10,13 +10,13 @@
 // process, and an in-process harness cannot observe either.
 //
 // The two sides are the same agent with recording off and on — `vesper` and
-// `vesper+log` — so every row answers "what does durability cost?".
+// `vesper+log` — so every row answers "what does in-memory recording cost?".
 
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { formatMs, summarise } from './stats.js';
-import type { ScenarioName, ScenarioResult, SideName } from './workload.js';
+import { formatMs, summarise } from './stats.ts';
+import type { ScenarioName, ScenarioResult, SideName } from './workload.ts';
 
 const SELF = fileURLToPath(import.meta.url);
 
@@ -28,8 +28,10 @@ const SELF = fileURLToPath(import.meta.url);
  * exactly the shape of measurement that once had this project reporting a
  * 1m42s startup for something that takes well under a second.
  */
-const MEMORY_REPEATS = 5;
-const STARTUP_REPEATS = 5;
+const SMOKE = process.env.VESPER_BENCH_SMOKE === '1';
+const HEAVY = process.env.VESPER_BENCH_HEAVY === '1';
+const MEMORY_REPEATS = SMOKE ? 1 : 5;
+const STARTUP_REPEATS = SMOKE ? 1 : 5;
 
 const PLAN: ReadonlyArray<readonly [SideName, ScenarioName]> = [
   ['vesper', 'turn'],
@@ -38,6 +40,11 @@ const PLAN: ReadonlyArray<readonly [SideName, ScenarioName]> = [
   ['vesper', 'scaling'],
   ['vesper+log', 'scaling'],
   ['vesper+log', 'growth'],
+  ['vesper', 'parts'],
+  ['vesper+log', 'parts'],
+  ['vesper+log', 'history-open'],
+  ['vesper', 'backpressure'],
+  ['vesper+log', 'backpressure'],
   ['vesper', 'startup'],
   ['vesper+log', 'memory'],
 ];
@@ -46,8 +53,25 @@ const PLAN: ReadonlyArray<readonly [SideName, ScenarioName]> = [
 
 const child = async (side: SideName, scenario: ScenarioName): Promise<void> => {
   const result: ScenarioResult = await (
-    await import('./vesper.js')
+    await import('./vesper.ts')
   ).run(scenario, side === 'vesper+log');
+
+  if (scenario !== 'history-open' && (result.modelCalls ?? 0) <= 0) {
+    throw new Error(`${side}/${scenario} reported no model calls`);
+  }
+  if (result.turnsPerSample !== undefined && result.samples.length > 0) {
+    const expected = result.samples.length * result.turnsPerSample;
+    if (result.modelCalls !== expected) {
+      throw new Error(
+        `${side}/${scenario} reported ${result.modelCalls} calls for ${expected} measured turns`,
+      );
+    }
+  }
+  if (scenario === 'history-open' && result.modelCalls !== 0) {
+    throw new Error(
+      `history fixture unexpectedly made ${result.modelCalls} model calls`,
+    );
+  }
 
   process.stdout.write(`##BENCH##${JSON.stringify(result)}\n`);
 };
@@ -196,6 +220,40 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       continue;
     }
 
+    if (scenario === 'parts') {
+      const parts = list[0]?.partSeries?.map((s) => s.parts) ?? [];
+      line(
+        `   ${'side'.padEnd(11)} ` +
+          parts.map((count) => `N=${count}`.padStart(11)).join(' ') +
+          '   (ms, median)',
+      );
+      for (const r of list) {
+        const cells = (r.partSeries ?? []).map((s) =>
+          formatMs(summarise(s.samples).median).padStart(11),
+        );
+        line(`   ${r.side.padEnd(11)} ${cells.join(' ')}`);
+      }
+      line(
+        `   fixed 10,000-byte output; model calls: ${list
+          .map((r) => `${r.side}=${r.modelCalls}`)
+          .join(', ')}`,
+      );
+      continue;
+    }
+
+    if (scenario === 'history-open') {
+      line(
+        `   ${'mode'.padEnd(22)} ${'lifetime'.padStart(9)} ${'live'.padStart(6)} ${'pages'.padStart(7)} ${'read'.padStart(7)} ${'median'.padStart(10)} ${'min'.padStart(10)} ${'max'.padStart(10)}   ms`,
+      );
+      for (const point of list[0]?.historySeries ?? []) {
+        const summary = summarise(point.samples);
+        line(
+          `   ${point.mode.padEnd(22)} ${String(point.records).padStart(9)} ${String(point.liveRecords).padStart(6)} ${String(point.pages).padStart(7)} ${String(point.recordsRead).padStart(7)} ${formatMs(summary.median).padStart(10)} ${formatMs(summary.min).padStart(10)} ${formatMs(summary.max).padStart(10)}   n=${summary.n}`,
+        );
+      }
+      continue;
+    }
+
     if (scenario === 'startup') {
       const bySide = new Map<SideName, ScenarioResult[]>();
       for (const r of list) {
@@ -277,6 +335,11 @@ const parent = async (): Promise<void> => {
   }
 
   line(`node ${process.version} on ${process.platform}/${process.arch}`);
+  if (!HEAVY) {
+    line(
+      'heavy cells omitted; set VESPER_BENCH_HEAVY=1 for 10k deltas and 10k records',
+    );
+  }
   report(results);
 };
 

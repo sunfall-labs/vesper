@@ -28,12 +28,14 @@ const write = Tool.make('write', {
 
 const scribe = Agent.make({
   name: 'scribe',
+  revision: '1',
   instructions: 'write it down',
   toolkit: Toolkit.make(write),
 }).withHandlers({ write: () => Effect.succeed({ ok: true }) });
 
 const boss = Agent.make({
   name: 'boss',
+  revision: '1',
   instructions: 'delegate',
   toolkit: Toolkit.make(),
   subagents: [scribe],
@@ -62,6 +64,7 @@ const _model: Has<LanguageModel.LanguageModel, BossR> = 'yes';
 // the entire requirement channel of every agent without subagents.
 const solo = Agent.make({
   name: 'solo',
+  revision: '1',
   instructions: 'x',
   toolkit: Toolkit.make(),
 });

@@ -14,6 +14,7 @@ import {
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { Agent } from '../src/agent.js';
+import { ContextWindow } from '../src/context-window.js';
 import { AgentEvents } from '../src/event.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
@@ -127,6 +128,7 @@ const dispatched = { count: 0 };
 
 const agent = Agent.make({
   name: 'test',
+  revision: '1',
   instructions: 'be terse',
   toolkit: Toolkit.make(lookup),
 }).withHandlers({
@@ -228,6 +230,7 @@ describe('resuming a crashed run', () => {
     // The crashed run got one turn's worth of records and no `Completed`.
     expect(observed.afterCrash).toEqual([
       'RunStarted',
+      'ToolStarted',
       'Text',
       'ToolCall',
       'ToolOutcome',
@@ -292,6 +295,7 @@ describe('resuming a crashed run', () => {
 
     expect(tags).toEqual([
       'RunStarted',
+      'ToolStarted',
       'Text',
       'ToolCall',
       'ToolOutcome',
@@ -377,6 +381,40 @@ describe('resuming an ordinary conversation', () => {
     expect(totals.second.output).toBe(totals.first.output * 2);
     expect(totals.second.input).toBe(totals.first.input * 2);
   });
+
+  it('restores the latest turn usage as the resumed estimator anchor', async () => {
+    const models = provider([answeringTurn, laterTurn]);
+    const seen: Array<ContextWindow.TurnUsage | undefined> = [];
+    const heuristics: ContextWindow.Heuristics = {
+      estimate: (_prompt, usage) => {
+        seen.push(usage);
+        return { tokens: 0, usageTokens: 0, trailingTokens: 0 };
+      },
+      shouldCompact: () => false,
+    };
+    const anchored = Agent.make({
+      name: 'anchored',
+      revision: '1',
+      instructions: 'be terse',
+      toolkit: Toolkit.make(),
+      compaction: {
+        contextWindow: 1_000,
+        reserveTokens: 100,
+        keepRecentTokens: 10,
+        instructions: 'sum',
+      },
+    });
+
+    await run(
+      Effect.gen(function* () {
+        yield* anchored.resume(CONVERSATION, 'first');
+        yield* anchored.resume(CONVERSATION, 'second');
+      }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
+      models.layer,
+    );
+
+    expect(seen).toEqual([undefined, { inputTokens: 10, outputTokens: 4 }]);
+  });
 });
 
 describe('rebuilding a prompt from records', () => {
@@ -386,6 +424,8 @@ describe('rebuilding a prompt from records', () => {
         {
           _tag: 'RunStarted',
           agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'looking' },
@@ -427,6 +467,8 @@ describe('rebuilding a prompt from records', () => {
         {
           _tag: 'RunStarted',
           agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'looking' },
@@ -469,6 +511,8 @@ describe('rebuilding a prompt from records', () => {
         {
           _tag: 'RunStarted',
           agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'working' },
@@ -496,6 +540,8 @@ describe('rebuilding a prompt from records', () => {
         {
           _tag: 'RunStarted',
           agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
           prompt: Prompt.make('hi').content,
         },
         {
@@ -520,6 +566,8 @@ describe('rebuilding a prompt from records', () => {
         {
           _tag: 'RunStarted',
           agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
           prompt: Prompt.make('hi').content,
         },
         { _tag: 'Text', step: 1, text: 'done' },
@@ -550,7 +598,13 @@ describe('rebuilding a prompt from records', () => {
   it('sums usage across runs rather than reporting the last one', () => {
     const usage = AgentHistory.usageFrom(
       envelopes([
-        { _tag: 'RunStarted', agent: 'test', prompt: [] },
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
+          prompt: [],
+        },
         { _tag: 'TurnFinished', step: 1, usage: { input: 3, output: 1 } },
         {
           _tag: 'RunSettled',
@@ -559,7 +613,13 @@ describe('rebuilding a prompt from records', () => {
           steps: 1,
           usage: { input: 3, output: 1 },
         },
-        { _tag: 'RunStarted', agent: 'test', prompt: [] },
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
+          prompt: [],
+        },
         { _tag: 'TurnFinished', step: 1, usage: { input: 5, output: 2 } },
         {
           _tag: 'RunSettled',
@@ -572,5 +632,30 @@ describe('rebuilding a prompt from records', () => {
     );
 
     expect(usage).toEqual({ input: 8, output: 3 });
+  });
+
+  it('restores only the latest turn own usage from cumulative records', () => {
+    const usage = AgentHistory.latestTurnUsageFrom(
+      envelopes([
+        {
+          _tag: 'RunStarted',
+          agent: 'test',
+          formatVersion: 1,
+          agentRevision: '1',
+          prompt: [],
+        },
+        { _tag: 'TurnFinished', step: 1, usage: { input: 10, output: 4 } },
+        { _tag: 'TurnFinished', step: 2, usage: { input: 25, output: 10 } },
+        {
+          _tag: 'RunSettled',
+          outcome: 'success',
+          detail: '',
+          steps: 2,
+          usage: { input: 25, output: 10 },
+        },
+      ]),
+    );
+
+    expect(usage).toEqual({ input: 15, output: 6 });
   });
 });

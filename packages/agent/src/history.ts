@@ -4,6 +4,7 @@ import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
 import { Compaction } from './compaction.js';
+import { PromptTransport } from './prompt-transport.js';
 import type { Stop } from './stop.js';
 
 // Records back into a runnable conversation.
@@ -32,9 +33,9 @@ import type { Stop } from './stop.js';
 // a call nothing answered. Sending that to a provider is not a degraded
 // prompt, it is a rejected request — Anthropic and OpenAI both refuse an
 // assistant tool call with no matching result. So an unanswered call is
-// dropped and the model is free to ask again. The tool may or may not have
-// actually run before the crash; nothing in the log can say, and re-asking is
-// the same at-least-once bargain the rest of this family makes.
+// dropped. A resumed agent resolves indeterminate starts before rebuilding this
+// prompt, so the active recovery path supplies an outcome first. The filtering
+// remains necessary for malformed/legacy history and non-resuming readers.
 //
 // ## Compaction is honoured, not ignored
 //
@@ -282,9 +283,9 @@ const fold = (
         // `RunStarted.prompt` already holds it normalised to messages.
         flush();
         messages.push(
-          ...Prompt.make(record.prompt as Prompt.RawInput).content.map(
-            (message) => ({ offset, message }),
-          ),
+          ...Prompt.make(
+            PromptTransport.decode(record.prompt) as Prompt.RawInput,
+          ).content.map((message) => ({ offset, message })),
         );
         break;
 
@@ -312,6 +313,7 @@ const fold = (
             id: record.id,
             name: record.name,
             isFailure: record.outcome === 'failure',
+            providerExecuted: false,
             // Already the toolkit's encoding — the form `Prompt` puts in front
             // of the model — which is why `ToolOutcome.result` stores that and
             // not the decoded value.
@@ -330,7 +332,7 @@ const fold = (
         // own words before the instruction that redirected it. A cancel
         // changed no prompt; it ended a run.
         flush();
-        if (record.kind === 'steer') {
+        if (record.kind === 'steer' && record.disposition !== 'rejected') {
           messages.push({
             offset,
             message: Prompt.makeMessage('user', {
@@ -353,6 +355,7 @@ const fold = (
       // switch and one that did would say nothing about the conversation.
       case 'Compacted':
       case 'BranchedFrom':
+      case 'ToolStarted':
       case 'Completed':
       case 'ChildSession':
       case 'RunSettled':
@@ -403,7 +406,10 @@ export const usageFrom = (
         run = record.usage;
         break;
       case 'RunSettled':
-        total = add(total, record.usage);
+        total =
+          record.resume === undefined
+            ? add(total, record.usage)
+            : record.resume.usage;
         run = { input: 0, output: 0 };
         break;
       default:
@@ -412,6 +418,89 @@ export const usageFrom = (
   }
 
   return add(total, run);
+};
+
+/** Provider usage for the latest completed turn, excluding earlier turns. */
+export const latestTurnUsageFrom = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+): Stop.Usage | undefined => {
+  let previous: Stop.Usage = { input: 0, output: 0 };
+  let latest: Stop.Usage | undefined;
+  let compacted = false;
+
+  for (const { record } of AgentBranch.activePath(records)) {
+    switch (record._tag) {
+      case 'RunStarted':
+        previous = { input: 0, output: 0 };
+        break;
+      case 'Compacted':
+        compacted = true;
+        break;
+      case 'RunSettled':
+        if (record.resume !== undefined) {
+          latest = record.resume.latestTurnUsage;
+        }
+        break;
+      case 'TurnFinished':
+        latest = compacted
+          ? undefined
+          : {
+              input: record.usage.input - previous.input,
+              output: record.usage.output - previous.output,
+            };
+        previous = record.usage;
+        compacted = false;
+        break;
+      default:
+        break;
+    }
+  }
+
+  return latest;
+};
+
+/** The latest durable result, when a child can return it without rerunning. */
+export const completedFrom = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+):
+  | {
+      readonly text: string;
+      readonly outcome: 'success' | 'cancelled';
+      readonly steps: number;
+      readonly usage: Stop.Usage;
+    }
+  | undefined => {
+  let completed:
+    | {
+        readonly text: string;
+        readonly outcome: 'success' | 'cancelled';
+        readonly steps: number;
+        readonly usage: Stop.Usage;
+      }
+    | undefined;
+  for (const { record } of AgentBranch.activePath(records)) {
+    if (record._tag === 'RunStarted') {
+      completed = undefined;
+    }
+    if (record._tag === 'Completed') {
+      completed = { ...record, outcome: record.outcome ?? 'success' };
+    }
+    if (record._tag === 'RunSettled' && record.resume !== undefined) {
+      completed =
+        record.resume.completed === undefined
+          ? undefined
+          : {
+              ...record.resume.completed,
+              outcome: record.resume.completed.outcome ?? 'success',
+            };
+    }
+  }
+
+  // `Completed` is appended before the event reaches the result fold. The
+  // settlement finalizer is deliberately best-effort and may time out after
+  // that, so requiring `RunSettled(success)` here would rerun a child whose
+  // result and side effects are already durable.
+  return completed;
 };
 
 const add = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({

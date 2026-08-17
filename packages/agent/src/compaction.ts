@@ -27,9 +27,8 @@ import { ContextWindow } from './context-window.js';
 // The estimate, the trigger, and the summarizer's system prompt are not
 // written here any more. They are read from `ContextWindow.Service`, whose
 // default is the four-characters-per-token guess this file used to hold and
-// whose production implementation is Pi's — see `context-window.ts` for why
-// that is a seam rather than an import. What stays here is everything Pi
-// cannot do for us: where to cut, that the system message survives, and that
+// whose usage-anchored implementation lives in `context-window.ts`.
+// What stays here is where to cut, that the system message survives, and that
 // the rewrite is reported.
 //
 // ## Why this is two files and not one
@@ -37,9 +36,8 @@ import { ContextWindow } from './context-window.js';
 // `context-window.ts` is not the other half of this module; it is the
 // *contract* this module consumes. Everything in it — `Heuristics`, `pure`,
 // `Service`, `TurnUsage` — exists to be implemented by somebody else, and
-// somebody else does: `@sunfall/vesper-pi/compaction` produces a value of that shape
-// without importing it, and `@sunfall/vesper-runtime` is where the two are checked
-// against each other. This file is the sole consumer, and none of it is
+// `ContextWindow.usageAnchored` provides a richer value of that shape. This
+// file is the sole consumer, and none of it is
 // implementable by a provider: where to cut a history, that the agent's system
 // message survives the cut, and that the rewrite is announced are decisions
 // this package has to keep.
@@ -89,17 +87,9 @@ export interface Policy {
 /**
  * The system prompt a summarization call runs under by default.
  *
- * Pi's, transcribed rather than imported — and that is a deliberate,
- * uncomfortable exception to how the rest of this seam works. Pi maintains
- * this text as `SUMMARIZATION_SYSTEM_PROMPT` in
- * `pi-agent-core/harness/compaction/compaction.ts`, but the package's entry
- * point does not re-export it and its `exports` map admits no deep import, so
- * at 0.80.2 there is no way for any adapter to read the real one. Copying it
- * is the only way to have the maintained wording at all.
- *
- * The cost is that this cannot notice Pi changing it. Re-check the constant on
- * a `pi-agent-core` bump, and delete this in favour of the seam the moment Pi
- * exports it.
+ * Kept here as Vesper policy rather than delegated to a provider: every
+ * provider must summarize under the same instruction, and callers can replace
+ * it through `Policy.system` when their format differs.
  */
 export const defaultSystem =
   'You are a context summarization assistant. Your task is to read a ' +
@@ -160,26 +150,24 @@ export const shouldCompact = (
  * The `InvalidRequestError.constraint` a provider adapter sets to mean "the
  * prompt no longer fits".
  *
- * A cross-package protocol constant, duplicated on purpose. `@sunfall/vesper-agent`
- * must not import `@sunfall/vesper-pi` — that is the rule which keeps the loop
- * provider-agnostic — so the producer and the consumer of this marker cannot
- * share a definition. What they can share is a test: `runtime` depends on both
- * and pins the agreement, so drift fails a build instead of silently
- * disabling compaction.
+ * Official providers may set this constraint directly. Providers that preserve
+ * only their upstream description are recognized by {@link isContextOverflow}.
  */
 export const CONTEXT_OVERFLOW = 'context-window';
 
 /**
  * True when a provider failure means the prompt no longer fits.
  *
- * Matched structurally rather than by importing the marker from `@sunfall/vesper-pi`
- * — the layering rule forbids that dependency, and matching on the shape means
- * any provider adapter that classifies overflow the same way gets this
- * behaviour for free.
+ * Effect AI normalizes these as invalid requests, but providers do not yet
+ * agree on a constraint. Keep the message fallback narrow and gated on the
+ * reason tag so an unrelated provider failure cannot trigger summarization.
  */
 export const isContextOverflow = (error: AiError.AiError): boolean =>
   error.reason._tag === 'InvalidRequestError' &&
-  error.reason.constraint === CONTEXT_OVERFLOW;
+  (error.reason.constraint === CONTEXT_OVERFLOW ||
+    /(?:context(?: length| window)?(?: is)?(?: exceeded| too long)|maximum context length|model_context_window_exceeded|prompt is too long|too many tokens|input is too long)/i.test(
+      error.reason.description ?? '',
+    ));
 
 /**
  * What one compaction did.
@@ -202,6 +190,8 @@ export interface Summarized {
   readonly summarizedMessages: number;
   /** Messages kept verbatim after it, newest-last. */
   readonly keptMessages: number;
+  /** Provider usage spent producing the summary. */
+  readonly usage: { readonly input: number; readonly output: number };
 }
 
 /**
@@ -267,6 +257,10 @@ export const compact = Effect.fn('Agent.compact')(function* (
     summary: summary.text,
     summarizedMessages: split.older.length,
     keptMessages: split.recent.length,
+    usage: {
+      input: summary.usage.inputTokens.total ?? 0,
+      output: summary.usage.outputTokens.total ?? 0,
+    },
   };
 });
 
@@ -314,7 +308,35 @@ const splitAt = (prompt: Prompt.Prompt, keepRecentTokens: number): Split => {
     recent.unshift(message);
   }
 
-  return { system, older: rest.slice(0, rest.length - recent.length), recent };
+  let firstRecent = rest.length - recent.length;
+
+  // Effect Chat stores one turn's calls in an assistant message and their
+  // outcomes in the following tool message. A token boundary between those
+  // messages creates an invalid prompt, so move the matching assistant message
+  // into the kept tail as one atomic unit.
+  if (firstRecent > 0 && rest[firstRecent]?.role === 'tool') {
+    const calls = rest[firstRecent - 1];
+    const results = rest[firstRecent];
+    if (
+      calls?.role === 'assistant' &&
+      results?.role === 'tool' &&
+      calls.content.some(
+        (call) =>
+          call.type === 'tool-call' &&
+          results.content.some(
+            (result) => result.type === 'tool-result' && result.id === call.id,
+          ),
+      )
+    ) {
+      firstRecent -= 1;
+    }
+  }
+
+  return {
+    system,
+    older: rest.slice(0, firstRecent),
+    recent: rest.slice(firstRecent),
+  };
 };
 
 export * as Compaction from './compaction.js';

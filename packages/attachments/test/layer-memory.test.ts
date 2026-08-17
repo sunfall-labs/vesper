@@ -17,6 +17,13 @@ AttachmentStoreContract.attachmentStoreContract('memory', {
   overwriteUnsafe: memory.overwriteUnsafe,
 });
 
+const _unprovidedAttachmentContract: AttachmentStoreContract.ContractOptions<never> =
+  {
+    // @ts-expect-error contract helpers must not erase unprovided layer requirements
+    layer: memory.layer,
+    overwriteUnsafe: memory.overwriteUnsafe,
+  };
+
 // The contract runs against `make()`, because that is the shape with the back
 // door it needs. `layer` is the export everything else wires, and it is a
 // different construction — `Effect.suspend` around a fresh map rather than a

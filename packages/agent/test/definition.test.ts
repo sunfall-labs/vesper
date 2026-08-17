@@ -77,8 +77,21 @@ const pingHandlers = Toolkit.make(ping).toLayer({
   ping: () => Effect.succeed({ pong: true }),
 });
 
+const reservedSkill = Tool.make(Skill.TOOL_NAME, {
+  description: 'reserved',
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({}),
+});
+
+const reservedChild = Tool.make('task_researcher', {
+  description: 'reserved',
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({}),
+});
+
 const researcher = Agent.make({
   name: 'researcher',
+  revision: '1',
   description: 'Looks things up.',
   instructions: 'Answer concisely.',
   toolkit: Toolkit.make(),
@@ -89,6 +102,45 @@ const refunds: Skill.Skill = {
   description: 'How to process a refund.',
   instructions: 'STEP 1: verify the order.',
 };
+
+// Literal tuples reject collisions before runtime. Widened arrays are covered
+// by the runtime tests below.
+const compileTimeCollisionAssertions = (): void => {
+  // @ts-expect-error every definition must declare its durable revision
+  Agent.make({
+    name: 'missing-revision',
+    instructions: 'x',
+    toolkit: Toolkit.make(),
+  });
+
+  // @ts-expect-error load_skill is generated when a literal skill tuple exists
+  Agent.make({
+    name: 'bad-skill',
+    revision: '1',
+    instructions: 'x',
+    toolkit: Toolkit.make(reservedSkill),
+    skills: [refunds],
+  });
+
+  // @ts-expect-error task_researcher is generated from the literal child tuple
+  Agent.make({
+    name: 'bad-child',
+    revision: '1',
+    instructions: 'x',
+    toolkit: Toolkit.make(reservedChild),
+    subagents: [researcher],
+  });
+
+  // @ts-expect-error duplicate child names generate the same tool name
+  Agent.make({
+    name: 'duplicate-child',
+    revision: '1',
+    instructions: 'x',
+    toolkit: Toolkit.make(),
+    subagents: [researcher, researcher],
+  });
+};
+void compileTimeCollisionAssertions;
 
 const run = <A, E>(effect: Effect.Effect<A, E>): Promise<A> =>
   Effect.runPromise(Effect.orDie(effect));
@@ -117,9 +169,45 @@ const drive = <R>(agent: Agent.Named<string, R>) =>
   });
 
 describe('declarative definition', () => {
+  it('rejects an empty revision at construction', () => {
+    expect(() =>
+      Agent.make({
+        name: 'empty-revision',
+        revision: '   ',
+        instructions: 'x',
+        toolkit: Toolkit.make(),
+      }),
+    ).toThrow('revision must be non-empty');
+  });
+
+  it('rejects a hand-written child even when it matches the public shape', () => {
+    const child: Agent.Named<'hand-written', never> = {
+      name: 'hand-written',
+      revision: '1',
+      run: () =>
+        Effect.succeed({
+          outcome: 'success',
+          text: 'ok',
+          steps: 1,
+          usage: { input: 0, output: 0 },
+        }),
+    };
+
+    expect(() =>
+      Agent.make({
+        name: 'parent',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(),
+        subagents: [child],
+      }),
+    ).toThrow('was not created by Agent.make');
+  });
+
   it('offers subagents to the model as tools without manual merging', async () => {
     const parent = Agent.make({
       name: 'parent',
+      revision: '1',
       instructions: 'delegate when useful',
       toolkit: Toolkit.make(ping),
       subagents: [researcher],
@@ -135,6 +223,7 @@ describe('declarative definition', () => {
   it('offers the skill loader and puts only the catalog in the prompt', async () => {
     const helper = Agent.make({
       name: 'helper',
+      revision: '1',
       instructions: 'be helpful',
       toolkit: Toolkit.make(),
       skills: [refunds],
@@ -153,6 +242,7 @@ describe('declarative definition', () => {
   it('leaves the toolkit alone when nothing is declared', async () => {
     const plain = Agent.make({
       name: 'plain',
+      revision: '1',
       instructions: 'x',
       toolkit: Toolkit.make(ping),
     });
@@ -167,6 +257,7 @@ describe('declarative definition', () => {
   it('provides handlers for everything it advertises', async () => {
     const parent = Agent.make({
       name: 'parent',
+      revision: '1',
       instructions: 'x',
       toolkit: Toolkit.make(),
       subagents: [researcher],
@@ -180,5 +271,45 @@ describe('declarative definition', () => {
     // a drift between the two would fail here at dispatch.
     expect(tools).toContain(Subagent.toolName('researcher'));
     expect(tools).toContain(Skill.TOOL_NAME);
+  });
+
+  it('rejects generated collisions from widened arrays at runtime', () => {
+    const children: ReadonlyArray<Agent.Named> = [researcher, researcher];
+    const skills: ReadonlyArray<Skill.Skill> = [refunds];
+
+    expect(() =>
+      Agent.make({
+        name: 'duplicate-child',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(),
+        subagents: children,
+      }),
+    ).toThrow('duplicate tool "task_researcher"');
+
+    expect(() =>
+      Agent.make({
+        name: 'own-child-collision',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(reservedChild),
+        subagents: children.slice(0, 1),
+      }),
+    ).toThrow('toolkit already defines it');
+
+    expect(() =>
+      Agent.make({
+        name: 'own-skill-collision',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(reservedSkill),
+        skills,
+      }),
+    ).toThrow('toolkit already defines it');
+  });
+
+  it('checks the agent brand value, not merely the property', () => {
+    expect(Agent.isAgent(researcher)).toBe(true);
+    expect(Agent.isAgent({ [Agent.TypeId]: 'forged' })).toBe(false);
   });
 });

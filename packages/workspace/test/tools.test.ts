@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -69,6 +70,7 @@ const call = <Name extends keyof Tools>(
   directory: string,
   name: Name,
   params: Tool.Parameters<Tools[Name]>,
+  policy: Layer.Layer<WorkspaceTools.CommandPolicy> = WorkspaceTools.defaultCommandPolicyLayer,
 ): Promise<Outcome> => {
   const program = Effect.gen(function* () {
     const kit = yield* WorkspaceTools.toolkit;
@@ -88,6 +90,7 @@ const call = <Name extends keyof Tools>(
     Effect.provide(
       Layer.mergeAll(
         WorkspaceTools.rootLayer(directory),
+        policy,
         localLayer.pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
@@ -174,6 +177,10 @@ const _runNeedsDriver: Has<
   Services<'run_shell'>
 > = 'yes';
 const _runNeedsRoot: Has<WorkspaceTools.Root, Services<'run_shell'>> = 'yes';
+const _runNeedsPolicy: Has<
+  WorkspaceTools.CommandPolicy,
+  Services<'run_shell'>
+> = 'yes';
 
 // ...and the handler layer discharges the handlers and *not* the workspace.
 // If it provided either, wiring an agent would silently stop requiring one.
@@ -258,7 +265,40 @@ describe('read_file', () => {
       // The window fit its own budget, but it is not the whole file, and
       // saying `false` here is exactly the lie this tool must not tell.
       truncated: true,
+      truncatedBy: 'lines',
     });
+  });
+
+  it('keeps metadata consistent for an offset beyond the end', async () => {
+    const directory = workspace();
+    writeFileSync(join(directory, 'short.txt'), 'one\ntwo');
+
+    const value = expectOk(
+      await call(directory, 'read_file', {
+        path: 'short.txt',
+        offset: 100,
+        limit: 5,
+      }),
+    );
+
+    expect(value).toMatchObject({
+      content: '',
+      firstLine: 3,
+      lineCount: 0,
+      totalLines: 2,
+      truncated: true,
+      truncatedBy: 'lines',
+    });
+  });
+
+  it('refuses to materialize a file beyond the driver read budget', async () => {
+    const directory = workspace();
+    writeFileSync(join(directory, 'huge.txt'), 'x'.repeat(2 * 1024 * 1024 + 1));
+
+    expectFailure(
+      await call(directory, 'read_file', { path: 'huge.txt' }),
+      '@sunfall/vesper-workspace/FileTooLarge',
+    );
   });
 
   it('truncates a file too large for a context window and says which limit hit', async () => {
@@ -645,6 +685,16 @@ describe('list_files', () => {
     ]);
   });
 
+  it('returns malformed glob ranges as InvalidPattern', async () => {
+    const directory = workspace();
+    tree(directory);
+
+    expectFailure(
+      await call(directory, 'list_files', { pattern: '[z-a]' }),
+      '@sunfall/vesper-workspace/InvalidPattern',
+    );
+  });
+
   it('lists a symlink as a symlink and does not walk through it', async () => {
     const directory = workspace();
     mkdirSync(join(directory, 'real'));
@@ -800,6 +850,39 @@ describe('search_files', () => {
     expect(value['largeFilesSkipped']).toBe(0);
   });
 
+  it('enforces and reports the aggregate search read budget', async () => {
+    const directory = workspace();
+    const content = 'x'.repeat(2 * 1024 * 1024);
+    for (let index = 0; index < 9; index += 1) {
+      writeFileSync(join(directory, `large-${String(index)}.txt`), content);
+    }
+
+    const value = expectOk(
+      await call(directory, 'search_files', { pattern: 'needle' }),
+    );
+
+    expect(value['filesSearched']).toBe(8);
+    expect(value['aggregateBudgetFilesSkipped']).toBe(1);
+    expect(value['longLinesSkipped']).toBe(8);
+    expect(value['truncated']).toBe(true);
+  });
+
+  it('reports files that fail during search reads', async (context) => {
+    if (process.getuid?.() === 0) {
+      context.skip('uid 0 can read files regardless of mode bits');
+    }
+    const directory = workspace();
+    const path = join(directory, 'unreadable.txt');
+    writeFileSync(path, 'needle');
+    chmodSync(path, 0o000);
+
+    const value = expectOk(
+      await call(directory, 'search_files', { pattern: 'needle' }),
+    );
+
+    expect(value['unreadableFiles']).toEqual(['unreadable.txt']);
+  });
+
   it('fails with InvalidPattern on a malformed regular expression', async () => {
     const directory = workspace();
     const error = expectFailure(
@@ -808,6 +891,35 @@ describe('search_files', () => {
     );
     expect(error['pattern']).toBe('([');
     expect(String(error['reason']).length).toBeGreaterThan(0);
+  });
+
+  it.each(['(a+)+$', '(a|aa)+$'])(
+    'rejects unsafe expression %s before reading files',
+    async (pattern) => {
+      const directory = workspace();
+      writeFileSync(
+        join(directory, 'adversarial.txt'),
+        `${'a'.repeat(100_000)}!`,
+      );
+
+      expectFailure(
+        await call(directory, 'search_files', { pattern }),
+        '@sunfall/vesper-workspace/InvalidPattern',
+      );
+    },
+  );
+
+  it('returns malformed search globs as InvalidPattern', async () => {
+    const directory = workspace();
+    writeFileSync(join(directory, 'a.txt'), 'needle');
+
+    expectFailure(
+      await call(directory, 'search_files', {
+        pattern: 'needle',
+        glob: '[z-a]',
+      }),
+      '@sunfall/vesper-workspace/InvalidPattern',
+    );
   });
 
   it('caps matches at `limit` and says it was capped', async () => {
@@ -825,7 +937,7 @@ describe('search_files', () => {
     expect(value['truncated']).toBe(true);
   });
 
-  it('shortens an enormous matching line rather than returning it whole', async () => {
+  it('reports lines too large for bounded regex evaluation', async () => {
     const directory = workspace();
     writeFileSync(
       join(directory, 'minified.js'),
@@ -835,11 +947,8 @@ describe('search_files', () => {
     const value = expectOk(
       await call(directory, 'search_files', { pattern: 'needle' }),
     );
-    const matches = value['matches'] as ReadonlyArray<{ text: string }>;
-
-    expect(matches.length).toBe(1);
-    expect(matches[0]!.text.length).toBeLessThan(600);
-    expect(matches[0]!.text.endsWith('…')).toBe(true);
+    expect(value['matches']).toEqual([]);
+    expect(value['longLinesSkipped']).toBe(1);
   });
 
   it('refuses to search outside the workspace', async () => {
@@ -907,6 +1016,27 @@ describe('run_shell', () => {
     );
 
     expect(error['timeoutMs']).toBe(200);
+  });
+
+  it('clamps a model timeout to the application policy', async () => {
+    const directory = workspace();
+    const error = expectFailure(
+      await call(
+        directory,
+        'run_shell',
+        {
+          command: 'sleep 1',
+          timeoutMs: 60_000,
+        },
+        WorkspaceTools.commandPolicyLayer({
+          defaultTimeoutMs: 100,
+          maxTimeoutMs: 100,
+        }),
+      ),
+      '@sunfall/vesper-workspace/CommandTimedOut',
+    );
+
+    expect(error['timeoutMs']).toBe(100);
   });
 
   it('keeps the end of enormous output and says it was cut', async () => {

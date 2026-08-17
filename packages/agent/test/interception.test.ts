@@ -4,7 +4,9 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Context, Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
+  Chat,
   LanguageModel,
+  Prompt,
   type Response,
   Tool,
   Toolkit,
@@ -105,6 +107,7 @@ const lookup = Tool.make('lookup', {
 const agentWith = (ran: { count: number }) =>
   Agent.make({
     name: 'test',
+    revision: '1',
     instructions: 'be terse',
     toolkit: Toolkit.make(lookup),
   }).withHandlers({
@@ -177,6 +180,29 @@ describe('beforeTurn', () => {
     expect(prompts[0]).not.toContain('the original question');
   });
 
+  it('persists the rewritten input reconstruction will replay', async () => {
+    const ran = { count: 0 };
+
+    const written = await run(
+      Effect.gen(function* () {
+        yield* agentWith(ran)
+          .intercepting({
+            beforeTurn: () =>
+              Effect.succeed(Interception.proceedWith('persisted rewrite')),
+          })
+          .recordingTo(CONVERSATION)
+          .run('discarded original');
+        return yield* readAll();
+      }),
+    );
+
+    const started = written.find(
+      (envelope) => envelope.record._tag === 'RunStarted',
+    )?.record;
+    expect(JSON.stringify(started)).toContain('persisted rewrite');
+    expect(JSON.stringify(started)).not.toContain('discarded original');
+  });
+
   it('is handed the input it is being asked about', async () => {
     const seen: string[] = [];
     const ran = { count: 0 };
@@ -225,6 +251,23 @@ describe('beforeTurn', () => {
     // leaves no trace of a turn that never ran.
     expect(events).toEqual([]);
   });
+
+  it('settles a refused recorded run only after recording its input', async () => {
+    const ran = { count: 0 };
+
+    const tags = await run(
+      Effect.gen(function* () {
+        yield* agentWith(ran)
+          .intercepting({ beforeTurn: () => Effect.fail(refused) })
+          .recordingTo(CONVERSATION)
+          .run('refused input')
+          .pipe(Effect.exit);
+        return (yield* readAll()).map((envelope) => envelope.record._tag);
+      }),
+    );
+
+    expect(tags).toEqual(['RunStarted', 'RunSettled']);
+  });
 });
 
 // ----------------------------------------------------------- beforeModelCall
@@ -252,15 +295,24 @@ describe('beforeModelCall', () => {
     const seen: Interception.Attempt[] = [];
     const ran = { count: 0 };
 
+    const intercepted = agentWith(ran).intercepting({
+      beforeModelCall: (context) =>
+        Effect.sync(() => {
+          seen.push(context.attempt);
+        }),
+    });
+
     await run(
-      agentWith(ran)
-        .intercepting({
-          beforeModelCall: (context) =>
-            Effect.sync(() => {
-              seen.push(context.attempt);
-            }),
-        })
-        .run('hi'),
+      Effect.gen(function* () {
+        const chat = yield* Chat.fromPrompt(
+          Prompt.make([
+            { role: 'system', content: 'S' },
+            { role: 'user', content: 'old'.repeat(20_000) },
+            { role: 'assistant', content: 'answer'.repeat(20_000) },
+          ]),
+        );
+        yield* intercepted.runIn(chat, 'hi');
+      }),
       [overflow, answeringTurn],
     );
 
@@ -361,6 +413,9 @@ describe('beforeToolCall', () => {
         result: 'denied',
       }),
     ]);
+    expect(written.some(({ record }) => record._tag === 'ToolStarted')).toBe(
+      false,
+    );
   });
 
   it('fails the run when it fails', async () => {
@@ -420,7 +475,13 @@ const outcomesOf = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 const crashed: ReadonlyArray<ConversationRecord.Record> = [
-  { _tag: 'RunStarted', agent: 'test', prompt: [] },
+  {
+    _tag: 'RunStarted',
+    agent: 'test',
+    formatVersion: 1,
+    agentRevision: '1',
+    prompt: [],
+  },
   {
     _tag: 'ToolCall',
     step: 1,
@@ -466,6 +527,9 @@ describe('when the log and an interceptor both have an opinion', () => {
     expect(consulted).toEqual([]);
     expect(ran.count).toBe(0);
     expect(outcomesOf(written).at(-1)?.result).toEqual({ status: 'from-log' });
+    expect(written.some(({ record }) => record._tag === 'ToolStarted')).toBe(
+      false,
+    );
   });
 
   it('consults the interceptor once the earlier run has settled', async () => {
@@ -599,12 +663,25 @@ describe('an agent that is not intercepted', () => {
 class Policy extends Context.Service<Policy, { readonly allow: boolean }>()(
   'interception-test/Policy',
 ) {}
+class Reconciler extends Context.Service<
+  Reconciler,
+  { readonly retry: boolean }
+>()('interception-test/Reconciler') {}
 
 const policed = agentWith({ count: 0 }).intercepting({
   beforeToolCall: () =>
     Effect.gen(function* () {
       const policy = yield* Policy;
       return policy.allow ? Interception.dispatch : Interception.refuse('no');
+    }),
+});
+const recoverable = agentWith({ count: 0 }).intercepting({
+  onIndeterminateToolCall: () =>
+    Effect.gen(function* () {
+      const policy = yield* Reconciler;
+      return policy.retry
+        ? Interception.retry
+        : Interception.reconcileFailure('not committed');
     }),
 });
 
@@ -636,14 +713,19 @@ const _untaxed: Has<
   Policy,
   EffR<ReturnType<ReturnType<typeof agentWith>['run']>>
 > = 'no';
+const _recoveryWidened: Has<
+  Reconciler,
+  EffR<ReturnType<typeof recoverable.run>>
+> = 'yes';
 
 describe('the requirement channel', () => {
   it('names the interceptor’s services, and only the intercepted agent’s', () => {
-    expect([_guard, _widened, _kept, _untaxed]).toEqual([
+    expect([_guard, _widened, _kept, _untaxed, _recoveryWidened]).toEqual([
       'not-any',
       'yes',
       'yes',
       'no',
+      'yes',
     ]);
   });
 });
