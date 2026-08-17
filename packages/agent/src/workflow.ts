@@ -1,5 +1,5 @@
-import type { Layer, Schedule, Schema } from 'effect';
-import { Effect } from 'effect';
+import type { Layer, Schedule } from 'effect';
+import { Effect, Schema } from 'effect';
 import type { Prompt } from 'effect/unstable/ai';
 import {
   Activity,
@@ -8,13 +8,32 @@ import {
 } from 'effect/unstable/workflow';
 
 import { Agent } from './agent.js';
+import { AgentSignals } from './signal.js';
 import type { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
-type PayloadType<
-  Payload extends Schema.Struct.Fields | Workflow.AnyStructSchema,
-> = (Payload extends Schema.Struct.Fields
-  ? Schema.Struct<Payload>
-  : Payload)['Type'];
+/** Durable request fields shared by execution, cancellation, and resumption. */
+export const RequestFields = {
+  conversationId: Schema.String,
+  input: Schema.String,
+} as const;
+
+/** Define a workflow request schema with Vesper's required identity fields. */
+export const request = <const Fields extends Schema.Struct.Fields>(
+  fields: Fields,
+) =>
+  Schema.Struct({
+    ...RequestFields,
+    ...fields,
+  });
+
+export interface Request {
+  readonly conversationId: string;
+  readonly input: string;
+}
+
+type WorkflowPayload<Payload extends Workflow.AnyStructSchema> =
+  Payload extends Schema.Struct.Fields ? Schema.Struct<Payload> : Payload;
 
 /** A durable Effect workflow bound to one Vesper agent definition. */
 export interface Binding<
@@ -31,20 +50,38 @@ export interface Binding<
   >;
   /** Register the workflow handler. The application still chooses its engine. */
   readonly layer: Layer.Layer<never, never, Requires>;
+  /** Derive both durable identities from one validated workflow payload. */
+  readonly ids: (payload: Payload['~type.make.in']) => Effect.Effect<{
+    readonly executionId: string;
+    readonly conversationId: LogVocabulary.ConversationId;
+  }>;
+  /** Persist Vesper cancellation intent, then terminally interrupt the workflow. */
+  readonly cancel: (
+    payload: Payload['~type.make.in'],
+    signal: CancelSignal,
+  ) => Effect.Effect<
+    void,
+    LogStore.LogStoreError,
+    WorkflowEngine.WorkflowEngine | LogStore.Service
+  >;
+}
+
+export interface CancelSignal {
+  readonly text: string;
+  readonly source: string;
 }
 
 /** Options for projecting an application workflow payload into an agent run. */
 export interface Options<
   Tag extends string,
-  Payload extends Schema.Struct.Fields | Workflow.AnyStructSchema,
+  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request>,
   Error extends Schema.Top,
   AgentError,
 > {
   readonly tag: Tag;
   readonly payload: Payload;
-  readonly idempotencyKey: (payload: PayloadType<Payload>) => string;
-  readonly conversationId: (payload: PayloadType<Payload>) => string;
-  readonly input: (payload: PayloadType<Payload>) => Prompt.RawInput;
+  readonly idempotencyKey: (payload: Payload['Type']) => string;
+  readonly input?: (payload: Payload['Type']) => Prompt.RawInput;
   readonly error: Error;
   readonly mapError: (error: AgentError) => Error['Type'];
   readonly suspendedRetrySchedule?: Schedule.Schedule<any, unknown> | undefined;
@@ -135,21 +172,19 @@ export const idempotencyKey = Activity.idempotencyKey;
 export const make = <
   A extends Agent.Any,
   const Tag extends string,
-  const Payload extends Schema.Struct.Fields | Workflow.AnyStructSchema,
+  const Payload extends Workflow.AnyStructSchema & Schema.Schema<Request>,
   Error extends Schema.Top,
 >(
   agent: A,
   options: Options<Tag, Payload, Error, Agent.Error<A>>,
 ): Binding<
   Tag,
-  Payload extends Schema.Struct.Fields ? Schema.Struct<Payload> : Payload,
+  WorkflowPayload<Payload>,
   Error,
   | WorkflowEngine.WorkflowEngine
   | Agent.Requires<A>
   | LogStore.Service
-  | (Payload extends Schema.Struct.Fields ? Schema.Struct<Payload> : Payload)[
-      | 'DecodingServices'
-      | 'EncodingServices']
+  | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
   | (typeof Agent.Result)['EncodingServices']
   | Error['EncodingServices']
 > => {
@@ -165,20 +200,49 @@ export const make = <
 
   const layer = workflow.toLayer((payload) =>
     agent
-      .resume(options.conversationId(payload), options.input(payload))
+      .resume(payload.conversationId, options.input?.(payload) ?? payload.input)
       .pipe(Effect.mapError(options.mapError)),
   );
 
-  return { workflow, layer } as Binding<
+  const ids = (payload: (typeof workflow.payloadSchema)['~type.make.in']) =>
+    Effect.map(
+      workflow.payloadSchema.makeEffect(payload).pipe(Effect.orDie),
+      (validated) => ({
+        conversationId: LogVocabulary.ConversationId.make(
+          validated.conversationId,
+        ),
+      }),
+    ).pipe(
+      Effect.flatMap(({ conversationId }) =>
+        Effect.map(workflow.executionId(payload), (executionId) => ({
+          executionId,
+          conversationId,
+        })),
+      ),
+    );
+
+  const cancel = (
+    payload: (typeof workflow.payloadSchema)['~type.make.in'],
+    signal: CancelSignal,
+  ) =>
+    Effect.gen(function* () {
+      const identity = yield* ids(payload);
+      yield* AgentSignals.send(identity.conversationId, {
+        kind: 'cancel',
+        text: signal.text,
+        source: signal.source,
+      });
+      yield* workflow.interrupt(identity.executionId);
+    });
+
+  return { workflow, layer, ids, cancel } satisfies Binding<
     Tag,
-    Payload extends Schema.Struct.Fields ? Schema.Struct<Payload> : Payload,
+    WorkflowPayload<Payload>,
     Error,
     | WorkflowEngine.WorkflowEngine
     | Agent.Requires<A>
     | LogStore.Service
-    | (Payload extends Schema.Struct.Fields ? Schema.Struct<Payload> : Payload)[
-        | 'DecodingServices'
-        | 'EncodingServices']
+    | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
     | (typeof Agent.Result)['EncodingServices']
     | Error['EncodingServices']
   >;

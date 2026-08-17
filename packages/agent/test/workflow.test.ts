@@ -66,6 +66,12 @@ const agent = Agent.make({
   toolkit: Toolkit.make(),
 });
 
+const WorkflowRequest = AgentWorkflow.request({
+  submissionId: Schema.String,
+});
+
+const RequiringWorkflowRequest = AgentWorkflow.request({ id: Schema.String });
+
 const requiringAgent = Agent.make({
   name: 'requiring-workflow-test',
   revision: '1',
@@ -77,24 +83,16 @@ const requiringAgent = Agent.make({
 
 const binding = AgentWorkflow.make(agent, {
   tag: 'WorkflowTest',
-  payload: {
-    submissionId: Schema.String,
-    conversationId: Schema.String,
-    message: Schema.String,
-  },
+  payload: WorkflowRequest,
   idempotencyKey: ({ submissionId }) => submissionId,
-  conversationId: ({ conversationId }) => conversationId,
-  input: ({ message }) => message,
   error: WorkflowFailure,
   mapError: (error) => new WorkflowFailure({ message: String(error) }),
 });
 
 const requiringBinding = AgentWorkflow.make(requiringAgent, {
   tag: 'RequiringWorkflowTest',
-  payload: { id: Schema.String },
+  payload: RequiringWorkflowRequest,
   idempotencyKey: ({ id }) => id,
-  conversationId: ({ id }) => id,
-  input: () => 'hello',
   error: WorkflowFailure,
   mapError: (error) => new WorkflowFailure({ message: String(error) }),
 });
@@ -116,13 +114,32 @@ const AppLive = binding.layer.pipe(
 );
 
 describe('AgentWorkflow', () => {
+  it.effect(
+    'derives workflow and conversation identities from one payload',
+    () =>
+      Effect.gen(function* () {
+        const payload = {
+          submissionId: 'identity-submission',
+          conversationId: 'identity-conversation',
+          input: 'hello',
+        };
+        const ids = yield* binding.ids(payload);
+        const executionId = yield* binding.workflow.executionId(payload);
+
+        expect(ids).toEqual({
+          executionId,
+          conversationId: 'identity-conversation',
+        });
+      }),
+  );
+
   it.effect('runs a recorded agent through Effect Workflow', () =>
     Effect.gen(function* () {
       const result = yield* binding.workflow
         .execute({
           submissionId: 'submission-1',
           conversationId: 'conversation-1',
-          message: 'say hello',
+          input: 'say hello',
         })
         .pipe(Effect.provide(AppLive));
 
@@ -160,7 +177,7 @@ describe('AgentWorkflow', () => {
         const payload = {
           submissionId: 'same-submission',
           conversationId: 'same-conversation',
-          message: 'once',
+          input: 'once',
         };
 
         const results = yield* Effect.gen(function* () {

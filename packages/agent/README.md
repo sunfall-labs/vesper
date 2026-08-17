@@ -32,16 +32,14 @@ class RunFailure extends Schema.TaggedError<RunFailure>()('RunFailure', {
   message: Schema.String,
 }) {}
 
+const SupportRequest = AgentWorkflow.request({
+  submissionId: Schema.String,
+});
+
 const supportWorkflow = AgentWorkflow.make(supportAgent, {
   tag: 'SupportAgent',
-  payload: {
-    submissionId: Schema.String,
-    conversationId: Schema.String,
-    message: Schema.String,
-  },
+  payload: SupportRequest,
   idempotencyKey: ({ submissionId }) => submissionId,
-  conversationId: ({ conversationId }) => conversationId,
-  input: ({ message }) => message,
   error: RunFailure,
   mapError: (error) => new RunFailure({ message: String(error) }),
 });
@@ -51,7 +49,7 @@ const supportWorkflow = AgentWorkflow.make(supportAgent, {
 const result = supportWorkflow.workflow.execute({
   submissionId: 'request-1042',
   conversationId: 'customer-17',
-  message: 'where is my order?',
+  input: 'where is my order?',
 });
 
 // Register beside the application's WorkflowEngine, LogStore, model, and

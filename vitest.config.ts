@@ -98,6 +98,10 @@ const alias = {
     './packages/workspace/src/driver.ts',
     import.meta.url,
   ).pathname,
+  '@sunfall/vesper-workspace/agent': new URL(
+    './packages/workspace/src/agent.ts',
+    import.meta.url,
+  ).pathname,
   '@sunfall/vesper-workspace/glob': new URL(
     './packages/workspace/src/glob.ts',
     import.meta.url,

@@ -53,6 +53,7 @@
       "@sunfall/vesper-workspace/driver": [
         "./packages/workspace/src/driver.ts"
       ],
+      "@sunfall/vesper-workspace/agent": ["./packages/workspace/src/agent.ts"],
       "@sunfall/vesper-workspace/glob": ["./packages/workspace/src/glob.ts"],
       "@sunfall/vesper-workspace/layer-local": [
         "./packages/workspace/src/layer-local.ts"
