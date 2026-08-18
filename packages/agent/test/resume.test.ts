@@ -20,7 +20,7 @@ import { Conversation } from '../src/conversation.js';
 import { ContextWindow } from '../src/context-window.js';
 import { AgentEvents } from '../src/event.js';
 import { AgentHistory } from '../src/history.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),

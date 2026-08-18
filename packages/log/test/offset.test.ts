@@ -60,16 +60,11 @@ describe('LogOffset', () => {
     }),
   );
 
-  it.effect('fails on a malformed offset rather than throwing', () =>
+  it.effect('rejects a malformed offset at the decoding boundary', () =>
     Effect.gen(function* () {
-      const outcome = yield* LogOffset.toSeq(
-        'nonsense' as unknown as LogOffset.Offset,
-      ).pipe(Effect.result);
+      const outcome = yield* LogOffset.decode('nonsense').pipe(Effect.result);
 
       expect(outcome._tag).toBe('Failure');
-      if (outcome._tag === 'Failure') {
-        expect(outcome.failure.offset).toBe('nonsense');
-      }
     }),
   );
 

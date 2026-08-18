@@ -263,7 +263,7 @@ describe('delegation', () => {
   );
 
   // Propagation through the *generic* path, which is the one that used to
-  // erase everything. `Named` now carries a real `R` (defaulting to
+  // erase everything. `Child` carries a real `R` (defaulting to
   // `unknown`, not `any`), so `ChildEnv` recovers the child's services and
   // `Effect.context` captures them onto the delegation layer.
   it("carries a child's services onto the delegation layer", () => {

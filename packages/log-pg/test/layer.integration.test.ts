@@ -1,6 +1,11 @@
 import { PgClient } from '@effect/sql-pg';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, beforeAll, describe, expect, it } from '@effect/vitest';
+import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
+import { ConversationRecord } from '@sunfall/vesper-log/record';
+import { Tail } from '@sunfall/vesper-log/tail';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Deferred,
   Effect,
@@ -11,14 +16,9 @@ import {
   Stream,
 } from 'effect';
 
-import { channelFor, LogStorePg } from '../src/layer-pg.js';
-import { LogStore } from '../src/log-store.js';
-import { LogStoreContract } from '../src/log-store-contract.js';
-import { LogOffset } from '../src/offset.js';
-import { VesperPgClient } from '../src/pg-client.js';
-import { ConversationRecord } from '../src/record.js';
-import { Tail } from '../src/tail.js';
-import { LogVocabulary } from '../src/vocabulary.js';
+import { VesperPgClient } from '../src/client.js';
+import { channelFor, LogStorePg } from '../src/layer.js';
+import { logStoreContract } from '../../log/test/log-store-contract.js';
 import {
   createPostgresTestHarness,
   type PostgresTestHarness,
@@ -52,7 +52,7 @@ describeIntegration('LogStore Postgres backend', () => {
     Layer.provide(NodeServices.layer),
   );
 
-  LogStoreContract.logStoreContract('postgres', { layer: storeLayer });
+  logStoreContract('postgres', { layer: storeLayer });
 
   describe('corrected official PgClient behavior', () => {
     it(

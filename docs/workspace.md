@@ -25,7 +25,7 @@ program.pipe(
 ```
 
 The subpaths are `./agent`, `./driver`, `./layer-local`, `./tools`, `./output`,
-`./path`, `./glob`, and `./workspace-contract`. Each module also re-exports
+`./path`, and `./glob`. Each module also re-exports
 itself as a namespace (`WorkspaceAgent`, `WorkspaceDriver`, `WorkspaceLocal`,
 `WorkspaceTools`, and so on), which is the form used throughout this file.
 
@@ -58,7 +58,7 @@ const agent = Agent.make({
 agent
   .run('inspect issue 42')
   .pipe(
-    Effect.provide(workspace.defaultLayer),
+    Effect.provide(workspace.layer),
     Effect.provide(WorkspaceTools.rootLayer('/work')),
     Effect.provide(
       WorkspaceLocal.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -66,11 +66,12 @@ agent
   );
 ```
 
-The layers remain visible by design: `defaultLayer` supplies the standard tool
-handlers and default shell policy, `rootLayer` selects the workspace root, and
-the driver layer selects the execution substrate. Application handlers remain
-application-owned. Tool-name collisions are rejected rather than silently
-overridden.
+The layers remain visible by design: `layer` supplies the standard tool
+handlers, a shell-disabled command policy, and symlink-denying filesystem
+policy; `rootLayer` selects the workspace root, and the driver layer selects
+the execution substrate. Application handlers remain application-owned.
+Tool-name collisions are rejected rather than silently overridden. To enable
+the host shell, explicitly provide `WorkspaceTools.shellEnabledCommandPolicyLayer`.
 
 ## The toolkit
 
@@ -97,14 +98,16 @@ run.pipe(
 
 ### The requirement is the product
 
-Each tool declares `dependencies: [Root, WorkspaceDriver.Service]`. That puts
-both service keys in `Tool.HandlerServices` and from there into the requirement
+Each tool declares `Root`, `WorkspaceDriver.Service`, and `FilesystemPolicy`
+(with `CommandPolicy` additionally required by `run_shell`). That puts those
+service keys in `Tool.HandlerServices` and from there into the requirement
 channel of any agent holding the toolkit. An application that forgets to wire a
-workspace does not get a tool that quietly reads the host filesystem — it does
-not compile.
+workspace or policy does not get a tool that quietly reads the host filesystem
+— it does not compile.
 
-`WorkspaceTools.layer` supplies the handlers and nothing else: `Root` and
-`WorkspaceDriver.Service` stay the application's to provide. `tools.test.ts`
+`WorkspaceTools.layer` supplies the handlers and nothing else: `Root`,
+`WorkspaceDriver.Service`, and the policy services stay the application's to
+provide. `tools.test.ts`
 pins both halves as type-level assertions that fail at `tsc` — one pair per
 tool (dropping `dependencies` from a single tool would leave a union-shaped
 assertion still passing), plus three on the layer's output confirming it
@@ -124,9 +127,9 @@ ends a turn, not a run.
 Each failure is a `Schema.TaggedError` with the fields needed to retry
 differently: `PathOutsideWorkspace`, `FileNotFound`, `NotAFile`,
 `NotADirectory`, `BinaryContent`, `EditTargetMissing`, `EditTargetAmbiguous`,
-`AccessDenied`, `InvalidPattern`, `CommandTimedOut`, `WorkspaceUnavailable`. A
-single `ToolFailed { message }` would compile and would put the whole diagnosis
-back into prose.
+`AccessDenied`, `SymlinkDenied`, `InvalidPattern`, `CommandTimedOut`,
+`ShellDisabled`, `WorkspaceUnavailable`. A single `ToolFailed { message }`
+would compile and would put the whole diagnosis back into prose.
 
 Two are worth calling out. `EditTargetMissing` is the one that matters most:
 an edit tool that writes the file back unchanged and reports success teaches
@@ -143,8 +146,10 @@ may be the third.
 - **Report zero matches for files it never opened.** `search_files` returns
   `filesSearched`, `binaryFilesSkipped`, and `largeFilesSkipped` alongside the
   matches. Files over 2 MB are skipped, as are files that fail the text check.
-- **Descend a symlink.** The walk lists links as links. A link to `..` is an
-  infinite tree, and a link out of the root defeats the containment check.
+- **Follow a symlink by default.** The walk lists links as links, and direct
+  access to a path containing one returns `SymlinkDenied`. A link to `..` is an
+  infinite tree, and a link out of the root defeats lexical containment. Use
+  `unrestrictedFilesystemPolicyLayer` only when link-following is intentional.
 - **Lose a tree to one unreadable directory.** An `EACCES` deep in the walk is
   recorded in `unreadableDirectories` and the walk continues. The _root_
   directory failing does fail the call — that is the model's mistake, not an
@@ -157,8 +162,10 @@ may be the third.
 friends in the replacement text are literal — a model editing a regular
 expression or a shell script gets back what it wrote.
 
-`run_shell` defaults to a 120-second deadline, and truncates output from the
-front so the end of a long build log survives.
+`run_shell` is disabled by the default policy and returns `ShellDisabled`; it
+must be explicitly enabled with `shellEnabledCommandPolicyLayer`. Once enabled,
+it defaults to a 120-second deadline and truncates output from the front so the
+end of a long build log survives.
 
 ## A driver swap is a composition boundary, not a security boundary
 
@@ -172,10 +179,12 @@ it. The seam constrains code that _cooperates_ — a tool written against this
 service goes wherever the layer points, and a tool that reaches for `node:fs`
 directly is untouched by which driver is wired.
 
-**The toolkit's path containment is lexical.** Paths are resolved and checked
-against `Root` before they reach the driver, which stops a model that wandered
-— not code that meant to leave. A symlink inside the root is followed wherever
-it points, and `run_shell` executes a command string nothing here inspects.
+**The toolkit's path containment is lexical plus a symlink check by default.**
+Paths are resolved and checked against `Root` before they reach the driver, and
+existing symlink components are denied. This stops a model that wandered — not
+code that meant to leave. `unrestrictedFilesystemPolicyLayer` restores explicit
+link-following behavior, and an enabled `run_shell` still executes a command
+string nothing here inspects.
 
 If the requirement is containment of hostile code, that has to come from the
 driver's substrate: a container, a VM, a jailed remote worker. What this seam
@@ -256,16 +265,14 @@ workspace.exec('npm test').pipe(
 );
 ```
 
-## `env` does not isolate
+## Local environment policy
 
-`ExecOptions.env` is merged _over_ the driver's ambient environment, not
-substituted for it — otherwise a caller setting one variable would have to
-reconstruct `PATH`. On the local driver that ambient environment is the host
-process's, secrets included, and every command inherits it. A container or
-remote driver's will be its own and will not match, so code relying on an
-inherited host variable breaks on the layer swap. That is the environment half
-of the boundary note above: the seam decides where a command runs, not what it
-can see.
+`WorkspaceLocal.layer` supplies only a small executable `PATH` to commands;
+host variables and secrets are not inherited. `WorkspaceLocal.unrestricted` is
+the explicit opt-in for legacy host-local behavior where `ExecOptions.env` is
+merged over the ambient environment. Neither layer is a sandbox: enabled shell
+commands still have the local process's filesystem authority. Use a container,
+VM, or jailed remote driver when hostile code is in scope.
 
 ## Cancellation
 
@@ -289,10 +296,10 @@ needs it.
 
 ## The contract
 
-`workspace-contract` is the behaviour every driver must have, expressed once,
-and it lives here rather than in a testkit package — anything implementing
-`WorkspaceDriver` already depends on this package, so importing the contract
-from it cannot cycle. See [`contributing.md`](contributing.md).
+The internal workspace contract expresses the behaviour every built-in driver
+must have once. It lives beside `WorkspaceDriver` rather than in a testkit
+package, avoiding a dependency cycle without adding test machinery to the
+published interface. See [`contributing.md`](contributing.md).
 
 ```ts
 workspaceContract('local', { layer, root });

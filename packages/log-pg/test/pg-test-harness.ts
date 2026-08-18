@@ -6,9 +6,9 @@ import { PgClient } from '@effect/sql-pg';
 import { ManagedRuntime, Redacted } from 'effect';
 import pg from 'pg';
 
-import { VesperPgClient } from '../src/pg-client.js';
+import { VesperPgClient } from '../src/client.js';
 
-// Test support for `layer-pg.integration.test.ts`. Not part of the package's
+// Test support for `layer.integration.test.ts`. Not part of the package's
 // public surface — nothing in `exports` points here.
 //
 // In the repository this package was extracted from, the `ai_log` tables were
@@ -28,7 +28,7 @@ import { VesperPgClient } from '../src/pg-client.js';
  *   row. `batch_index` is what keeps write-once-per-slot enforceable at the
  *   database rather than in application state.
  * - the read index pins `COLLATE "C"`, matching every comparison in
- *   `layer-pg.ts`. Under a glibc locale, punctuation is ignored at the primary
+ *   `layer.ts`. Under a glibc locale, punctuation is ignored at the primary
  *   comparison level and `'-1'` — read-from-the-beginning — sorts *after*
  *   every real offset, so an unpinned read returns an empty log to every fresh
  *   reader. Without the matching collation here the index is merely unused;

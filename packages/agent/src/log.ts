@@ -1,3 +1,4 @@
+import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
@@ -24,6 +25,7 @@ import {
 } from './conversation-error.js';
 import { AgentHistory } from './history.js';
 import * as AgentIds from './internal/ids.js';
+import * as Observability from './internal/observability.js';
 import { PromptTransport } from './prompt-transport.js';
 import * as RecoveryState from './recovery.js';
 import { ResumeProjection } from './resume-projection.js';
@@ -134,6 +136,17 @@ export interface SignalDrain {
   readonly backlog: boolean;
 }
 
+/** A conversation checkpoint could not be made durable. */
+export class DurabilityError extends Schema.TaggedError<DurabilityError>(
+  '@sunfall/vesper-agent/DurabilityError',
+)('DurabilityError', {
+  source: Schema.Literals(['log', 'attachment', 'timeout']),
+  operation: Schema.String,
+  reason: Schema.String,
+  detail: Schema.String,
+  cause: Schema.Defect(),
+}) {}
+
 /** Where a run picks a conversation up, when not at its end. */
 export interface OpenOptions {
   /** The agent definition that will continue this conversation. */
@@ -225,10 +238,11 @@ const SessionTypeId: unique symbol = Symbol.for(
  * same object because they were given it, not because a lookup happened to
  * find something.
  *
- * Nothing here fails. The store's errors become defects — see {@link orDie} —
- * for the reason `@sunfall/vesper-durable` gives for a checkpoint write: this is
- * infrastructure, not something the model did, and a run whose result exists
- * while its history does not is the exact divergence the log removes.
+ * Appends expose {@link DurabilityError} as an ordinary typed failure, so
+ * callers can distinguish durable infrastructure from model and application
+ * failures. Reads retain the historic defect boundary because they back
+ * synchronous views. Attachment persistence is opt-in through
+ * `AttachmentStore.Service`; without it, prompts retain the inline transport.
  */
 export interface Session {
   /** @internal Prevents structural fabrication outside this module. */
@@ -250,9 +264,6 @@ export interface Session {
 
   /** How long teardown waits for this session's settlement append. */
   readonly settlementTimeoutMillis: number;
-
-  /** @internal Persistence-only filtering inherited by child sessions. */
-  readonly recordingPolicy: RecordingPolicyRuntime.Runtime;
 
   /**
    * The records required to rebuild the live prompt when this run claimed it.
@@ -296,7 +307,7 @@ export interface Session {
   readonly append: (
     records: ReadonlyArray<ConversationRecord.Record>,
     timeoutMillis?: number,
-  ) => Effect.Effect<void>;
+  ) => Effect.Effect<void, DurabilityError>;
 
   /**
    * The state an **unsettled earlier run** recorded for this call: either a
@@ -352,8 +363,6 @@ export interface Session {
    * nothing here promises to deliver a backlog atomically — and it keeps the
    * drain a single bounded read.
    */
-  /** @internal Compatibility drain. Policies use {@link drainSignalsBounded}. */
-  readonly drainSignals: Effect.Effect<ReadonlyArray<Delivered>>;
   /** @internal Bounded authoritative signal drain. */
   readonly drainSignalsBounded: (limit: number) => Effect.Effect<SignalDrain>;
 
@@ -382,7 +391,10 @@ export interface Session {
     options: ChildOptions,
   ) => Effect.Effect<
     Session,
-    CompatibilityError | SuspendedConversationError | LogStore.LogStoreError,
+    | CompatibilityError
+    | SuspendedConversationError
+    | LogStore.LogStoreError
+    | DurabilityError,
     Crypto.Crypto
   >;
 }
@@ -419,10 +431,17 @@ export interface Session {
  * *away from* still holding the recovery index, and the new run would be
  * served tool results answering calls that are no longer in its prompt.
  */
-export const open = Effect.fn('AgentLog.open')(function* (
+export const open: (
   conversationId: LogVocabulary.ConversationId,
   options: OpenOptions,
-) {
+) => Effect.Effect<
+  Session,
+  | CompatibilityError
+  | SuspendedConversationError
+  | LogStore.LogStoreError
+  | DurabilityError,
+  LogStore.Service | Crypto.Crypto
+> = Effect.fn('AgentLog.open')(function* (conversationId, options) {
   const store = yield* LogStore.Service;
   return yield* openWith(store, conversationId, options);
 });
@@ -490,39 +509,54 @@ const ACQUIRE_ATTEMPTS = 4;
  * mechanism. A retry with the same source and boundary resumes its copy;
  * every other non-empty destination is rejected.
  */
-export const fork = Effect.fn('AgentLog.fork')(function* (
+export const fork: (
   conversationId: LogVocabulary.ConversationId,
   at: LogOffset.Offset,
   forkConversationId: LogVocabulary.ConversationId,
   compatibility: Compatibility,
   pendingWait?: 'restart',
-) {
-  yield* validateCompatibilityInput(compatibility);
-  const store = yield* LogStore.Service;
-
-  const ancestor = yield* readAll(store, pathFor(conversationId));
-  // Cut first, then fold: this is exactly the sequence `activePath` would
-  // return if a `BranchedFrom { at }` had been appended to the ancestor, which
-  // is what makes a fork inherit the same prefix `branchFrom` would have.
-  const prefix = AgentBranch.activePath(
-    ancestor.filter((envelope) => !LogOffset.isAfter(envelope.offset, at)),
-  );
-  yield* validateCompatibility(prefix, compatibility);
-  yield* validateSuspendedBoundary(conversationId, prefix, pendingWait);
-  const identity = forkIdentity({
-    sourceConversationId: conversationId,
+) => Effect.Effect<
+  Session,
+  | CompatibilityError
+  | SuspendedConversationError
+  | LogStore.LogStoreError
+  | DurabilityError,
+  LogStore.Service | Crypto.Crypto
+> = Effect.fn('AgentLog.fork')(
+  function* (
+    conversationId,
     at,
-    records: prefix.length,
-    inheritedUsage: AgentHistory.usageFrom(prefix),
-  });
-
-  return yield* openWith(store, forkConversationId, {
-    seed: prefix,
-    identity,
+    forkConversationId,
     compatibility,
-    ...(pendingWait === undefined ? {} : { pendingWait }),
-  });
-});
+    pendingWait,
+  ) {
+    yield* validateCompatibilityInput(compatibility);
+    const store = yield* LogStore.Service;
+
+    const ancestor = yield* readAll(store, pathFor(conversationId));
+    // Cut first, then fold: this is exactly the sequence `activePath` would
+    // return if a `BranchedFrom { at }` had been appended to the ancestor, which
+    // is what makes a fork inherit the same prefix `branchFrom` would have.
+    const prefix = AgentBranch.activePath(
+      ancestor.filter((envelope) => !LogOffset.isAfter(envelope.offset, at)),
+    );
+    yield* validateCompatibility(prefix, compatibility);
+    yield* validateSuspendedBoundary(conversationId, prefix, pendingWait);
+    const identity = forkIdentity({
+      sourceConversationId: conversationId,
+      at,
+      records: prefix.length,
+      inheritedUsage: AgentHistory.usageFrom(prefix),
+    });
+
+    return yield* openWith(store, forkConversationId, {
+      seed: prefix,
+      identity,
+      compatibility,
+      ...(pendingWait === undefined ? {} : { pendingWait }),
+    });
+  },
+);
 
 const restartWaits = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
@@ -563,10 +597,18 @@ const openWith = (
   options: ClaimOptions,
 ): Effect.Effect<
   Session,
-  CompatibilityError | SuspendedConversationError | LogStore.LogStoreError,
+  | CompatibilityError
+  | SuspendedConversationError
+  | LogStore.LogStoreError
+  | DurabilityError,
   Crypto.Crypto
 > =>
   Effect.gen(function* () {
+    // Attachments are an explicit opt-in service. Without it, prompts retain
+    // the existing inline transport and no attachment dependency is required.
+    const attachmentStore = Option.getOrUndefined(
+      yield* Effect.serviceOption(AttachmentStore.Service),
+    );
     yield* validateCompatibilityInput(options.compatibility);
     const path = pathFor(conversationId);
     const identity = options?.identity ?? conversationId;
@@ -621,7 +663,11 @@ const openWith = (
       // is deliberately the same bounded suffix used for compatibility: a
       // changed head is rejected by acquire and the post-claim full active
       // path check below catches any prompt records outside the suffix.
-      yield* validatePromptHistory(retainedBeforeClaim, options.compatibility);
+      yield* validatePromptHistory(
+        retainedBeforeClaim,
+        options.compatibility,
+        attachmentStore,
+      );
       const acquired = yield* store
         .acquire(path, yield* AgentIds.producerId, {
           epoch: observed.epoch,
@@ -657,13 +703,42 @@ const openWith = (
             Effect.uninterruptibleMask((restore) =>
               Effect.gen(function* () {
                 const timestamp = yield* Clock.currentTimeMillis;
-                const persist = orDie(
-                  store.append({
+                const persistedRecords = yield* Effect.forEach(
+                  records,
+                  (
+                    record,
+                  ): Effect.Effect<
+                    ConversationRecord.Record,
+                    DurabilityError
+                  > => {
+                    if (record._tag !== 'RunStarted') {
+                      return Effect.succeed(record);
+                    }
+                    if (attachmentStore === undefined) {
+                      return Effect.succeed({
+                        ...record,
+                        prompt: PromptTransport.encode(record.prompt),
+                      });
+                    }
+                    return PromptTransport.encodeWithAttachments(
+                      record.prompt,
+                    ).pipe(
+                      Effect.provideService(
+                        AttachmentStore.Service,
+                        attachmentStore,
+                      ),
+                      Effect.mapError(attachmentDurabilityError),
+                      Effect.map((prompt) => ({ ...record, prompt })),
+                    );
+                  },
+                );
+                const persist = store
+                  .append({
                     path,
                     producerId: claim.producerId,
                     epoch: claim.epoch,
                     sequence: next,
-                    records: records.map((record) => ({
+                    records: persistedRecords.map((record) => ({
                       conversationId,
                       timestamp,
                       // Policy wrappers run outside this append; transport is
@@ -672,12 +747,12 @@ const openWith = (
                         record._tag === 'RunStarted'
                           ? {
                               ...record,
-                              prompt: PromptTransport.encode(record.prompt),
+                              prompt: record.prompt,
                             }
                           : record,
                     })),
-                  }),
-                );
+                  })
+                  .pipe(Effect.mapError(logDurabilityError));
 
                 // Keep the backend interruptible (and optionally bounded),
                 // then resume masking before advancing the local sequence.
@@ -685,7 +760,17 @@ const openWith = (
                   ? restore(persist)
                   : restore(persist).pipe(
                       Effect.timeout(Math.max(1, timeoutMillis - 1)),
-                      Effect.orDie,
+                      Effect.mapError((error) =>
+                        error._tag === 'DurabilityError'
+                          ? error
+                          : new DurabilityError({
+                              source: 'timeout',
+                              operation: 'append',
+                              reason: 'timeout',
+                              detail: `Conversation append exceeded ${Math.max(1, timeoutMillis - 1)}ms`,
+                              cause: error,
+                            }),
+                      ),
                     );
 
                 // SynchronizedRef commits this next value only after the
@@ -734,11 +819,23 @@ const openWith = (
     }
 
     const opened = yield* loadOpenState(store, path);
-    const history = opened.history;
+    const history = yield* hydrateHistory(opened.history, attachmentStore).pipe(
+      Effect.mapError((error) =>
+        compatibilityError(
+          options.compatibility,
+          {},
+          `malformed persisted attachment: ${error.message}`,
+        ),
+      ),
+    );
     // Prompt parsing is a typed open failure. Keeping it here means a caller
     // never receives a claimed session whose first continuation would defect
     // while rebuilding malformed durable messages.
-    yield* validatePromptHistory(history, options.compatibility);
+    yield* validatePromptHistory(
+      history,
+      options.compatibility,
+      attachmentStore,
+    );
     yield* validateCompatibility(
       options.branchFrom === undefined
         ? mergeByOffset(opened.aggregateSuffix, history)
@@ -821,7 +918,10 @@ const openWith = (
       options: ChildOptions,
     ): Effect.Effect<
       Session,
-      CompatibilityError | SuspendedConversationError | LogStore.LogStoreError,
+      | CompatibilityError
+      | SuspendedConversationError
+      | LogStore.LogStoreError
+      | DurabilityError,
       Crypto.Crypto
     > =>
       childLock
@@ -861,7 +961,19 @@ const openWith = (
             return session;
           }),
         )
-        .pipe(Effect.withSpan('AgentLog.Session.child'));
+        .pipe(
+          Effect.withSpan('AgentLog.Session.child', {
+            attributes: {
+              'vesper.conversation.id': conversationId,
+              'vesper.child.agent': options.agent,
+              'vesper.child.conversation.id': childIdFor(
+                conversationId,
+                options.toolCallId,
+              ),
+              'vesper.child.depth': options.depth,
+            },
+          }),
+        );
 
     const meta = yield* store.meta(path);
     const inheritedUsage = Option.isSome(meta)
@@ -897,10 +1009,8 @@ const openWith = (
           const settlementIndex = records.findIndex(
             (record) => record._tag === 'RunSettled',
           );
-          if (settlementIndex >= 0) {
-            const settlement = records[
-              settlementIndex
-            ] as ConversationRecord.RecordOf<'RunSettled'>;
+          const settlement = records[settlementIndex];
+          if (settlement?._tag === 'RunSettled') {
             const beforeSettlement = records.slice(0, settlementIndex);
             const settlementResume = beforeSettlement.reduce(
               ResumeProjection.update,
@@ -926,6 +1036,22 @@ const openWith = (
           }
 
           yield* append(persisted, timeoutMillis);
+          yield* Effect.forEach(
+            records,
+            (record) => {
+              switch (record._tag) {
+                case 'ToolSuspended':
+                  return Observability.waitSuspended;
+                case 'ToolWaitCompleted':
+                  return Observability.waitCompleted;
+                case 'ToolWaitRestarted':
+                  return Observability.waitRestarted;
+                default:
+                  return Effect.void;
+              }
+            },
+            { discard: true },
+          );
           yield* Ref.set(signalCursor, nextSignalCursor);
           yield* Ref.set(
             state,
@@ -948,7 +1074,6 @@ const openWith = (
       latestTurnUsage: initialResume.latestTurnUsage,
       completed: initialResume.completed,
       settlementTimeoutMillis: SETTLEMENT_TIMEOUT_MILLIS,
-      recordingPolicy: RecordingPolicyRuntime.raw,
       history,
       stateHistory: projectionHistory,
       recorded: orDie(readResumeHistory(store, path)),
@@ -962,10 +1087,6 @@ const openWith = (
       pendingToolState: toolRecovery.pendingToolState,
       hasPendingToolCalls: toolRecovery.hasPendingToolCalls,
       onToolSettled: toolRecovery.onToolSettled,
-      drainSignals: Effect.map(
-        orDie(drainSignalsBounded(1_000)),
-        (page) => page.signals,
-      ),
       drainSignalsBounded: (limit) => orDie(drainSignalsBounded(limit)),
       signalPages,
       child,
@@ -983,7 +1104,6 @@ export const withRecordingPolicy = (
     );
   return {
     ...session,
-    recordingPolicy,
     append,
     child: (options) =>
       Effect.map(session.child(options), (child) =>
@@ -1161,14 +1281,48 @@ const validateCompatibilityInput = (
 };
 
 /** Validate untrusted durable prompts before they reach the synchronous fold. */
+const hydrateHistory = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+  attachmentStore: AttachmentStore.Interface | undefined,
+): Effect.Effect<
+  ReadonlyArray<ConversationRecord.Envelope>,
+  PromptTransport.DecodeError | AttachmentStore.GetError
+> =>
+  attachmentStore === undefined
+    ? Effect.succeed(history)
+    : Effect.forEach(history, (envelope) =>
+        envelope.record._tag !== 'RunStarted'
+          ? Effect.succeed(envelope)
+          : PromptTransport.decodeWithAttachments(envelope.record.prompt).pipe(
+              Effect.provideService(AttachmentStore.Service, attachmentStore),
+              Effect.map((prompt) => ({
+                ...envelope,
+                record: {
+                  ...envelope.record,
+                  // Keep hydrated bytes in the in-memory history. The durable
+                  // log remains content-addressed; this view is what the
+                  // synchronous prompt rebuild hands to the model.
+                  prompt,
+                },
+              })),
+            ),
+      );
+
 const validatePromptHistory = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
   expected: Compatibility,
+  attachmentStore?: AttachmentStore.Interface,
 ): Effect.Effect<void, CompatibilityError> =>
   Effect.gen(function* () {
     for (const { record } of AgentBranch.activePath(history)) {
       if (record._tag === 'RunStarted') {
-        yield* PromptTransport.decodeMessages(record.prompt);
+        const decode =
+          attachmentStore === undefined
+            ? PromptTransport.decodeMessages(record.prompt)
+            : PromptTransport.decodeMessagesWithAttachments(record.prompt).pipe(
+                Effect.provideService(AttachmentStore.Service, attachmentStore),
+              );
+        yield* decode;
       }
     }
     yield* Effect.try({
@@ -1358,7 +1512,7 @@ const ensureChildReference = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
   reference: ConversationRecord.RecordOf<'ChildSession'>,
   append: Session['append'],
-): Effect.Effect<void> => {
+): Effect.Effect<void, DurabilityError> => {
   const parentSide = conversationId === reference.parentConversationId;
   const links = history.flatMap(({ record }) =>
     record._tag === 'ChildSession' &&
@@ -1404,7 +1558,7 @@ const seedInto = (
     ReadonlyArray<ConversationRecord.Envelope>,
     LogStore.LogStoreError
   >,
-): Effect.Effect<void, LogStore.LogStoreError> =>
+): Effect.Effect<void, LogStore.LogStoreError | DurabilityError> =>
   Effect.gen(function* () {
     const reseated = new Map<LogOffset.Offset, LogOffset.Offset>();
     let written = yield* recorded;
@@ -1568,7 +1722,7 @@ export interface Options {
 export const start = (
   session: Session,
   options: Options,
-): Effect.Effect<void> =>
+): Effect.Effect<void, DurabilityError> =>
   session.append([
     {
       _tag: 'RunStarted',
@@ -1600,4 +1754,23 @@ const orDie = <A, R>(
     ),
   );
 
-export * as AgentLog from './log.js';
+const logDurabilityError = (error: LogStore.LogStoreError): DurabilityError =>
+  new DurabilityError({
+    source: 'log',
+    operation: error.operation,
+    reason: error.reason,
+    detail: error.detail,
+    cause: error,
+  });
+
+const attachmentDurabilityError = (
+  error: AttachmentStore.AttachmentStoreError,
+): DurabilityError =>
+  new DurabilityError({
+    source: 'attachment',
+    operation: error.operation,
+    reason: 'storage',
+    detail:
+      error.cause instanceof Error ? error.cause.message : String(error.cause),
+    cause: error,
+  });

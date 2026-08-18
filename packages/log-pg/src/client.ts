@@ -23,4 +23,4 @@ export const layer = (
 ): Layer.Layer<PgClient.PgClient | SqlClient, SqlError, never> =>
   PgClient.layerFrom(make(config));
 
-export * as VesperPgClient from './pg-client.js';
+export * as VesperPgClient from './client.js';

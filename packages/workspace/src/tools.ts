@@ -17,12 +17,14 @@ import { WorkspacePath } from './path.js';
 //
 // ## The requirement is the product
 //
-// Each tool declares `dependencies: [Root, WorkspaceDriver.Service]`, which
-// puts both service keys in `Tool.HandlerServices` and from there into the
-// requirement channel of any agent holding this toolkit. An application that
-// forgets to wire a workspace does not get a tool that quietly reads the host
-// filesystem — it gets a compile error. That is the property this package
-// exists for, and `tools.test.ts` pins it as a type-level assertion.
+// Each tool declares `Root`, `WorkspaceDriver.Service`, and
+// `FilesystemPolicy` (with `CommandPolicy` additionally required by
+// `run_shell`). Those service keys ride in `Tool.HandlerServices` and from
+// there into the requirement channel of any agent holding this toolkit. An
+// application that forgets to wire a workspace or its safety policy does not
+// get a tool that quietly reads the host filesystem — it gets a compile error.
+// That is the property this package exists for, and `tools.test.ts` pins it as
+// a type-level assertion.
 //
 // The alternative — a `makeTools(driver)` factory closing over a driver — is
 // one line shorter and gives all of that away: the requirement disappears from
@@ -61,6 +63,8 @@ export const rootLayer = (path: string): Layer.Layer<Root> =>
 export interface CommandPolicyConfig {
   readonly defaultTimeoutMs: number;
   readonly maxTimeoutMs: number;
+  /** Shell execution is opt-in because commands are host-authoritative. */
+  readonly allowShell?: boolean;
 }
 
 /** Application-owned limits for model-supplied command deadlines. */
@@ -83,7 +87,10 @@ export const commandPolicyLayer = (
       'command timeouts must be positive integers with defaultTimeoutMs <= maxTimeoutMs',
     );
   }
-  return Layer.succeed(CommandPolicy, config);
+  return Layer.succeed(CommandPolicy, {
+    ...config,
+    allowShell: config.allowShell ?? false,
+  });
 };
 
 // --------------------------------------------------------------- the limits
@@ -97,6 +104,37 @@ export const defaultCommandPolicyLayer: Layer.Layer<CommandPolicy> =
     defaultTimeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
     maxTimeoutMs: DEFAULT_MAX_COMMAND_TIMEOUT_MS,
   });
+
+/** Explicit opt-in for the host shell, still bounded by the timeout policy. */
+export const shellEnabledCommandPolicyLayer: Layer.Layer<CommandPolicy> =
+  commandPolicyLayer({
+    defaultTimeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
+    maxTimeoutMs: DEFAULT_MAX_COMMAND_TIMEOUT_MS,
+    allowShell: true,
+  });
+
+/** Filesystem policy for model-addressed paths. */
+export interface FilesystemPolicyConfig {
+  /** Follow links only when the application explicitly opts in. */
+  readonly allowSymlinks: boolean;
+}
+
+export class FilesystemPolicy extends Context.Service<
+  FilesystemPolicy,
+  FilesystemPolicyConfig
+>()('@sunfall/vesper-workspace/FilesystemPolicy') {}
+
+export const filesystemPolicyLayer = (
+  config: FilesystemPolicyConfig,
+): Layer.Layer<FilesystemPolicy> => Layer.succeed(FilesystemPolicy, config);
+
+/** Safe default: a model cannot turn a workspace path into a link traversal. */
+export const defaultFilesystemPolicyLayer: Layer.Layer<FilesystemPolicy> =
+  filesystemPolicyLayer({ allowSymlinks: false });
+
+/** Explicit opt-in for legacy host-local link-following behavior. */
+export const unrestrictedFilesystemPolicyLayer: Layer.Layer<FilesystemPolicy> =
+  filesystemPolicyLayer({ allowSymlinks: true });
 
 /** Directory names the walk does not descend into, and reports skipping. */
 export const IGNORED_DIRECTORIES: ReadonlyArray<string> = [
@@ -222,6 +260,11 @@ export class AccessDenied extends Schema.TaggedError<AccessDenied>(
   operation: WorkspaceDriver.Operation,
 }) {}
 
+/** A requested path contains a symbolic link and policy forbids traversal. */
+export class SymlinkDenied extends Schema.TaggedError<SymlinkDenied>(
+  '@sunfall/vesper-workspace/SymlinkDenied',
+)('SymlinkDenied', { path: Schema.String }) {}
+
 /** The search pattern is not a valid regular expression. */
 export class InvalidPattern extends Schema.TaggedError<InvalidPattern>(
   '@sunfall/vesper-workspace/InvalidPattern',
@@ -231,6 +274,11 @@ export class InvalidPattern extends Schema.TaggedError<InvalidPattern>(
 export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>(
   '@sunfall/vesper-workspace/CommandTimedOut',
 )('CommandTimedOut', { command: Schema.String, timeoutMs: Schema.Natural }) {}
+
+/** Shell execution must be explicitly enabled by the application. */
+export class ShellDisabled extends Schema.TaggedError<ShellDisabled>(
+  '@sunfall/vesper-workspace/ShellDisabled',
+)('ShellDisabled', {}) {}
 
 /**
  * The workspace failed in a way none of the above describes.
@@ -265,6 +313,7 @@ const pathFailureSchemas = [
   NotADirectory,
   FileTooLarge,
   AccessDenied,
+  SymlinkDenied,
   WorkspaceUnavailable,
 ] as const;
 
@@ -274,6 +323,7 @@ type PathFailure =
   | FileTooLarge
   | NotADirectory
   | NotAFile
+  | SymlinkDenied
   | WorkspaceUnavailable;
 
 /**
@@ -313,11 +363,13 @@ const resolvePath = (
     readonly absolute: string;
     readonly display: string;
   },
-  PathOutsideWorkspace,
-  Root
+  PathOutsideWorkspace | SymlinkDenied,
+  Root | WorkspaceDriver.Service | FilesystemPolicy
 > =>
   Effect.gen(function* () {
     const root = yield* Root;
+    const driver = yield* WorkspaceDriver.Service;
+    const filesystem = yield* FilesystemPolicy;
     const normalizedRoot = WorkspacePath.normalize(root.path);
     const resolution = WorkspacePath.resolve(normalizedRoot, input);
     if (!resolution.ok) {
@@ -329,6 +381,36 @@ const resolvePath = (
         }),
       );
     }
+    if (!filesystem.allowSymlinks) {
+      const segments = WorkspacePath.relative(normalizedRoot, resolution.path);
+      const candidates = segments === '.' ? [] : segments.split('/');
+      let current = normalizedRoot;
+      const check = (path: string) =>
+        driver.stat(path).pipe(
+          Effect.map((value) => value.isSymbolicLink),
+          // The real operation below remains responsible for reporting
+          // permission and other driver failures. This probe only answers the
+          // narrower question: is an existing component a symlink?
+          Effect.catchTag('PathNotFound', () => Effect.succeed(false)),
+          Effect.catchTag('PermissionDenied', () => Effect.succeed(false)),
+          Effect.catchTag('FileReadLimitExceeded', () => Effect.succeed(false)),
+          Effect.catchTag('WorkspaceFailure', () => Effect.succeed(false)),
+        );
+      const paths = [normalizedRoot, ...candidates];
+      for (const segment of paths) {
+        if (segment !== normalizedRoot) {
+          current = current === '/' ? `/${segment}` : `${current}/${segment}`;
+        }
+        if (yield* check(current)) {
+          return yield* Effect.fail(
+            new SymlinkDenied({
+              path: WorkspacePath.relative(normalizedRoot, resolution.path),
+            }),
+          );
+        }
+      }
+    }
+
     return {
       root: normalizedRoot,
       absolute: resolution.path,
@@ -629,7 +711,7 @@ const readFileTool = Tool.make('read_file', {
   // different path, a different tool, a smaller window. Aborting the run
   // instead would make a mistyped filename fatal.
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service],
+  dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
 });
 
 const writeFileTool = Tool.make('write_file', {
@@ -648,7 +730,7 @@ const writeFileTool = Tool.make('write_file', {
   }),
   failure: Schema.Union([PathOutsideWorkspace, ...pathFailureSchemas]),
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service],
+  dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
 });
 
 const editFileTool = Tool.make('edit_file', {
@@ -677,7 +759,7 @@ const editFileTool = Tool.make('edit_file', {
     ...pathFailureSchemas,
   ]),
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service],
+  dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
 });
 
 const ListedEntry = Schema.Struct({
@@ -711,7 +793,7 @@ const listFilesTool = Tool.make('list_files', {
     ...pathFailureSchemas,
   ]),
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service],
+  dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
 });
 
 const SearchMatch = Schema.Struct({
@@ -754,7 +836,7 @@ const searchFilesTool = Tool.make('search_files', {
     ...pathFailureSchemas,
   ]),
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service],
+  dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
 });
 
 const runShellTool = Tool.make('run_shell', {
@@ -780,10 +862,16 @@ const runShellTool = Tool.make('run_shell', {
   failure: Schema.Union([
     PathOutsideWorkspace,
     CommandTimedOut,
+    ShellDisabled,
     ...pathFailureSchemas,
   ]),
   failureMode: 'return',
-  dependencies: [Root, WorkspaceDriver.Service, CommandPolicy],
+  dependencies: [
+    Root,
+    WorkspaceDriver.Service,
+    CommandPolicy,
+    FilesystemPolicy,
+  ],
 });
 
 /**
@@ -1117,6 +1205,9 @@ const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
 }) {
   const driver = yield* WorkspaceDriver.Service;
   const policy = yield* CommandPolicy;
+  if (!policy.allowShell) {
+    return yield* Effect.fail(new ShellDisabled({}));
+  }
   const { absolute, display } = yield* resolvePath(params.cwd ?? '.');
   const requestedTimeoutMs = params.timeoutMs ?? policy.defaultTimeoutMs;
   const timeoutMs = Math.min(

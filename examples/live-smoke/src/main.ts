@@ -11,16 +11,19 @@ import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
-import { Conversation } from '@sunfall/vesper-agent/conversation';
+import {
+  Conversation,
+  DurabilityError,
+} from '@sunfall/vesper-agent/conversation';
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
 import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
-import { LogStorePg } from '@sunfall/vesper-log/layer-pg';
+import { LogStorePg } from '@sunfall/vesper-log-pg/layer';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import { VesperPgClient } from '@sunfall/vesper-log/pg-client';
+import { VesperPgClient } from '@sunfall/vesper-log-pg/client';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import {
   Config,
@@ -1016,7 +1019,11 @@ const workspacePhase = Effect.gen(function* () {
 }).pipe(
   Effect.scoped,
   Effect.provide(
-    Layer.merge(WorkspaceTools.layer, WorkspaceTools.defaultCommandPolicyLayer),
+    Layer.mergeAll(
+      WorkspaceTools.layer,
+      WorkspaceTools.shellEnabledCommandPolicyLayer,
+      WorkspaceTools.defaultFilesystemPolicyLayer,
+    ),
   ),
   // The local driver needs a process spawner, and it is provided here rather
   // than inherited from the program's `NodeServices` so this phase's
@@ -1361,6 +1368,7 @@ const phases: Record<
     | Agent.RunFailure
     | Conversation.CompatibilityError
     | Conversation.SuspendedConversationError
+    | DurabilityError
     | LogStore.LogStoreError,
     Crypto.Crypto | LanguageModel.LanguageModel | LogStore.Service
   >

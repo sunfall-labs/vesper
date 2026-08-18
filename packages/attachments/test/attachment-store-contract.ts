@@ -1,8 +1,8 @@
 import { Effect, Layer } from 'effect';
 import { describe, expect, it } from 'vitest';
 
-import { AttachmentStore } from './attachment-store.js';
-import { AttachmentRef } from './ref.js';
+import { AttachmentStore } from '../src/attachment-store.js';
+import { AttachmentRef } from '../src/ref.js';
 
 // The behaviour every AttachmentStore backend must have, expressed once.
 //
@@ -144,23 +144,6 @@ export const attachmentStoreContract = <E>(
       expect(new TextDecoder().decode(outcome.viaBinary)).toBe('ambiguous');
     });
 
-    it('reports presence without reading', async () => {
-      const outcome = await run(
-        Effect.gen(function* () {
-          const store = yield* AttachmentStore.Service;
-          const ref = yield* store.put(bytesOf('present'), {
-            mediaType: 'text/plain',
-          });
-          return {
-            stored: yield* store.has(ref),
-            absent: yield* store.has(ABSENT),
-          };
-        }),
-      );
-
-      expect(outcome).toEqual({ stored: true, absent: false });
-    });
-
     // Zero bytes are a real attachment — an empty file, a truncated upload
     // the caller chose to keep — and a store that conflates "empty" with
     // "missing" fails only on the day one shows up.
@@ -171,25 +154,14 @@ export const attachmentStoreContract = <E>(
           const ref = yield* store.put(new Uint8Array(0), {
             mediaType: 'application/octet-stream',
           });
-          return {
-            present: yield* store.has(ref),
-            read: yield* store.get(ref),
-          };
+          return yield* store.get(ref);
         }),
       );
 
-      expect(outcome.present).toBe(true);
-      expect(outcome.read.byteLength).toBe(0);
+      expect(outcome.byteLength).toBe(0);
     });
 
-    // `has` is presence, not verification, and the doc comment on it is
-    // currently the only place that says so. Pinning it here makes the
-    // divergence a property of the contract rather than a claim in prose: a
-    // backend whose `has` quietly read and verified would be paying for a full
-    // read on every quota check, and a caller that treated `true` as "`get`
-    // will succeed" would be wrong on exactly the payloads this package exists
-    // to catch.
-    it('reports a corrupted payload as present, and still refuses to return it', async () => {
+    it('refuses to return a corrupted payload', async () => {
       const original = bytesOf('the real document');
       const outcome = await run(
         Effect.gen(function* () {
@@ -199,15 +171,11 @@ export const attachmentStoreContract = <E>(
           // verification — the declared length — is caught here too.
           yield* options.overwriteUnsafe(ref, bytesOf('short'));
 
-          return {
-            present: yield* store.has(ref),
-            read: yield* store.get(ref).pipe(Effect.result),
-          };
+          return yield* store.get(ref).pipe(Effect.result);
         }),
       );
 
-      expect(outcome.present).toBe(true);
-      expect(outcome.read._tag).toBe('Failure');
+      expect(outcome._tag).toBe('Failure');
     });
 
     // Attachments are PDFs, screenshots and archives, not text. A backend that
@@ -275,6 +243,14 @@ export const attachmentStoreContract = <E>(
 
       expect(outcome.result._tag).toBe('Failure');
       if (outcome.result._tag === 'Failure') {
+        if (
+          !(
+            outcome.result.failure instanceof
+            AttachmentStore.AttachmentIntegrityError
+          )
+        ) {
+          throw outcome.result.failure;
+        }
         expect(outcome.result.failure).toBeInstanceOf(
           AttachmentStore.AttachmentIntegrityError,
         );
@@ -283,10 +259,9 @@ export const attachmentStoreContract = <E>(
         expect(outcome.result.failure).toMatchObject({
           actualByteLength: original.byteLength,
         });
-        expect(
-          (outcome.result.failure as AttachmentStore.AttachmentIntegrityError)
-            .actualDigest,
-        ).not.toBe(outcome.ref.digest);
+        expect(outcome.result.failure.actualDigest).not.toBe(
+          outcome.ref.digest,
+        );
       }
     });
 
@@ -344,5 +319,3 @@ export const attachmentStoreContract = <E>(
     });
   });
 };
-
-export * as AttachmentStoreContract from './attachment-store-contract.js';

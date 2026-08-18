@@ -4,7 +4,7 @@
 
 This repository uses [Nub](https://nubjs.com) as its package manager and task
 runner. Use the pinned workspace binary through `nub`; do not invoke `npm`,
-`npx`, `node`, `vitest`, `tsgo`, `oxfmt`, or `oxlint` directly for repository
+`npx`, `node`, `vitest`, `tsc`, `oxfmt`, or `oxlint` directly for repository
 development tasks.
 
 Use the scripts declared in the root `package.json`:
@@ -29,7 +29,7 @@ nub run test -- packages/agent/test/workflow.test.ts
 ```
 
 Prefer the nearest existing Nub script over reproducing its implementation.
-For example, use `nub run typecheck`, not a direct `tsgo` command; use
+For example, use `nub run typecheck`, not a direct `tsc` command; use
 `nub run format`, not a direct `oxfmt` command; and use `nub run verify`, not
 a hand-written sequence of its build, static, and test gates.
 

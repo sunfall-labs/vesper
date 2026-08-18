@@ -3,8 +3,11 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 
 import { AttachmentStore } from '../src/attachment-store.js';
-import { AttachmentStoreContract } from '../src/attachment-store-contract.js';
 import { AttachmentStoreMemory } from '../src/layer-memory.js';
+import {
+  attachmentStoreContract,
+  type ContractOptions as AttachmentStoreContractOptions,
+} from './attachment-store-contract.js';
 
 // The memory backend can be corrupted on purpose, so it runs the whole suite
 // including the two integrity cases. `Crypto` comes from the Node platform
@@ -12,17 +15,16 @@ import { AttachmentStoreMemory } from '../src/layer-memory.js';
 // implementation to whoever wires the runtime.
 const memory = AttachmentStoreMemory.make();
 
-AttachmentStoreContract.attachmentStoreContract('memory', {
+attachmentStoreContract('memory', {
   layer: memory.layer.pipe(Layer.provide(NodeServices.layer)),
   overwriteUnsafe: memory.overwriteUnsafe,
 });
 
-const _unprovidedAttachmentContract: AttachmentStoreContract.ContractOptions<never> =
-  {
-    // @ts-expect-error contract helpers must not erase unprovided layer requirements
-    layer: memory.layer,
-    overwriteUnsafe: memory.overwriteUnsafe,
-  };
+const _unprovidedAttachmentContract: AttachmentStoreContractOptions<never> = {
+  // @ts-expect-error contract helpers must not erase unprovided layer requirements
+  layer: memory.layer,
+  overwriteUnsafe: memory.overwriteUnsafe,
+};
 
 // The contract runs against `make()`, because that is the shape with the back
 // door it needs. `layer` is the export everything else wires, and it is a
@@ -62,12 +64,15 @@ describe('the ordinary memory layer', () => {
       }).pipe(Effect.provide(ordinary));
 
       // A second, independent build of the same layer value.
-      const present = yield* Effect.gen(function* () {
+      const read = yield* Effect.gen(function* () {
         const store = yield* AttachmentStore.Service;
-        return yield* store.has(ref);
+        return yield* store.get(ref).pipe(Effect.result);
       }).pipe(Effect.provide(ordinary));
 
-      expect(present).toBe(false);
+      expect(read).toMatchObject({
+        _tag: 'Failure',
+        failure: { _tag: 'AttachmentNotFound' },
+      });
     }),
   );
 });

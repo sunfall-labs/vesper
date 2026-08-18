@@ -3,16 +3,17 @@ import {
   Effect,
   Exit,
   Option,
-  PubSub,
   Ref,
   Schema,
   Stream,
+  SubscriptionRef,
 } from 'effect';
 import { AiError, type Tool, type Toolkit } from 'effect/unstable/ai';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Interception } from './interception.js';
-import type { AgentLog } from './log.js';
+import type * as AgentLog from './log.js';
+import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
@@ -21,13 +22,19 @@ type RunError = AiError.AiError | RunPolicy.RunPolicyExhausted;
 
 const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
 
-const preserveRunPolicy = <E, R>(
-  stream: Stream.Stream<Tool.HandlerResult<Tool.Any>, E, R>,
-): Stream.Stream<
-  Tool.HandlerResult<Tool.Any>,
-  E | RunPolicy.RunPolicyExhausted,
-  R
-> =>
+// Toolkit resolution captures handler and schema services in the ambient
+// context, but Effect intentionally exposes that captured context as
+// `Context<never>`. Widen it once at this internal boundary so schema decoders
+// can consume the services they declare without each decoder asserting its
+// entire Effect type.
+const capturedContext: Effect.Effect<Context.Context<unknown>> = Effect.map(
+  Effect.context<never>(),
+  (context) => context as Context.Context<unknown>,
+);
+
+const preserveRunPolicy = <T extends Tool.Any, E, R>(
+  stream: Stream.Stream<Tool.HandlerResult<T>, E, R>,
+): Stream.Stream<Tool.HandlerResult<T>, E | RunPolicy.RunPolicyExhausted, R> =>
   Stream.mapEffect(stream, (result) =>
     result.isFailure && isRunPolicyExhausted(result.result)
       ? Effect.fail(result.result)
@@ -110,11 +117,13 @@ const preserveRunPolicy = <E, R>(
  * `gate(toolkit, undefined, interceptor)` at the one call site would be worse
  * than either.
  */
-export interface GateOptions {
+export interface GateOptions<InterceptorRequires = never> {
   /** The run's log claim, when it is recording. */
   readonly session?: AgentLog.Session | undefined;
   /** The agent's interceptor, when it has one. */
-  readonly interceptor?: Interception.Interceptor | undefined;
+  readonly interceptor?:
+    | Interception.Interceptor<InterceptorRequires>
+    | undefined;
   /** The agent's name, for {@link Interception.ToolCallContext}. */
   readonly agent: string;
   /** Root-run budget shared by this loop and every descendant. */
@@ -126,13 +135,20 @@ export interface GateOptions {
 }
 
 /** Resolve every orphaned handler start before a resumed provider call. */
-export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
+export const resolveIndeterminate = <
+  Tools extends Record<string, Tool.Any>,
+  InterceptorRequires = never,
+>(
   toolkit: Toolkit.Toolkit<Tools>,
-  options: GateOptions & {
+  options: GateOptions<InterceptorRequires> & {
     readonly session: AgentLog.Session;
     readonly arbitration: TurnArbitration;
   },
-): Effect.Effect<void, RunError, Tool.HandlersFor<Tools>> =>
+): Effect.Effect<
+  void,
+  RunError,
+  Tool.HandlersFor<Tools> | InterceptorRequires
+> =>
   Effect.gen(function* () {
     if (options.session.recoveryCorruption !== undefined) {
       return yield* Effect.fail(
@@ -156,8 +172,7 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
     }
 
     const resolved = yield* toolkit;
-    const underlying = resolved.handle as unknown as Dispatch;
-    const services = yield* Effect.context<never>();
+    const services = yield* capturedContext;
     for (const call of pending) {
       const recovery = options.session.recovery(call.name, call.toolCallId);
       if (Option.isNone(recovery) || recovery.value._tag === 'Settled')
@@ -204,6 +219,10 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
         continue;
       }
 
+      if (!hasTool(resolved.tools, call.name)) {
+        return yield* Effect.fail(unknownToolError(call.name));
+      }
+
       const params = yield* decodeParameters(
         resolved,
         services,
@@ -237,7 +256,7 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
           name: call.name,
           toolCallId: call.toolCallId,
         };
-        const invoke = underlying(call.name, params, call.toolCallId).pipe(
+        const invoke = resolved.handle(call.name, params, call.toolCallId).pipe(
           Effect.provideService(ToolExecution.Current, execution),
           Effect.map((stream) =>
             stream.pipe(
@@ -295,24 +314,33 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
         ]);
       }).pipe(Effect.ensuring(permit.value.settle));
     }
-  }) as Effect.Effect<void, RunError, Tool.HandlersFor<Tools>>;
+  }).pipe(
+    Effect.catchTag('DurabilityError', (error) =>
+      Effect.fail(durabilityAiError(error)),
+    ),
+  );
+
+const hasTool = <Tools extends Record<string, Tool.Any>>(
+  tools: Tools,
+  name: string,
+): name is Extract<keyof Tools, string> => Object.hasOwn(tools, name);
 
 const decodeUnknownToolValue = (
   schema: Schema.Constraint | undefined,
   value: unknown,
-  services: Context.Context<never>,
+  services: Context.Context<unknown>,
   onError: (detail: string) => AiError.AiError,
 ): Effect.Effect<unknown, AiError.AiError> =>
   schema === undefined
     ? Effect.fail(onError('tool is not defined'))
-    : (Schema.decodeUnknownEffect(schema)(value).pipe(
+    : Schema.decodeUnknownEffect(schema)(value).pipe(
         Effect.provide(services),
         Effect.mapError((error) => onError(String(error))),
-      ) as Effect.Effect<unknown, AiError.AiError>);
+      );
 
 const decodeResult = (
   toolkit: { readonly tools: Record<string, Tool.Any> },
-  services: Context.Context<never>,
+  services: Context.Context<unknown>,
   name: string,
   result: unknown,
   isFailure: boolean,
@@ -331,22 +359,25 @@ const decodeResult = (
   );
 };
 
-const decodeParameters = (
-  toolkit: { readonly tools: Record<string, Tool.Any> },
+const decodeParameters = <
+  Tools extends Record<string, Tool.Any>,
+  Name extends Extract<keyof Tools, string>,
+>(
+  toolkit: { readonly tools: Tools },
   services: Context.Context<never>,
-  name: string,
+  name: Name,
   params: unknown,
-): Effect.Effect<unknown, AiError.AiError> => {
-  const tool = Object.hasOwn(toolkit.tools, name)
-    ? toolkit.tools[name]
-    : undefined;
-  return decodeUnknownToolValue(
-    tool?.parametersSchema,
-    params,
-    services,
-    (detail) => toolParameterDecodeError(name, detail),
-  );
-};
+): Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError> =>
+  toolkit.tools[name] === undefined
+    ? Effect.fail(unknownToolError(name))
+    : (Schema.decodeUnknownEffect(toolkit.tools[name].parametersSchema)(
+        params,
+      ).pipe(
+        Effect.provide(services),
+        Effect.mapError((error) =>
+          toolParameterDecodeError(name, String(error)),
+        ),
+      ) as Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError>);
 
 interface ArbitrationState {
   readonly cancelled: boolean;
@@ -368,27 +399,20 @@ export interface DispatchPermit {
 /** One turn's atomic cancellation/dispatch race. */
 export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
   function* () {
-    const state = yield* Ref.make<ArbitrationState>({
+    const state = yield* SubscriptionRef.make<ArbitrationState>({
       cancelled: false,
       dispatches: 0,
     });
-    const changes = yield* PubSub.unbounded<void>();
-
-    const awaitIdle = Effect.scoped(
-      Effect.gen(function* () {
-        // Subscribe before inspecting state so the last settlement cannot land
-        // between the check and the wait.
-        const subscription = yield* PubSub.subscribe(changes);
-        while ((yield* Ref.get(state)).dispatches > 0) {
-          yield* PubSub.take(subscription);
-        }
-      }),
+    const awaitIdle = SubscriptionRef.changes(state).pipe(
+      Stream.filter((current) => current.dispatches === 0),
+      Stream.runHead,
+      Effect.asVoid,
     );
 
     return {
       cancel: Effect.gen(function* () {
         while (true) {
-          const won = yield* Ref.modify(state, (current) =>
+          const won = yield* SubscriptionRef.modify(state, (current) =>
             current.dispatches === 0
               ? [true, { ...current, cancelled: true }]
               : [false, current],
@@ -400,7 +424,7 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
       commit: Effect.uninterruptible(
         Effect.gen(function* () {
           const released = yield* Ref.make(false);
-          const committed = yield* Ref.modify(state, (current) =>
+          const committed = yield* SubscriptionRef.modify(state, (current) =>
             current.cancelled
               ? [false, current]
               : [true, { ...current, dispatches: current.dispatches + 1 }],
@@ -412,11 +436,10 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
               current ? [false, true] : [true, true],
             );
             if (!first) return;
-            yield* Ref.update(state, (current) => ({
+            yield* SubscriptionRef.update(state, (current) => ({
               ...current,
               dispatches: current.dispatches - 1,
             }));
-            yield* PubSub.publish(changes, undefined);
           });
           return Option.some({ settle });
         }),
@@ -435,10 +458,17 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
  * reaches this function, because the loop passes its toolkit through
  * untouched.
  */
-export const gate = <Tools extends Record<string, Tool.Any>>(
+export const gate = <
+  Tools extends Record<string, Tool.Any>,
+  InterceptorRequires = never,
+>(
   toolkit: Toolkit.Toolkit<Tools>,
-  options: GateOptions,
-): Effect.Effect<Toolkit.WithHandler<Tools>, never, Tool.HandlersFor<Tools>> =>
+  options: GateOptions<InterceptorRequires>,
+): Effect.Effect<
+  Toolkit.WithHandler<Tools>,
+  never,
+  Tool.HandlersFor<Tools> | InterceptorRequires
+> =>
   Effect.gen(function* () {
     const session = options.session;
     const interceptor = options.interceptor;
@@ -449,7 +479,7 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
     // the tool's own decoding services, and `handle`'s signature fixes what
     // its stream is allowed to require. Providing the ambient context inward
     // keeps the requirement off the signature instead of casting it away.
-    const services = yield* Effect.context<never>();
+    const services = yield* capturedContext;
     const decoders = new Map<string, Decode>();
 
     const decoderFor = (name: string): Decode => {
@@ -490,14 +520,6 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
       return decode;
     };
 
-    // Loosely typed on purpose: nothing inside can honour the per-tool
-    // relationship between a name and its result type, because a stored
-    // result arrives as `unknown` from a `Schema.Unknown` column. The one
-    // cast is at the end, and what it asserts — that this handles the same
-    // names the wrapped toolkit does — is guaranteed by `tools` being passed
-    // straight through.
-    const underlying = resolved.handle as unknown as Dispatch;
-
     /**
      * A result nobody's handler produced, in the two forms a part carries.
      *
@@ -507,26 +529,29 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
      * what its type says; the encoded half is served as-is, because that is
      * the field `Prompt` builds the tool-result message from.
      */
-    const answered = (
-      name: string,
+    const answered = <Name extends keyof Tools>(
+      name: Name,
       encoded: unknown,
       isFailure: boolean,
       requireDecoded: boolean,
     ): Effect.Effect<
-      Stream.Stream<Tool.HandlerResult<Tool.Any>>,
+      Stream.Stream<Tool.HandlerResult<Tools[Name]>>,
       AiError.AiError
     > =>
       Effect.map(
         requireDecoded
-          ? decoderFor(name)(encoded)
-          : decoderFor(name)(encoded).pipe(
+          ? decoderFor(String(name))(encoded)
+          : decoderFor(String(name))(encoded).pipe(
               // Only a typed schema failure gets the encoded fallback. Defects
               // and interruption are control-flow signals and must survive.
               Effect.catch(() => Effect.succeed(encoded)),
             ),
         (decoded) =>
           Stream.make({
-            result: decoded,
+            // The value has just passed this tool's result schema. Effect's
+            // widened runtime `failureMode` property prevents TypeScript from
+            // deriving the conditional `Tool.Result` type from that schema.
+            result: decoded as Tool.Result<Tools[Name]>,
             encodedResult: encoded,
             isFailure,
             preliminary: false,
@@ -537,8 +562,14 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
           }),
       );
 
-    const handle: Dispatch = (name, params, toolCallId) =>
-      Effect.gen(function* () {
+    const handle = <Name extends keyof Tools>(
+      name: Name,
+      params: Tool.Parameters<Tools[Name]>,
+      toolCallId?: string,
+    ): ReturnType<Toolkit.WithHandler<Tools>['handle']> => {
+      const toolName = String(name);
+      return Effect.gen(function* () {
+        yield* Observability.toolCall;
         const normalizedToolCallId =
           toolCallId === undefined
             ? undefined
@@ -546,12 +577,13 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
         const prior =
           normalizedToolCallId === undefined || session === undefined
             ? Option.none<AgentLog.Recovery>()
-            : session.recovery(name, normalizedToolCallId);
+            : session.recovery(toolName, normalizedToolCallId);
 
         // Step 1. A call an unsettled earlier run already completed is served
         // from the log and goes no further — not to the interceptor, and not
         // to the tool. See the ordering note above.
         if (Option.isSome(prior) && prior.value._tag === 'Settled') {
+          yield* Observability.recoveredToolCall;
           return yield* answered(
             name,
             prior.value.result,
@@ -561,8 +593,12 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
         }
 
         if (Option.isSome(prior)) {
+          yield* Observability.indeterminateToolCall;
+          if (normalizedToolCallId === undefined) {
+            return yield* Effect.fail(missingToolCallIdError(toolName));
+          }
           return yield* Effect.fail(
-            indeterminateError(name, normalizedToolCallId!),
+            indeterminateError(toolName, normalizedToolCallId),
           );
         }
 
@@ -580,7 +616,7 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
             .beforeToolCall({
               agent: options.agent,
               conversationId: session?.conversationId,
-              name,
+              name: toolName,
               toolCallId: normalizedToolCallId,
               params,
             })
@@ -612,20 +648,22 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
         const setup = Effect.gen(function* () {
           if (session !== undefined) {
             if (normalizedToolCallId === undefined) {
-              return yield* Effect.fail(missingToolCallIdError(name));
+              return yield* Effect.fail(missingToolCallIdError(toolName));
             }
-            yield* session.append([
-              {
-                _tag: 'ToolStarted',
-                id: normalizedToolCallId,
-                name,
-              },
-            ]);
+            yield* session
+              .append([
+                {
+                  _tag: 'ToolStarted',
+                  id: normalizedToolCallId,
+                  name: toolName,
+                },
+              ])
+              .pipe(Effect.mapError(durabilityAiError));
             // Register only after ToolStarted is durable. The handler cannot
             // begin before this effect returns, so no ToolOutcome can race the
             // registration; a failed append leaves no stale callback behind.
             if (settle !== undefined) {
-              session.onToolSettled(name, normalizedToolCallId, settle);
+              session.onToolSettled(toolName, normalizedToolCallId, settle);
             }
           }
           const execution: ToolExecution.Execution | undefined =
@@ -633,10 +671,10 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
               ? undefined
               : {
                   session,
-                  name,
+                  name: toolName,
                   toolCallId: normalizedToolCallId,
                 };
-          const invoked = underlying(name, params, toolCallId);
+          const invoked = resolved.handle(name, params, toolCallId);
           const invoke =
             execution === undefined
               ? invoked
@@ -650,15 +688,29 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
                 );
           const stream =
             options.runtime === undefined ||
-            options.unmeteredToolNames?.has(name) === true
+            options.unmeteredToolNames?.has(toolName) === true
               ? yield* invoke
               : options.runtime.toolStream(Stream.unwrap(invoke));
           return preserveRunPolicy(stream).pipe(
+            Stream.tap((result) =>
+              result.isFailure ? Observability.toolFailure : Effect.void,
+            ),
+            Stream.onExit((exit) =>
+              Exit.isFailure(exit) ? Observability.toolFailure : Effect.void,
+            ),
             // Toolkit.handle returns a stream whose handler work is pull
             // driven. Keep this span around the returned stream, not merely
             // around the effect that constructs it.
             Stream.withSpan('Agent.tool', {
-              attributes: { 'vesper.tool.name': name },
+              attributes: {
+                'vesper.tool.name': toolName,
+                ...(session === undefined
+                  ? {}
+                  : { 'vesper.conversation.id': session.conversationId }),
+                ...(normalizedToolCallId === undefined
+                  ? {}
+                  : { 'vesper.tool.call_id': normalizedToolCallId }),
+              },
             }),
           );
         });
@@ -673,31 +725,20 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
             );
         return settle === undefined
           ? guarded
-          : guarded.pipe(
-              Stream.onExit((exit) =>
-                Exit.isFailure(exit) ? settle : Effect.void,
-              ),
+          : Stream.onExit(guarded, (exit) =>
+              Exit.isFailure(exit) ? settle : Effect.void,
             );
-      });
+      }) as ReturnType<Toolkit.WithHandler<Tools>['handle']>;
+    };
 
     return {
       tools: resolved.tools,
-      handle: handle as unknown as Toolkit.WithHandler<Tools>['handle'],
+      handle,
     };
   });
 
 /** A decoder for one tool's substituted encoded result. */
 type Decode = (stored: unknown) => Effect.Effect<unknown, AiError.AiError>;
-
-/** `Toolkit.WithHandler['handle']` with the per-tool types erased. */
-type Dispatch = (
-  name: string,
-  params: unknown,
-  toolCallId?: string,
-) => Effect.Effect<
-  Stream.Stream<Tool.HandlerResult<Tool.Any>, unknown, unknown>,
-  AiError.AiError
->;
 
 const indeterminateError = (
   name: string,
@@ -712,11 +753,35 @@ const indeterminateError = (
     }),
   });
 
+const durabilityAiError = (error: AgentLog.DurabilityError): AiError.AiError =>
+  new AiError.AiError({
+    module: 'AgentLog',
+    method: error.operation,
+    reason: new AiError.UnknownError({
+      description: error.detail,
+      metadata: {
+        tag: error._tag,
+        source: error.source,
+        reason: error.reason,
+      },
+    }),
+  });
+
 const recoveryCorruptionError = (description: string): AiError.AiError =>
   new AiError.AiError({
     module: 'Agent',
     method: 'resolveIndeterminateToolCall',
     reason: new AiError.InvalidRequestError({ description }),
+  });
+
+const unknownToolError = (name: string): AiError.AiError =>
+  new AiError.AiError({
+    module: 'Agent',
+    method: 'resolveIndeterminateToolCall',
+    reason: new AiError.InvalidRequestError({
+      description: `Stored tool "${name}" is not present in the current toolkit. Use the matching agent revision.`,
+      metadata: { name },
+    }),
   });
 
 const missingToolCallIdError = (name: string): AiError.AiError =>

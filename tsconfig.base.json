@@ -28,9 +28,6 @@
       "@sunfall/vesper-agent/interception": [
         "./packages/agent/src/interception.ts"
       ],
-      "@sunfall/vesper-agent/unstable/log": [
-        "./packages/agent/src/unstable/log.ts"
-      ],
       "@sunfall/vesper-agent/recording-policy": [
         "./packages/agent/src/recording-policy.ts"
       ],
@@ -52,16 +49,14 @@
       "@sunfall/vesper-log/record-batch": [
         "./packages/log/src/record-batch.ts"
       ],
+      "@sunfall/vesper-log/adapter": ["./packages/log/src/adapter.ts"],
       "@sunfall/vesper-log/log-store": ["./packages/log/src/log-store.ts"],
       "@sunfall/vesper-log/tail": ["./packages/log/src/tail.ts"],
       "@sunfall/vesper-log/layer-memory": [
         "./packages/log/src/layer-memory.ts"
       ],
-      "@sunfall/vesper-log/log-store-contract": [
-        "./packages/log/src/log-store-contract.ts"
-      ],
-      "@sunfall/vesper-log/layer-pg": ["./packages/log/src/layer-pg.ts"],
-      "@sunfall/vesper-log/pg-client": ["./packages/log/src/pg-client.ts"],
+      "@sunfall/vesper-log-pg/layer": ["./packages/log-pg/src/layer.ts"],
+      "@sunfall/vesper-log-pg/client": ["./packages/log-pg/src/client.ts"],
       "@sunfall/vesper-workspace/driver": [
         "./packages/workspace/src/driver.ts"
       ],
@@ -75,9 +70,6 @@
       ],
       "@sunfall/vesper-workspace/path": ["./packages/workspace/src/path.ts"],
       "@sunfall/vesper-workspace/tools": ["./packages/workspace/src/tools.ts"],
-      "@sunfall/vesper-workspace/workspace-contract": [
-        "./packages/workspace/src/workspace-contract.ts"
-      ],
       "@sunfall/vesper-attachments/ref": ["./packages/attachments/src/ref.ts"],
       "@sunfall/vesper-attachments/attachment-store": [
         "./packages/attachments/src/attachment-store.ts"
@@ -85,9 +77,7 @@
       "@sunfall/vesper-attachments/layer-memory": [
         "./packages/attachments/src/layer-memory.ts"
       ],
-      "@sunfall/vesper-attachments/attachment-store-contract": [
-        "./packages/attachments/src/attachment-store-contract.ts"
-      ]
+      "@sunfall/vesper-mcp/agent": ["./packages/mcp/src/agent.ts"]
     }
   }
 }

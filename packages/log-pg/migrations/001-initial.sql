@@ -1,3 +1,4 @@
+-- Vesper PostgreSQL append-only conversation log schema.
 CREATE SCHEMA IF NOT EXISTS ai_log;
 
 CREATE TABLE IF NOT EXISTS ai_log.streams (

@@ -1,5 +1,5 @@
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import type { Effect } from 'effect';
+import { Effect, Schema } from 'effect';
 
 type SignalRecord = ConversationRecord.RecordOf<'Signal'>;
 
@@ -27,6 +27,24 @@ export interface Policy<R = never> {
   ) => Effect.Effect<Pick<SignalRecord, 'kind' | 'text' | 'source'>, never, R>;
   readonly cause?: (rendered: string) => Effect.Effect<string, never, R>;
 }
+
+/**
+ * Build a type-preserving redaction hook for one schema-shaped value.
+ *
+ * Values outside the schema pass through unchanged so a policy can be safely
+ * composed across heterogeneous records. Values inside it can only be
+ * transformed into the same decoded type. This is the preferred constructor
+ * for ordinary field and struct redaction; use a raw hook only when changing
+ * the persisted representation is intentional.
+ */
+export const preserving = <A, R>(
+  schema: Schema.Schema<A>,
+  transform: (value: A) => Effect.Effect<A, never, R>,
+) => {
+  const is = Schema.is(schema);
+  return (value: unknown): Effect.Effect<unknown, never, R> =>
+    is(value) ? transform(value) : Effect.succeed(value);
+};
 
 type FunctionServices<F> = F extends (...args: infer _Args) => infer Result
   ? Result extends Effect.Effect<infer _A, infer _E, infer R>

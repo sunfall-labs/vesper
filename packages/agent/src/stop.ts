@@ -107,20 +107,20 @@ export const toolCalled =
 export function any<
   Tools extends Record<string, Tool.Any> = Record<string, never>,
 >(): StopCondition<Tools>;
+export function any<Tools extends Record<string, Tool.Any>>(
+  ...conditions: ReadonlyArray<StopCondition<Tools>>
+): StopCondition<Tools>;
 export function any<
   const Conditions extends ReadonlyArray<
     // A function constraint avoids contextual widening before extraction.
-    // oxlint-disable-next-line no-explicit-any
-    (...args: any[]) => any
+    (...args: never[]) => unknown
   >,
 >(
   ...conditions: Conditions
 ): StopCondition<CombinedTools<Conditions>, Services<Conditions[number]>>;
 export function any(
-  // oxlint-disable-next-line no-explicit-any
-  ...conditions: ReadonlyArray<StopCondition<any, any>>
-  // oxlint-disable-next-line no-explicit-any
-): StopCondition<any, any> {
+  ...conditions: ReadonlyArray<StopCondition<never, unknown>>
+): StopCondition<never, unknown> {
   return (state) =>
     Effect.reduce(
       conditions,
@@ -133,20 +133,20 @@ export function any(
 export function all<
   Tools extends Record<string, Tool.Any> = Record<string, never>,
 >(): StopCondition<Tools>;
+export function all<Tools extends Record<string, Tool.Any>>(
+  ...conditions: ReadonlyArray<StopCondition<Tools>>
+): StopCondition<Tools>;
 export function all<
   const Conditions extends ReadonlyArray<
     // A function constraint avoids contextual widening before extraction.
-    // oxlint-disable-next-line no-explicit-any
-    (...args: any[]) => any
+    (...args: never[]) => unknown
   >,
 >(
   ...conditions: Conditions
 ): StopCondition<CombinedTools<Conditions>, Services<Conditions[number]>>;
 export function all(
-  // oxlint-disable-next-line no-explicit-any
-  ...conditions: ReadonlyArray<StopCondition<any, any>>
-  // oxlint-disable-next-line no-explicit-any
-): StopCondition<any, any> {
+  ...conditions: ReadonlyArray<StopCondition<never, unknown>>
+): StopCondition<never, unknown> {
   return (state) =>
     Effect.reduce(
       conditions,
@@ -163,7 +163,6 @@ export function all(
  */
 export const defaultCondition = <
   Tools extends Record<string, Tool.Any>,
->(): StopCondition<Tools> =>
-  any(noToolCalls<Tools>(), maxSteps<Tools>(32)) as StopCondition<Tools>;
+>(): StopCondition<Tools> => any(noToolCalls<Tools>(), maxSteps<Tools>(32));
 
 export * as Stop from './stop.js';

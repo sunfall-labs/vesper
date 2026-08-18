@@ -47,7 +47,7 @@ const lookupOrder = Tool.make('lookup_order', {
   description: 'Look up the fulfilment status of one order.',
   parameters: Schema.Struct({ orderId: Schema.String }),
   success: Schema.Struct({ status: Schema.String }),
-  failure: AgentState.error,
+  failure: AgentState.Error,
   failureMode: 'return',
   dependencies: AgentState.dependencies(SupportState, OrderRepo),
 });
@@ -61,7 +61,7 @@ const issueRefund = Tool.make('issue_refund', {
     detail: Schema.String,
     actor: Schema.String,
   }),
-  failure: AgentState.error,
+  failure: AgentState.Error,
   failureMode: 'return',
   dependencies: AgentState.dependencies(SupportState, OrderRepo),
 });

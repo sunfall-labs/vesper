@@ -1,13 +1,22 @@
+import { AttachmentRef } from '@sunfall/vesper-attachments/ref';
+import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
 import { Encoding, Effect, Result, Schema } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 const TAG = '@sunfall/vesper-agent/PromptFileData';
+const ATTACHMENT_TAG = '@sunfall/vesper-agent/PromptAttachment';
 
 interface Envelope {
   readonly _tag: typeof TAG;
   readonly version: 1;
   readonly encoding: 'base64' | 'url';
   readonly value: string;
+}
+
+interface AttachmentEnvelope {
+  readonly _tag: typeof ATTACHMENT_TAG;
+  readonly version: 1;
+  readonly ref: AttachmentRef.Ref;
 }
 
 /** A persisted prompt could not be safely handed to the model. */
@@ -91,6 +100,93 @@ export const decodeMessages = (
     ),
   );
 
+/**
+ * Persist file bytes in an explicit {@link AttachmentStore} while retaining
+ * URLs and ordinary provider data inline. This is deliberately separate from
+ * {@link encode}: callers that do not provide an attachment store keep the
+ * existing inline transport and acquire no new requirement.
+ */
+export const encodeWithAttachments = (
+  prompt: unknown,
+): Effect.Effect<
+  unknown,
+  AttachmentStore.AttachmentStoreError,
+  AttachmentStore.Service
+> =>
+  mapFileDataEffect(prompt, (data, part) => {
+    if (!(data instanceof Uint8Array)) return Effect.succeed(data);
+    const mediaType =
+      typeof part.mediaType === 'string'
+        ? part.mediaType
+        : 'application/octet-stream';
+    return Effect.gen(function* () {
+      const store = yield* AttachmentStore.Service;
+      const ref = yield* store.put(data, { mediaType });
+      return {
+        _tag: ATTACHMENT_TAG,
+        version: 1,
+        ref,
+      } satisfies AttachmentEnvelope;
+    });
+  });
+
+/** Restore attachment references before a resumed prompt is rebuilt. */
+export const decodeWithAttachments = (
+  prompt: unknown,
+): Effect.Effect<
+  unknown,
+  DecodeError | AttachmentStore.GetError,
+  AttachmentStore.Service
+> =>
+  mapFileDataEffect(prompt, (data) => {
+    if (!isAttachmentEnvelope(data)) {
+      return Effect.try({
+        try: () => decode(data),
+        catch: (cause) => new DecodeError({ message: messageOf(cause) }),
+      });
+    }
+    if (data.version !== 1) {
+      return Effect.fail(
+        new DecodeError({ message: 'Unsupported Vesper attachment envelope' }),
+      );
+    }
+    return Schema.decodeUnknownEffect(AttachmentRef.Ref)(data.ref).pipe(
+      Effect.mapError(
+        (cause) =>
+          new DecodeError({
+            message: `Malformed Vesper attachment reference: ${messageOf(cause)}`,
+          }),
+      ),
+      Effect.flatMap((ref) =>
+        Effect.gen(function* () {
+          const store = yield* AttachmentStore.Service;
+          return yield* store.get(ref);
+        }),
+      ),
+    );
+  });
+
+/** Decode a persisted prompt while resolving every content-addressed file. */
+export const decodeMessagesWithAttachments = (
+  prompt: unknown,
+): Effect.Effect<
+  ReadonlyArray<Prompt.Message>,
+  DecodeError | AttachmentStore.GetError,
+  AttachmentStore.Service
+> =>
+  decodeWithAttachments(prompt).pipe(
+    Effect.flatMap((decoded) =>
+      Schema.decodeUnknownEffect(Schema.Array(Prompt.Message))(decoded).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DecodeError({
+              message: `Malformed persisted prompt messages: ${messageOf(cause)}`,
+            }),
+        ),
+      ),
+    ),
+  );
+
 const mapFileData = (
   prompt: unknown,
   transform: (data: unknown) => unknown,
@@ -114,6 +210,39 @@ const mapFileData = (
   return changed ? messages : prompt;
 };
 
+const mapFileDataEffect = <E, R>(
+  prompt: unknown,
+  transform: (
+    data: unknown,
+    part: Record<PropertyKey, unknown>,
+  ) => Effect.Effect<unknown, E, R>,
+): Effect.Effect<unknown, E, R> =>
+  !Array.isArray(prompt)
+    ? Effect.succeed(prompt)
+    : Effect.map(
+        Effect.forEach(prompt, (message) => {
+          if (!isObject(message) || !Array.isArray(message.content)) {
+            return Effect.succeed(message);
+          }
+          const originalContent = message.content;
+          return Effect.map(
+            Effect.forEach(originalContent, (part) => {
+              if (!isObject(part) || part.type !== 'file') {
+                return Effect.succeed(part);
+              }
+              return Effect.map(transform(part.data, part), (data) =>
+                data === part.data ? part : { ...part, data },
+              );
+            }),
+            (content) =>
+              content.every((part, index) => part === originalContent[index])
+                ? message
+                : { ...message, content },
+          );
+        }),
+        (messages) => messages,
+      );
+
 const isObject = (value: unknown): value is Record<PropertyKey, unknown> =>
   typeof value === 'object' && value !== null;
 
@@ -121,6 +250,9 @@ const isEnvelopeCandidate = (
   value: unknown,
 ): value is Record<PropertyKey, unknown> =>
   isObject(value) && '_tag' in value && value._tag === TAG;
+
+const isAttachmentEnvelope = (value: unknown): value is AttachmentEnvelope =>
+  isObject(value) && '_tag' in value && value._tag === ATTACHMENT_TAG;
 
 const messageOf = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);

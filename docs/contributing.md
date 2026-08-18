@@ -82,13 +82,10 @@ CI runs Node 22 and 24; publishing uses Node 24.
 - Do not create `index.ts` barrels, facade packages, or compatibility
   re-exports. A file that is not in `exports` is internal.
 - Keep tests in `packages/<module>/test/`, named for what they exercise.
-- A backend's contract suite lives in the package that owns the interface —
-  `@sunfall/vesper-log/log-store-contract`,
-  `@sunfall/vesper-workspace/workspace-contract`,
-  `@sunfall/vesper-attachments/attachment-store-contract` — not in a testkit
-  of its own. A shared testkit would have to depend on those packages while
-  they depend on it to run their contracts, which is a cycle, and one that
-  per-package test runs never build the graph to notice.
+- A backend's internal contract suite lives beside the interface it verifies,
+  not in a testkit package or the published export map. A shared testkit would
+  have to depend on those packages while they depend on it to run their
+  contracts, creating a cycle that per-package test runs may not expose.
 
 ## Tests
 
@@ -112,7 +109,7 @@ asserts a type will pass `nub run test` while failing the gate.
 
 ### The Postgres suite
 
-`packages/log/test/layer-pg.integration.test.ts` runs the shared
+`packages/log-pg/test/layer.integration.test.ts` runs the core package's shared
 `log-store-contract` against real Postgres, plus the two things a memory
 backend cannot demonstrate: that the schema the test harness creates is the
 schema the layer actually queries, and that a `LISTEN` connection dying
@@ -140,7 +137,7 @@ default" does not mean "never run".
 One tsdown configuration builds every package in unbundled ESM form, generates
 declarations, cleans stale output, keeps dependencies external, and validates
 the finished packages with publint and Are the types wrong?. Packages publish
-`dist` and `LICENSE`; `@sunfall/vesper-log` also publishes its authoritative
+`dist` and `LICENSE`; `@sunfall/vesper-log-pg` also publishes its authoritative
 `migrations` directory. Every `exports` entry names `./dist/*.js` and
 `./dist/*.d.ts`: sources are not published, and a module absent from `exports`
 is unreachable to a consumer however it got into `dist`.
@@ -155,10 +152,12 @@ another dist-tag.
 ## The layering rule
 
 ```
-agent       -> effect, @sunfall/vesper-log
+agent       -> effect, @sunfall/vesper-log, @sunfall/vesper-attachments
 log         -> effect
+log-pg      -> effect, @sunfall/vesper-log, @effect/sql-pg, pg
 workspace   -> effect
 attachments -> effect
+mcp         -> effect, @sunfall/vesper-agent, @sunfall/vesper-log
 ```
 
 **No Vesper package depends on a provider SDK.** The loop targets Effect's
@@ -171,10 +170,10 @@ The provider-independent context policies live at the seam that consumes them:
 `@sunfall/vesper-agent/context-window`. `pure` is the default and
 `usageAnchored` is an explicit application wiring choice.
 
-`agent -> log` is the one Vesper-package edge, admitted on a narrow argument.
-`log` depends on nothing but `effect`, and what it supplies is a data
-vocabulary — records, offsets, a store interface — not a provider and not a
-durability strategy. Recording is opt-in through
+The `agent -> log` and `agent -> attachments` edges are admitted on narrow
+arguments. `log` supplies the durable vocabulary and store Interface;
+`attachments` supplies content-addressed prompt payloads. Neither knows about
+providers, and attachment storage remains optional at runtime. Recording is opt-in through
 `Conversation.make(agent, id)` and its bound `conversation.run(input)`, the
 only entry points that name `LogStore`; an agent used through neither requires
 no new service and writes nothing. Do not read this as
@@ -236,7 +235,7 @@ A tool declares the service keys its handler needs as _values_, on
 `Tool.make`'s `dependencies` option. Effect's tool model requires this —
 `dependencies` takes `Context.Key` values, and services cannot be recovered
 from a type. In exchange those keys reach the agent's `Requires`, and because
-`Definition.subagents` captures a tuple of `Agent.Named` rather than
+`Definition.subagents` captures a tuple of branded `Agent.Child` rather than
 `ReadonlyArray<Agent.Any>`, they flow on into every parent's requirement
 channel, transitively through delegation chains.
 

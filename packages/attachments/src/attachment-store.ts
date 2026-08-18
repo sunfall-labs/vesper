@@ -65,7 +65,7 @@ export class AttachmentIntegrityError extends Schema.TaggedError<AttachmentInteg
 export class AttachmentStoreError extends Schema.TaggedError<AttachmentStoreError>(
   '@sunfall/vesper-attachments/AttachmentStoreError',
 )('AttachmentStoreError', {
-  operation: Schema.Literals(['put', 'get', 'has']),
+  operation: Schema.Literals(['put', 'get']),
   cause: Schema.Defect(),
 }) {}
 
@@ -101,18 +101,6 @@ export interface Interface {
    * backends where it fires are precisely the ones nobody has written yet.
    */
   readonly get: (ref: AttachmentRef.Ref) => Effect.Effect<Uint8Array, GetError>;
-
-  /**
-   * Whether these bytes are present.
-   *
-   * Presence only — it does not verify, because verifying costs a full read
-   * and a caller that wanted one would have called `get`. A `true` here is
-   * therefore not a promise that `get` will succeed, and the doc comment is
-   * the only place that can say so.
-   */
-  readonly has: (
-    ref: AttachmentRef.Ref,
-  ) => Effect.Effect<boolean, AttachmentStoreError>;
 }
 
 export class Service extends Context.Service<Service, Interface>()(

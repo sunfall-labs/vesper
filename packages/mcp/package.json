@@ -1,0 +1,56 @@
+{
+  "name": "@sunfall/vesper-mcp",
+  "version": "0.1.0-alpha.1",
+  "description": "Expose a Vesper agent as an Effect-native MCP server tool.",
+  "keywords": [
+    "agent",
+    "effect",
+    "mcp",
+    "model-context-protocol",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/mcp"
+  },
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "exports": {
+    "./agent": {
+      "types": "./dist/agent.d.ts",
+      "default": "./dist/agent.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@sunfall/vesper-agent": "0.1.0-alpha.1",
+    "@sunfall/vesper-log": "0.1.0-alpha.1"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-rc.109"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
+    "effect": "catalog:"
+  }
+}

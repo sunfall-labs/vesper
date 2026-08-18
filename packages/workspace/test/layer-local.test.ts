@@ -7,9 +7,14 @@ import { afterAll, describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 
 import { WorkspaceDriver } from '../src/driver.js';
-import { layer as localLayer } from '../src/layer-local.js';
-import { workspaceContract } from '../src/workspace-contract.js';
-import type { ContractOptions as WorkspaceContractOptions } from '../src/workspace-contract.js';
+import {
+  layer as safeLocalLayer,
+  unrestricted as localLayer,
+} from '../src/layer-local.js';
+import {
+  workspaceContract,
+  type ContractOptions as WorkspaceContractOptions,
+} from './workspace-contract.js';
 
 // The local driver against a real temp directory and a real shell. Nothing is
 // faked: a stubbed `node:fs` would pass every case here and still get the
@@ -18,6 +23,7 @@ import type { ContractOptions as WorkspaceContractOptions } from '../src/workspa
 const root = mkdtempSync(join(tmpdir(), 'ai-workspace-'));
 
 const layer = localLayer.pipe(Layer.provide(NodeServices.layer));
+const safeLayer = safeLocalLayer.pipe(Layer.provide(NodeServices.layer));
 
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
@@ -36,6 +42,17 @@ const run = <A>(
 ): Effect.Effect<A> => effect.pipe(Effect.provide(layer)) as Effect.Effect<A>;
 
 describe('local driver specifics', () => {
+  it.live('does not inherit the host environment by default', () =>
+    Effect.gen(function* () {
+      const result = yield* Effect.gen(function* () {
+        const driver = yield* WorkspaceDriver.Service;
+        return yield* driver.exec('test -z "$HOME"');
+      }).pipe(Effect.provide(safeLayer));
+
+      expect(result.exitCode).toBe(0);
+    }),
+  );
+
   it.live('stat reports a symlink as a symlink, not as its target', () =>
     Effect.gen(function* () {
       const stat = yield* run(

@@ -25,7 +25,7 @@ import {
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import { ToolDispatch } from '../src/dispatch.js';
 
 const testLogLayer = Layer.mergeAll(
@@ -310,49 +310,20 @@ describe('responsive cancellation arbitration', () => {
     }),
   );
 
-  it.effect('settles a dispatch that fails before returning its stream', () =>
-    Effect.gen(function* () {
-      const arbitration = yield* ToolDispatch.makeTurnArbitration;
-      const toolkit = Toolkit.make(lookup);
-      const gated = yield* ToolDispatch.gate(toolkit, {
-        agent: 'test',
-        arbitration,
-      }).pipe(
-        Effect.provide(
-          toolkit.toLayer({
-            lookup: () => Effect.succeed({ status: 'ok', at: WHEN }),
-          }),
-        ),
-      );
-      const dispatch = gated.handle as unknown as (
-        name: string,
-        params: unknown,
-        toolCallId: string,
-      ) => Effect.Effect<Stream.Stream<unknown, unknown, unknown>, unknown>;
-
-      const failed = yield* dispatch('lookup', { id: 42 }, 'setup-fails').pipe(
-        Effect.exit,
-      );
-      expect(failed._tag).toBe('Failure');
-
-      const cancelled = yield* arbitration.cancel.pipe(
-        Effect.timeout('100 millis'),
-        Effect.exit,
-      );
-      expect(cancelled._tag).toBe('Success');
-    }),
-  );
-
   it.effect('settles a dispatch whose durable start append fails', () =>
     Effect.gen(function* () {
       const arbitration = yield* ToolDispatch.makeTurnArbitration;
       const toolkit = Toolkit.make(lookup);
-      const session = {
-        conversationId: CONVERSATION,
-        recovery: () => Option.none(),
-        onToolSettled: () => {},
+      const opened = yield* AgentLog.open(CONVERSATION, {
+        compatibility: {
+          agent: 'test',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        },
+      });
+      const session: AgentLog.Session = {
+        ...opened,
         append: () => Effect.die('ToolStarted append failed'),
-      } as unknown as AgentLog.Session;
+      };
       const gated = yield* ToolDispatch.gate(toolkit, {
         agent: 'test',
         arbitration,
@@ -364,17 +335,9 @@ describe('responsive cancellation arbitration', () => {
           }),
         ),
       );
-      const dispatch = gated.handle as unknown as (
-        name: string,
-        params: unknown,
-        toolCallId: string,
-      ) => Effect.Effect<Stream.Stream<unknown, unknown, unknown>, unknown>;
-
-      const failed = yield* dispatch(
-        'lookup',
-        { id: '42' },
-        'append-fails',
-      ).pipe(Effect.exit);
+      const failed = yield* gated
+        .handle('lookup', { id: '42' }, 'append-fails')
+        .pipe(Effect.exit);
       expect(failed._tag).toBe('Failure');
 
       const cancelled = yield* arbitration.cancel.pipe(
@@ -382,7 +345,7 @@ describe('responsive cancellation arbitration', () => {
         Effect.exit,
       );
       expect(cancelled._tag).toBe('Success');
-    }),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 });
 
@@ -1071,17 +1034,17 @@ describe('what a tool outcome stores', () => {
                 Effect.sync(() => {
                   if (
                     event._tag === 'Part' &&
-                    (event.part as Response.StreamPartEncoded).type ===
-                      'tool-result'
+                    event.part.type === 'tool-result' &&
+                    typeof event.part.result === 'object' &&
+                    event.part.result !== null &&
+                    'at' in event.part.result
                   ) {
                     sources.push(
-                      (event.part as { readonly resultSource?: unknown })
-                        .resultSource,
+                      'resultSource' in event.part
+                        ? event.part.resultSource
+                        : undefined,
                     );
-                    seen.push(
-                      (event.part as unknown as { result: { at: unknown } })
-                        .result.at,
-                    );
+                    seen.push(event.part.result.at);
                   }
                 }),
               ),

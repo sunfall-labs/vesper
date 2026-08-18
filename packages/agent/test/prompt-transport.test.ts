@@ -1,3 +1,4 @@
+import { AttachmentStoreMemory } from '@sunfall/vesper-attachments/layer-memory';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
@@ -8,7 +9,8 @@ import { Cause, Context, Effect, Exit, Layer, Option } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentHistory } from '../src/history.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
+import { PromptTransport } from '../src/prompt-transport.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
 
 const testLogLayer = Layer.mergeAll(
@@ -83,6 +85,61 @@ describe('prompt transport', () => {
         fileData(AgentHistory.messagesFrom(runStarted(persisted)).content),
       ).toEqual(new Uint8Array([0, 1, 255]));
     }),
+  );
+
+  it.effect('externalizes bytes and hydrates them on resume when enabled', () =>
+    Effect.gen(function* () {
+      const bytes = new Uint8Array([0, 1, 255]);
+      const source = yield* AgentLog.open(
+        LogVocabulary.ConversationId.make('attachment-source'),
+        {
+          compatibility: {
+            agent: 'test',
+            revision: LogVocabulary.AgentRevision.make('1'),
+          },
+        },
+      );
+      yield* AgentLog.start(source, {
+        agent: 'test',
+        revision: LogVocabulary.AgentRevision.make('1'),
+        input: filePrompt(bytes),
+      });
+      const sourceRecords = yield* source.recorded;
+      const persisted = sourceRecords[0]!.record;
+      if (persisted._tag !== 'RunStarted')
+        throw new Error('missing RunStarted');
+
+      expect(fileData(persisted.prompt)).toMatchObject({
+        _tag: '@sunfall/vesper-agent/PromptAttachment',
+        version: 1,
+        ref: { mediaType: 'application/octet-stream', byteLength: 3 },
+      });
+      const decoded = yield* PromptTransport.decodeMessagesWithAttachments(
+        persisted.prompt,
+      );
+      expect(fileData(decoded)).toEqual(bytes);
+
+      const fork = yield* AgentLog.fork(
+        LogVocabulary.ConversationId.make('attachment-source'),
+        sourceRecords[0]!.offset,
+        LogVocabulary.ConversationId.make('attachment-fork'),
+        {
+          agent: 'test',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        },
+      );
+      const prompt = AgentHistory.messagesFrom(fork.history).content;
+      expect(fileData(prompt)).toEqual(bytes);
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          testLogLayer,
+          AttachmentStoreMemory.make().layer.pipe(
+            Layer.provide(NodeServices.layer),
+          ),
+        ),
+      ),
+    ),
   );
 
   it.effect('persists and rebuilds URL file data', () =>

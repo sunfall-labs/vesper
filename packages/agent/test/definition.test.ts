@@ -144,7 +144,7 @@ const compileTimeCollisionAssertions = (): void => {
 };
 void compileTimeCollisionAssertions;
 
-// `Agent.Named` rather than a hand-written shape: it is precisely "an agent
+// `Agent.Child` rather than a hand-written shape: it is precisely "an agent
 // whose requirements I want to keep", which is what this helper needs.
 //
 // There is no cast here any more, and that is the point. The two layers below
@@ -152,7 +152,7 @@ void compileTimeCollisionAssertions;
 // if `make` ever stopped providing its own subagent and skill handlers, this
 // would stop compiling rather than fail at dispatch with a missing-handler
 // error from the model.
-const drive = <R>(agent: Agent.Named<string, R>) =>
+const drive = <R>(agent: Agent.Child<string, R>) =>
   Effect.gen(function* () {
     const tools = yield* Ref.make<ReadonlyArray<string>>([]);
     const system = yield* Ref.make('');
@@ -181,7 +181,7 @@ describe('declarative definition', () => {
   });
 
   it('rejects a hand-written child even when it matches the public shape', () => {
-    const child: Agent.Named<'hand-written', never> = {
+    const child = {
       name: 'hand-written',
       revision: LogVocabulary.AgentRevision.make('1'),
       run: () =>
@@ -199,6 +199,7 @@ describe('declarative definition', () => {
         revision: '1',
         instructions: 'x',
         toolkit: Toolkit.make(),
+        // @ts-expect-error hand-written children are not branded by Agent.make
         subagents: [child],
       }),
     ).toThrow('was not created by Agent.make');
@@ -262,6 +263,48 @@ describe('declarative definition', () => {
     }),
   );
 
+  it.effect(
+    're-encodes transformed standard response parts for observers',
+    () =>
+      Effect.gen(function* () {
+        const timestamp = '2026-08-18T12:34:56.000Z';
+        const model = Layer.effect(
+          LanguageModel.LanguageModel,
+          LanguageModel.make({
+            generateText: () => Effect.succeed([finish]),
+            streamText: () =>
+              Stream.fromIterable<Response.StreamPartEncoded>([
+                { type: 'response-metadata', timestamp },
+                finish,
+              ]),
+          }),
+        );
+        const plain = Agent.make({
+          name: 'metadata',
+          revision: '1',
+          instructions: 'x',
+          toolkit: Toolkit.make(),
+        });
+
+        const events = yield* plain
+          .stream('go')
+          .pipe(Stream.runCollect, Effect.provide(model), Effect.orDie);
+        const metadata = events.find(
+          (event) =>
+            event._tag === 'Part' &&
+            event.encodedPart.type === 'response-metadata',
+        );
+
+        expect(metadata?._tag).toBe('Part');
+        if (
+          metadata?._tag === 'Part' &&
+          metadata.encodedPart.type === 'response-metadata'
+        ) {
+          expect(metadata.encodedPart.timestamp).toBe(timestamp);
+        }
+      }),
+  );
+
   // The layer and the toolkit are produced together precisely so they cannot
   // disagree: every advertised tool has a handler.
   it.effect('provides handlers for everything it advertises', () =>
@@ -286,7 +329,7 @@ describe('declarative definition', () => {
   );
 
   it('rejects generated collisions from widened arrays at runtime', () => {
-    const children: ReadonlyArray<Agent.Named> = [researcher, researcher];
+    const children: ReadonlyArray<Agent.Child> = [researcher, researcher];
     const skills: ReadonlyArray<Skill.Skill> = [refunds];
 
     expect(() =>
@@ -322,6 +365,8 @@ describe('declarative definition', () => {
 
   it('checks the agent brand value, not merely the property', () => {
     expect(Agent.isAgent(researcher)).toBe(true);
+    expect('streamConversation' in researcher).toBe(false);
+    expect('runWithSession' in researcher).toBe(false);
     expect(Agent.isAgent({ [Agent.TypeId]: 'forged' })).toBe(false);
   });
 });

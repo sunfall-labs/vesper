@@ -2,6 +2,7 @@ import { Effect, Ref } from 'effect';
 import { AiError, Chat, LanguageModel, Prompt } from 'effect/unstable/ai';
 
 import { ContextWindow } from './context-window.js';
+import * as Observability from './internal/observability.js';
 
 // Compaction: replace old history with a summary when the conversation
 // outgrows the context window.
@@ -248,6 +249,11 @@ export const compact = Effect.fn('Agent.compact')(function* (
       { role: 'user', content: [{ type: 'text', text: policy.instructions }] },
     ]),
   });
+  yield* Observability.usage({
+    input: summary.usage.inputTokens.total ?? 0,
+    output: summary.usage.outputTokens.total ?? 0,
+  });
+  yield* Observability.compaction;
 
   yield* Ref.set(
     chat.history,

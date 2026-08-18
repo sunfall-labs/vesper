@@ -25,6 +25,32 @@ Modules are exposed as explicit subpaths, including
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
 `/testing`, plus `/workflow`.
 
+## Durable file attachments
+
+Inline `Uint8Array` and `URL` file parts remain the default transport. To
+externalize byte payloads into content-addressed storage, provide an
+`AttachmentStore` layer around the conversation run:
+
+```ts
+import { Effect } from 'effect';
+import { AttachmentStoreMemory } from '@sunfall/vesper-attachments/layer-memory';
+import { Conversation } from '@sunfall/vesper-agent/conversation';
+
+const conversation = Conversation.make(agent, 'support-42');
+const result = conversation
+  .run(input)
+  .pipe(Effect.provide(AttachmentStoreMemory.layer));
+```
+
+`RunStarted` records then carry verified attachment references instead of file
+bytes. Opening or forking with the same store hydrates and verifies those
+references before prompt reconstruction; without the layer, existing inline
+behavior and service requirements are unchanged. Attachment writes are part
+of the same append durability boundary as the conversation log: a store write
+failure is surfaced as a typed `DurabilityError` with its tagged cause,
+while resume-time missing or corrupt references remain typed compatibility
+failures.
+
 ## Evals
 
 `AgentEval.run` executes a real agent and captures its typed public evidence:
@@ -108,13 +134,13 @@ const SupportState = AgentState.make({
   id: 'support-case',
   version: '1',
   schema: Schema.Struct({ phase: Schema.String }),
-  initial: { phase: 'gathering' },
+  initial: () => ({ phase: 'gathering' }),
 });
 
 const draft = Tool.make('draft', {
   parameters: Schema.Struct({}),
   success: Schema.Struct({ phase: Schema.String }),
-  failure: AgentState.error,
+  failure: AgentState.Error,
   dependencies: AgentState.dependencies(SupportState),
 });
 
@@ -148,9 +174,9 @@ agent.
 
 State definition, compatibility, schema, and JSON-boundary failures use the
 schema-tagged `AgentState.Error` union: `StateDefinitionError`,
-`StateCompatibilityError`, `StateDecodeError`, `StateEncodeError`, and
-`StateJsonError`.
-Direct state operations expose this error. Declare `failure: AgentState.error`
+`StateCompatibilityError`, `StateDecodeError`, `StateEncodeError`,
+`StateJsonError`, and `DurabilityError`.
+Direct state operations expose this error. Declare `failure: AgentState.Error`
 when a tool handler lets mutation failures escape; state failures are never
 converted to defects.
 
@@ -301,7 +327,12 @@ turns, tool outcomes, compatibility, and prompt reconstruction. The supplied
 Effect `WorkflowEngine` remains authoritative for accepted execution,
 activities, suspension, interruption, and wakeup. Use
 `WorkflowEngine.layerMemory` in tests or `ClusterWorkflowEngine.layer` for a
-cluster-backed runtime; Vesper does not wrap either one.
+cluster-backed runtime; Vesper does not wrap either one. For a SQL-backed
+single-process deployment, compose `ClusterWorkflowEngine.layer` with Effect's
+`SingleRunner.layer` and the application's `SqlClient`/`Crypto` layers. The
+runner persists workflow mailboxes, replies, and locks in SQL, but its runner
+communication and health services are intentionally no-op: this composition
+proves restart/reopen durability for one process, not distributed failover.
 
 ### Yielding from a tool handler
 
@@ -379,6 +410,14 @@ yield *
   });
 ```
 
+Wait keys follow the same non-empty rule as durable step keys; an empty key is
+rejected before a wait token is created. Request and replay-result encoding
+failures stay in the typed `AiError` channel (as
+`ToolResultEncodingError`) instead of becoming defects. External completion
+also validates the success or failure value through its schema before asking
+the workflow engine to persist it, so malformed values remain typed
+`SchemaError`s.
+
 `awaitPending` returns an Effect for one definition, conversation, and stable
 key. It completes immediately when that request is already actionable or waits
 on the full durable conversation until it becomes actionable. Internally it
@@ -449,7 +488,7 @@ cannot reset it by opening another agent loop. `StopCondition`s remain soft.
 
 Recording persists raw values by default. Pass an effectful
 `RecordingPolicy.Policy` as the third argument to
-`Conversation.withRecordingPolicy(agent, id, policy)` to redact only
+`Conversation.make(agent, id, policy)` to redact only
 the persisted prompt, tool parameters/results, external wait requests and
 results, delivered signals, and rendered failure causes. Its Effect services appear
 exactly in `Agent.Requires`.

@@ -12,6 +12,10 @@ const custom = Tool.make('lookup_issue', {
 
 describe('WorkspaceAgent', () => {
   it('provides the six standard workspace tools explicitly', () => {
+    expect(Object.keys(WorkspaceAgent.standard).sort()).toEqual([
+      'layer',
+      'toolkit',
+    ]);
     expect(Object.keys(WorkspaceAgent.standard.toolkit.tools).sort()).toEqual([
       'edit_file',
       'list_files',

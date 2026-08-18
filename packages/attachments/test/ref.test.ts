@@ -76,9 +76,9 @@ describe('AttachmentRef', () => {
         mediaType: 'image/png',
       });
 
-      const wire = JSON.parse(
+      const wire: unknown = JSON.parse(
         JSON.stringify(Schema.encodeSync(AttachmentRef.Ref)(ref)),
-      ) as unknown;
+      );
       const decoded = Schema.decodeUnknownSync(AttachmentRef.Ref)(wire);
 
       expect(decoded).toEqual(ref);

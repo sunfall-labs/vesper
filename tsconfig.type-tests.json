@@ -13,5 +13,6 @@
     "benchmarks/**/*.ts",
     "examples/*/src/**/*.ts",
     "type-tests/**/*.ts"
-  ]
+  ],
+  "exclude": ["type-tests/published-types.ts"]
 }

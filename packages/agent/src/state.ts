@@ -1,16 +1,20 @@
 import { RecordBatch } from '@sunfall/vesper-log/record-batch';
 import { Context, Effect, Layer, Schema, SynchronizedRef } from 'effect';
 
-import type { AgentLog } from './log.js';
+import * as AgentLog from './log.js';
 import { ResumeProjection } from './resume-projection.js';
+
+export type HandleError = Error | AgentLog.DurabilityError;
 
 export interface Handle<A, EncodeR = never> {
   readonly get: Effect.Effect<A, Error>;
-  readonly set: (value: A) => Effect.Effect<void, Error, EncodeR>;
-  readonly update: (f: (value: A) => A) => Effect.Effect<A, Error, EncodeR>;
+  readonly set: (value: A) => Effect.Effect<void, HandleError, EncodeR>;
+  readonly update: (
+    f: (value: A) => A,
+  ) => Effect.Effect<A, HandleError, EncodeR>;
   readonly modify: <B>(
     f: (value: A) => readonly [B, A],
-  ) => Effect.Effect<B, Error, EncodeR>;
+  ) => Effect.Effect<B, HandleError, EncodeR>;
 }
 
 export interface Definition<
@@ -32,21 +36,18 @@ export interface Options<A, Encoded = A, DecodeR = never, EncodeR = never> {
   readonly id: string;
   readonly version: string;
   readonly schema: Schema.Codec<A, Encoded, DecodeR, EncodeR>;
-  readonly initial: A | (() => A);
+  readonly initial: () => A;
 }
 
 /** Any state definition, used when an agent's state is not known statically. */
-// The key is covariant, while `Definition` itself is invariant in its
-// identifier and handle shape. Constraining against the key keeps generic
-// agents assignable without erasing their concrete codec below.
-// oxlint-disable-next-line no-explicit-any
-export type AnyDefinition = Context.Key<any, any> & {
+// Context.Key and Schema.Codec are covariant in their erased positions. Using
+// unknown therefore keeps concrete definitions assignable without introducing
+// an unsound any-shaped service or codec.
+export type AnyDefinition = Context.Key<unknown, unknown> & {
   readonly id: string;
   readonly version: string;
-  // oxlint-disable-next-line no-explicit-any
-  readonly schema: Schema.Codec<any, any, any, any>;
-  // oxlint-disable-next-line no-explicit-any
-  readonly initial: () => any;
+  readonly schema: Schema.Codec<unknown, unknown, unknown, unknown>;
+  readonly initial: () => unknown;
 };
 
 /** Services needed to decode and encode one state definition's checkpoints. */
@@ -114,10 +115,9 @@ export const Error = Schema.Union([
   StateDecodeError,
   StateEncodeError,
   StateJsonError,
+  AgentLog.DurabilityError,
 ]);
 export type Error = typeof Error.Type;
-
-export const error = Error;
 
 export const make = <A, Encoded = A, DecodeR = never, EncodeR = never>(
   options: Options<A, Encoded, DecodeR, EncodeR>,
@@ -136,21 +136,17 @@ export const make = <A, Encoded = A, DecodeR = never, EncodeR = never>(
     Definition<A, Encoded, DecodeR, EncodeR>,
     Handle<A, EncodeR>
   >(`@sunfall/vesper-agent/state/${options.id}/${nextContextKey++}`);
-  const initial: () => A =
-    typeof options.initial === 'function'
-      ? (options.initial as () => A)
-      : () => options.initial as A;
   return Object.assign(tag, {
     id: options.id,
     version: options.version,
     schema: options.schema,
-    initial,
+    initial: options.initial,
   });
 };
 
 export const dependencies = <
   D extends AnyDefinition,
-  const Rest extends ReadonlyArray<Context.Key<any, any>>,
+  const Rest extends ReadonlyArray<Context.Key<unknown, unknown>>,
 >(
   state: D,
   ...rest: Rest
@@ -168,7 +164,7 @@ const encode = <A, Encoded, DecodeR, EncodeR>(
 ): Effect.Effect<Encoded, Schema.SchemaError, EncodeR> =>
   Schema.encodeEffect(schema)(value);
 
-export const open = Effect.fn('AgentState.open')(function* <
+const openEffect = Effect.fn('AgentState.open')(function* <
   A,
   Encoded,
   DecodeR,
@@ -284,6 +280,47 @@ export const open = Effect.fn('AgentState.open')(function* <
     modify,
   };
 });
+
+/** Open an in-memory state handle without requiring codec services. */
+export function open<A, Encoded = A, DecodeR = never, EncodeR = never>(
+  definition: {
+    readonly id: string;
+    readonly version: string;
+    readonly schema: Schema.Codec<A, Encoded, DecodeR, EncodeR>;
+    readonly initial: () => A;
+  },
+  session: undefined,
+): Effect.Effect<Handle<A, never>, Error, never>;
+/** Open a state handle backed by a persisted session and its codec services. */
+export function open<A, Encoded = A, DecodeR = never, EncodeR = never>(
+  definition: {
+    readonly id: string;
+    readonly version: string;
+    readonly schema: Schema.Codec<A, Encoded, DecodeR, EncodeR>;
+    readonly initial: () => A;
+  },
+  session: AgentLog.Session,
+): Effect.Effect<Handle<A, EncodeR>, Error, DecodeR | EncodeR>;
+export function open<A, Encoded = A, DecodeR = never, EncodeR = never>(
+  definition: {
+    readonly id: string;
+    readonly version: string;
+    readonly schema: Schema.Codec<A, Encoded, DecodeR, EncodeR>;
+    readonly initial: () => A;
+  },
+  session: AgentLog.Session | undefined,
+): Effect.Effect<Handle<A, EncodeR>, Error, DecodeR | EncodeR>;
+export function open<A, Encoded = A, DecodeR = never, EncodeR = never>(
+  definition: {
+    readonly id: string;
+    readonly version: string;
+    readonly schema: Schema.Codec<A, Encoded, DecodeR, EncodeR>;
+    readonly initial: () => A;
+  },
+  session: AgentLog.Session | undefined,
+): Effect.Effect<Handle<A, EncodeR>, Error, DecodeR | EncodeR> {
+  return openEffect(definition, session);
+}
 
 export const layerEphemeral = <D extends AnyDefinition>(definition: D) =>
   Layer.effect(definition, open(definition, undefined));

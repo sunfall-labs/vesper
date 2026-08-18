@@ -1,5 +1,6 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord } from '@sunfall/vesper-log/record';
+import { Schema } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
@@ -173,7 +174,8 @@ const rebuild = (
   if (latest === undefined) return fold(records);
 
   const compaction = records[latest]!;
-  const record = compaction.record as ConversationRecord.RecordOf<'Compacted'>;
+  const record = compaction.record;
+  if (record._tag !== 'Compacted') return fold(records);
 
   return [
     // The summary stands where the compaction record does, so a later
@@ -287,10 +289,11 @@ const fold = (
       // A previous run's input is a user message in this conversation, and
       // `RunStarted.prompt` already holds it normalised to messages.
       flush();
+      const decoded = Schema.decodeUnknownSync(Schema.Array(Prompt.Message))(
+        PromptTransport.decode(record.prompt),
+      );
       messages.push(
-        ...Prompt.make(
-          PromptTransport.decode(record.prompt) as Prompt.RawInput,
-        ).content.map((message) => ({ offset: currentOffset, message })),
+        ...decoded.map((message) => ({ offset: currentOffset, message })),
       );
     },
 

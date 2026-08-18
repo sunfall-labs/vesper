@@ -17,7 +17,7 @@ import {
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { protocolOf } from '../src/internal/protocol.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 
@@ -149,7 +149,7 @@ const run = <A, E>(
   );
 
 const runInSession = <R>(
-  child: Agent.Named<string, R>,
+  child: Agent.Child<string, R>,
   session: AgentLog.Session,
   input: string,
 ) =>

@@ -81,7 +81,7 @@ const jsonClone = (
     return clone;
   }
 
-  const prototype = Object.getPrototypeOf(value) as object | null;
+  const prototype: object | null = Object.getPrototypeOf(value);
   if (prototype !== Object.prototype && prototype !== null) {
     throw jsonFailure(path, 'is not a plain object');
   }
@@ -100,14 +100,13 @@ const jsonClone = (
     stringKeys.push(key);
   }
 
-  const clone = Object.create(null) as { [key: string]: JsonValue };
+  const clone: { [key: string]: JsonValue } = Object.create(null);
   for (const key of stringKeys.sort()) {
     const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
-    clone[key] = jsonClone(
-      (descriptor as PropertyDescriptor & { value: unknown }).value,
-      `${path}.${key}`,
-      nextAncestors,
-    );
+    if (!('value' in descriptor)) {
+      throw jsonFailure(`${path}.${key}`, 'is an accessor property');
+    }
+    clone[key] = jsonClone(descriptor.value, `${path}.${key}`, nextAncestors);
   }
   return clone;
 };
@@ -179,7 +178,9 @@ export const prepare = (
             }),
     });
     const material = JSON.stringify(canonical);
-    const persisted = JSON.parse(material) as ReadonlyArray<unknown>;
+    const persisted = Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))(
+      JSON.parse(material),
+    );
     const normalized = yield* Effect.forEach(persisted, (entry) =>
       decodeEntry(entry),
     ).pipe(

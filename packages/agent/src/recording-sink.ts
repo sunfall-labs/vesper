@@ -6,7 +6,7 @@ import type { Response, Tool } from 'effect/unstable/ai';
 
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
-import type { Session } from './log.js';
+import type { DurabilityError, Session } from './log.js';
 import type { Stop } from './stop.js';
 
 // The sink turns the loop's events into durable records while emitting the
@@ -19,7 +19,7 @@ import type { Stop } from './stop.js';
 export const record = <Tools extends Record<string, Tool.Any>, E, R>(
   session: Session,
   events: Stream.Stream<AgentEvents.Event<Tools>, E, R>,
-): Stream.Stream<AgentEvents.Event<Tools>, E, R> =>
+): Stream.Stream<AgentEvents.Event<Tools>, E | DurabilityError, R> =>
   Stream.unwrap(
     Effect.sync(() => {
       const pending: Pending = {
@@ -44,7 +44,7 @@ const compaction = (
   session: Session,
   pending: Pending,
   event: Extract<AgentEvents.Lifecycle, { readonly _tag: 'Compacted' }>,
-): Effect.Effect<void> =>
+): Effect.Effect<void, DurabilityError> =>
   Effect.gen(function* () {
     yield* session.append(flush(pending));
 

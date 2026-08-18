@@ -10,8 +10,12 @@ import { Stop } from '../src/stop.js';
 // indirectly through the loop — the combinators, the boundary cases, and the
 // short-circuiting were all unpinned.
 
-const call = (name: string): Response.ToolCallPartEncoded =>
-  ({ type: 'tool-call', id: 'c1', name, params: {} }) as never;
+const call = (name: string): Response.ToolCallPartEncoded => ({
+  type: 'tool-call',
+  id: 'c1',
+  name,
+  params: {},
+});
 
 const state = (over: Partial<Stop.State<Record<string, never>>> = {}) => ({
   step: 1,

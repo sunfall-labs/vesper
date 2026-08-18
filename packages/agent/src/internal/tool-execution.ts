@@ -1,6 +1,6 @@
 import { Context } from 'effect';
 
-import type { AgentLog } from '../log.js';
+import type * as AgentLog from '../log.js';
 
 /** The recorded tool invocation currently evaluating its handler. */
 export interface Execution {

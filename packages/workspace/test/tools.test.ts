@@ -75,7 +75,7 @@ const call = <Name extends keyof Tools>(
   directory: string,
   name: Name,
   params: Tool.Parameters<Tools[Name]>,
-  policy: Layer.Layer<WorkspaceTools.CommandPolicy> = WorkspaceTools.defaultCommandPolicyLayer,
+  policy: Layer.Layer<WorkspaceTools.CommandPolicy> = WorkspaceTools.shellEnabledCommandPolicyLayer,
 ): Effect.Effect<Outcome> =>
   Effect.gen(function* () {
     const kit = yield* WorkspaceTools.toolkit;
@@ -96,6 +96,7 @@ const call = <Name extends keyof Tools>(
       Layer.mergeAll(
         WorkspaceTools.rootLayer(directory),
         policy,
+        WorkspaceTools.defaultFilesystemPolicyLayer,
         localLayer.pipe(Layer.provide(NodeServices.layer)),
       ),
     ),
@@ -146,6 +147,10 @@ const _readNeedsDriver: Has<
   Services<'read_file'>
 > = 'yes';
 const _readNeedsRoot: Has<WorkspaceTools.Root, Services<'read_file'>> = 'yes';
+const _readNeedsFilesystemPolicy: Has<
+  WorkspaceTools.FilesystemPolicy,
+  Services<'read_file'>
+> = 'yes';
 
 const _writeNeedsDriver: Has<
   WorkspaceDriver.Service,
@@ -181,6 +186,10 @@ const _runNeedsDriver: Has<
 const _runNeedsRoot: Has<WorkspaceTools.Root, Services<'run_shell'>> = 'yes';
 const _runNeedsPolicy: Has<
   WorkspaceTools.CommandPolicy,
+  Services<'run_shell'>
+> = 'yes';
+const _runNeedsFilesystemPolicy: Has<
+  WorkspaceTools.FilesystemPolicy,
   Services<'run_shell'>
 > = 'yes';
 
@@ -798,6 +807,19 @@ describe('list_files', () => {
     }),
   );
 
+  it.live('refuses to follow a symlink by default', () =>
+    Effect.gen(function* () {
+      const directory = workspace();
+      writeFileSync(join(directory, 'outside.txt'), 'secret');
+      symlinkSync(join(directory, 'outside.txt'), join(directory, 'link.txt'));
+
+      expectFailure(
+        yield* call(directory, 'read_file', { path: 'link.txt' }),
+        'SymlinkDenied',
+      );
+    }),
+  );
+
   it.live('caps the result at `limit` and says it was capped', () =>
     Effect.gen(function* () {
       const directory = workspace();
@@ -1079,6 +1101,21 @@ describe('search_files', () => {
 // ---------------------------------------------------------------- run_shell
 
 describe('run_shell', () => {
+  it.live('is disabled by the default command policy', () =>
+    Effect.gen(function* () {
+      const directory = workspace();
+      expectFailure(
+        yield* call(
+          directory,
+          'run_shell',
+          { command: 'echo should-not-run' },
+          WorkspaceTools.defaultCommandPolicyLayer,
+        ),
+        'ShellDisabled',
+      );
+    }),
+  );
+
   it.live('runs a command and separates its streams', () =>
     Effect.gen(function* () {
       const directory = workspace();
@@ -1159,6 +1196,7 @@ describe('run_shell', () => {
           WorkspaceTools.commandPolicyLayer({
             defaultTimeoutMs: 100,
             maxTimeoutMs: 100,
+            allowShell: true,
           }),
         ),
         'CommandTimedOut',

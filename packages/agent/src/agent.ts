@@ -4,8 +4,8 @@ import {
   Effect,
   Exit,
   Layer,
-  Match,
   Option,
+  Predicate,
   Ref,
   Schema,
   Stream,
@@ -27,17 +27,22 @@ import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
 import { foldToResult } from './internal/fold-to-result.js';
-import { protocolOf, register } from './internal/protocol.js';
+import {
+  hasProtocol,
+  register as registerProtocol,
+} from './internal/protocol.js';
+import type { AgentProtocol } from './internal/protocol.js';
 import type { Interception } from './interception.js';
-import { AgentLog } from './log.js';
+import * as AgentLog from './log.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
-import { Skill } from './skill.js';
+import * as AgentSkill from './skill.js';
 import { Stop } from './stop.js';
 import { AgentState } from './state.js';
 import { Subagent } from './subagent.js';
 import { SubagentRuntime } from './subagent-runtime.js';
+import * as Observability from './internal/observability.js';
 
 /** Recoverable failures produced by an unrecorded agent run. */
 export type RunFailure = AiError.AiError | RunPolicy.RunPolicyExhausted;
@@ -76,6 +81,10 @@ export const TypeId: TypeId = '~sunfall/vesper/Agent';
  */
 export type TypeId = '~sunfall/vesper/Agent';
 
+const ChildTypeId: unique symbol = Symbol.for(
+  '@sunfall/vesper-agent/Agent/Child',
+);
+
 /**
  * The declarative shape an agent is built from.
  *
@@ -89,8 +98,8 @@ export type TypeId = '~sunfall/vesper/Agent';
 export interface Definition<
   Name extends string,
   Tools extends Record<string, Tool.Any>,
-  Children extends ReadonlyArray<Named> = readonly [],
-  Skills extends ReadonlyArray<Skill.Skill> = readonly [],
+  Children extends ReadonlyArray<Child> = readonly [],
+  Skills extends ReadonlyArray<AgentSkill.Skill> = readonly [],
   StopR = never,
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
 > {
@@ -275,6 +284,7 @@ export interface Instance<
   out StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
 > {
   readonly [TypeId]: TypeId;
+  readonly [ChildTypeId]: typeof ChildTypeId;
   readonly name: Name;
   readonly revision: LogVocabulary.AgentRevision;
   /** Shown to a parent when this agent is used as a subagent. */
@@ -288,7 +298,6 @@ export interface Instance<
    */
   readonly instructions: string;
   readonly state: StateDefinition | undefined;
-
   /**
    * Observe the run as it happens: model output arrives token by token,
    * across every turn, with turn boundaries marked.
@@ -376,7 +385,7 @@ export interface Instance<
    *
    * `interception.ts` is where the seams and their permissions are written
    * down; this is only how one is attached. Attaching is the same shape of
-   * decision as `Conversation.withRecordingPolicy`: a call whose consequence is in the
+   * decision as `Conversation.make` with a recording policy: a call whose consequence is in the
    * type — the agent this returns requires whatever the interceptor's seams
    * require, and an agent that never calls it requires exactly what it
    * required before and runs the same code, because the loop checks for the
@@ -423,23 +432,24 @@ export interface Instance<
  * `Subagent.Services` recover a child's real services instead of collapsing
  * them, which is what makes delegation propagate requirements at all.
  *
- * Declared structurally rather than as `extends Instance<Name, any, R, …>`.
- * Effect declares `Tool.Any` by instantiation, but that convention is for
- * types used as *constraints*; this one is an inference source, and TypeScript
- * will not recover `R` through interface inheritance — every child built with
- * `withHandlers` fell back to `unknown`. {@link Any} keeps the instantiated
- * form, because it really is only ever a constraint.
+ * This branded view is declared directly rather than as `extends
+ * Instance<Name, any, R, …>`. TypeScript will not recover `R` through that
+ * interface inheritance, while the brand ensures only agents created by
+ * {@link make} can cross this boundary.
  *
  * @category utility types
  * @since 0.1.0
  */
-export interface Named<Name extends string = string, R = unknown> {
+export interface Child<
+  Name extends string = string,
+  R = unknown,
+  RunError extends RunFailure | CompatibilityError = RunFailure,
+> {
+  readonly [ChildTypeId]: typeof ChildTypeId;
   readonly name: Name;
   readonly revision: LogVocabulary.AgentRevision;
   readonly description?: string | undefined;
-  readonly run: (
-    input: Prompt.RawInput,
-  ) => Effect.Effect<Result, RunFailure, R>;
+  readonly run: (input: Prompt.RawInput) => Effect.Effect<Result, RunError, R>;
 }
 
 /**
@@ -452,24 +462,16 @@ export interface Named<Name extends string = string, R = unknown> {
  *
  * Use it only as a constraint — for a collection whose members' requirements
  * genuinely do not matter to the caller. `Definition.subagents` deliberately
- * does *not*: it captures a tuple of {@link Named} instead, because erasing a
+ * does *not*: it captures a tuple of {@link Child} instead, because erasing a
  * child's `R` there produced a parent that compiled without its children's
  * services and failed the first time the model delegated.
  *
  * @category utility types
  * @since 0.1.0
  */
-// oxlint-disable-next-line no-explicit-any
-export interface Any extends Instance<
-  any,
-  any,
-  any,
-  any,
-  any,
-  any,
-  any,
-  AgentState.AnyDefinition | undefined
-> {}
+export interface Any extends Child<string, unknown> {
+  readonly [TypeId]: TypeId;
+}
 
 /**
  * Extract an agent's name.
@@ -566,19 +568,50 @@ export type Error<A> =
  * @since 0.1.0
  */
 export const isAgent = (u: unknown): u is Any =>
-  typeof u === 'object' &&
-  u !== null &&
-  (u as { readonly [TypeId]?: unknown })[TypeId] === TypeId &&
-  protocolOf<unknown, RunFailure>(u) !== undefined;
+  Predicate.isObject(u) &&
+  u[TypeId] === TypeId &&
+  ChildTypeId in u &&
+  hasProtocol<unknown, RunFailure, Record<string, Tool.Any>>(u);
 
 /** Every tool visible to the model after declarative capabilities compile. */
 export type CompiledTools<
   Own extends Record<string, Tool.Any>,
-  Children extends ReadonlyArray<Named>,
-  Skills extends ReadonlyArray<Skill.Skill>,
-> = Own & Subagent.Tools<Children> & Skill.Tools<Skills>;
+  Children extends ReadonlyArray<Child>,
+  Skills extends ReadonlyArray<AgentSkill.Skill>,
+> = Own & Subagent.Tools<Children> & AgentSkill.Tools<Skills>;
 
-type ChildNames<Children extends ReadonlyArray<Named>> = {
+/**
+ * Preserve the declarative capability types while assembling their runtime
+ * toolkits. The overload is the construction contract: generated subagent and
+ * skill toolkits are derived from the same `Children` and `Skills` values, and
+ * `validateGeneratedToolNames` rejects collisions before this is called.
+ */
+function mergeCompiledToolkit<
+  Tools extends Record<string, Tool.Any>,
+  const Children extends ReadonlyArray<Child>,
+  const Skills extends ReadonlyArray<AgentSkill.Skill>,
+>(
+  own: Toolkit.Toolkit<Tools>,
+  children: Children | undefined,
+  skills: Skills | undefined,
+  delegation: Toolkit.Any | undefined,
+  loader: Toolkit.Any | undefined,
+): Toolkit.Toolkit<CompiledTools<Tools, Children, Skills>>;
+function mergeCompiledToolkit(
+  own: Toolkit.Any,
+  _children: ReadonlyArray<Child> | undefined,
+  _skills: ReadonlyArray<AgentSkill.Skill> | undefined,
+  delegation: Toolkit.Any | undefined,
+  loader: Toolkit.Any | undefined,
+): Toolkit.Any {
+  return Toolkit.merge(
+    own,
+    ...(delegation === undefined ? [] : [delegation]),
+    ...(loader === undefined ? [] : [loader]),
+  );
+}
+
+type ChildNames<Children extends ReadonlyArray<Child>> = {
   [K in keyof Children]: Children[K]['name'];
 };
 
@@ -593,8 +626,8 @@ type HasDuplicates<Values extends ReadonlyArray<string>> =
     : false;
 
 type GeneratedNames<
-  Children extends ReadonlyArray<Named>,
-  Skills extends ReadonlyArray<Skill.Skill>,
+  Children extends ReadonlyArray<Child>,
+  Skills extends ReadonlyArray<AgentSkill.Skill>,
 > =
   | (number extends Children['length']
       ? never
@@ -603,12 +636,12 @@ type GeneratedNames<
       ? never
       : Skills extends readonly []
         ? never
-        : typeof Skill.TOOL_NAME);
+        : typeof AgentSkill.TOOL_NAME);
 
 type DefinitionCollision<
   Own extends Record<string, Tool.Any>,
-  Children extends ReadonlyArray<Named>,
-  Skills extends ReadonlyArray<Skill.Skill>,
+  Children extends ReadonlyArray<Child>,
+  Skills extends ReadonlyArray<AgentSkill.Skill>,
 > =
   HasDuplicates<ChildNames<Children>> extends true
     ? 'duplicate subagent names'
@@ -618,8 +651,8 @@ type DefinitionCollision<
 
 type CollisionFreeDefinition<
   Own extends Record<string, Tool.Any>,
-  Children extends ReadonlyArray<Named>,
-  Skills extends ReadonlyArray<Skill.Skill>,
+  Children extends ReadonlyArray<Child>,
+  Skills extends ReadonlyArray<AgentSkill.Skill>,
 > = [DefinitionCollision<Own, Children, Skills>] extends [never]
   ? unknown
   : {
@@ -637,8 +670,8 @@ type CollisionFreeDefinition<
 export const make = <
   const Name extends string,
   Tools extends Record<string, Tool.Any>,
-  const Children extends ReadonlyArray<Named> = readonly [],
-  const Skills extends ReadonlyArray<Skill.Skill> = readonly [],
+  const Children extends ReadonlyArray<Child> = readonly [],
+  const Skills extends ReadonlyArray<AgentSkill.Skill> = readonly [],
   StopR = never,
   const StateDefinition extends AgentState.AnyDefinition | undefined =
     undefined,
@@ -694,8 +727,8 @@ export const make = <
   // when it is done wrong — a tool advertised with no handler, or a handler
   // for a tool nobody advertised — surfaces as a confusing model-facing
   // error rather than a compile error.
-  const children = (definition.subagents ?? []) as Children;
-  const skills = (definition.skills ?? []) as Skills;
+  const children = definition.subagents ?? [];
+  const skills = definition.skills ?? [];
 
   for (const child of children) {
     if (!isAgent(child)) {
@@ -716,27 +749,20 @@ export const make = <
   const delegationToolNames = new Set(
     children.map((child) => Subagent.toolName(child.name)),
   );
-  const loader = skills.length > 0 ? Skill.loader(skills) : undefined;
+  const loader = skills.length > 0 ? AgentSkill.loader(skills) : undefined;
 
-  // `Toolkit.merge` wants `Toolkit.Any`, and while `Children` is generic TS
-  // cannot reduce `ToolsByName<ToolTuple<Children>>` to `Record<string,
-  // Tool.Any>` — the mapped tuple is structurally a tuple until it is
-  // instantiated. The widening is safe: every element of `ToolTuple` is a
-  // `Tool` by construction. The merged result is asserted back to `Tools`
-  // regardless, so callers see only their own tools' requirements while the
-  // agent's own layer serves the rest.
-  const toolkit = Toolkit.merge(
+  const toolkit = mergeCompiledToolkit(
     definition.toolkit,
-    ...(delegation === undefined
-      ? []
-      : [delegation.toolkit as unknown as Toolkit.Any]),
-    ...(loader === undefined ? [] : [loader.toolkit]),
-  ) as unknown as Toolkit.Toolkit<RuntimeTools>;
+    definition.subagents,
+    definition.skills,
+    delegation?.toolkit,
+    loader?.toolkit,
+  );
 
   // The skill catalog joins the system prompt: a model cannot ask for a
   // skill it does not know exists. The bodies stay out, so the prefix is
   // still identical across turns and still cacheable.
-  const catalog = Skill.catalog(skills);
+  const catalog = AgentSkill.catalog(skills);
   const instructions =
     catalog === ''
       ? definition.instructions
@@ -759,9 +785,9 @@ export const make = <
   // A closure over `wiring` is how that stays lexical — both the session and
   // the interceptor are passed in, not looked up, so nothing here depends on
   // what happens to be in the context.
-  const entryFor = (
-    wiring: Wiring,
-  ): Entry<RuntimeTools, BaseRequires, RunFailure> => {
+  const entryFor = <InterceptorR>(
+    wiring: Wiring<InterceptorR>,
+  ): Entry<RuntimeTools, BaseRequires | InterceptorR, RunFailure> => {
     const session = wiring.session;
     const interceptor = wiring.interceptor;
     const runtime = wiring.runtime;
@@ -778,7 +804,7 @@ export const make = <
     ): Effect.Effect<
       Toolkit.WithHandler<RuntimeTools>,
       never,
-      Tool.HandlersFor<RuntimeTools>
+      Tool.HandlersFor<RuntimeTools> | InterceptorR
     > =>
       ToolDispatch.gate(toolkit, {
         agent: definition.name,
@@ -843,7 +869,7 @@ export const make = <
     ): Stream.Stream<
       AgentEvents.Event<RuntimeTools>,
       RunFailure,
-      WithOwnHandlers<RuntimeTools>
+      WithOwnHandlers<RuntimeTools> | InterceptorR
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
@@ -861,6 +887,10 @@ export const make = <
             });
           }
           if (runtime !== undefined) yield* runtime.modelCall;
+          // Count attempts at the provider boundary, including calls that
+          // fail before producing a part. Token counters are updated only
+          // once a provider finish part reports usage below.
+          yield* Observability.modelCall;
           const remaining =
             runtime === undefined ? undefined : yield* runtime.remainingMillis;
           const asked = chat
@@ -883,44 +913,57 @@ export const make = <
                     ),
               ),
               Stream.tap(({ encodedPart }) =>
-                Effect.sync(() => {
+                Effect.gen(function* () {
                   seen.started = true;
                   observe(seen, encodedPart);
-                }).pipe(
-                  Effect.andThen(
-                    runtime === undefined
-                      ? Effect.void
-                      : runtime.remainingMillis,
-                  ),
-                ),
+                  if (encodedPart.type === 'finish') {
+                    yield* Observability.usage({
+                      input: encodedPart.usage.inputTokens.total ?? 0,
+                      output: encodedPart.usage.outputTokens.total ?? 0,
+                    });
+                  }
+                  if (runtime !== undefined) yield* runtime.remainingMillis;
+                }),
               ),
               Stream.map(
                 ({ part, encodedPart }): AgentEvents.Event<RuntimeTools> => ({
                   _tag: 'Part',
                   step,
-                  // The toolkit resolver preserves the same runtime tool map;
-                  // this assertion only repairs the conditional generic
-                  // relationship after Chat has decoded the provider part.
+                  // Effect's mapped tool-part union is not idempotent under
+                  // this compiled intersection, although the toolkit value is
+                  // exactly the one Chat used to decode the part.
                   part: part as Response.StreamPart<RuntimeTools>,
                   encodedPart,
                 }),
               ),
             );
-          return remaining === undefined
-            ? asked
-            : asked.pipe(
-                Stream.timeoutOrElse({
-                  duration: remaining,
-                  orElse: () =>
-                    Stream.fail(
-                      RunPolicyRuntime.error({
-                        limit: 'deadline',
-                        used: runPolicy.wallClockMillis,
-                        maximum: runPolicy.wallClockMillis,
-                      }),
-                    ),
-                }),
-              );
+          const model =
+            remaining === undefined
+              ? asked
+              : asked.pipe(
+                  Stream.timeoutOrElse({
+                    duration: remaining,
+                    orElse: () =>
+                      Stream.fail(
+                        RunPolicyRuntime.error({
+                          limit: 'deadline',
+                          used: runPolicy.wallClockMillis,
+                          maximum: runPolicy.wallClockMillis,
+                        }),
+                      ),
+                  }),
+                );
+          return model.pipe(
+            Stream.withSpan('Agent.model', {
+              attributes: {
+                'vesper.agent.step': step,
+                'vesper.model.attempt': attempt,
+                ...(session === undefined
+                  ? {}
+                  : { 'vesper.conversation.id': session.conversationId }),
+              },
+            }),
+          );
         }),
       ) as Stream.Stream<
         AgentEvents.Event<RuntimeTools>,
@@ -938,7 +981,7 @@ export const make = <
       step: number,
       totals: Stop.Usage,
       input: Prompt.RawInput,
-    ): Effect.Effect<Prompt.RawInput, RunFailure> =>
+    ): Effect.Effect<Prompt.RawInput, RunFailure, InterceptorR> =>
       interceptor?.beforeTurn === undefined
         ? Effect.succeed(input)
         : Effect.map(
@@ -1004,9 +1047,12 @@ export const make = <
       LanguageModel.LanguageModel
     > =>
       Effect.gen(function* () {
-        if (runtime === undefined)
+        if (runtime === undefined) {
+          yield* Observability.modelCall;
           return yield* Compaction.compact(chat, policy);
+        }
         yield* runtime.modelCall;
+        yield* Observability.modelCall;
         const remaining = yield* runtime.remainingMillis;
         return yield* Effect.timeoutOrElse(Compaction.compact(chat, policy), {
           duration: remaining,
@@ -1030,7 +1076,7 @@ export const make = <
     ): Stream.Stream<
       AgentEvents.Event<RuntimeTools>,
       RunFailure,
-      WithOwnHandlers<RuntimeTools> | StopR
+      WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
@@ -1376,12 +1422,20 @@ export const make = <
           return opened.pipe(
             Stream.concat(guarded.pipe(Stream.interruptWhen(responsiveCancel))),
             Stream.concat(decide),
+            Stream.withSpan('Agent.turn', {
+              attributes: {
+                'vesper.agent.step': step,
+                ...(session === undefined
+                  ? {}
+                  : { 'vesper.conversation.id': session.conversationId }),
+              },
+            }),
           );
         }),
       ) as Stream.Stream<
         AgentEvents.Event<RuntimeTools>,
         RunFailure,
-        WithOwnHandlers<RuntimeTools> | StopR
+        WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
       >;
 
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
@@ -1395,7 +1449,7 @@ export const make = <
             ) as Stream.Stream<
               AgentEvents.Event<RuntimeTools>,
               RunFailure,
-              WithOwnHandlers<RuntimeTools> | StopR
+              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
           }
           if (session !== undefined && (yield* session.hasPendingToolCalls)) {
@@ -1598,14 +1652,14 @@ export const make = <
                   }).streamIn(chat, effective) as Stream.Stream<
                     AgentEvents.Event<RuntimeTools>,
                     RunFailure,
-                    WithOwnHandlers<RuntimeTools> | StopR
+                    WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
                   >;
                 }),
               ),
             ) as Stream.Stream<
               AgentEvents.Event<RuntimeTools>,
               RunFailure,
-              WithOwnHandlers<RuntimeTools> | StopR
+              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
           }
           const usage = yield* Ref.make<Stop.Usage>(
@@ -1652,7 +1706,7 @@ export const make = <
 
     return provideEntry({ stream, streamIn }, layer) as Entry<
       RuntimeTools,
-      BaseRequires,
+      BaseRequires | InterceptorR,
       RunFailure
     >;
   };
@@ -1681,8 +1735,8 @@ export const make = <
 
 const validateGeneratedToolNames = (
   own: Toolkit.Any,
-  children: ReadonlyArray<Named>,
-  skills: ReadonlyArray<Skill.Skill>,
+  children: ReadonlyArray<Child>,
+  skills: ReadonlyArray<AgentSkill.Skill>,
 ): void => {
   const ownNames = new Set(Object.keys(own.tools));
   const generated = new Set<string>();
@@ -1704,7 +1758,7 @@ const validateGeneratedToolNames = (
   for (const child of children) {
     reserve(Subagent.toolName(child.name), `subagent "${child.name}"`);
   }
-  if (skills.length > 0) reserve(Skill.TOOL_NAME, 'skills');
+  if (skills.length > 0) reserve(AgentSkill.TOOL_NAME, 'skills');
 };
 
 const stateErrorMetadata = (error: AgentState.Error) => {
@@ -1730,6 +1784,13 @@ const stateErrorMetadata = (error: AgentState.Error) => {
         stateId: error.stateId,
         stateVersion: error.stateVersion,
         cause: error.cause,
+      };
+    case 'DurabilityError':
+      return {
+        tag: error._tag,
+        source: error.source,
+        operation: error.operation,
+        reason: error.reason,
       };
   }
 };
@@ -1823,12 +1884,16 @@ const provideEntry = <
  * outside — the dispatch seam needs both, the turn boundary needs the session,
  * the provider call needs the interceptor.
  */
-interface Wiring {
+interface Wiring<InterceptorRequires = never> {
   readonly session: AgentLog.Session | undefined;
-  readonly interceptor: Interception.Interceptor | undefined;
+  readonly interceptor:
+    | Interception.Interceptor<InterceptorRequires>
+    | undefined;
   readonly runtime?: RunPolicyRuntime.Runtime | undefined;
   readonly startRun?:
-    | ((input: Prompt.RawInput) => Effect.Effect<void>)
+    | ((
+        input: Prompt.RawInput,
+      ) => Effect.Effect<void, AgentLog.DurabilityError>)
     | undefined;
   readonly initialUsage?: Stop.Usage | undefined;
   readonly lastTurn?: ContextWindow.TurnUsage | undefined;
@@ -1857,6 +1922,7 @@ interface Parts<
   OwnTools extends Record<string, Tool.Any>,
   RuntimeTools extends Record<string, Tool.Any>,
   BaseRequires,
+  InterceptorRequires,
   RunError,
   StateDefinition extends AgentState.AnyDefinition | undefined,
 > {
@@ -1867,11 +1933,13 @@ interface Parts<
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
   readonly instructions: string;
   readonly state: StateDefinition | undefined;
-  readonly interceptor: Interception.Interceptor | undefined;
+  readonly interceptor:
+    | Interception.Interceptor<InterceptorRequires>
+    | undefined;
   readonly runPolicy: RunPolicy.Limits;
-  readonly entry: (
-    wiring: Wiring,
-  ) => Entry<RuntimeTools, BaseRequires, RunError>;
+  readonly entry: <WiringRequires>(
+    wiring: Wiring<WiringRequires>,
+  ) => Entry<RuntimeTools, BaseRequires | WiringRequires, RunError>;
 }
 
 /**
@@ -1895,6 +1963,7 @@ const fromParts = <
     OwnTools,
     RuntimeTools,
     BaseRequires,
+    InterceptorRequires,
     RunError,
     StateDefinition
   >,
@@ -1914,8 +1983,8 @@ const fromParts = <
   // agent.
   const wiring = (
     session: AgentLog.Session | undefined,
-    options?: Omit<Wiring, 'session' | 'interceptor'>,
-  ): Wiring => ({
+    options?: Omit<Wiring<InterceptorRequires>, 'session' | 'interceptor'>,
+  ): Wiring<InterceptorRequires> => ({
     session,
     interceptor: parts.interceptor,
     ...options,
@@ -1927,6 +1996,7 @@ const fromParts = <
   const runStream = <A, E, R>(
     stream: Stream.Stream<A, E, R>,
     recorded: boolean,
+    session?: AgentLog.Session,
   ) =>
     stream.pipe(
       Stream.withSpan('Agent.run', {
@@ -1934,6 +2004,11 @@ const fromParts = <
           'vesper.agent.name': parts.name,
           'vesper.agent.revision': parts.revision,
           'vesper.run.recorded': recorded,
+          ...(session === undefined
+            ? {}
+            : {
+                'vesper.conversation.id': session.conversationId,
+              }),
         },
       }),
     );
@@ -2040,13 +2115,10 @@ const fromParts = <
     input: Prompt.RawInput,
     runtime?: RunPolicyRuntime.Runtime,
   ) =>
-    runStream(
-      Stream.unwrap(
-        Effect.map(opener, (session) =>
-          continuingStream(session, input, runtime),
-        ),
+    Stream.unwrap(
+      Effect.map(opener, (session) =>
+        runStream(continuingStream(session, input, runtime), true, session),
       ),
-      true,
     );
 
   const agent: Instance<
@@ -2060,6 +2132,7 @@ const fromParts = <
     StateDefinition
   > = {
     [TypeId]: TypeId,
+    [ChildTypeId]: ChildTypeId,
     name: parts.name,
     revision: parts.revision,
     description: parts.description,
@@ -2097,7 +2170,7 @@ const fromParts = <
         StateDefinition
       >({
         ...parts,
-        interceptor: interceptor as unknown as Interception.Interceptor,
+        interceptor,
       }),
 
     withHandlers: (handlers) => {
@@ -2122,18 +2195,23 @@ const fromParts = <
         StateDefinition
       >({
         ...parts,
-        entry: (incoming: Wiring) =>
+        entry: <WiringRequires>(incoming: Wiring<WiringRequires>) =>
           provideEntry(parts.entry(incoming), own) as Entry<
             RuntimeTools,
-            WithoutOwnHandlers<BaseRequires, OwnTools>,
+            WithoutOwnHandlers<BaseRequires, OwnTools> | WiringRequires,
             RunError
           >,
       });
     },
   };
-  register(agent, {
+  const protocol: AgentProtocol<
+    BaseRequires | InterceptorRequires,
+    RunError,
+    RuntimeTools
+  > = {
     stream: (conversationId, input, options) => {
       const compatibility = { agent: parts.name, revision: parts.revision };
+      const policy = options?.policy;
       const opener =
         options?.forkConversationId === undefined
           ? AgentLog.open(conversationId, {
@@ -2154,12 +2232,12 @@ const fromParts = <
             );
       return streamFrom(
         Effect.flatMap(opener, (session) =>
-          options?.policy === undefined
+          policy === undefined
             ? Effect.succeed(session)
-            : Effect.map(Effect.context<never>(), (context) =>
+            : Effect.map(Effect.context(), (context) =>
                 AgentLog.withRecordingPolicy(
                   session,
-                  RecordingPolicyRuntime.compile(options.policy!, context),
+                  RecordingPolicyRuntime.compile(policy, context),
                 ),
               ),
         ),
@@ -2187,13 +2265,17 @@ const fromParts = <
               const completed = session.completed;
               return completed === undefined
                 ? foldToResult(
-                    runStream(continuingStream(session, input, runtime), true),
+                    runStream(
+                      continuingStream(session, input, runtime),
+                      true,
+                      session,
+                    ),
                   )
                 : Effect.succeed(completed);
             }),
           ),
-  });
-  return agent;
+  };
+  return registerProtocol(agent, protocol);
 };
 
 interface TurnState {
@@ -2229,40 +2311,36 @@ const observe = (state: TurnState, part: Response.StreamPartEncoded): void => {
   }
 };
 
-type EncodableStreamPart = Response.StreamPart<Record<string, Tool.Any>>;
-type EncodableToolCall = Extract<
-  EncodableStreamPart,
+type EncodableToolCall<Tools extends Record<string, Tool.Any>> = Extract<
+  Response.StreamPart<Tools>,
   { readonly type: 'tool-call' }
 >;
-type EncodableToolResult = Extract<
-  EncodableStreamPart,
+type EncodableToolResult<Tools extends Record<string, Tool.Any>> = Extract<
+  Response.StreamPart<Tools>,
   { readonly type: 'tool-result' }
 >;
-type EncodableFile = Extract<EncodableStreamPart, { readonly type: 'file' }>;
-
-type PartEncodingStrategy = 'identity' | 'tool-call' | 'tool-result' | 'file';
-
-const classifyPart = Match.type<EncodableStreamPart>().pipe(
-  Match.discriminatorsExhaustive('type')({
-    'text-start': () => 'identity' as const,
-    'text-delta': () => 'identity' as const,
-    'text-end': () => 'identity' as const,
-    'reasoning-start': () => 'identity' as const,
-    'reasoning-delta': () => 'identity' as const,
-    'reasoning-end': () => 'identity' as const,
-    'tool-params-start': () => 'identity' as const,
-    'tool-params-delta': () => 'identity' as const,
-    'tool-params-end': () => 'identity' as const,
-    'tool-call': () => 'tool-call' as const,
-    'tool-result': () => 'tool-result' as const,
-    'tool-approval-request': () => 'identity' as const,
-    file: () => 'file' as const,
-    source: () => 'identity' as const,
-    'response-metadata': () => 'identity' as const,
-    finish: () => 'identity' as const,
-    error: () => 'identity' as const,
-  }),
-);
+type EncodableFile<Tools extends Record<string, Tool.Any>> = Extract<
+  Response.StreamPart<Tools>,
+  { readonly type: 'file' }
+>;
+const StandardPart = Schema.Union([
+  Response.TextStartPart,
+  Response.TextDeltaPart,
+  Response.TextEndPart,
+  Response.ReasoningStartPart,
+  Response.ReasoningDeltaPart,
+  Response.ReasoningEndPart,
+  Response.ToolParamsStartPart,
+  Response.ToolParamsDeltaPart,
+  Response.ToolParamsEndPart,
+  Response.ToolApprovalRequestPart,
+  Response.DocumentSourcePart,
+  Response.UrlSourcePart,
+  Response.ResponseMetadataPart,
+  Response.FinishPart,
+  Response.ErrorPart,
+]);
+type StandardPart = typeof StandardPart.Type;
 
 const encodePartError = (error: Schema.SchemaError): AiError.AiError =>
   new AiError.AiError({
@@ -2271,16 +2349,15 @@ const encodePartError = (error: Schema.SchemaError): AiError.AiError =>
     reason: AiError.InvalidOutputError.fromSchemaError(error),
   });
 
-const encodeIdentity = <Tools extends Record<string, Tool.Any>>(
-  part: Response.StreamPart<Tools>,
+const encodeStandardPart = (
+  part: StandardPart,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
-  // The remaining part variants currently have no transformation in this
-  // module. Keep the cast local to this explicit identity branch so a new
-  // Response part must still be added to the exhaustive classifier above.
-  Effect.succeed(part as Response.StreamPartEncoded);
+  Schema.encodeEffect(StandardPart)(part).pipe(
+    Effect.mapError(encodePartError),
+  );
 
 const encodeToolCall = <Tools extends Record<string, Tool.Any>>(
-  part: EncodableToolCall,
+  part: EncodableToolCall<Tools>,
   toolkit: Toolkit.WithHandler<Tools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   const tool = Object.hasOwn(toolkit.tools, part.name)
@@ -2320,8 +2397,8 @@ const encodeToolCall = <Tools extends Record<string, Tool.Any>>(
   );
 };
 
-const encodeToolResult = (
-  part: EncodableToolResult,
+const encodeToolResult = <Tools extends Record<string, Tool.Any>>(
+  part: EncodableToolResult<Tools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
   // The decoded result can be a substituted value that deliberately does not
   // satisfy the tool schema. `encodedResult` is already the exact
@@ -2336,15 +2413,15 @@ const encodeToolResult = (
     preliminary: part.preliminary,
   });
 
-const encodeFile = (
-  part: EncodableFile,
+const encodeFile = <Tools extends Record<string, Tool.Any>>(
+  part: EncodableFile<Tools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
   Schema.encodeEffect(Response.FilePart)(part).pipe(
     Effect.mapError(encodePartError),
   );
 
-const assertPartEncodingStrategy = (strategy: never): never => {
-  throw new Error(`Unhandled response part encoding strategy: ${strategy}`);
+const assertPartEncodingStrategy = (part: never): never => {
+  throw new Error(`Unhandled response part encoding strategy: ${String(part)}`);
 };
 
 /** Encode a decoded model part before it reaches observers or persistence. */
@@ -2352,20 +2429,30 @@ const encodePart = <Tools extends Record<string, Tool.Any>>(
   part: Response.StreamPart<Tools>,
   toolkit: Toolkit.WithHandler<Tools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
-  const strategy: PartEncodingStrategy = classifyPart(
-    part as EncodableStreamPart,
-  );
-  switch (strategy) {
-    case 'identity':
-      return encodeIdentity(part);
+  switch (part.type) {
     case 'tool-call':
-      return encodeToolCall(part as EncodableToolCall, toolkit);
+      return encodeToolCall(part, toolkit);
     case 'tool-result':
-      return encodeToolResult(part as EncodableToolResult);
+      return encodeToolResult(part);
     case 'file':
-      return encodeFile(part as EncodableFile);
+      return encodeFile(part);
+    case 'text-start':
+    case 'text-delta':
+    case 'text-end':
+    case 'reasoning-start':
+    case 'reasoning-delta':
+    case 'reasoning-end':
+    case 'tool-params-start':
+    case 'tool-params-delta':
+    case 'tool-params-end':
+    case 'tool-approval-request':
+    case 'source':
+    case 'response-metadata':
+    case 'finish':
+    case 'error':
+      return encodeStandardPart(part);
     default:
-      return assertPartEncodingStrategy(strategy);
+      return assertPartEncodingStrategy(part);
   }
 };
 
@@ -2403,15 +2490,12 @@ const describeProviderError = (
   readonly description: string;
   readonly metadata: Record<string, unknown>;
 } => {
-  if (typeof error !== 'object' || error === null) {
+  if (!Predicate.isObject(error)) {
     return { description: String(error), metadata: partMetadata ?? {} };
   }
 
-  const value = error as Record<string, unknown>;
-  const metadata =
-    typeof value.metadata === 'object' && value.metadata !== null
-      ? (value.metadata as Record<string, unknown>)
-      : {};
+  const value = error;
+  const metadata = Predicate.isObject(value.metadata) ? value.metadata : {};
   const code =
     value.code ??
     (typeof value.type === 'string' && value.type !== 'error'

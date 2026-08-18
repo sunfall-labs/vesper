@@ -12,23 +12,30 @@ import {
   Option,
   Ref,
   Schema,
+  SchemaIssue,
+  SchemaTransformation,
   Stream,
 } from 'effect';
 import {
+  AiError,
   LanguageModel,
   type Prompt,
   type Response,
   Tool,
   Toolkit,
 } from 'effect/unstable/ai';
-import { Workflow, WorkflowEngine } from 'effect/unstable/workflow';
+import {
+  DurableDeferred,
+  Workflow,
+  WorkflowEngine,
+} from 'effect/unstable/workflow';
 import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import { AgentWorkflow } from '../src/workflow.js';
 
 type LayerR<T> = T extends Layer.Layer<infer _A, infer _E, infer R> ? R : never;
@@ -151,6 +158,11 @@ const _pendingRejectsWrongValues = (pending: ProofPending) => {
   // @ts-expect-error fail accepts only the error schema's decoded type
   pending.fail({ reason: 404 });
 };
+
+const _waitEncodingErrorsAreTyped: Has<
+  AiError.AiError,
+  EffE<ReturnType<typeof proofWait>>
+> = 'yes';
 
 const WorkflowRequest = AgentWorkflow.request({
   submissionId: Schema.String,
@@ -532,6 +544,58 @@ describe('AgentWorkflow', () => {
       'AgentWorkflow step "invalid-step" produced an empty key',
     );
   });
+
+  it('rejects empty wait keys before creating a durable effect', () => {
+    const invalid = AgentWorkflow.wait({
+      name: 'invalid-wait',
+      key: () => '',
+      request: Schema.Void,
+      success: Schema.Void,
+      error: Schema.Never,
+    });
+
+    expect(() => invalid(undefined)).toThrow(
+      'AgentWorkflow wait "invalid-wait" produced an empty key',
+    );
+  });
+
+  it.effect(
+    'keeps wait result encoding failures in the typed error channel',
+    () =>
+      Effect.gen(function* () {
+        const EncodeFailure = Schema.String.pipe(
+          Schema.decodeTo(
+            Schema.Number,
+            SchemaTransformation.transformOrFail<number, string>({
+              decode: (value) => Effect.succeed(Number(value)),
+              encode: () =>
+                Effect.fail(
+                  new SchemaIssue.InvalidValue({ message: 'encode failed' }),
+                ),
+            }),
+          ),
+        );
+        const approval = AgentWorkflow.wait({
+          name: 'encoding-wait',
+          key: () => 'request',
+          request: Schema.Void,
+          success: EncodeFailure,
+          error: Schema.Never,
+        });
+        const token = new DurableDeferred.TokenParsed({
+          workflowName: 'EncodingWorkflow',
+          executionId: 'encoding-execution',
+          deferredName: 'encoding-wait/request',
+        }).asToken;
+
+        const result = yield* Effect.exit(approval.complete(token, 1));
+        if (Exit.isSuccess(result)) {
+          return expect.unreachable('invalid result encoding must fail');
+        }
+        const error = Exit.findErrorOption(result);
+        expect(Option.getOrThrow(error)).toBeInstanceOf(Schema.SchemaError);
+      }).pipe(Effect.provide(WorkflowEngine.layerMemory)),
+  );
 
   it.effect(
     'derives stable external idempotency keys from workflow execution and step name',

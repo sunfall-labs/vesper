@@ -2,11 +2,11 @@ import { PgClient } from '@effect/sql-pg';
 import { Crypto, Effect, Layer, Option, Schema, Stream } from 'effect';
 import { SqlError } from 'effect/unstable/sql';
 
-import { LogStore } from './log-store.js';
-import { LogOffset } from './offset.js';
-import { RecordBatch } from './record-batch.js';
-import { LogVocabulary } from './vocabulary.js';
-import * as AppendDecision from './append-decision.js';
+import { LogStoreAdapter } from '@sunfall/vesper-log/adapter';
+import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
+import { RecordBatch } from '@sunfall/vesper-log/record-batch';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 // Postgres log store.
 //
@@ -60,6 +60,20 @@ import * as AppendDecision from './append-decision.js';
 
 /** A row as PostgreSQL hands it back. */
 type Row = Readonly<Record<string, unknown>>;
+
+/** The database operations the log store actually uses. */
+export interface Client {
+  readonly unsafe: (
+    sql: string,
+    params?: ReadonlyArray<unknown>,
+  ) => Effect.Effect<ReadonlyArray<Row>, SqlError.SqlError>;
+  readonly withTransaction: <R, E, A>(
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | SqlError.SqlError, R>;
+  readonly listen: (
+    channel: string,
+  ) => Stream.Stream<string, SqlError.SqlError>;
+}
 
 export interface Options {
   /**
@@ -240,7 +254,7 @@ const metaOf = (path: string, row: StreamRow): LogStore.StreamMeta => ({
 });
 
 export const make = (
-  client: PgClient.PgClient,
+  client: Client,
   options?: Options,
 ): Effect.Effect<LogStore.Interface, never, Crypto.Crypto> =>
   Effect.map(Crypto.Crypto, (crypto) => {
@@ -281,7 +295,7 @@ export const make = (
       identity: string,
     ) {
       const rows = yield* client
-        .unsafe<Row>(
+        .unsafe(
           `INSERT INTO ${streams} (path, identity)
          VALUES ($1, $2)
          ON CONFLICT (path) DO NOTHING
@@ -323,7 +337,7 @@ export const make = (
         ),
       );
       const rows = yield* client
-        .unsafe<Row>(
+        .unsafe(
           `UPDATE ${streams}
          SET epoch = epoch + 1,
              producer_id = $2,
@@ -346,7 +360,7 @@ export const make = (
       if (row === undefined) {
         if (expected !== undefined) {
           const existing = yield* client
-            .unsafe<Row>(`SELECT 1 FROM ${streams} WHERE path = $1`, [path])
+            .unsafe(`SELECT 1 FROM ${streams} WHERE path = $1`, [path])
             .pipe(Effect.mapError(asLogStoreError(path, 'acquire')));
           if (existing[0] !== undefined) {
             return yield* Effect.fail(
@@ -397,7 +411,7 @@ export const make = (
     const append = Effect.fn('LogStore.append')(function* (
       input: LogStore.AppendInput,
     ) {
-      const validated = yield* AppendDecision.validateInput(input);
+      const validated = yield* LogStoreAdapter.validateInput(input);
 
       return yield* client
         .withTransaction(
@@ -409,7 +423,7 @@ export const make = (
             // bottom then advances, so the two have to be one critical section
             // per stream — which producer fencing already implies, since a
             // stream has one writer at a time by construction.
-            const locked = yield* client.unsafe<Row>(
+            const locked = yield* client.unsafe(
               `SELECT identity, epoch, producer_id, next_sequence,
                     next_producer_sequence, last_fingerprint, last_offset
              FROM ${streams}
@@ -440,7 +454,7 @@ export const make = (
               ),
             );
 
-            const decision = yield* AppendDecision.decide(validated, {
+            const decision = yield* LogStoreAdapter.decide(validated, {
               epoch: state.epoch,
               producerId: state.producerId,
               nextSequence: state.nextProducerSequence,
@@ -538,7 +552,7 @@ export const make = (
       // lateral side pages it. `limit + 1` answers `upToDate` without a second
       // count — a backend that guesses `false` here makes `Tail` spin.
       const rows = yield* client
-        .unsafe<Row>(
+        .unsafe(
           `SELECT r.record_offset, r.conversation_id, r.record_timestamp, r.record
          FROM ${streams} s
          LEFT JOIN LATERAL (
@@ -609,7 +623,7 @@ export const make = (
       );
       const before = Option.getOrUndefined(normalized.before);
       const rows = yield* client
-        .unsafe<Row>(
+        .unsafe(
           `SELECT r.record_offset, r.conversation_id, r.record_timestamp, r.record
            FROM ${streams} s
            LEFT JOIN LATERAL (
@@ -658,7 +672,7 @@ export const make = (
 
     const meta = Effect.fn('LogStore.meta')(function* (path: string) {
       const rows = yield* client
-        .unsafe<Row>(
+        .unsafe(
           `SELECT identity, epoch, producer_id, next_sequence,
                 next_producer_sequence, last_fingerprint, last_offset
          FROM ${streams}
@@ -718,4 +732,4 @@ export const layer = (
     ),
   );
 
-export * as LogStorePg from './layer-pg.js';
+export * as LogStorePg from './layer.js';

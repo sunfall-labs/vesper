@@ -10,8 +10,9 @@ npm install @sunfall/vesper-attachments effect@4.0.0-rc.109
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-attachments/attachment-store`, `/ref`, and `/layer-memory`.
 
-`@sunfall/vesper-attachments/attachment-store-contract` is test-only. Backend
-authors must install `vitest@^4.1.9` as a dev dependency before importing it.
+The repository keeps a shared conformance suite beside the store interface so
+every built-in backend is held to the same behaviour. It is test
+infrastructure, not part of the published package interface.
 
 See the [Vesper repository](https://github.com/sunfall-labs/vesper#readme) for
 project status and package documentation.

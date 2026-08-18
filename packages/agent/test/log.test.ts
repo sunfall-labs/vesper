@@ -24,7 +24,7 @@ import {
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),

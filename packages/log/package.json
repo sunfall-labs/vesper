@@ -1,12 +1,11 @@
 {
   "name": "@sunfall/vesper-log",
   "version": "0.1.0-alpha.1",
-  "description": "An append-only conversation log with per-record offsets, producer fencing, tailing, and memory + Postgres backends.",
+  "description": "An append-only conversation log with per-record offsets, producer fencing, tailing, and an in-memory adapter.",
   "keywords": [
     "append-only",
     "effect",
     "event-sourcing",
-    "postgres",
     "typescript"
   ],
   "homepage": "https://github.com/sunfall-labs/vesper#readme",
@@ -22,7 +21,6 @@
   },
   "files": [
     "dist",
-    "migrations",
     "LICENSE"
   ],
   "type": "module",
@@ -47,6 +45,10 @@
       "types": "./dist/record-batch.d.ts",
       "default": "./dist/record-batch.js"
     },
+    "./adapter": {
+      "types": "./dist/adapter.d.ts",
+      "default": "./dist/adapter.js"
+    },
     "./log-store": {
       "types": "./dist/log-store.d.ts",
       "default": "./dist/log-store.js"
@@ -58,44 +60,19 @@
     "./layer-memory": {
       "types": "./dist/layer-memory.d.ts",
       "default": "./dist/layer-memory.js"
-    },
-    "./log-store-contract": {
-      "types": "./dist/log-store-contract.d.ts",
-      "default": "./dist/log-store-contract.js"
-    },
-    "./layer-pg": {
-      "types": "./dist/layer-pg.d.ts",
-      "default": "./dist/layer-pg.js"
-    },
-    "./pg-client": {
-      "types": "./dist/pg-client.d.ts",
-      "default": "./dist/pg-client.js"
-    },
-    "./migrations/001-initial.sql": "./migrations/001-initial.sql"
+    }
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109",
-    "vitest": ">=4.1.9 <5"
-  },
-  "peerDependenciesMeta": {
-    "vitest": {
-      "optional": true
-    }
+    "effect": "4.0.0-rc.109"
   },
   "devDependencies": {
     "effect": "catalog:",
-    "@testcontainers/postgresql": "^11.14.0",
-    "@types/pg": "^8.20.0",
     "vitest": "^4.1.9"
-  },
-  "dependencies": {
-    "@effect/sql-pg": "4.0.0-rc.109",
-    "pg": "8.20.0"
   }
 }

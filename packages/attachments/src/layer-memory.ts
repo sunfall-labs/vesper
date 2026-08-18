@@ -65,14 +65,7 @@ const service = (blobs: MutableHashMap.MutableHashMap<string, Uint8Array>) =>
       return stored.value.slice();
     });
 
-    // `Effect.fn` with a plain function rather than a generator: the lookup is
-    // synchronous and has nothing to yield, and an empty generator trips
-    // `require-yield`.
-    const has = Effect.fn('AttachmentStore.has')((ref: AttachmentRef.Ref) =>
-      Effect.sync(() => MutableHashMap.has(blobs, ref.digest)),
-    );
-
-    return AttachmentStore.Service.of({ put, get, has });
+    return AttachmentStore.Service.of({ put, get });
   });
 
 /**

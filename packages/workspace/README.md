@@ -33,7 +33,7 @@ const agent = Agent.make({
 agent
   .run(input)
   .pipe(
-    Effect.provide(workspaceWithApplicationTools.defaultLayer),
+    Effect.provide(workspaceWithApplicationTools.layer),
     Effect.provide(WorkspaceTools.rootLayer('/work')),
     Effect.provide(
       WorkspaceLocal.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -41,7 +41,7 @@ agent
   );
 ```
 
-The layers are explicit: `defaultLayer` installs the standard tool handlers and
+The layers are explicit: `layer` installs the standard tool handlers and
 default shell policy, `rootLayer` selects the visible workspace root, and the
 driver layer selects where filesystem and shell operations run. Use
 `WorkspaceTools` directly only for advanced lower-level toolkit, handler, root,
@@ -50,8 +50,9 @@ or command-policy wiring.
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-workspace/agent`, `/driver`, `/layer-local`, and `/tools`.
 
-`@sunfall/vesper-workspace/workspace-contract` is test-only. Driver authors
-must install `vitest@^4.1.9` as a dev dependency before importing it.
+The repository keeps a shared conformance suite beside the driver interface so
+every built-in driver is held to the same behaviour. It is test
+infrastructure, not part of the published package interface.
 
 See the [workspace guide](https://github.com/sunfall-labs/vesper/blob/main/docs/workspace.md)
 for usage and security boundaries.

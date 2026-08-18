@@ -1,10 +1,13 @@
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import {
+  ConversationId as ConversationIdSchema,
+  LogVocabulary,
+} from '@sunfall/vesper-log/vocabulary';
 import type { Crypto, Schedule, SchemaIssue } from 'effect';
 import { Effect, Exit, Layer, Option, Schema, Stream } from 'effect';
-import { type Prompt, Tool } from 'effect/unstable/ai';
+import { AiError, type Prompt, Tool } from 'effect/unstable/ai';
 import {
   Activity,
   DurableDeferred,
@@ -174,7 +177,9 @@ interface OptionsBase<
   readonly idempotencyKey: (payload: Payload['Type']) => string;
   readonly error: Error;
   readonly mapError: (error: AgentError) => Error['Type'];
-  readonly suspendedRetrySchedule?: Schedule.Schedule<any, unknown> | undefined;
+  readonly suspendedRetrySchedule?:
+    | Schedule.Schedule<unknown, unknown>
+    | undefined;
 }
 
 /** Options for the ordinary plain-text workflow request. */
@@ -227,7 +232,7 @@ export interface StepOptions<
     input: Input,
   ) => Effect.Effect<Success['Type'], Error['Type'], Requires>;
   readonly interruptRetryPolicy?:
-    | Schedule.Schedule<any, import('effect').Cause.Cause<unknown>>
+    | Schedule.Schedule<unknown, import('effect').Cause.Cause<unknown>>
     | undefined;
 }
 
@@ -262,14 +267,21 @@ export class WaitTokenError extends Schema.TaggedError<WaitTokenError>(
 )('WaitTokenError', { message: Schema.String }) {}
 
 /** Ambiguous durable state for one independently keyed external wait. */
-export class WaitStateError extends Schema.TaggedError<WaitStateError>(
-  '@sunfall/vesper-agent/AgentWorkflow/WaitStateError',
-)('WaitStateError', {
+const WaitStateErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly conversationId: typeof ConversationIdSchema;
+  readonly wait: typeof Schema.String;
+  readonly key: typeof Schema.String;
+} = {
   message: Schema.String,
-  conversationId: LogVocabulary.ConversationId,
+  conversationId: ConversationIdSchema,
   wait: Schema.String,
   key: Schema.String,
-}) {}
+};
+
+export class WaitStateError extends Schema.TaggedError<WaitStateError>(
+  '@sunfall/vesper-agent/AgentWorkflow/WaitStateError',
+)('WaitStateError', WaitStateErrorFields) {}
 
 /** Invalid source/target identity for a workflow branch or fork. */
 export class PathError extends Schema.TaggedError<PathError>(
@@ -318,11 +330,13 @@ export interface Wait<
     request: Request['Type'],
   ): Effect.Effect<
     Success['Type'],
-    Error['Type'],
+    Error['Type'] | AiError.AiError,
     | WorkflowEngine.WorkflowEngine
     | WorkflowInstance
     | ToolExecution.Current
     | Request['EncodingServices']
+    | Success['EncodingServices']
+    | Error['EncodingServices']
     | Success['DecodingServices']
     | Error['DecodingServices']
   >;
@@ -392,11 +406,31 @@ export const wait = <
   }
   const error = options.error;
   const prefix = `${options.name}/`;
+  const keyFor = (request: Request['Type']) => {
+    const key = options.key(request);
+    if (key.length === 0) {
+      throw new Error(
+        `AgentWorkflow wait "${options.name}" produced an empty key`,
+      );
+    }
+    return key;
+  };
   const deferredFor = (key: string) =>
     DurableDeferred.make(`${prefix}${encodeURIComponent(key)}`, {
       success: options.success,
       error,
     });
+  const encodeFailure =
+    (stage: string, value: unknown) => (issue: Schema.SchemaError) =>
+      new AiError.AiError({
+        module: 'AgentWorkflow',
+        method: `${options.name}.${stage}`,
+        reason: new AiError.ToolResultEncodingError({
+          toolName: options.name,
+          toolResult: value,
+          description: issue.message,
+        }),
+      });
   const fromToken = (token: string) =>
     Effect.gen(function* () {
       const parsed = yield* Schema.decodeUnknownEffect(
@@ -416,10 +450,10 @@ export const wait = <
       };
     });
 
-  const run = (request: Request['Type']) =>
-    Effect.gen(function* () {
+  const run = (request: Request['Type']) => {
+    const key = keyFor(request);
+    return Effect.gen(function* () {
       const execution = yield* ToolExecution.Current;
-      const key = options.key(request);
       const deferred = deferredFor(key);
       const token = yield* DurableDeferred.token(deferred);
       const engine = yield* WorkflowEngine.WorkflowEngine;
@@ -428,7 +462,9 @@ export const wait = <
         if (!execution.session.hasCompletedWait(token)) {
           const result = yield* Schema.encodeUnknownEffect(
             Schema.toCodecJson(deferred.exitSchema),
-          )(existing.value).pipe(Effect.orDie);
+          )(existing.value).pipe(
+            Effect.mapError(encodeFailure('resume', existing.value)),
+          );
           yield* execution.session.append([
             {
               _tag: 'ToolWaitCompleted',
@@ -446,7 +482,7 @@ export const wait = <
 
       const encoded = yield* Schema.encodeUnknownEffect(options.request)(
         request,
-      ).pipe(Effect.orDie);
+      ).pipe(Effect.mapError(encodeFailure('request', request)));
       yield* execution.session.append([
         {
           _tag: 'ToolSuspended',
@@ -459,6 +495,7 @@ export const wait = <
       ]);
       return yield* DurableDeferred.await(deferred);
     });
+  };
 
   type SuspendedEnvelope = Conversation.WaitEnvelope & {
     readonly record: Extract<
@@ -519,7 +556,7 @@ export const wait = <
             offset: envelope.offset,
             toolCallId: envelope.record.id,
             toolName: envelope.record.name,
-            key: options.key(request),
+            key: keyFor(request),
             token: envelope.record.token,
             request,
           }),
@@ -569,12 +606,24 @@ export const wait = <
 
   const complete = (token: string, value: Success['Type']) =>
     Effect.flatMap(fromToken(token), ({ deferred, token }) =>
-      DurableDeferred.succeed(deferred, { token, value }),
+      Schema.encodeUnknownEffect(Schema.toCodecJson(options.success))(
+        value,
+      ).pipe(
+        Effect.asVoid,
+        Effect.andThen(DurableDeferred.succeed(deferred, { token, value })),
+      ),
     );
 
   const fail = (token: string, failure: Error['Type']) =>
     Effect.flatMap(fromToken(token), ({ deferred, token }) =>
-      DurableDeferred.fail(deferred, { token, error: failure }),
+      Schema.encodeUnknownEffect(Schema.toCodecJson(options.error))(
+        failure,
+      ).pipe(
+        Effect.asVoid,
+        Effect.andThen(
+          DurableDeferred.fail(deferred, { token, error: failure }),
+        ),
+      ),
     );
 
   const selectPending = (
@@ -616,8 +665,13 @@ export const wait = <
     PendingWait<Request['Type'], Success, Error>,
     LogStore.LogStoreError | Schema.SchemaError | WaitStateError,
     LogStore.Service | Request['DecodingServices']
-  > =>
-    Effect.gen(function* () {
+  > => {
+    if (key.length === 0) {
+      throw new Error(
+        `AgentWorkflow wait "${options.name}" received an empty key`,
+      );
+    }
+    return Effect.gen(function* () {
       const initial = yield* snapshot(conversation);
       const existing = yield* selectPending(
         initial.items,
@@ -641,6 +695,7 @@ export const wait = <
       if (Option.isNone(found)) return yield* Effect.never;
       return bindPending(found.value);
     });
+  };
 
   return Object.assign(run, {
     waitName: options.name,

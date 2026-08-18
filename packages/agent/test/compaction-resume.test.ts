@@ -66,11 +66,7 @@ const agent = Agent.make({
   toolkit: Toolkit.make(),
   compaction: POLICY,
 });
-const conversation = Conversation.withRecordingPolicy(
-  agent,
-  CONVERSATION,
-  POLICY,
-);
+const conversation = Conversation.make(agent, CONVERSATION, POLICY);
 
 const run = <A, E>(
   effect: Effect.Effect<

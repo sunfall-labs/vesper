@@ -62,10 +62,6 @@
       "types": "./dist/interception.d.ts",
       "default": "./dist/interception.js"
     },
-    "./unstable/log": {
-      "types": "./dist/unstable/log.d.ts",
-      "default": "./dist/unstable/log.js"
-    },
     "./recording-policy": {
       "types": "./dist/recording-policy.d.ts",
       "default": "./dist/recording-policy.js"
@@ -107,9 +103,10 @@
     "access": "public"
   },
   "scripts": {
-    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
+    "@sunfall/vesper-attachments": "0.1.0-alpha.1",
     "@sunfall/vesper-log": "0.1.0-alpha.1"
   },
   "peerDependencies": {

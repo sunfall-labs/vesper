@@ -13,7 +13,7 @@ import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
-import type { AgentLog } from '../src/log.js';
+import type * as AgentLog from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { Stop } from '../src/stop.js';
@@ -206,7 +206,7 @@ const State = AgentState.make({
   id: 'assertion-state',
   version: '1',
   schema: Schema.Struct({ count: Schema.Number }),
-  initial: { count: 0 },
+  initial: () => ({ count: 0 }),
 });
 const TransformedState = AgentState.make({
   id: 'assertion-transformed-state',
@@ -227,7 +227,7 @@ const TransformedState = AgentState.make({
       }),
     ),
   ),
-  initial: 0,
+  initial: () => 0,
 });
 const _directTransformedCodecRequired: Has<
   StateCodecService,
@@ -237,7 +237,7 @@ const stateTool = Tool.make('stateful', {
   description: 'state-aware handler',
   parameters: Schema.Struct({}),
   success: Schema.Struct({ count: Schema.Number }),
-  failure: AgentState.error,
+  failure: AgentState.Error,
   dependencies: AgentState.dependencies(State, Db),
 });
 const stateful = Agent.make({
@@ -264,7 +264,7 @@ const transformedStateful = Agent.make({
       description: 'transformed state handler',
       parameters: Schema.Struct({}),
       success: Schema.Number,
-      failure: AgentState.error,
+      failure: AgentState.Error,
       dependencies: AgentState.dependencies(
         TransformedState,
         StateCodecService,
@@ -320,6 +320,12 @@ const _exactForkError: Exact<
 > = true;
 // @ts-expect-error Session/runtime invocation is not public Agent API.
 handled.runInSession;
+// @ts-expect-error Durable protocol invocation is internal to Conversation.
+handled.streamConversation;
+// @ts-expect-error Durable protocol invocation is internal to delegation.
+handled.runWithSession;
+// @ts-expect-error Child is the only public subagent view.
+type _NoLegacyNamed = Agent.Named;
 const _noPublicDelegationHandler: 'handler' extends keyof typeof Subagent
   ? false
   : true = true;
@@ -354,12 +360,15 @@ class SecondPolicy extends Context.Service<
 const recordingPolicy = {
   prompt: (prompt: unknown) => Effect.as(FirstPolicy, prompt),
 } satisfies RecordingPolicy.Policy<FirstPolicy>;
-const filteredRecording = Conversation.withRecordingPolicy(
+const filteredRecording = Conversation.make(
   handled,
   'filtered',
   recordingPolicy,
 );
 const _noAmbiguousRecordingConstructor: 'recording' extends keyof typeof Conversation
+  ? false
+  : true = true;
+const _noSecondRecordingConstructor: 'withRecordingPolicy' extends keyof typeof Conversation
   ? false
   : true = true;
 const _exactFilteredRecording: Exact<
@@ -377,6 +386,9 @@ const _noRunRuntime: 'Runtime' extends keyof typeof RunPolicy ? false : true =
   true;
 const _noRunCreate: 'create' extends keyof typeof RunPolicy ? false : true =
   true;
+const _noLowercaseStateError: 'error' extends keyof typeof AgentState
+  ? false
+  : true = true;
 const firstInterceptor = {
   beforeTurn: () =>
     Effect.gen(function* () {

@@ -17,7 +17,7 @@
   "type": "module",
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
-    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
     "effect": "catalog:",
@@ -26,6 +26,7 @@
     "@effect/platform-node": "catalog:",
     "@sunfall/vesper-agent": "workspace:*",
     "@sunfall/vesper-log": "workspace:*",
+    "@sunfall/vesper-log-pg": "workspace:*",
     "@sunfall/vesper-workspace": "workspace:*"
   }
 }

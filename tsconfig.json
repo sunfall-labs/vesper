@@ -6,6 +6,9 @@
       "path": "./packages/log"
     },
     {
+      "path": "./packages/log-pg"
+    },
+    {
       "path": "./packages/agent"
     },
     {
@@ -13,6 +16,9 @@
     },
     {
       "path": "./packages/attachments"
+    },
+    {
+      "path": "./packages/mcp"
     }
   ]
 }

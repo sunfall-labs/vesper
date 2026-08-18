@@ -41,26 +41,16 @@
     "./layer-memory": {
       "types": "./dist/layer-memory.d.ts",
       "default": "./dist/layer-memory.js"
-    },
-    "./attachment-store-contract": {
-      "types": "./dist/attachment-store-contract.d.ts",
-      "default": "./dist/attachment-store-contract.js"
     }
   },
   "publishConfig": {
     "access": "public"
   },
   "scripts": {
-    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109",
-    "vitest": ">=4.1.9 <5"
-  },
-  "peerDependenciesMeta": {
-    "vitest": {
-      "optional": true
-    }
+    "effect": "4.0.0-rc.109"
   },
   "devDependencies": {
     "effect": "catalog:",

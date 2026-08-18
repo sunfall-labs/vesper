@@ -1,20 +1,19 @@
 import { Deferred, Effect, Fiber, Layer, Option, Stream } from 'effect';
 import { describe, expect, it } from 'vitest';
 
-import { LogStore } from './log-store.js';
-import { LogOffset } from './offset.js';
-import { ConversationRecord } from './record.js';
-import { RecordBatch } from './record-batch.js';
-import { Tail } from './tail.js';
-import { LogVocabulary } from './vocabulary.js';
+import { LogStore } from '../src/log-store.js';
+import { LogOffset } from '../src/offset.js';
+import { ConversationRecord } from '../src/record.js';
+import { RecordBatch } from '../src/record-batch.js';
+import { Tail } from '../src/tail.js';
+import { LogVocabulary } from '../src/vocabulary.js';
 
 // The behaviour every LogStore backend must have, expressed once.
 //
-// Per `docs/contributing.md` this lives in the package that owns the
-// interface. Anything implementing `LogStore` already depends on
-// `@sunfall/vesper-log`, so importing the suite from here cannot cycle, whereas a
-// shared testkit package would have to depend on the packages that depend on
-// it.
+// Per `docs/contributing.md` this lives in the test tree of the package that
+// owns the interface. Every built-in adapter imports it here; it is not part of
+// the published interface. A shared testkit package would have to depend on the
+// packages that depend on it, creating a cycle for no additional leverage.
 //
 // Run it against every backend:
 //
@@ -58,8 +57,8 @@ const texts = (envelopes: ReadonlyArray<ConversationRecord.Envelope>) =>
       : envelope.record._tag,
   );
 
-export interface ContractOptions<E, R> {
-  readonly layer: Layer.Layer<LogStore.Service, E, R>;
+export interface ContractOptions<E> {
+  readonly layer: Layer.Layer<LogStore.Service, E>;
   /**
    * The same backend, with `changes(path)` failing.
    *
@@ -73,22 +72,17 @@ export interface ContractOptions<E, R> {
    */
   readonly layerWithFailingChanges?: (
     path: string,
-  ) => Layer.Layer<LogStore.Service, E, R>;
+  ) => Layer.Layer<LogStore.Service, E>;
 }
 
-export const logStoreContract = <E, R>(
+export const logStoreContract = <E>(
   name: string,
-  options: ContractOptions<E, R>,
+  options: ContractOptions<E>,
 ): void => {
   const runIn = <A>(
-    layer: Layer.Layer<LogStore.Service, E, R>,
+    layer: Layer.Layer<LogStore.Service, E>,
     effect: Effect.Effect<A, unknown, LogStore.Service>,
-  ): Promise<A> =>
-    Effect.runPromise(
-      effect.pipe(
-        Effect.provide(layer as Layer.Layer<LogStore.Service>),
-      ) as Effect.Effect<A>,
-    );
+  ): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(layer)));
 
   const run = <A>(
     effect: Effect.Effect<A, unknown, LogStore.Service>,
@@ -459,7 +453,8 @@ export const logStoreContract = <E, R>(
                 .pipe(Effect.result),
               store
                 .readBackwards('invalid-backwards', {
-                  before: 'malformed' as unknown as LogOffset.Offset,
+                  // @ts-expect-error Exercise runtime validation at the untrusted boundary.
+                  before: 'malformed',
                 })
                 .pipe(Effect.result),
             ]);
@@ -892,7 +887,7 @@ export const logStoreContract = <E, R>(
       cyclic.self = cyclic;
       const sparse: unknown[] = [];
       sparse.length = 1;
-      const symbolProperty = { okay: true } as Record<PropertyKey, unknown>;
+      const symbolProperty: Record<PropertyKey, unknown> = { okay: true };
       symbolProperty[Symbol('hidden')] = true;
       const lossy: ReadonlyArray<unknown> = [
         undefined,
@@ -970,10 +965,18 @@ export const logStoreContract = <E, R>(
       });
       const record = read.records[0]?.record;
       expect(record?._tag).toBe('ToolCall');
-      if (record?._tag === 'ToolCall') {
-        const stored = record.params as Record<string, unknown>;
+      if (
+        record?._tag === 'ToolCall' &&
+        typeof record.params === 'object' &&
+        record.params !== null
+      ) {
+        const stored = record.params;
         expect(Object.hasOwn(stored, '__proto__')).toBe(true);
-        expect(stored['__proto__']).toEqual({ retained: true });
+        const protoValue: unknown = Object.getOwnPropertyDescriptor(
+          stored,
+          '__proto__',
+        )?.value;
+        expect(protoValue).toEqual({ retained: true });
       }
     });
 
@@ -1019,7 +1022,8 @@ export const logStoreContract = <E, R>(
               .pipe(Effect.result),
             store
               .read('invalid-read-options', {
-                after: 'malformed' as unknown as LogOffset.Offset,
+                // @ts-expect-error Exercise runtime validation at the untrusted boundary.
+                after: 'malformed',
               })
               .pipe(Effect.result),
           ]);
@@ -1122,5 +1126,3 @@ export const logStoreContract = <E, R>(
     });
   });
 };
-
-export * as LogStoreContract from './log-store-contract.js';

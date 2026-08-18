@@ -3,7 +3,14 @@ import { resolve } from 'node:path';
 
 import { defineConfig } from 'tsdown';
 
-const packages = ['agent', 'attachments', 'log', 'workspace'] as const;
+const packages = [
+  'agent',
+  'attachments',
+  'log',
+  'log-pg',
+  'mcp',
+  'workspace',
+] as const;
 
 const packageEntries = (name: (typeof packages)[number]): string[] => {
   const manifest = JSON.parse(
@@ -41,7 +48,13 @@ export default defineConfig(
     Object.assign({}, shared, {
       name,
       cwd: `packages/${name}`,
-      entry: packageEntries(name),
+      // The private benchmark imports the built low-level log by relative
+      // path. Keep it as a build entry for complete declarations without
+      // publishing a package export that applications can depend on.
+      entry:
+        name === 'agent'
+          ? [...packageEntries(name), 'src/log.ts']
+          : packageEntries(name),
     }),
   ),
 );

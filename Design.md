@@ -78,7 +78,7 @@ user, in production.
 `Effect<A, E, R>` carries what the `Promise` carries plus the failure type and
 the requirement set, so composing a child into a parent composes their
 requirements, and the unmet one is a type error at the call site that composed
-them. `Definition.subagents` captures a tuple of `Agent.Named` rather than a
+them. `Definition.subagents` captures a tuple of `Agent.Child` rather than a
 `ReadonlyArray<Agent.Any>` precisely so that composition survives; erased, the
 whole property goes with it.
 

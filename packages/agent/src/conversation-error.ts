@@ -1,24 +1,46 @@
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import {
+  AgentRevision,
+  ConversationId,
+  ToolCallId,
+} from '@sunfall/vesper-log/vocabulary';
 import { Schema } from 'effect';
 
-/** A durable conversation cannot be opened by this agent definition. */
-export class CompatibilityError extends Schema.TaggedError<CompatibilityError>(
-  '@sunfall/vesper-agent/CompatibilityError',
-)('CompatibilityError', {
+const CompatibilityErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly expectedAgent: typeof Schema.String;
+  readonly expectedRevision: typeof Schema.String;
+  readonly persistedFormat: ReturnType<
+    typeof Schema.optionalKey<Schema.Natural>
+  >;
+  readonly persistedAgent: ReturnType<typeof Schema.optionalKey<Schema.String>>;
+  readonly persistedRevision: Schema.optionalKey<typeof AgentRevision>;
+} = {
   message: Schema.String,
   expectedAgent: Schema.String,
   expectedRevision: Schema.String,
   persistedFormat: Schema.optionalKey(Schema.Natural),
   persistedAgent: Schema.optionalKey(Schema.String),
-  persistedRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
-}) {}
+  persistedRevision: Schema.optionalKey(AgentRevision),
+};
+
+const SuspendedConversationErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly conversationId: typeof ConversationId;
+  readonly toolCallId: typeof ToolCallId;
+  readonly wait: typeof Schema.String;
+} = {
+  message: Schema.String,
+  conversationId: ConversationId,
+  toolCallId: ToolCallId,
+  wait: Schema.String,
+};
+
+/** A durable conversation cannot be opened by this agent definition. */
+export class CompatibilityError extends Schema.TaggedError<CompatibilityError>(
+  '@sunfall/vesper-agent/CompatibilityError',
+)('CompatibilityError', CompatibilityErrorFields) {}
 
 /** A branch or fork boundary would detach a wait from its workflow owner. */
 export class SuspendedConversationError extends Schema.TaggedError<SuspendedConversationError>(
   '@sunfall/vesper-agent/SuspendedConversationError',
-)('SuspendedConversationError', {
-  message: Schema.String,
-  conversationId: LogVocabulary.ConversationId,
-  toolCallId: LogVocabulary.ToolCallId,
-  wait: Schema.String,
-}) {}
+)('SuspendedConversationError', SuspendedConversationErrorFields) {}

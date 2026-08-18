@@ -2,7 +2,7 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 
-import * as AppendDecision from '../src/append-decision.js';
+import { LogStoreAdapter } from '../src/adapter.js';
 import { ConversationRecord } from '../src/record.js';
 import { LogVocabulary } from '../src/vocabulary.js';
 
@@ -19,7 +19,7 @@ const text = (value: string): ConversationRecord.Entry => ({
 const input = (
   value: string,
   producerSequence = 0,
-): AppendDecision.ValidatedInput => ({
+): LogStoreAdapter.ValidatedInput => ({
   path: 'conversation',
   producerId: producer,
   epoch,
@@ -27,10 +27,10 @@ const input = (
   records: [text(value)],
 });
 
-describe('append decision', () => {
+describe('LogStoreAdapter', () => {
   it.effect('advances a new append and recognizes its exact retry', () =>
     Effect.gen(function* () {
-      const first = yield* AppendDecision.decide(input('first'), {
+      const first = yield* LogStoreAdapter.decide(input('first'), {
         epoch,
         producerId: producer,
         nextSequence: sequence(0),
@@ -38,7 +38,7 @@ describe('append decision', () => {
       });
       expect(first).toMatchObject({ kind: 'append', nextSequence: 1 });
 
-      const retry = yield* AppendDecision.decide(input('first'), {
+      const retry = yield* LogStoreAdapter.decide(input('first'), {
         epoch,
         producerId: producer,
         nextSequence: sequence(1),
@@ -50,37 +50,37 @@ describe('append decision', () => {
 
   it.effect('distinguishes changed retries, gaps, and fenced producers', () =>
     Effect.gen(function* () {
-      const accepted = yield* AppendDecision.decide(input('first'), {
+      const accepted = yield* LogStoreAdapter.decide(input('first'), {
         epoch,
         producerId: producer,
         nextSequence: sequence(0),
         lastFingerprint: '',
       });
-      const state: AppendDecision.FencingState = {
+      const state: LogStoreAdapter.FencingState = {
         epoch,
         producerId: producer,
         nextSequence: sequence(1),
         lastFingerprint: accepted.prepared.fingerprint,
       };
 
-      const changed = yield* AppendDecision.decide(
+      const changed = yield* LogStoreAdapter.decide(
         input('changed'),
         state,
       ).pipe(Effect.flip);
       expect(changed.reason).toBe('conflict');
 
-      const gap = yield* AppendDecision.decide(input('later', 3), state).pipe(
+      const gap = yield* LogStoreAdapter.decide(input('later', 3), state).pipe(
         Effect.flip,
       );
       expect(gap.reason).toBe('gap');
 
-      const fenced = yield* AppendDecision.decide(input('stale'), {
+      const fenced = yield* LogStoreAdapter.decide(input('stale'), {
         ...state,
         epoch: LogVocabulary.Epoch.make(2),
       }).pipe(Effect.flip);
       expect(fenced.reason).toBe('fenced');
 
-      const producerConflict = yield* AppendDecision.decide(
+      const producerConflict = yield* LogStoreAdapter.decide(
         input('impostor', 1),
         {
           ...state,
@@ -93,7 +93,7 @@ describe('append decision', () => {
 
   it.effect('validates the wire input before either storage adapter runs', () =>
     Effect.gen(function* () {
-      const empty = yield* AppendDecision.validateInput({
+      const empty = yield* LogStoreAdapter.validateInput({
         path: 'conversation',
         producerId: producer,
         epoch,
@@ -102,7 +102,7 @@ describe('append decision', () => {
       }).pipe(Effect.flip);
       expect(empty.reason).toBe('empty');
 
-      const invalidSequence = yield* AppendDecision.validateInput({
+      const invalidSequence = yield* LogStoreAdapter.validateInput({
         path: 'conversation',
         producerId: producer,
         epoch,
@@ -111,7 +111,7 @@ describe('append decision', () => {
       }).pipe(Effect.flip);
       expect(invalidSequence.reason).toBe('conflict');
 
-      const invalidEpoch = yield* AppendDecision.validateInput({
+      const invalidEpoch = yield* LogStoreAdapter.validateInput({
         path: 'conversation',
         producerId: producer,
         epoch: -1 as LogVocabulary.Epoch,
@@ -120,7 +120,7 @@ describe('append decision', () => {
       }).pipe(Effect.flip);
       expect(invalidEpoch.reason).toBe('conflict');
 
-      const invalidProducer = yield* AppendDecision.validateInput({
+      const invalidProducer = yield* LogStoreAdapter.validateInput({
         path: 'conversation',
         producerId: '' as LogVocabulary.ProducerId,
         epoch,
@@ -133,7 +133,7 @@ describe('append decision', () => {
 
   it.effect('classifies an unencodable current-producer payload', () =>
     Effect.gen(function* () {
-      const unencodable: AppendDecision.ValidatedInput = {
+      const unencodable: LogStoreAdapter.ValidatedInput = {
         ...input('ignored'),
         records: [
           {
@@ -149,7 +149,7 @@ describe('append decision', () => {
           },
         ],
       };
-      const error = yield* AppendDecision.decide(unencodable, {
+      const error = yield* LogStoreAdapter.decide(unencodable, {
         epoch,
         producerId: producer,
         nextSequence: sequence(0),

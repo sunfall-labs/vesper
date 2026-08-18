@@ -12,10 +12,10 @@ import {
 } from './conversation-error.js';
 import type { AgentEvents } from './event.js';
 import { foldToResult } from './internal/fold-to-result.js';
-import { protocolOf } from './internal/protocol.js';
-import { AgentLog } from './log.js';
+import * as AgentLog from './log.js';
 import { RecordingPolicy } from './recording-policy.js';
 import { append as appendSignal } from './internal/signal-store.js';
+import { protocolOf } from './internal/protocol.js';
 
 /** Out-of-band input addressed to a durable conversation. */
 export interface Signal {
@@ -66,7 +66,8 @@ export type Error<A extends ConcreteAgent> =
   | Agent.Error<A>
   | CompatibilityError
   | SuspendedConversationError
-  | LogStore.LogStoreError;
+  | LogStore.LogStoreError
+  | AgentLog.DurabilityError;
 
 export interface Instance<
   A extends ConcreteAgent,
@@ -155,11 +156,11 @@ export interface Instance<
   >;
 }
 
-const bind = <A extends ConcreteAgent>(
+const bind = <A extends ConcreteAgent, PolicyRequires = never>(
   agent: A,
   conversationId: string,
-  policy?: RecordingPolicy.Policy<never>,
-): Instance<A> => {
+  policy?: RecordingPolicy.Policy<PolicyRequires>,
+): Instance<A, Agent.Requires<A> | PolicyRequires> => {
   const id = LogVocabulary.ConversationId.make(conversationId);
   const protocol = protocolOf<
     Agent.Requires<A>,
@@ -217,26 +218,25 @@ const bind = <A extends ConcreteAgent>(
 };
 
 /** Bind an agent to one durable conversation identity. */
-export const make = <A extends ConcreteAgent>(
+export function make<A extends ConcreteAgent>(
   agent: A,
   conversationId: string,
-): Instance<A> => bind(agent, conversationId);
-
+): Instance<A>;
 /** Bind an agent with one recording policy applied across every durable run. */
-export const withRecordingPolicy = <
-  A extends ConcreteAgent,
-  const P extends object,
->(
+export function make<A extends ConcreteAgent, const P extends object>(
   agent: A,
   conversationId: string,
   policy: P & RecordingPolicy.Policy<RecordingPolicy.Services<P>>,
-): Instance<A, Agent.Requires<A> | RecordingPolicy.Services<P>> =>
-  bind(
-    agent,
-    conversationId,
-    policy as RecordingPolicy.Policy<never>,
-  ) as Instance<A, Agent.Requires<A> | RecordingPolicy.Services<P>>;
+): Instance<A, Agent.Requires<A> | RecordingPolicy.Services<P>>;
+export function make<A extends ConcreteAgent, const P extends object>(
+  agent: A,
+  conversationId: string,
+  policy?: P & RecordingPolicy.Policy<RecordingPolicy.Services<P>>,
+): Instance<A, Agent.Requires<A> | RecordingPolicy.Services<P>> {
+  return bind(agent, conversationId, policy);
+}
 
 export { CompatibilityError, SuspendedConversationError };
+export { DurabilityError } from './log.js';
 
 export * as Conversation from './conversation.js';

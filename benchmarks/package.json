@@ -18,7 +18,8 @@
   "scripts": {
     "bench": "node --experimental-strip-types src/main.ts",
     "bench:compare:flue": "node --experimental-strip-types src/compare-flue.ts",
-    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+    "bench:workflow": "node --experimental-strip-types src/workflow-operational.ts",
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
     "@earendil-works/pi-ai": "0.83.0",

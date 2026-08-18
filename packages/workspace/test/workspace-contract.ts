@@ -1,7 +1,7 @@
 import { Duration, Effect, Fiber, Layer, Schedule } from 'effect';
 import { describe, expect, it } from 'vitest';
 
-import { WorkspaceDriver } from './driver.js';
+import { WorkspaceDriver } from '../src/driver.js';
 
 // The behaviour every WorkspaceDriver must have, expressed once.
 //
@@ -373,5 +373,3 @@ export const workspaceContract = <E>(
     });
   });
 };
-
-export * as WorkspaceContract from './workspace-contract.js';

@@ -1,4 +1,4 @@
-import { Context, Crypto, type Effect, Schema } from 'effect';
+import { Context, Crypto, Schema } from 'effect';
 import { Tool } from 'effect/unstable/ai';
 
 import type { Agent } from './agent.js';
@@ -86,13 +86,9 @@ export const toolName = <const Name extends string>(
  * no longer discarded: it becomes a child session with its own id, referenced
  * from both logs.
  */
-export const tool = <const Name extends string>(
-  child: Pick<Agent.Named<Name>, 'name' | 'description'>,
-) =>
-  Tool.make(toolName(child.name), {
-    description:
-      child.description ??
-      `Delegate a self-contained task to the ${child.name} agent.`,
+const makeTool = <const Name extends string>(name: Name, description: string) =>
+  Tool.make(name, {
+    description,
     parameters: Parameters,
     success: Success,
     failure: Schema.Union([Failure, RunPolicy.RunPolicyExhausted]),
@@ -101,6 +97,23 @@ export const tool = <const Name extends string>(
     failureMode: 'return',
   });
 
+export const tool = <const Name extends string>(
+  child: Pick<Agent.Child<Name>, 'name' | 'description'>,
+) =>
+  makeTool(
+    toolName(child.name),
+    child.description ??
+      `Delegate a self-contained task to the ${child.name} agent.`,
+  );
+
+/** Runtime form whose dynamic name lets an arbitrary child tuple build a layer. */
+export const runtimeTool = (child: Pick<Agent.Child, 'name' | 'description'>) =>
+  makeTool(
+    String(toolName(child.name)),
+    child.description ??
+      `Delegate a self-contained task to the ${child.name} agent.`,
+  );
+
 /**
  * Each child's delegation tool, positionally, so literal names survive.
  *
@@ -108,12 +121,12 @@ export const tool = <const Name extends string>(
  * what keeps `task_researcher` a literal key instead of collapsing the whole
  * record to `Record<string, Tool.Any>`.
  */
-export type ToolTuple<Children extends ReadonlyArray<Agent.Named>> = {
+export type ToolTuple<Children extends ReadonlyArray<Agent.Child>> = {
   readonly [K in keyof Children]: ReturnType<typeof tool<Children[K]['name']>>;
 };
 
 /** The generated delegation tools, keyed by their model-facing names. */
-export type Tools<Children extends ReadonlyArray<Agent.Named>> = {
+export type Tools<Children extends ReadonlyArray<Agent.Child>> = {
   [Child in Children[number] as `task_${Child['name']}`]: ReturnType<
     typeof tool<Child['name']>
   >;
@@ -131,7 +144,7 @@ export type Tools<Children extends ReadonlyArray<Agent.Named>> = {
  * @category utility types
  * @since 0.1.0
  */
-export type Services<Children extends ReadonlyArray<Agent.Named>> = [
+export type Services<Children extends ReadonlyArray<Agent.Child>> = [
   Children[number],
 ] extends [never]
   ? // No children, no inherited services. This branch is load-bearing rather
@@ -140,10 +153,7 @@ export type Services<Children extends ReadonlyArray<Agent.Named>> = [
     // inference site for `R` — so without this guard a childless agent
     // inherits `unknown`, which then swallows its whole requirement channel.
     never
-  : Children[number] extends {
-        // oxlint-disable-next-line no-explicit-any
-        readonly run: (input: any) => Effect.Effect<any, any, infer R>;
-      }
+  : Children[number] extends Agent.Child<infer _Name, infer R>
     ? Crypto.Crypto | R
     : Crypto.Crypto;
 

@@ -166,3 +166,5 @@ export const decide = (
       ),
     } satisfies AppendDecision;
   });
+
+export * as LogStoreAdapter from './adapter.js';

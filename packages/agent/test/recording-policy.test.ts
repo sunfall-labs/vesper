@@ -1,5 +1,6 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
@@ -8,7 +9,7 @@ import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
 
@@ -69,11 +70,9 @@ describe('recording policy', () => {
       });
 
       const records = yield* Effect.gen(function* () {
-        yield* Conversation.withRecordingPolicy(
-          agent,
-          conversation,
-          policy,
-        ).run('input secret');
+        yield* Conversation.make(agent, conversation, policy).run(
+          'input secret',
+        );
         const store = yield* LogStore.Service;
         return (yield* store.read(
           AgentLog.pathFor(LogVocabulary.ConversationId.make(conversation)),
@@ -161,7 +160,7 @@ describe('recording policy', () => {
                 text: 'secret',
                 source: 'operator',
                 step: 1,
-                at: '00000000000000000001' as never,
+                at: LogOffset.fromSeq(1n),
               },
               {
                 _tag: 'RunSettled' as const,

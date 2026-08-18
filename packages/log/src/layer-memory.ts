@@ -15,7 +15,7 @@ import { LogOffset } from './offset.js';
 import { ConversationRecord } from './record.js';
 import { RecordBatch } from './record-batch.js';
 import { LogVocabulary } from './vocabulary.js';
-import * as AppendDecision from './append-decision.js';
+import { LogStoreAdapter } from './adapter.js';
 
 // In-process log store.
 //
@@ -230,9 +230,9 @@ const build = (
       const appendUnlocked = Effect.fn('LogStore.append')(function* (
         input: LogStore.AppendInput,
       ) {
-        const validated = yield* AppendDecision.validateInput(input);
+        const validated = yield* LogStoreAdapter.validateInput(input);
         const state = yield* lookup(input.path, 'append');
-        const decision = yield* AppendDecision.decide(validated, {
+        const decision = yield* LogStoreAdapter.decide(validated, {
           epoch: state.epoch,
           producerId: state.producerId,
           nextSequence: LogVocabulary.ProducerSequence.make(

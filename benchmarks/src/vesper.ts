@@ -7,7 +7,7 @@
 
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
-import { AgentLog } from '@sunfall/vesper-agent/unstable/log';
+import * as AgentLog from '../../packages/agent/dist/log.js';
 import { AgentHistory } from '@sunfall/vesper-agent/history';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';

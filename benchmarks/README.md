@@ -34,6 +34,21 @@ The report deliberately keeps three kinds of evidence separate:
   `not equivalent` and `not exercised` are reported rather than inferred as
   pass or fail.
 
+The workflow operational probe is separate from latency comparisons:
+
+```bash
+nub run --filter @sunfall/vesper-benchmarks bench:workflow
+```
+
+It exercises accepted execution, durable wait suspension, completion, wake-up,
+and persisted-result re-read with `WorkflowEngine.layerMemory`. The report
+explicitly labels process crash recovery as `not-proven` because this benchmark
+does not provision the SQL-backed `ClusterWorkflowEngine` composition. The
+opt-in `AgentWorkflow` Postgres integration test covers completed-result
+reopen across separately constructed single-process runtimes when
+`RUN_POSTGRES_INTEGRATION=1` is enabled; it does not claim distributed runner
+failover.
+
 The volatile storage engines are intentionally native to each side: Vesper uses
 `LogStoreMemory`; Flue 2.0.3 uses its process-local in-memory SQLite runtime.
 Flue's benchmark provider directly implements the Provider interface with a

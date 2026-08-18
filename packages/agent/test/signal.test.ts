@@ -24,7 +24,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '../src/agent.js';
 import { Conversation, type Signal } from '../src/conversation.js';
 import * as AgentSignals from '../src/internal/signal-store.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import { Stop } from '../src/stop.js';
 
 const testLogLayer = Layer.mergeAll(

@@ -27,7 +27,7 @@ import {
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import { AgentState } from '../src/state.js';
 
 const compatibility = {
@@ -39,13 +39,13 @@ const Count = AgentState.make({
   id: 'count',
   version: '1',
   schema: Schema.Struct({ count: Schema.Number }),
-  initial: { count: 0 },
+  initial: () => ({ count: 0 }),
 });
 const SameIdCount = AgentState.make({
   id: 'count',
   version: '1',
   schema: Schema.Struct({ count: Schema.Number }),
-  initial: { count: 10 },
+  initial: () => ({ count: 10 }),
 });
 class StateCodecService extends Context.Service<
   StateCodecService,
@@ -70,7 +70,7 @@ const OffsetState = AgentState.make({
       }),
     ),
   ),
-  initial: 0,
+  initial: () => 0,
 });
 const EncodeFailureState = AgentState.make({
   id: 'encode-failure',
@@ -87,13 +87,13 @@ const EncodeFailureState = AgentState.make({
       }),
     ),
   ),
-  initial: 0,
+  initial: () => 0,
 });
 const DecodeFailureState = AgentState.make({
   id: 'decode-failure',
   version: '1',
   schema: Schema.Number,
-  initial: 0,
+  initial: () => 0,
 });
 
 const testLogLayer = Layer.mergeAll(
@@ -163,7 +163,7 @@ describe('recorded agent state', () => {
         id: '',
         version: '1',
         schema: Schema.Struct({}),
-        initial: {},
+        initial: () => ({}),
       }),
     ).toThrow(
       expect.objectContaining({
@@ -179,7 +179,7 @@ describe('recorded agent state', () => {
         description: 'Increment the recorded count.',
         parameters: Schema.Struct({}),
         success: Schema.Struct({ count: Schema.Number }),
-        failure: AgentState.error,
+        failure: AgentState.Error,
         dependencies: AgentState.dependencies(Count),
       });
       const agent = Agent.make({
@@ -258,32 +258,25 @@ describe('recorded agent state', () => {
 
   it.effect('preserves transformed codec service requirements at runtime', () =>
     Effect.gen(function* () {
-      const records: Array<{ readonly record: unknown }> = [];
-      const session = (stateHistory: ReadonlyArray<unknown>) =>
-        ({
-          stateHistory,
-          append: (next: ReadonlyArray<unknown>) =>
-            Effect.sync(() => {
-              records.push(...next.map((record) => ({ record })));
-            }),
-        }) as unknown as AgentLog.Session;
+      const session = yield* open();
       const codecService = { offset: 1 };
-      const opened = yield* AgentState.open(OffsetState, session([])).pipe(
+      const opened = yield* AgentState.open(OffsetState, session).pipe(
         Effect.provideService(StateCodecService, codecService),
       );
       yield* opened
         .set(41)
         .pipe(Effect.provideService(StateCodecService, codecService));
-      expect(records.at(-1)?.record).toMatchObject({
+      expect((yield* session.recorded).at(-1)?.record).toMatchObject({
         _tag: 'StateCheckpoint',
         value: '40',
       });
-      const restored = yield* AgentState.open(
-        OffsetState,
-        session(records as ReadonlyArray<unknown>),
-      ).pipe(Effect.provideService(StateCodecService, codecService));
+
+      const reopened = yield* AgentLog.open(conversation, { compatibility });
+      const restored = yield* AgentState.open(OffsetState, reopened).pipe(
+        Effect.provideService(StateCodecService, codecService),
+      );
       expect(yield* restored.get).toBe(41);
-    }),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('reports checkpoint decoding failures as structured errors', () =>
@@ -341,7 +334,7 @@ describe('recorded agent state', () => {
         description: 'Increment the ephemeral count.',
         parameters: Schema.Struct({}),
         success: Schema.Struct({ count: Schema.Number }),
-        failure: AgentState.error,
+        failure: AgentState.Error,
         dependencies: AgentState.dependencies(Count),
       });
       const agent = Agent.make({
@@ -412,7 +405,7 @@ describe('recorded agent state', () => {
         description: 'Set the recorded count.',
         parameters: Schema.Struct({ count: Schema.Number }),
         success: Schema.Struct({ count: Schema.Number }),
-        failure: AgentState.error,
+        failure: AgentState.Error,
         dependencies: AgentState.dependencies(Count),
       });
       const agent = Agent.make({
@@ -698,7 +691,7 @@ describe('recorded agent state', () => {
         id: 'other',
         version: '1',
         schema: Schema.Struct({ count: Schema.Number }),
-        initial: { count: 0 },
+        initial: () => ({ count: 0 }),
       });
       const result = yield* Effect.exit(AgentState.open(Other, reopened));
       expect(result._tag).toBe('Failure');
@@ -718,7 +711,7 @@ describe('recorded agent state', () => {
       id: 'other-agent-state',
       version: '7',
       schema: Schema.Struct({ count: Schema.Number }),
-      initial: { count: 0 },
+      initial: () => ({ count: 0 }),
     });
     const agent = Agent.make({
       name: compatibility.agent,
@@ -763,7 +756,7 @@ describe('recorded agent state', () => {
       id: 'invalid',
       version: '1',
       schema: Schema.Struct({ count: Schema.Number }),
-      initial: { count: 0 },
+      initial: () => ({ count: 0 }),
     });
     return Effect.gen(function* () {
       const session = yield* open();

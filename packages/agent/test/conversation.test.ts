@@ -76,11 +76,7 @@ const policy = {
 } satisfies RecordingPolicy.Policy<Redactor>;
 
 const plain = Conversation.make(agent, 'typed');
-const filtered = Conversation.withRecordingPolicy(
-  agent,
-  'typed-filtered',
-  policy,
-);
+const filtered = Conversation.make(agent, 'typed-filtered', policy);
 const storageFailure = (
   operation: LogStore.LogStoreError['operation'],
   path: string,
@@ -131,6 +127,34 @@ describe('Conversation', () => {
         );
       expect(error).toMatchObject({ reason: 'storage' });
     }),
+  );
+
+  it.effect(
+    'reports failed durable appends without turning them into defects',
+    () =>
+      Effect.gen(function* () {
+        const failing = failingStore(() => ({
+          append: ({ path }) => Effect.fail(storageFailure('append', path)),
+        }));
+        const result = yield* Conversation.make(agent, 'append-failure')
+          .run('hello')
+          .pipe(
+            Effect.provide(model),
+            Effect.provide(failing),
+            Effect.provide(NodeCrypto.layer),
+            Effect.result,
+          );
+
+        expect(result._tag).toBe('Failure');
+        if (result._tag === 'Failure') {
+          expect(result.failure).toMatchObject({
+            _tag: 'DurabilityError',
+            source: 'log',
+            operation: 'append',
+            reason: 'storage',
+          });
+        }
+      }),
   );
 
   it.effect('keeps continuation storage failures typed', () =>
@@ -250,7 +274,7 @@ describe('Conversation', () => {
     () =>
       provide(
         Effect.gen(function* () {
-          const conversation = Conversation.withRecordingPolicy(
+          const conversation = Conversation.make(
             agent,
             'policy-source',
             policy,

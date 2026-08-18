@@ -23,17 +23,21 @@ formality — read them before picking this up.
 
 ## Packages
 
-Vesper publishes four packages:
+Vesper publishes six packages:
 
-| Package                                               | What it does                                                     |
-| ----------------------------------------------------- | ---------------------------------------------------------------- |
-| [`@sunfall/vesper-agent`](packages/agent)             | The loop, typed evals, skills, recording, resumption, subagents  |
-| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory + Postgres |
-| [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                   |
-| [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                        |
+| Package                                               | What it does                                                    |
+| ----------------------------------------------------- | --------------------------------------------------------------- |
+| [`@sunfall/vesper-agent`](packages/agent)             | The loop, typed evals, skills, recording, resumption, subagents |
+| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory adapter   |
+| [`@sunfall/vesper-log-pg`](packages/log-pg)           | Opt-in PostgreSQL adapter and migration                         |
+| [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                  |
+| [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                       |
+| [`@sunfall/vesper-mcp`](packages/mcp)                 | Effect-native MCP exposure for durable agents                   |
 
-`workspace` and `attachments` are standalone: nothing in `agent` composes
-them implicitly. Applications opt into either package directly.
+`workspace` is standalone and never composed implicitly. Attachments remain a
+separate reusable package; recorded agent runs use its optional
+`AttachmentStore.Service` when one is provided and otherwise preserve inline
+prompt content.
 `WorkspaceAgent.standard` exposes the standard workspace toolkit, and
 `WorkspaceAgent.compose(applicationToolkit)` adds those tools to an application
 toolkit without hiding the required layers. `WorkspaceTools` remains the
@@ -333,7 +337,7 @@ failures the compiler catches that are otherwise silent until the model does
 the wrong thing at runtime:
 
 **A subagent's services reach its parent.** `Definition.subagents` captures a
-tuple of `Agent.Named`, not `ReadonlyArray<Agent.Any>`, so a child whose tool
+tuple of branded `Agent.Child`, not `ReadonlyArray<Agent.Any>`, so a child whose tool
 declares `dependencies: [OrderRepo]` puts `OrderRepo` in the parent's
 requirement channel with nothing declared at the parent. Erased, a parent whose
 child read a database compiled clean and died the first time the model
@@ -416,19 +420,15 @@ recorded representation without changing the values the live model and tools
 see:
 
 ```ts
-const conversation = Conversation.withRecordingPolicy(
-  supportAgent,
-  conversationId,
-  {
-    prompt: (prompt) => Redaction.redactPrompt(prompt),
-    toolParameters: (params, call) => Redaction.redactTool(call.name, params),
-    toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
-    externalRequest: (request, wait) =>
-      Redaction.redactExternalRequest(wait.wait, request),
-    signal: (signal) => Redaction.redactSignal(signal),
-    cause: (rendered) => Redaction.redactCause(rendered),
-  },
-);
+const conversation = Conversation.make(supportAgent, conversationId, {
+  prompt: (prompt) => Redaction.redactPrompt(prompt),
+  toolParameters: (params, call) => Redaction.redactTool(call.name, params),
+  toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
+  externalRequest: (request, wait) =>
+    Redaction.redactExternalRequest(wait.wait, request),
+  signal: (signal) => Redaction.redactSignal(signal),
+  cause: (rendered) => Redaction.redactCause(rendered),
+});
 ```
 
 Any Effect services those functions use are added to the returned agent's
@@ -462,11 +462,12 @@ of writing a history that never happened. A failed append is a **defect**, not
 a typed failure — continuing past one would produce a run whose result exists
 and whose history does not.
 
-Two backends implement `LogStore`: an in-memory one, and Postgres. The Postgres
-backend consumes Effect's official `PgClient`/`SqlClient`; transaction,
+Two adapters implement `LogStore`: core's in-memory adapter and the opt-in
+`@sunfall/vesper-log-pg` package. PostgreSQL consumes Effect's official
+`PgClient`/`SqlClient`; transaction,
 connection, interruption, and query lifecycles remain Effect SQL concerns. It
 never issues DDL: the schema is the application's to own and migrate. The
-authoritative DDL is published as `packages/log/migrations/001-initial.sql`;
+authoritative DDL is published as `packages/log-pg/migrations/001-initial.sql`;
 the integration harness applies that same asset. Wake-ups cross processes
 through `LISTEN`/`NOTIFY`, and its `changes` stream fails rather than going
 quiet, because a dead feed that looks healthy is indistinguishable from a
@@ -724,7 +725,7 @@ writes a run and queued signal, disposes that PostgreSQL runtime and pool, then
 creates an independently scoped runtime and pool to resume the same
 conversation. This demonstrates persistence across application resource
 replacement; it does not spawn a second OS process. Apply
-`packages/log/migrations/001-initial.sql` to the database first, then run:
+`packages/log-pg/migrations/001-initial.sql` to the database first, then run:
 
 ```bash
 OPENROUTER_API_KEY=... \

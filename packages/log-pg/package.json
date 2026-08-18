@@ -1,0 +1,65 @@
+{
+  "name": "@sunfall/vesper-log-pg",
+  "version": "0.1.0-alpha.1",
+  "description": "PostgreSQL adapter for the Vesper append-only conversation log.",
+  "keywords": [
+    "effect",
+    "event-sourcing",
+    "postgres",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/log-pg"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "LICENSE"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "exports": {
+    "./layer": {
+      "types": "./dist/layer.d.ts",
+      "default": "./dist/layer.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    },
+    "./migrations/001-initial.sql": "./migrations/001-initial.sql"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@effect/sql-pg": "4.0.0-rc.109",
+    "@sunfall/vesper-log": "0.1.0-alpha.1",
+    "pg": "8.23.0"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-rc.109"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@testcontainers/postgresql": "^11.14.0",
+    "@types/pg": "^8.20.0",
+    "effect": "catalog:",
+    "vitest": "^4.1.9"
+  }
+}

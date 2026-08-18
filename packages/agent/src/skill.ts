@@ -64,23 +64,21 @@ export const catalog = (skills: ReadonlyArray<Skill>): string =>
 
 const Success = Schema.Struct({ instructions: Schema.String });
 
-const makeTool = (names: ReadonlyArray<string>) =>
-  Tool.make(TOOL_NAME, {
+const makeTool = (names: ReadonlyArray<string>) => {
+  const name: Schema.Codec<string, string> =
+    names.length === 0 ? Schema.String : Schema.Literals(names);
+  return Tool.make(TOOL_NAME, {
     description:
       'Load the full instructions for one of the available skills. Do this ' +
       'before attempting work the skill covers.',
     parameters: Schema.Struct({
-      name: (names.length === 0
-        ? Schema.String
-        : Schema.Literals(names as [string, ...string[]])) as Schema.Codec<
-        string,
-        string
-      >,
+      name,
     }),
     success: Success,
     failure: Schema.Struct({ unknownSkill: Schema.String }),
     failureMode: 'return',
   });
+};
 
 /**
  * The loading tool and its handler.

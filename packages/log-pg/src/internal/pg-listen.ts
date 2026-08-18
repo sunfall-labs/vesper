@@ -38,17 +38,34 @@ const clientConfig = (config: PgClient.PgPoolConfig): pg.ClientConfig => ({
   connectionTimeoutMillis: config.connectTimeout
     ? Duration.toMillis(Duration.fromInputUnsafe(config.connectTimeout))
     : undefined,
-  application_name: config.applicationName ?? '@sunfall/vesper-log-listener',
+  application_name: config.applicationName ?? '@sunfall/vesper-log-pg-listener',
   types: config.types,
 });
 
+/** The listener lifecycle surface used here, kept small enough to fake fully. */
+export interface ListenerClient {
+  on(event: 'notification', listener: (message: pg.Notification) => void): this;
+  on(event: 'error', listener: (error: Error) => void): this;
+  on(event: 'end', listener: () => void): this;
+  off(
+    event: 'notification',
+    listener: (message: pg.Notification) => void,
+  ): this;
+  off(event: 'error', listener: (error: Error) => void): this;
+  off(event: 'end', listener: () => void): this;
+  connect(): Promise<unknown>;
+  query(text: string): Promise<unknown>;
+  end(): Promise<void>;
+}
+
 /** Internal corrected LISTEN implementation, injectable for lifecycle tests. */
 export const correctedListen =
-  (config: PgClient.PgPoolConfig, makeClient?: () => pg.Client) =>
+  (config: PgClient.PgPoolConfig, makeClient?: () => ListenerClient) =>
   (channel: string) =>
     Stream.callback<string, SqlError>(
       Effect.fnUntraced(function* (queue) {
-        const client = makeClient?.() ?? new pg.Client(clientConfig(config));
+        const client: ListenerClient =
+          makeClient?.() ?? new pg.Client(clientConfig(config));
         let terminal = false;
         let connectAttempted = false;
         let listening = false;

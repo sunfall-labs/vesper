@@ -26,7 +26,7 @@ import {
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
-import { AgentLog } from '../src/log.js';
+import * as AgentLog from '../src/log.js';
 import * as AgentSignals from '../src/internal/signal-store.js';
 
 const testLogLayer = Layer.mergeAll(
@@ -759,7 +759,7 @@ describe('the offset pointers in a copied prefix', () => {
           if (copied.record._tag !== 'SignalReceived')
             throw new Error('expected copied signal');
           const copiedAt = copied.record.at;
-          const delivered = yield* fork.drainSignals;
+          const delivered = (yield* fork.drainSignalsBounded(1_000)).signals;
 
           // The premise: carrying the ancestor's cursor over would park the fork
           // past its own first signal, because the fork's signal stream starts again

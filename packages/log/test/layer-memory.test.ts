@@ -4,8 +4,8 @@ import { Deferred, Effect, Fiber, Layer, Option, Stream } from 'effect';
 
 import { LogStoreMemory } from '../src/layer-memory.js';
 import { LogStore } from '../src/log-store.js';
-import { LogStoreContract } from '../src/log-store-contract.js';
 import { LogVocabulary } from '../src/vocabulary.js';
+import { logStoreContract } from './log-store-contract.js';
 
 const memoryLayer = LogStoreMemory.layer.pipe(
   Layer.provide(NodeServices.layer),
@@ -14,7 +14,7 @@ const memoryLayer = LogStoreMemory.layer.pipe(
 // The memory backend can fake a dead notification channel, so it runs the
 // whole suite including the change-feed failure case. A backend that cannot
 // skips that one and the suite says so in the test name.
-LogStoreContract.logStoreContract('memory', {
+logStoreContract('memory', {
   layer: memoryLayer,
   layerWithFailingChanges: (path) =>
     LogStoreMemory.layerFailingChanges(path).pipe(

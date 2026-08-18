@@ -1,6 +1,6 @@
-import type { Effect } from 'effect';
-import type { AiError, Prompt } from 'effect/unstable/ai';
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { Effect, Schema } from 'effect';
+import { AiError, type Prompt, type Tool } from 'effect/unstable/ai';
 
 import type { Stop } from './stop.js';
 
@@ -166,6 +166,15 @@ export interface ToolCallContext extends Run {
   readonly params: unknown;
 }
 
+/** A tool-call context decoded against one named tool's parameter schema. */
+export type TypedToolCallContext<Name extends string, Parameters> = Omit<
+  ToolCallContext,
+  'name' | 'params'
+> & {
+  readonly name: Name;
+  readonly params: Parameters;
+};
+
 /** A prior run entered this handler but recorded no outcome. */
 export interface IndeterminateToolCallContext extends ToolCallContext {}
 
@@ -243,6 +252,19 @@ export const answer = (result: unknown): ToolDecision => ({
 });
 
 /**
+ * Encode a successful replacement through one tool's own result schema.
+ *
+ * Use this in tool-specific policies when the replacement should obey the
+ * declared tool contract. {@link answer} remains the lower-level escape hatch
+ * for provider-facing policy responses that deliberately live outside it.
+ */
+export const answerFor = <S extends Schema.Constraint>(
+  tool: Tool.Any & { readonly successSchema: S },
+  result: S['Type'],
+): Effect.Effect<ToolDecision, Schema.SchemaError, S['EncodingServices']> =>
+  Schema.encodeEffect(tool.successSchema)(result).pipe(Effect.map(answer));
+
+/**
  * Do not run the tool; this is its result, and it is a failure.
  *
  * The shape an approval gate wants. A model shown a failed tool result knows
@@ -257,6 +279,13 @@ export const refuse = (result: unknown): ToolDecision => ({
   result,
   isFailure: true,
 });
+
+/** Encode a failed replacement through one tool's declared failure schema. */
+export const refuseFor = <S extends Schema.Constraint>(
+  tool: Tool.Any & { readonly failureSchema: S },
+  failure: S['Type'],
+): Effect.Effect<ToolDecision, Schema.SchemaError, S['EncodingServices']> =>
+  Schema.encodeEffect(tool.failureSchema)(failure).pipe(Effect.map(refuse));
 
 /** An explicit reconciliation decision for indeterminate execution. */
 export type IndeterminateToolDecision =
@@ -349,6 +378,72 @@ export interface Interceptor<R = never> {
     context: IndeterminateToolCallContext,
   ) => Effect.Effect<IndeterminateToolDecision, AiError.AiError, R>;
 }
+
+/**
+ * Decode a raw interception context against one named tool.
+ *
+ * This is the narrow Adapter between the provider-facing interception seam
+ * and a tool-specific policy. A schema mismatch is reported in the loop's
+ * ordinary `AiError` channel rather than escaping as a schema implementation
+ * detail.
+ */
+export const decodeParameters = <
+  const Name extends string,
+  Parameters extends Schema.Constraint,
+>(
+  tool: {
+    readonly name: Name;
+    readonly parametersSchema: Parameters;
+  },
+  context: ToolCallContext,
+): Effect.Effect<
+  TypedToolCallContext<Name, Parameters['Type']>,
+  AiError.AiError,
+  Parameters['DecodingServices']
+> =>
+  Schema.decodeUnknownEffect(tool.parametersSchema)(context.params).pipe(
+    Effect.mapError(
+      (cause) =>
+        new AiError.AiError({
+          module: 'Interception',
+          method: 'decodeParameters',
+          reason: new AiError.InvalidRequestError({
+            description: `Tool "${tool.name}" parameters did not match its schema: ${String(cause)}`,
+          }),
+        }),
+    ),
+    Effect.map((params) => ({
+      ...context,
+      name: tool.name,
+      params,
+    })),
+  );
+
+/**
+ * Build an interceptor for one tool with schema-decoded parameters.
+ *
+ * Calls for every other tool dispatch unchanged. This keeps the raw,
+ * provider-facing Interface available for expert policies while making the
+ * safe path the shortest path for approval gates and policy checks.
+ */
+export const forTool = <
+  const Name extends string,
+  Parameters extends Schema.Constraint,
+  R,
+>(
+  tool: {
+    readonly name: Name;
+    readonly parametersSchema: Parameters;
+  },
+  policy: (
+    context: TypedToolCallContext<Name, Parameters['Type']>,
+  ) => Effect.Effect<ToolDecision, AiError.AiError, R>,
+): Interceptor<R | Parameters['DecodingServices']> => ({
+  beforeToolCall: (context) =>
+    context.name === tool.name
+      ? decodeParameters(tool, context).pipe(Effect.flatMap(policy))
+      : Effect.succeed(dispatch),
+});
 
 type FunctionServices<F> = F extends (...args: infer _Args) => infer Result
   ? Result extends Effect.Effect<infer _A, infer _E, infer R>

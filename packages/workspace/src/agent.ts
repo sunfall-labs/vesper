@@ -5,6 +5,10 @@ import { WorkspaceTools } from './tools.js';
 
 export type StandardTools = Toolkit.Tools<typeof WorkspaceTools.toolkit>;
 export type StandardToolName = keyof StandardTools;
+type ComposedTools<ApplicationTools extends Record<string, Tool.Any>> =
+  Toolkit.MergedTools<
+    [Toolkit.Toolkit<ApplicationTools>, typeof WorkspaceTools.toolkit]
+  >;
 
 type Collision<Tools extends Record<string, Tool.Any>> = Extract<
   keyof Tools,
@@ -25,23 +29,23 @@ type CollisionFree<Tools extends Record<string, Tool.Any>> = [
 export interface Composition<
   ApplicationTools extends Record<string, Tool.Any>,
 > {
-  readonly toolkit: Toolkit.Toolkit<ApplicationTools & StandardTools>;
-  readonly handlers: Layer.Layer<Tool.HandlersFor<StandardTools>>;
-  readonly defaultLayer: Layer.Layer<
-    Tool.HandlersFor<StandardTools> | WorkspaceTools.CommandPolicy
+  readonly toolkit: Toolkit.Toolkit<ComposedTools<ApplicationTools>>;
+  readonly layer: Layer.Layer<
+    | Tool.HandlersFor<StandardTools>
+    | WorkspaceTools.CommandPolicy
+    | WorkspaceTools.FilesystemPolicy
   >;
 }
 
 const standardLayer = Layer.merge(
-  WorkspaceTools.layer,
-  WorkspaceTools.defaultCommandPolicyLayer,
+  Layer.merge(WorkspaceTools.layer, WorkspaceTools.defaultCommandPolicyLayer),
+  WorkspaceTools.defaultFilesystemPolicyLayer,
 );
 
 /** The standard workspace toolkit without application-owned tools. */
 export const standard: Composition<{}> = {
   toolkit: WorkspaceTools.toolkit,
-  handlers: WorkspaceTools.layer,
-  defaultLayer: standardLayer,
+  layer: standardLayer,
 };
 
 /** Add the standard workspace tools to an application toolkit. */
@@ -59,12 +63,8 @@ export const compose = <ApplicationTools extends Record<string, Tool.Any>>(
   }
 
   return {
-    toolkit: Toolkit.merge(
-      application,
-      WorkspaceTools.toolkit,
-    ) as Toolkit.Toolkit<ApplicationTools & StandardTools>,
-    handlers: WorkspaceTools.layer,
-    defaultLayer: standardLayer,
+    toolkit: Toolkit.merge(application, WorkspaceTools.toolkit),
+    layer: standardLayer,
   };
 };
 
