@@ -28,18 +28,41 @@ type ReservedRequestField = keyof typeof RequestFields;
 type ReservedFree<Fields extends Schema.Struct.Fields> =
   Extract<keyof Fields, ReservedRequestField> extends never ? Fields : never;
 
-/** Define a workflow request schema with Vesper's required identity fields. */
-export const request = <const Fields extends Schema.Struct.Fields>(
+type RequestSchema<
+  Fields extends Schema.Struct.Fields,
+  Input extends Schema.Constraint,
+> = Schema.Struct<
+  {
+    readonly conversationId: typeof Schema.String;
+    readonly input: Input;
+  } & Fields
+>;
+
+/** Define a workflow request with Vesper's identity and plain-text input. */
+export function request<const Fields extends Schema.Struct.Fields>(
   fields: ReservedFree<Fields>,
-) =>
-  Schema.Struct({
-    ...RequestFields,
+): RequestSchema<Fields, typeof Schema.String>;
+
+/** Define a workflow request whose application input has its own schema. */
+export function request<
+  const Fields extends Schema.Struct.Fields,
+  Input extends Schema.Constraint,
+>(fields: ReservedFree<Fields>, input: Input): RequestSchema<Fields, Input>;
+
+export function request(
+  fields: Schema.Struct.Fields,
+  input: Schema.Constraint = Schema.String,
+) {
+  return Schema.Struct({
+    conversationId: Schema.String,
+    input,
     ...fields,
   });
+}
 
-export interface Request {
+export interface Request<Input = string> {
   readonly conversationId: string;
-  readonly input: string;
+  readonly input: Input;
 }
 
 const IdentityTypeId: unique symbol = Symbol.for(
@@ -140,20 +163,39 @@ export interface CancelSignal {
   readonly source: string;
 }
 
-/** Options for projecting an application workflow payload into an agent run. */
-export interface Options<
+interface OptionsBase<
   Tag extends string,
-  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request>,
+  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request<unknown>>,
   Error extends Schema.Top,
   AgentError,
 > {
   readonly tag: Tag;
   readonly payload: Payload;
   readonly idempotencyKey: (payload: Payload['Type']) => string;
-  readonly input?: (payload: Payload['Type']) => Prompt.RawInput;
   readonly error: Error;
   readonly mapError: (error: AgentError) => Error['Type'];
   readonly suspendedRetrySchedule?: Schedule.Schedule<any, unknown> | undefined;
+}
+
+/** Options for the ordinary plain-text workflow request. */
+export interface Options<
+  Tag extends string,
+  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request<string>>,
+  Error extends Schema.Top,
+  AgentError,
+> extends OptionsBase<Tag, Payload, Error, AgentError> {
+  /** Override the default plain-text input projection. */
+  readonly input?: (payload: Payload['Type']) => Prompt.RawInput;
+}
+
+/** Options for schema-typed application input projected into Effect Prompt. */
+export interface InputOptions<
+  Tag extends string,
+  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request<unknown>>,
+  Error extends Schema.Top,
+  AgentError,
+> extends OptionsBase<Tag, Payload, Error, AgentError> {
+  readonly input: (payload: Payload['Type']) => Prompt.RawInput;
 }
 
 /** A named, replayable effect inside an agent workflow. */
@@ -617,6 +659,30 @@ type WorkflowAgentRequirements<A extends Agent.Any> = Exclude<
   WorkflowEngine.WorkflowEngine | WorkflowInstance | ToolExecution.Current
 >;
 
+type BindingRequirements<
+  A extends Agent.Any,
+  Payload extends Workflow.AnyStructSchema,
+  Error extends Schema.Top,
+> =
+  | WorkflowEngine.WorkflowEngine
+  | WorkflowAgentRequirements<A>
+  | LogStore.Service
+  | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
+  | (typeof Agent.Result)['EncodingServices']
+  | Error['EncodingServices'];
+
+type BoundWorkflow<
+  A extends Agent.Any,
+  Tag extends string,
+  Payload extends Workflow.AnyStructSchema,
+  Error extends Schema.Top,
+> = Binding<
+  Tag,
+  WorkflowPayload<Payload>,
+  Error,
+  BindingRequirements<A, Payload, Error>
+>;
+
 /**
  * Define one replayable workflow step for use inside an agent tool handler.
  *
@@ -666,25 +732,17 @@ export const idempotencyKey = Activity.idempotencyKey;
  * Vesper remains authoritative for conversation history and tool recovery;
  * the supplied WorkflowEngine remains authoritative for execution and wakeup.
  */
-export const make = <
+const bind = <
   A extends Agent.Any,
   const Tag extends string,
-  const Payload extends Workflow.AnyStructSchema & Schema.Schema<Request>,
+  const Payload extends Workflow.AnyStructSchema &
+    Schema.Schema<Request<unknown>>,
   Error extends Schema.Top,
 >(
   agent: A,
-  options: Options<Tag, Payload, Error, WorkflowAgentError<A>>,
-): Binding<
-  Tag,
-  WorkflowPayload<Payload>,
-  Error,
-  | WorkflowEngine.WorkflowEngine
-  | WorkflowAgentRequirements<A>
-  | LogStore.Service
-  | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
-  | (typeof Agent.Result)['EncodingServices']
-  | Error['EncodingServices']
-> => {
+  options: OptionsBase<Tag, Payload, Error, WorkflowAgentError<A>>,
+  inputFor: (payload: Payload['Type']) => Prompt.RawInput,
+): BoundWorkflow<A, Tag, Payload, Error> => {
   const workflow = Workflow.make(options.tag, {
     payload: options.payload,
     idempotencyKey: options.idempotencyKey,
@@ -723,7 +781,7 @@ export const make = <
   const layer = Layer.merge(
     workflow.toLayer((payload) =>
       Conversation.make(agent, payload.conversationId)
-        .run(options.input?.(payload) ?? payload.input)
+        .run(inputFor(payload))
         .pipe(Effect.mapError(options.mapError)),
     ),
     pathWorkflow.toLayer(({ at, encodedPayload, mode, sourceConversationId }) =>
@@ -742,13 +800,13 @@ export const make = <
           mode === 'branch'
             ? Conversation.make(agent, sourceConversationId).branchFrom(
                 at,
-                options.input?.(payload) ?? payload.input,
+                inputFor(payload),
                 { pendingWait: 'restart' },
               )
             : Conversation.make(agent, sourceConversationId).forkFrom(
                 at,
                 payload.conversationId,
-                options.input?.(payload) ?? payload.input,
+                inputFor(payload),
                 { pendingWait: 'restart' },
               )
         ).pipe(Effect.mapError(options.mapError));
@@ -928,19 +986,36 @@ export const make = <
     cancel,
     branchFrom,
     forkFrom,
-  } satisfies Binding<
-    Tag,
-    WorkflowPayload<Payload>,
-    Error,
-    | WorkflowEngine.WorkflowEngine
-    | WorkflowAgentRequirements<A>
-    | LogStore.Service
-    | Crypto.Crypto
-    | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
-    | (typeof Agent.Result)['EncodingServices']
-    | Error['EncodingServices']
-  >;
+  } satisfies BoundWorkflow<A, Tag, Payload, Error>;
 };
+
+/** Bind the ordinary plain-text request to Effect's durable workflow runtime. */
+export const make = <
+  A extends Agent.Any,
+  const Tag extends string,
+  const Payload extends Workflow.AnyStructSchema & Schema.Schema<Request>,
+  Error extends Schema.Top,
+>(
+  agent: A,
+  options: Options<Tag, Payload, Error, WorkflowAgentError<A>>,
+): BoundWorkflow<A, Tag, Payload, Error> =>
+  bind(
+    agent,
+    options,
+    options.input ?? ((payload: Payload['Type']) => payload.input),
+  );
+
+/** Bind schema-typed application input through an explicit prompt projection. */
+export const makeWithInput = <
+  A extends Agent.Any,
+  const Tag extends string,
+  const Payload extends Workflow.AnyStructSchema &
+    Schema.Schema<Request<unknown>>,
+  Error extends Schema.Top,
+>(
+  agent: A,
+  options: InputOptions<Tag, Payload, Error, WorkflowAgentError<A>>,
+): BoundWorkflow<A, Tag, Payload, Error> => bind(agent, options, options.input);
 
 /** @since 0.1.0 */
 export * as AgentWorkflow from './workflow.js';

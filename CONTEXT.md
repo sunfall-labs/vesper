@@ -34,6 +34,18 @@ The latest checkpoint on the active path wins. A settled run carries the latest
 checkpoint in its bounded resume aggregate so reopening does not require an
 unbounded scan.
 
+**Durable wait** — a named, independently keyed external request yielded from
+a tool handler running under Effect Workflow. The request and lifecycle are
+conversation records; Effect Workflow owns suspension and wakeup. Completing
+its typed token re-enters the handler, while completed Workflow activities
+replay without repeating their effects.
+
+**Workflow input projection** — the pure translation from a schema-typed
+application workflow payload into Effect's `Prompt.RawInput`. Plain strings
+need no explicit projection; any richer input requires one. Effect owns the
+Prompt codec, the application owns its durable input codec, and Vesper does not
+invent a reversible mapping between them.
+
 **Requires** — the third type parameter of `Agent`, and what still has to be
 provided before a run can happen. Unmet requirements are a compile error, which
 is the property this family exists for.
@@ -47,10 +59,11 @@ than concatenated into the system prompt, so the cacheable prefix stays
 byte-identical across turns. Only the catalog line goes in the prompt.
 
 **Record** — one thing that happened in a conversation, appended to the log:
-`RunStarted`, `Text`, `ToolCall`, `ToolStarted`, `ToolOutcome`, `TurnFinished`,
-`StateCheckpoint`, `Compacted`, `BranchedFrom`, `Completed`, `ChildSession`, `Signal`,
-`SignalReceived`, `RunSettled`. The conversation log is the single persistence
-mechanism in this family.
+`RunStarted`, `Text`, `ToolCall`, `ToolStarted`, `ToolSuspended`, `ToolResumed`,
+`ToolWaitCompleted`, `ToolWaitRestarted`, `ToolOutcome`, `TurnFinished`,
+`StateCheckpoint`, `Compacted`, `BranchedFrom`, `Completed`, `ChildSession`,
+`Signal`, `SignalReceived`, `RunSettled`. The conversation log is the single
+persistence mechanism in this family.
 
 **Conversation format version** — Vesper's version for persisted conversation
 semantics. It and the agent name/revision are written to `RunStarted` and the
@@ -125,3 +138,8 @@ after it.
 **Provider seam** — Effect's `LanguageModel` service. Official `@effect/ai-*`
 packages provide it directly; Vesper neither wraps provider SDKs nor keeps a
 second provider registry.
+
+**Scripted model** — a deterministic testing adapter at the Provider seam. It
+plays explicit streaming turns and compaction responses, records normalized
+requests, and fails on an unexpected call. It models no vendor because agent
+behavior depends on `LanguageModel`, not on a provider SDK.

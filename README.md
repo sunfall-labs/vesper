@@ -75,39 +75,33 @@ the APIs are release candidates. Every Vesper package peers on that exact
 
 ## A worked example
 
-The code below is `examples/support-agent/src/main.ts`, a compiled example with
-requirement-channel assertions, so it cannot drift from the API it documents.
+`examples/support-agent` is compiled with requirement-channel assertions and
+runs entirely against a scripted model, in-memory application adapters, and the
+in-memory conversation log. The definition excerpt below introduces the core
+composition; the source also exercises State, interception, and a durable
+human approval inside the refund handler.
 
-### Wiring
+### Mocked world
 
 ```ts
-import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
-import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
-import { ContextWindow } from '@sunfall/vesper-agent/context-window';
-import { Config, Layer } from 'effect';
+import { ScriptedModel } from '@sunfall/vesper-agent/testing';
 
-const Anthropic = AnthropicLanguageModel.model('claude-sonnet-4-6').pipe(
-  Layer.provide(
-    AnthropicClient.layerConfig({
-      apiKey: Config.redacted('ANTHROPIC_API_KEY'),
-    }),
-  ),
-  Layer.provide(NodeHttpClient.layerUndici),
+// Arrays of Effect `Response.StreamPartEncoded`, not Vesper response wrappers.
+const fake = ScriptedModel.make(supportTurns);
+
+const World = supportWorkflow.layer.pipe(
+  Layer.provideMerge(WorkflowEngine.layerMemory),
+  Layer.provide(fake.layer),
+  Layer.provide(OrderRepoTest),
+  Layer.provide(RefundAuthorizationTest),
+  Layer.provideMerge(LogLive),
 );
-
-const ContextPolicy = Layer.succeed(
-  ContextWindow.Service,
-  ContextWindow.usageAnchored,
-);
-
-export const AiLive = Layer.merge(Anthropic, ContextPolicy);
 ```
 
-The official provider owns prompt conversion, tools, streaming, usage,
-credentials, telemetry, and errors. Its `Model` provides `LanguageModel`,
-`ProviderName`, and `ModelName`. `ContextWindow.usageAnchored` is separate,
-provider-independent policy: it anchors completed history on reported usage
-and estimates only the messages after it.
+The fake is the provider: it implements Effect's `LanguageModel` seam directly
+and models no vendor. Its strict script found the extra turn caused by an
+accepted steer while this example was built. Application behavior is the same
+definition used with a real provider; only Layers change.
 
 ### Defining the agent
 
@@ -116,6 +110,7 @@ import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
+import { AgentWorkflow } from '@sunfall/vesper-agent/workflow';
 import { Context, Effect, Schema } from 'effect';
 import { Tool, Toolkit } from 'effect/unstable/ai';
 
@@ -124,7 +119,10 @@ export class OrderRepo extends Context.Service<
   OrderRepo,
   {
     readonly status: (id: string) => Effect.Effect<string>;
-    readonly refund: (id: string) => Effect.Effect<string>;
+    readonly refund: (
+      id: string,
+      idempotencyKey: string,
+    ) => Effect.Effect<string>;
   }
 >()('example/OrderRepo') {}
 
@@ -138,10 +136,38 @@ const lookupOrder = Tool.make('lookup_order', {
 });
 
 const issueRefund = Tool.make('issue_refund', {
-  description: 'Refund one order. Irreversible; confirm the order first.',
+  description: 'Refund one order after human approval.',
   parameters: Schema.Struct({ orderId: Schema.String }),
-  success: Schema.Struct({ confirmation: Schema.String }),
+  success: Schema.Struct({
+    status: Schema.Literals(['refunded', 'declined']),
+    detail: Schema.String,
+    actor: Schema.String,
+  }),
   dependencies: [OrderRepo],
+});
+
+const refundApproval = AgentWorkflow.wait({
+  name: 'refund-approval',
+  key: ({ orderId }) => orderId,
+  request: Schema.Struct({ orderId: Schema.String }),
+  success: Schema.Struct({
+    decision: Schema.Literals(['approve', 'deny']),
+    actor: Schema.String,
+  }),
+  error: Schema.Never,
+});
+
+const refundOrder = AgentWorkflow.step({
+  name: 'refund-order',
+  key: (orderId: string) => orderId,
+  success: Schema.String,
+  error: Schema.Never,
+  execute: (orderId: string) =>
+    Effect.gen(function* () {
+      const orders = yield* OrderRepo;
+      const key = yield* AgentWorkflow.idempotencyKey('refund-order');
+      return yield* orders.refund(orderId, key);
+    }),
 });
 
 const refundPolicy: Skill.Skill = {
@@ -172,7 +198,7 @@ export const supportAgent = Agent.make({
     'Delegate open-ended research rather than guessing.',
   ].join('\n'),
 
-  toolkit: Toolkit.make(lookupOrder, issueRefund),
+  toolkit: Toolkit.make(lookupOrder, AgentWorkflow.durable(issueRefund)),
 
   // Compiled into the toolkit; the child's requirements ride along.
   subagents: [researcher],
@@ -181,13 +207,8 @@ export const supportAgent = Agent.make({
   // the cacheable prefix stays byte-identical across turns.
   skills: [refundPolicy],
 
-  // Stop when the model stops calling tools, or at 12 steps, or as soon as
-  // a refund has been issued.
-  stopWhen: Stop.any(
-    Stop.noToolCalls(),
-    Stop.maxSteps(12),
-    Stop.toolCalled('issue_refund'),
-  ),
+  // Let the model observe the approved or declined result before stopping.
+  stopWhen: Stop.any(Stop.noToolCalls(), Stop.maxSteps(12)),
 
   compaction: {
     reserveTokens: 8_000,
@@ -213,9 +234,33 @@ export const supportAgent = Agent.make({
 
   issue_refund: ({ orderId }) =>
     Effect.gen(function* () {
-      const orders = yield* OrderRepo;
-      return { confirmation: yield* orders.refund(orderId) };
+      const approval = yield* refundApproval({ orderId });
+      if (approval.decision === 'deny') {
+        return {
+          status: 'declined',
+          detail: 'The supervisor declined the refund.',
+          actor: approval.actor,
+        } as const;
+      }
+      return {
+        status: 'refunded',
+        detail: yield* refundOrder(orderId),
+        actor: approval.actor,
+      } as const;
     }),
+});
+
+class SupportWorkflowFailure extends Schema.TaggedError<SupportWorkflowFailure>(
+  'SupportWorkflowFailure',
+)('SupportWorkflowFailure', { message: Schema.String }) {}
+
+const SupportRequest = AgentWorkflow.request({ runId: Schema.String });
+const supportWorkflow = AgentWorkflow.make(supportAgent, {
+  tag: 'SupportStory',
+  payload: SupportRequest,
+  idempotencyKey: ({ runId }) => runId,
+  error: SupportWorkflowFailure,
+  mapError: (error) => new SupportWorkflowFailure({ message: String(error) }),
 });
 ```
 
@@ -223,9 +268,43 @@ export const supportAgent = Agent.make({
 
 ```ts
 Effect.gen(function* () {
-  const result = yield* supportAgent.run('where is order_1042?');
+  const request = {
+    runId: 'case-1042/initial',
+    conversationId: 'case-1042',
+    input: 'Refund damaged order_1042 when allowed.',
+  };
+  yield* supportWorkflow.workflow.execute(request, { discard: true });
+
+  const pending = yield* refundApproval.awaitPending(
+    Conversation.make(supportAgent, request.conversationId),
+    'order_1042',
+  );
+  yield* pending.complete({ decision: 'approve', actor: 'supervisor-7' });
+
+  const result = yield* supportWorkflow.workflow.execute(request);
 });
 ```
+
+Run the complete credential-free story with:
+
+```bash
+nub run example:support-agent
+```
+
+It loads a skill, delegates policy research, invokes stateful tools through an
+authorization interceptor, suspends on a typed approval, performs the refund
+as an idempotent Workflow activity, accepts a steer, resumes, prints the full
+durable trail, and evaluates the same researcher definition used as a
+subagent. The mocked supervisor completes the approval automatically; use the
+focused `example:approval-cli` story below to choose approve or deny
+interactively.
+
+Workflow input can also be any application-owned Effect Schema rather than a
+string. `AgentWorkflow.makeWithInput` requires an exhaustive projection into
+Effect's `Prompt.RawInput`, so typed participant events remain durable without
+introducing a second prompt codec. See
+[Schema-typed workflow input](packages/agent/README.md#schema-typed-workflow-input)
+for the multiplayer composition and serialization pattern.
 
 `stream` is the primitive and `run` is a fold of it, so a streaming consumer
 and a blocking one take the same path through the loop. `streamIn` and `runIn`

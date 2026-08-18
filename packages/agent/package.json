@@ -86,6 +86,10 @@
       "types": "./dist/subagent.d.ts",
       "default": "./dist/subagent.js"
     },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
     "./skill": {
       "types": "./dist/skill.d.ts",
       "default": "./dist/skill.js"

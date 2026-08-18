@@ -23,7 +23,7 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
-`/workflow`.
+`/testing`, plus `/workflow`.
 
 ## Evals
 
@@ -60,6 +60,42 @@ their weighted mean; `passed` requires every criterion to meet the threshold.
 Scores outside `0..1` fail with `InvalidEvalScore`. The input is deliberately
 not retained because prompts commonly contain secrets or customer data; keep a
 dataset identifier beside the capture when a case needs one.
+
+## Scripted model
+
+`ScriptedModel` is a deterministic adapter for Effect's existing
+`LanguageModel` seam. It owns call sequencing, request capture, exhaustion, and
+optional repetition; response parts remain Effect's types rather than a second
+Vesper vocabulary.
+
+```ts
+import { ScriptedModel } from '@sunfall/vesper-agent/testing';
+import type { Response } from 'effect/unstable/ai';
+
+const turn = [
+  { type: 'text-start', id: 'answer' },
+  { type: 'text-delta', id: 'answer', delta: 'Done.' },
+  { type: 'text-end', id: 'answer' },
+  {
+    type: 'finish',
+    reason: 'stop',
+    usage: {
+      inputTokens: { total: 1, uncached: 1, cacheRead: 0, cacheWrite: 0 },
+      outputTokens: { total: 1 },
+    },
+  },
+] satisfies ReadonlyArray<Response.StreamPartEncoded>;
+
+const fake = ScriptedModel.make([turn]);
+const result = agent.run('hello').pipe(Effect.provide(fake.layer));
+```
+
+Streaming turns and non-streaming `generate` responses have independent
+cursors because agent turns use `streamText` while compaction uses
+`generateText`. An unscripted call fails as an `AiError`; `{ repeatLast: true }`
+is explicit when repetition is the behavior under test. `fake.requests`
+exposes normalized prompts, tool names, and tool choice without retaining a
+tracing span.
 
 ## Durable State
 
@@ -156,6 +192,72 @@ const result = supportWorkflow.workflow.execute({
 // every service in Agent.Requires<typeof supportAgent>.
 const SupportWorkflowLive = supportWorkflow.layer;
 ```
+
+### Schema-typed workflow input
+
+`AgentWorkflow.request(fields)` keeps the convenient `input: string` form.
+Pass an Effect Schema as its second argument when the application's durable
+input is richer, then bind it with `makeWithInput`. The projection is
+deliberately one-way: Effect already owns the `Prompt.Prompt` codec, while
+participant identity and authorization remain application meaning that a
+provider prompt cannot reconstruct.
+
+```ts
+import { Match, Schema } from 'effect';
+import type { Prompt } from 'effect/unstable/ai';
+
+const RoomInput = Schema.TaggedUnion({
+  ParticipantMessage: {
+    participantId: Schema.String,
+    text: Schema.String,
+  },
+  ModeratorNotice: {
+    moderatorId: Schema.String,
+    text: Schema.String,
+  },
+});
+
+// Useful when the application also keeps its own typed room transcript.
+const RoomInputJson = Schema.toCodecJson(RoomInput);
+
+const toPrompt = Match.type<typeof RoomInput.Type>().pipe(
+  Match.tagsExhaustive({
+    ParticipantMessage: ({ participantId, text }): Prompt.RawInput => [
+      { role: 'user', content: `[participant:${participantId}] ${text}` },
+    ],
+    ModeratorNotice: ({ moderatorId, text }): Prompt.RawInput => [
+      { role: 'user', content: `[moderator:${moderatorId}] ${text}` },
+    ],
+  }),
+);
+
+const RoomRequest = AgentWorkflow.request(
+  { submissionId: Schema.String },
+  RoomInput,
+);
+
+const roomWorkflow = AgentWorkflow.makeWithInput(roomAgent, {
+  tag: 'RoomAgent',
+  payload: RoomRequest,
+  idempotencyKey: ({ submissionId }) => submissionId,
+  input: ({ input }) => toPrompt(input),
+  error: RunFailure,
+  mapError: (error) => new RunFailure({ message: String(error) }),
+});
+```
+
+The Workflow payload codec validates and persists the complete application
+event. The projection supplies only what the model should see. Prompt labels
+are context, not authority: authenticate membership and moderator roles before
+executing the workflow.
+
+For concurrent participants, accept and persist submissions in an
+application-owned Workflow or Cluster entity keyed by conversation id, then
+order or batch them before starting one Vesper run. Producer fencing protects
+the conversation from interleaved agent writers; it is intentionally not a
+message queue. `conversation.follow()` can serve any number of observers, and
+`steer` / `cancel` signals should remain run controls rather than ordinary room
+messages.
 
 Durable work inside tools is an ordinary named function:
 

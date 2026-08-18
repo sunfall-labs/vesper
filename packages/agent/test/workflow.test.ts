@@ -8,6 +8,7 @@ import {
   Exit,
   Fiber,
   Layer,
+  Match,
   Option,
   Ref,
   Schema,
@@ -15,6 +16,7 @@ import {
 } from 'effect';
 import {
   LanguageModel,
+  type Prompt,
   type Response,
   Tool,
   Toolkit,
@@ -154,6 +156,53 @@ const WorkflowRequest = AgentWorkflow.request({
   submissionId: Schema.String,
 });
 
+const MultiplayerInput = Schema.TaggedUnion({
+  ParticipantMessage: {
+    participantId: Schema.String,
+    text: Schema.String,
+  },
+  ModeratorNotice: {
+    moderatorId: Schema.String,
+    text: Schema.String,
+  },
+});
+
+const renderMultiplayerInput = Match.type<typeof MultiplayerInput.Type>().pipe(
+  Match.tagsExhaustive({
+    ParticipantMessage: ({ participantId, text }): Prompt.RawInput => [
+      { role: 'user', content: `[${participantId}] ${text}` },
+    ],
+    ModeratorNotice: ({ moderatorId, text }): Prompt.RawInput => [
+      { role: 'user', content: `[moderator:${moderatorId}] ${text}` },
+    ],
+  }),
+);
+
+const MultiplayerRequest = AgentWorkflow.request(
+  { submissionId: Schema.String },
+  MultiplayerInput,
+);
+
+const multiplayerBinding = AgentWorkflow.makeWithInput(agent, {
+  tag: 'MultiplayerWorkflowTest',
+  payload: MultiplayerRequest,
+  idempotencyKey: ({ submissionId }) => submissionId,
+  input: ({ input }) => renderMultiplayerInput(input),
+  error: WorkflowFailure,
+  mapError: (error) => new WorkflowFailure({ message: String(error) }),
+});
+
+const _typedInputRequiresProjection = () => {
+  // @ts-expect-error non-string request input requires an explicit projection
+  AgentWorkflow.makeWithInput(agent, {
+    tag: 'MissingInputProjectionTest',
+    payload: MultiplayerRequest,
+    idempotencyKey: ({ submissionId }) => submissionId,
+    error: WorkflowFailure,
+    mapError: (error) => new WorkflowFailure({ message: String(error) }),
+  });
+};
+
 const RequiringWorkflowRequest = AgentWorkflow.request({ id: Schema.String });
 
 const requiringAgent = Agent.make({
@@ -255,6 +304,47 @@ describe('AgentWorkflow', () => {
       expect(result.outcome).toBe('success');
       expect(result.text).toBe('hello');
       expect(result.steps).toBe(1);
+    }),
+  );
+
+  it.effect('projects schema-typed application input into Effect Prompt', () =>
+    Effect.gen(function* () {
+      let observed: Prompt.Prompt | undefined;
+      const ObservingModel = Layer.effect(
+        LanguageModel.LanguageModel,
+        LanguageModel.make({
+          generateText: () => Effect.succeed([finish]),
+          streamText: (options) => {
+            observed = options.prompt;
+            return Stream.fromIterable<Response.StreamPartEncoded>([
+              { type: 'text-start', id: 'answer' },
+              { type: 'text-delta', id: 'answer', delta: 'hello' },
+              { type: 'text-end', id: 'answer' },
+              finish,
+            ]);
+          },
+        }),
+      );
+      const Live = multiplayerBinding.layer.pipe(
+        Layer.provideMerge(WorkflowEngine.layerMemory),
+        Layer.provide(ObservingModel),
+        Layer.provide(testLogLayer),
+      );
+
+      const result = yield* multiplayerBinding.workflow
+        .execute({
+          submissionId: 'multiplayer-submission',
+          conversationId: 'multiplayer-conversation',
+          input: {
+            _tag: 'ParticipantMessage',
+            participantId: 'alice',
+            text: 'hello from the room',
+          },
+        })
+        .pipe(Effect.provide(Live));
+
+      expect(result.text).toBe('hello');
+      expect(JSON.stringify(observed)).toContain('[alice] hello from the room');
     }),
   );
 
