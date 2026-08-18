@@ -12,6 +12,7 @@ import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { fakeProvider, turnOf } from './compaction-fixtures.js';
 import { AgentHistory } from '../src/history.js';
+import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -339,19 +340,19 @@ describe('rebuilding a compacted conversation', () => {
     it.effect('points at the record that opened the last kept message', () =>
       Effect.gen(function* () {
         expect(
-          yield* AgentHistory.compactionBoundary(records, {
+          yield* AgentHistoryRuntime.compactionBoundary(records, {
             summarizedMessages: 2,
             keptMessages: 1,
           }),
         ).toBe(LogOffset.fromSeq(3n));
         expect(
-          yield* AgentHistory.compactionBoundary(records, {
+          yield* AgentHistoryRuntime.compactionBoundary(records, {
             summarizedMessages: 1,
             keptMessages: 2,
           }),
         ).toBe(LogOffset.fromSeq(1n));
         expect(
-          yield* AgentHistory.compactionBoundary(records, {
+          yield* AgentHistoryRuntime.compactionBoundary(records, {
             summarizedMessages: 0,
             keptMessages: 3,
           }),
@@ -362,13 +363,13 @@ describe('rebuilding a compacted conversation', () => {
     it.effect('is START when nothing was kept', () =>
       Effect.gen(function* () {
         expect(
-          yield* AgentHistory.compactionBoundary(records, {
+          yield* AgentHistoryRuntime.compactionBoundary(records, {
             summarizedMessages: 3,
             keptMessages: 0,
           }),
         ).toBe(LogOffset.START);
         expect(
-          yield* AgentHistory.compactionBoundary([], {
+          yield* AgentHistoryRuntime.compactionBoundary([], {
             summarizedMessages: 0,
             keptMessages: 0,
           }),
@@ -380,10 +381,13 @@ describe('rebuilding a compacted conversation', () => {
       'fails instead of clamping when live and durable history drift',
       () =>
         Effect.gen(function* () {
-          const outcome = yield* AgentHistory.compactionBoundary(records, {
-            summarizedMessages: 3,
-            keptMessages: 1,
-          }).pipe(Effect.result);
+          const outcome = yield* AgentHistoryRuntime.compactionBoundary(
+            records,
+            {
+              summarizedMessages: 3,
+              keptMessages: 1,
+            },
+          ).pipe(Effect.result);
 
           expect(outcome).toMatchObject({
             _tag: 'Failure',

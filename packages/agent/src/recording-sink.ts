@@ -5,7 +5,7 @@ import { Cause, Effect, Exit, Option, Stream } from 'effect';
 import type { Response, Tool } from 'effect/unstable/ai';
 
 import { AgentEvents } from './event.js';
-import { AgentHistory } from './history.js';
+import { AgentHistory } from './internal/history.js';
 import { DurabilityError } from './conversation-error.js';
 import type { Session } from './log.js';
 import type { Stop } from './stop.js';

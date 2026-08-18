@@ -258,7 +258,7 @@ export const Record = Schema.TaggedUnion({
    *
    * `summary` is the model's summary text on its own, without the framing
    * sentence the compacted history wraps it in. The framing belongs to
-   * whoever renders it — `Compaction.summaryMessage` — so the producer and a
+   * the agent's compaction renderer, so the producer and a
    * resuming reader cannot drift into wrapping it two different ways.
    */
   Compacted: {

@@ -18,6 +18,7 @@ import { Agent } from '../src/agent.js';
 import { AgentBranch } from '../src/branch.js';
 import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
+import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
 import * as AgentLog from '../src/log.js';
 
 const testLogLayer = Layer.mergeAll(
@@ -424,7 +425,7 @@ describe('rebuilding a branched conversation', () => {
 
       // The path rebuilds as [user 'one', assistant 'a', user 'two', assistant
       // 'redone']; the last two of those start at the second `RunStarted`.
-      const boundary = yield* AgentHistory.compactionBoundary(records, {
+      const boundary = yield* AgentHistoryRuntime.compactionBoundary(records, {
         summarizedMessages: 2,
         keptMessages: 2,
       });
@@ -440,7 +441,7 @@ describe('rebuilding a branched conversation', () => {
   // mind. Mutation-checked: scoping `usageFrom` to the active path drops the
   // abandoned run's tokens and fails this.
   it('still counts what the abandoned branch cost', () => {
-    const usage = AgentHistory.usageFrom(
+    const usage = AgentHistoryRuntime.usageFrom(
       envelopes([
         started('one'),
         { _tag: 'TurnFinished', step: 1, usage: { input: 7, output: 3 } },

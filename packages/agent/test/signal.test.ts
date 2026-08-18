@@ -32,6 +32,29 @@ const testLogLayer = Layer.mergeAll(
   NodeServices.layer,
 );
 
+const logLayerWithFailingChanges = (failedPath: string) =>
+  Layer.effect(
+    LogStore.Service,
+    Effect.map(LogStore.Service, (store) =>
+      LogStore.Service.of({
+        ...store,
+        changes: (path) =>
+          path === failedPath
+            ? Stream.fail(
+                LogStore.makeError(
+                  path,
+                  'changes',
+                  'storage',
+                  'injected change-feed failure',
+                ),
+              )
+            : store.changes(path),
+      }),
+    ),
+  ).pipe(
+    Layer.provide(LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer))),
+  );
+
 // Signals: out-of-band input to a running conversation.
 //
 // What these have to prove:
@@ -724,11 +747,11 @@ describe('cancelling', () => {
           Effect.provide(scripted.layer),
           Effect.provide(
             Layer.mergeAll(
-              LogStoreMemory.layerFailingChanges(
+              logLayerWithFailingChanges(
                 AgentSignals.pathFor(
                   LogVocabulary.ConversationId.make(CONVERSATION),
                 ),
-              ).pipe(Layer.provide(NodeServices.layer)),
+              ),
               NodeServices.layer,
             ),
           ),

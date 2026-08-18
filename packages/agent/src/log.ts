@@ -25,6 +25,7 @@ import {
   SuspendedConversationError,
 } from './conversation-error.js';
 import { AgentHistory } from './history.js';
+import { AgentHistory as AgentHistoryRuntime } from './internal/history.js';
 import * as AgentIds from './internal/ids.js';
 import * as Observability from './internal/observability.js';
 import { PromptTransport } from './prompt-transport.js';
@@ -251,7 +252,7 @@ export interface Session {
   readonly latestTurnUsage: Stop.Usage | undefined;
 
   /** Latest completed result on the active path, including anchored history. */
-  readonly completed: ReturnType<typeof AgentHistory.completedFrom>;
+  readonly completed: ReturnType<typeof AgentHistoryRuntime.completedFrom>;
 
   /** How long teardown waits for this session's settlement append. */
   readonly settlementTimeoutMillis: number;
@@ -537,7 +538,7 @@ export const fork: (
       sourceConversationId: conversationId,
       at,
       records: prefix.length,
-      inheritedUsage: AgentHistory.usageFrom(prefix),
+      inheritedUsage: AgentHistoryRuntime.usageFrom(prefix),
     });
 
     return yield* openWith(store, forkConversationId, {
@@ -1142,7 +1143,7 @@ const loadOpenState = (
     return {
       history: yield* readResumeHistory(store, path),
       aggregateSuffix,
-      usage: AgentHistory.usageFrom(aggregateSuffix),
+      usage: AgentHistoryRuntime.usageFrom(aggregateSuffix),
       signalCursor: deliveredThrough(aggregateSuffix),
     };
   });
@@ -1434,7 +1435,7 @@ const resumeState = (
   compatibility: Compatibility,
   usage: Stop.Usage,
   signalCursor: LogOffset.Offset,
-  completed: ReturnType<typeof AgentHistory.completedFrom>,
+  completed: ReturnType<typeof AgentHistoryRuntime.completedFrom>,
   latestTurnUsage: Stop.Usage | undefined,
   state: ConversationRecord.RecordOf<'StateCheckpoint'> | undefined,
 ) => ({

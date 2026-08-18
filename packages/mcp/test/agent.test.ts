@@ -17,6 +17,7 @@ import { DurabilityError } from '@sunfall/vesper-agent/conversation';
 import { RunPolicy } from '@sunfall/vesper-agent/run-policy';
 import { ScriptedModel } from '@sunfall/vesper-agent/testing';
 import { AgentMcp } from '../src/agent.js';
+import { classify } from '../src/internal/failure.js';
 
 const agent = Agent.make({
   name: 'support',
@@ -187,7 +188,7 @@ describe('AgentMcp', () => {
 
   it('classifies framework failures without exposing arbitrary fields', () => {
     expect(
-      AgentMcp.failure(
+      classify(
         new DurabilityError({
           source: 'log',
           operation: 'append',
@@ -207,7 +208,7 @@ describe('AgentMcp', () => {
       },
     });
     expect(
-      AgentMcp.failure(
+      classify(
         new RunPolicy.RunPolicyExhausted({
           limit: 'turns',
           used: 3,
@@ -220,7 +221,7 @@ describe('AgentMcp', () => {
       retryable: false,
     });
 
-    const application = AgentMcp.failure({
+    const application = classify({
       _tag: 'OrderDenied',
       message: 'The order was denied',
       internalToken: 'must-not-leak',
