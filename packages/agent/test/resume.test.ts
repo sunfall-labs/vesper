@@ -15,6 +15,7 @@ import {
 } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { ContextWindow } from '../src/context-window.js';
 import { AgentEvents } from '../src/event.js';
 import { AgentHistory } from '../src/history.js';
@@ -141,6 +142,7 @@ const agent = Agent.make({
 });
 
 const CONVERSATION = 'conversation-1';
+const conversation = Conversation.make(agent, CONVERSATION);
 const PATH = AgentLog.pathFor(LogVocabulary.ConversationId.make(CONVERSATION));
 
 beforeEach(() => {
@@ -193,27 +195,24 @@ describe('resuming a crashed run', () => {
         const observed = yield* run(
           Effect.gen(function* () {
             // Run one, abandoned the moment the tool result arrives.
-            yield* agent
-              .recordingTo(CONVERSATION)
-              .stream('where is order 42?')
-              .pipe(
-                Stream.takeUntil(
-                  (event) =>
-                    AgentEvents.isPart(event) &&
-                    (event.part as Response.StreamPartEncoded).type ===
-                      'tool-result',
-                ),
-                Stream.runDrain,
-                Effect.orDie,
-              );
+            yield* conversation.stream('where is order 42?').pipe(
+              Stream.takeUntil(
+                (event) =>
+                  AgentEvents.isPart(event) &&
+                  (event.part as Response.StreamPartEncoded).type ===
+                    'tool-result',
+              ),
+              Stream.runDrain,
+              Effect.orDie,
+            );
 
             const afterCrash = yield* readAll();
             const askedDuringCrash = models.asked.length;
             const dispatchedDuringCrash = dispatched.count;
 
             // Run two: the same conversation, picked back up.
-            const result = yield* agent
-              .resume(CONVERSATION, 'and then?')
+            const result = yield* conversation
+              .resume('and then?')
               .pipe(Effect.orDie);
 
             return {
@@ -276,21 +275,18 @@ describe('resuming a crashed run', () => {
 
       const tags = yield* run(
         Effect.gen(function* () {
-          yield* agent
-            .recordingTo(CONVERSATION)
-            .stream('hi')
-            .pipe(
-              Stream.takeUntil(
-                (event) =>
-                  AgentEvents.isPart(event) &&
-                  (event.part as Response.StreamPartEncoded).type ===
-                    'tool-result',
-              ),
-              Stream.runDrain,
-              Effect.orDie,
-            );
+          yield* conversation.stream('hi').pipe(
+            Stream.takeUntil(
+              (event) =>
+                AgentEvents.isPart(event) &&
+                (event.part as Response.StreamPartEncoded).type ===
+                  'tool-result',
+            ),
+            Stream.runDrain,
+            Effect.orDie,
+          );
 
-          yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
+          yield* conversation.resume('and then?').pipe(Effect.orDie);
           return (yield* readAll()).map((envelope) => envelope.record._tag);
         }),
         models.layer,
@@ -320,7 +316,9 @@ describe('resuming an ordinary conversation', () => {
 
       const asked = yield* run(
         Effect.gen(function* () {
-          yield* agent.resume('fresh', 'hello').pipe(Effect.orDie);
+          yield* Conversation.make(agent, 'fresh')
+            .resume('hello')
+            .pipe(Effect.orDie);
           return models.asked;
         }),
         models.layer,
@@ -339,8 +337,8 @@ describe('resuming an ordinary conversation', () => {
 
       const asked = yield* run(
         Effect.gen(function* () {
-          yield* agent.resume(CONVERSATION, 'first').pipe(Effect.orDie);
-          yield* agent.resume(CONVERSATION, 'second').pipe(Effect.orDie);
+          yield* conversation.resume('first').pipe(Effect.orDie);
+          yield* conversation.resume('second').pipe(Effect.orDie);
           return models.asked;
         }),
         models.layer,
@@ -364,8 +362,12 @@ describe('resuming an ordinary conversation', () => {
 
       const asked = yield* run(
         Effect.gen(function* () {
-          yield* agent.resume('conv-a', 'first').pipe(Effect.orDie);
-          yield* agent.resume('conv-b', 'first').pipe(Effect.orDie);
+          yield* Conversation.make(agent, 'conv-a')
+            .resume('first')
+            .pipe(Effect.orDie);
+          yield* Conversation.make(agent, 'conv-b')
+            .resume('first')
+            .pipe(Effect.orDie);
           return models.asked;
         }),
         models.layer,
@@ -383,11 +385,9 @@ describe('resuming an ordinary conversation', () => {
 
       const totals = yield* run(
         Effect.gen(function* () {
-          const first = yield* agent
-            .resume(CONVERSATION, 'first')
-            .pipe(Effect.orDie);
-          const second = yield* agent
-            .resume(CONVERSATION, 'second')
+          const first = yield* conversation.resume('first').pipe(Effect.orDie);
+          const second = yield* conversation
+            .resume('second')
             .pipe(Effect.orDie);
           return { first: first.usage, second: second.usage };
         }),
@@ -427,8 +427,9 @@ describe('resuming an ordinary conversation', () => {
 
         yield* run(
           Effect.gen(function* () {
-            yield* anchored.resume(CONVERSATION, 'first');
-            yield* anchored.resume(CONVERSATION, 'second');
+            const conversation = Conversation.make(anchored, CONVERSATION);
+            yield* conversation.resume('first');
+            yield* conversation.resume('second');
           }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
           models.layer,
         );

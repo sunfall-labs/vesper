@@ -1,7 +1,7 @@
 import { RecordBatch } from '@sunfall/vesper-log/record-batch';
 import { Cache, Context, Effect, Layer, Ref, Schema, Semaphore } from 'effect';
 
-import { Session, StateCleanup } from './internal.js';
+import { Session, StateCleanup } from './internal/protocol.js';
 import type { AgentLog } from './log.js';
 import { ResumeProjection } from './resume-projection.js';
 
@@ -204,10 +204,10 @@ export const open = <A>(
     };
   });
 
-export const layerMemory = <A>(definition: Definition<A>) =>
+export const layerEphemeral = <A>(definition: Definition<A>) =>
   Layer.effect(definition, open(definition, undefined));
 
-export const layerDurable = <A>(definition: Definition<A>) =>
+export const layerRecorded = <A>(definition: Definition<A>) =>
   Layer.effect(
     definition,
     Effect.gen(function* () {
@@ -223,7 +223,7 @@ export const layerDurable = <A>(definition: Definition<A>) =>
           return yield* Effect.fail(
             new Error({
               reason: 'no-session',
-              message: 'Durable state requires a recorded agent session',
+              message: 'Recorded state requires a recorded agent session',
               stateId: definition.id,
               stateVersion: definition.version,
             }),

@@ -19,6 +19,9 @@
       "@sunfall/vesper-agent/context-window": [
         "./packages/agent/src/context-window.ts"
       ],
+      "@sunfall/vesper-agent/conversation": [
+        "./packages/agent/src/conversation.ts"
+      ],
       "@sunfall/vesper-agent/event": ["./packages/agent/src/event.ts"],
       "@sunfall/vesper-agent/history": ["./packages/agent/src/history.ts"],
       "@sunfall/vesper-agent/interception": [
@@ -31,7 +34,6 @@
       "@sunfall/vesper-agent/run-policy": [
         "./packages/agent/src/run-policy.ts"
       ],
-      "@sunfall/vesper-agent/signal": ["./packages/agent/src/signal.ts"],
       "@sunfall/vesper-agent/stop": ["./packages/agent/src/stop.ts"],
       "@sunfall/vesper-agent/state": ["./packages/agent/src/state.ts"],
       "@sunfall/vesper-agent/subagent": ["./packages/agent/src/subagent.ts"],

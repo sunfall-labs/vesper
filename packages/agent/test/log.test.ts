@@ -13,6 +13,7 @@ import {
 } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
 
 // What these have to prove, beyond "records appear":
@@ -159,7 +160,9 @@ describe('recording a run', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* Conversation.make(agent, CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
           return yield* readAll();
         }),
       );
@@ -185,7 +188,9 @@ describe('recording a run', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* Conversation.make(agent, CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
           return yield* readAll();
         }),
       );
@@ -201,7 +206,9 @@ describe('recording a run', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* Conversation.make(agent, CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
           return yield* readAll();
         }),
       );
@@ -228,8 +235,7 @@ describe('recording a run', () => {
     Effect.gen(function* () {
       const observed = yield* run(
         Effect.gen(function* () {
-          const result = yield* agent
-            .recordingTo(CONVERSATION)
+          const result = yield* Conversation.make(agent, CONVERSATION)
             .run('where is order 42?')
             .pipe(Effect.orDie);
           return { result, written: yield* readAll() };
@@ -268,8 +274,7 @@ describe('recording a run', () => {
             const store = yield* LogStore.Service;
             const seen: string[] = [];
 
-            yield* agent
-              .recordingTo(CONVERSATION)
+            yield* Conversation.make(agent, CONVERSATION)
               .stream('hi')
               .pipe(
                 Stream.runForEach((event) =>
@@ -331,32 +336,35 @@ describe('logging is optional', () => {
     }),
   );
 
-  it('puts LogStore in the type only after recordingTo', () => {
+  it('puts LogStore in the type for a conversation', () => {
+    type EffR<T> =
+      T extends Effect.Effect<unknown, unknown, infer R> ? R : never;
     type Plain = Agent.Requires<typeof agent>;
-    type Recording = Agent.Requires<ReturnType<typeof agent.recordingTo>>;
+    type Recording = ReturnType<typeof Conversation.make>;
 
-    // Both fail to compile if `recordingTo` stops changing the requirement
-    // channel, which is what keeps this from being a comment.
+    // Both fail to compile if binding a conversation stops changing the
+    // requirement channel, which is what keeps this from being a comment.
     const plainIsFree: LogStore.Service extends Plain ? false : true = true;
-    const recordingNeedsIt: LogStore.Service extends Recording ? true : false =
-      true;
+    type RecordingRequirements = EffR<ReturnType<Recording['run']>>;
+    const recordingNeedsIt: LogStore.Service extends RecordingRequirements
+      ? true
+      : false = true;
 
     expect([plainIsFree, recordingNeedsIt]).toEqual([true, true]);
   });
 });
 
-describe('Agent.streamFrom', () => {
+describe('Conversation.records', () => {
   it.effect('replays what was recorded, oldest first', () =>
     Effect.gen(function* () {
       const replayed = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          const conversation = Conversation.make(agent, CONVERSATION);
+          yield* conversation.run('hi').pipe(Effect.orDie);
 
-          return yield* Agent.streamFrom(CONVERSATION).pipe(
-            Stream.take(9),
-            Stream.runCollect,
-            Effect.orDie,
-          );
+          return yield* conversation
+            .records()
+            .pipe(Stream.take(9), Stream.runCollect, Effect.orDie);
         }),
       );
 
@@ -378,14 +386,13 @@ describe('Agent.streamFrom', () => {
     Effect.gen(function* () {
       const replayed = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          const conversation = Conversation.make(agent, CONVERSATION);
+          yield* conversation.run('hi').pipe(Effect.orDie);
           const written = yield* readAll();
 
-          return yield* Agent.streamFrom(CONVERSATION, written[3]!.offset).pipe(
-            Stream.take(1),
-            Stream.runCollect,
-            Effect.orDie,
-          );
+          return yield* conversation
+            .records(written[3]!.offset)
+            .pipe(Stream.take(1), Stream.runCollect, Effect.orDie);
         }),
       );
 
@@ -400,14 +407,15 @@ describe('Agent.streamFrom', () => {
     Effect.gen(function* () {
       const late = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          const conversation = Conversation.make(agent, CONVERSATION);
+          yield* conversation.run('hi').pipe(Effect.orDie);
           const store = yield* LogStore.Service;
           const historical = (yield* readAll()).length;
 
           const caughtUp = yield* Deferred.make<void>();
           const seen = yield* Ref.make(0);
 
-          const reader = yield* Agent.streamFrom(CONVERSATION).pipe(
+          const reader = yield* conversation.follow().pipe(
             Stream.tap(() =>
               Effect.gen(function* () {
                 const count = yield* Ref.updateAndGet(seen, (n) => n + 1);

@@ -10,6 +10,7 @@ import * as NodeRuntime from '@effect/platform-node/NodeRuntime';
 import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
+import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
 import { AgentLog } from '@sunfall/vesper-agent/log';
@@ -131,10 +132,10 @@ const check = (ok: boolean, claim: string): Effect.Effect<void> => {
  *
  * Two sources, because the two entry-point shapes report differently. A
  * streamed run's turns arrive as `finish` parts and are added as they go. A
- * `resume` returns only a `Result`, whose `usage` is cumulative **for the whole
- * conversation** rather than for that run — so it is added as a delta against
- * the last figure seen for that conversation id, which is what stops five
- * resumptions of one conversation from counting the first turn five times.
+ * `conversation.resume` returns only a `Result`, whose `usage` is cumulative
+ * **for the whole conversation** rather than for that run — so it is added as
+ * a delta against the last figure seen for that conversation id. That stops
+ * five resumptions of one conversation from counting the first turn five times.
  *
  * It undercounts one thing on purpose rather than by accident: a summarization
  * call goes through `LanguageModel.generateText`, which neither shape observes.
@@ -502,11 +503,9 @@ const delegatePhase = Effect.gen(function* () {
 
   const conversationId = `smoke-delegate-${Date.now()}`;
   const trace = yield* observe(
-    curator
-      .recordingTo(conversationId)
-      .stream(
-        'When was the north kiln commissioned, and how hot does it fire?',
-      ),
+    Conversation.make(curator, conversationId).stream(
+      'When was the north kiln commissioned, and how hot does it fire?',
+    ),
   );
 
   yield* report(trace);
@@ -639,7 +638,7 @@ const skillsPhase = Effect.gen(function* () {
   );
 });
 
-// ------------------------------------------- phase: record, resume, branch
+// --------------------------------- phase: run, continue, branch conversation
 
 const notetaker = Agent.make({
   name: 'notetaker',
@@ -655,8 +654,8 @@ const notetaker = Agent.make({
 /** A conversation with two runs, whose second run supersedes the first. */
 const seedConversation = (conversationId: string) =>
   Effect.gen(function* () {
-    const recording = notetaker.recordingTo(conversationId);
-    const first = yield* recording.run(
+    const conversation = Conversation.make(notetaker, conversationId);
+    const first = yield* conversation.run(
       'The shipment container id is CONTAINER-ALPHA. Acknowledge it in five words.',
     );
     yield* Console.log(
@@ -666,14 +665,14 @@ const seedConversation = (conversationId: string) =>
     const records = yield* readAll(conversationId).pipe(Effect.orDie);
     const afterFirstRun = records[records.length - 1]!.offset;
 
-    const second = yield* recording.run(
+    const second = yield* conversation.run(
       'Correction: the container id is CONTAINER-BETA. Acknowledge it in five words.',
     );
     yield* Console.log(
       dim(`  run 2: ${second.text.replace(/\s+/g, ' ').slice(0, 120)}`),
     );
 
-    // `recordingTo(...).run` reports what *this run* spent, so these add
+    // `conversation.run` reports what *this run* spent, so these add
     // directly — and they establish the conversation's running total, which is
     // what the resumption below reports cumulatively.
     spent(first.usage);
@@ -687,7 +686,7 @@ const seedConversation = (conversationId: string) =>
   });
 
 const logPhase = Effect.gen(function* () {
-  yield* heading('the log — record, then resume from records alone');
+  yield* heading('the log — run, then continue from records alone');
 
   const conversationId = `smoke-log-${Date.now()}`;
   const seeded = yield* seedConversation(conversationId);
@@ -697,8 +696,8 @@ const logPhase = Effect.gen(function* () {
 
   // A different agent value, and therefore a `Chat` this process has never
   // held. Everything it knows has to come out of the store.
-  const resumed = yield* notetaker.resume(
-    conversationId,
+  const conversation = Conversation.make(notetaker, conversationId);
+  const resumed = yield* conversation.resume(
     'What is the container id? Answer with just the id.',
   );
   spentByConversation(conversationId, resumed.usage);
@@ -721,8 +720,7 @@ const logPhase = Effect.gen(function* () {
 
   yield* heading('branching — the model sees the rewritten history');
 
-  const branched = yield* notetaker.branchFrom(
-    conversationId,
+  const branched = yield* conversation.branchFrom(
     seeded.afterFirstRun,
     'What is the container id? Answer with just the id.',
   );
@@ -757,14 +755,12 @@ const logPhase = Effect.gen(function* () {
 
   const [leftResult, rightResult] = yield* Effect.all(
     [
-      notetaker.forkFrom(
-        conversationId,
+      conversation.forkFrom(
         seeded.afterFirstRun,
         left,
         'Repeat the container id, then say the word LEFT.',
       ),
-      notetaker.forkFrom(
-        conversationId,
+      conversation.forkFrom(
         seeded.afterFirstRun,
         right,
         'Repeat the container id, then say the word RIGHT.',
@@ -928,19 +924,18 @@ const usagePhase = Effect.gen(function* () {
   const bulk = filler(6_000);
   const conversationId = `smoke-usage-${Date.now()}`;
 
+  const conversation = Conversation.make(parrot, conversationId);
   const first = yield* observe(
-    parrot
-      .recordingTo(conversationId)
-      .stream(
-        `Ignore this log; it is only here to make the prompt long.\n\n${bulk}\n\nSay ONE.`,
-      ),
+    conversation.stream(
+      `Ignore this log; it is only here to make the prompt long.\n\n${bulk}\n\nSay ONE.`,
+    ),
   );
   // Already counted through the stream's `finish` parts; recorded here so the
   // cumulative figure the resumption reports is charged as a delta.
   cumulative.set(conversationId, first.usage);
 
   // The second call rebuilds the first from records, preserving the long prefix.
-  const second = yield* parrot.resume(conversationId, 'Say TWO.');
+  const second = yield* conversation.resume('Say TWO.');
   spentByConversation(conversationId, second.usage);
   const secondRecords = yield* readAll(conversationId).pipe(Effect.orDie);
 
@@ -1003,15 +998,15 @@ const compactionProactivePhase = Effect.gen(function* () {
 
   const conversationId = `smoke-compact-${Date.now()}`;
 
-  // `resume`, not `recordingTo(...).run` in a loop.
+  // `conversation.resume`, not `conversation.run` in a loop.
   //
   // This is a real difference the faux provider cannot show. A recording
   // agent's `run` opens a fresh `Chat` seeded with instructions alone, so
   // calling it repeatedly against one conversation appends several runs to
   // one log and gives the model no memory of any of them — the history only
-  // ever comes back through `resume`, which rebuilds it from the records. A
-  // first `resume` on an id nobody has used starts the conversation, so this
-  // needs no special case for the opening turn.
+  // ever comes back through `conversation.resume`, which rebuilds it from the
+  // records. A first `conversation.resume` on a new conversation starts it, so
+  // this needs no special case for the opening turn.
   const prompts = [
     'My name is Wren and I collect antique barometers. Tell me about the ' +
       'history of the aneroid barometer.',
@@ -1022,9 +1017,10 @@ const compactionProactivePhase = Effect.gen(function* () {
   ];
 
   let last = '';
+  const conversation = Conversation.make(rambler, conversationId);
   const compactionsAfter: Array<number> = [];
   for (const prompt of prompts) {
-    const result = yield* rambler.resume(conversationId, prompt);
+    const result = yield* conversation.resume(prompt);
     spentByConversation(conversationId, result.usage);
     last = result.text;
     const soFar = yield* readAll(conversationId).pipe(Effect.orDie);
@@ -1077,8 +1073,7 @@ const compactionProactivePhase = Effect.gen(function* () {
     );
   }
 
-  const resumed = yield* rambler.resume(
-    conversationId,
+  const resumed = yield* conversation.resume(
     'One more time: what do I collect? Two words.',
   );
   spentByConversation(conversationId, resumed.usage);
@@ -1164,12 +1159,12 @@ const compactionReactivePhase = Effect.gen(function* () {
 
   const conversationId = `smoke-overflow-${Date.now()}`;
 
-  // `resume` for both turns, so the second turn's prompt is the first turn
-  // rebuilt from records *plus* the new half — which is what puts it over the
-  // window. Two `recordingTo(...).run` calls would each start from an empty
+  // `conversation.resume` for both turns, so the second turn's prompt is the
+  // first turn rebuilt from records *plus* the new half — which puts it over the
+  // window. Two `conversation.run` calls would each start from an empty
   // `Chat` and neither would overflow.
-  const one = yield* archivistOfLogs.resume(
-    conversationId,
+  const conversation = Conversation.make(archivistOfLogs, conversationId);
+  const one = yield* conversation.resume(
     `Here is the first half of the log.\n\n${first}\n\nHow many entries did I just give you, roughly?`,
   );
   spentByConversation(conversationId, one.usage);
@@ -1177,9 +1172,8 @@ const compactionReactivePhase = Effect.gen(function* () {
     dim(`  turn 1: in=${one.usage.input} out=${one.usage.output}`),
   );
 
-  const two = yield* archivistOfLogs
+  const two = yield* conversation
     .resume(
-      conversationId,
       `Here is the second half.\n\n${second}\n\nSay the word OVERFLOWED and nothing else.`,
     )
     .pipe(

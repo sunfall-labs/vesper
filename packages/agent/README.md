@@ -1,5 +1,8 @@
 # `@sunfall/vesper-agent`
 
+For replacements for the former Agent durability methods, see
+[Migrating to Conversation](../../docs/migrating-to-conversation.md).
+
 The Effect-first agent loop for Vesper: subagents, skills, stop conditions,
 tool-call interception, recording, resumption, compaction, and signals.
 
@@ -16,8 +19,9 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 ```
 
 Modules are exposed as explicit subpaths, including
-`@sunfall/vesper-agent/agent`, `/run-policy`, `/recording-policy`, `/stop`,
-`/skill`, `/state`, `/interception`, and `/workflow`.
+`@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
+`/recording-policy`, `/stop`, `/skill`, `/state`, `/interception`, and
+`/workflow`.
 
 ## Durable State
 
@@ -157,7 +161,8 @@ application limits stricter or larger; descendants share the root runtime and
 cannot reset it by opening another agent loop. `StopCondition`s remain soft.
 
 Recording persists raw values by default. Pass an effectful
-`RecordingPolicy.Policy` as the second argument to `recordingTo` to redact only
+`RecordingPolicy.Policy` as the third argument to
+`Conversation.recording(agent, id, policy)` to redact only
 the persisted prompt, tool parameters/results, delivered signals, and rendered
 failure causes. Its Effect services appear exactly in `Agent.Requires`.
 The separate incoming signal stream is explicitly raw so a resumed run can

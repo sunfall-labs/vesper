@@ -26,7 +26,7 @@ export const FORMAT_VERSION = 1;
 //
 // Not every case belongs to the same stream. `Signal` lives in a
 // conversation's *signal* stream and nothing else does — see
-// `agent/src/signal.ts` for why that has to be a separate stream from the
+// `agent/src/internal/signal-store.ts` for why that has to be a separate stream from the
 // conversation it steers.
 //
 // **Text is coalesced before it is logged.** This log exists so a

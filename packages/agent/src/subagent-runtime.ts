@@ -3,7 +3,7 @@ import { AiError, Toolkit } from 'effect/unstable/ai';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Agent } from './agent.js';
-import { protocolOf } from './internal.js';
+import { protocolOf } from './internal/protocol.js';
 import type { AgentLog } from './log.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
@@ -39,7 +39,7 @@ export const handler =
         });
       }
 
-      const protocol = protocolOf<R>(child);
+      const protocol = protocolOf<R, Agent.Tools<typeof child>>(child);
       if (protocol === undefined) {
         return yield* Effect.die(
           new Error(`Subagent "${child.name}" was not created by Agent.make`),

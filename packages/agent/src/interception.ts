@@ -92,7 +92,7 @@ export interface Run {
    * recording.
    *
    * Present rather than assumed, because interception is independent of
-   * logging: an agent may be intercepted without `recordingTo`, and an
+   * logging: an agent may be intercepted without `Conversation`, and a
    * interceptor keyed on a conversation has to be able to tell.
    */
   readonly conversationId: LogVocabulary.ConversationId | undefined;

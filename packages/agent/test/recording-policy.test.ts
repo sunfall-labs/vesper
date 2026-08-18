@@ -6,6 +6,7 @@ import { Context, Effect, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
@@ -62,7 +63,9 @@ describe('recording policy', () => {
       });
 
       const records = yield* Effect.gen(function* () {
-        yield* agent.recordingTo(conversation, policy).run('input secret');
+        yield* Conversation.recording(agent, conversation, policy).run(
+          'input secret',
+        );
         const store = yield* LogStore.Service;
         return (yield* store.read(
           AgentLog.pathFor(LogVocabulary.ConversationId.make(conversation)),

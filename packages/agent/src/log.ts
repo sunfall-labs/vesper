@@ -1,6 +1,7 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
+import { Tail } from '@sunfall/vesper-log/tail';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Clock,
@@ -19,7 +20,7 @@ import { AgentHistory } from './history.js';
 import { PromptTransport } from './prompt-transport.js';
 import * as RecoveryState from './recovery.js';
 import { ResumeProjection } from './resume-projection.js';
-import { AgentSignals } from './signal.js';
+import * as AgentSignals from './internal/signal-store.js';
 import type { Stop } from './stop.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
 import * as RecordingSink from './recording-sink.js';
@@ -27,7 +28,7 @@ import * as RecordingSink from './recording-sink.js';
 /**
  * Where a conversation's stream lives.
  *
- * One function, exported, because the writer and {@link Agent.streamFrom}
+ * One function, exported, because the writer and `Conversation.follow`
  * have to agree and a convention that lives in two places is a convention
  * that eventually differs. The prefix leaves room for streams that are not
  * conversations — `signals/<id>`, and a per-agent identity stream if one ever
@@ -36,6 +37,43 @@ import * as RecordingSink from './recording-sink.js';
  */
 export const pathFor = (conversationId: LogVocabulary.ConversationId): string =>
   `conversations/${conversationId}`;
+
+/** @internal Replay existing records and follow future appends. */
+export const follow = (
+  conversationId: LogVocabulary.ConversationId,
+  after: LogOffset.Offset = LogOffset.START,
+): Stream.Stream<
+  ConversationRecord.Envelope,
+  LogStore.LogStoreError,
+  LogStore.Service
+> => Tail.from(pathFor(conversationId), after);
+
+/** @internal Read a finite snapshot of the records currently stored. */
+export const snapshot = (
+  conversationId: LogVocabulary.ConversationId,
+  after: LogOffset.Offset = LogOffset.START,
+): Stream.Stream<
+  ConversationRecord.Envelope,
+  LogStore.LogStoreError,
+  LogStore.Service
+> =>
+  Stream.unwrap(
+    Effect.map(LogStore.Service, (store) => {
+      const path = pathFor(conversationId);
+      const page = (
+        cursor: LogOffset.Offset,
+      ): Stream.Stream<ConversationRecord.Envelope, LogStore.LogStoreError> =>
+        Stream.unwrap(
+          Effect.map(store.read(path, { after: cursor }), (read) =>
+            Stream.concat(
+              Stream.fromIterable(read.records),
+              read.upToDate ? Stream.empty : page(read.cursor),
+            ),
+          ),
+        );
+      return page(after);
+    }),
+  );
 
 /**
  * A conversation id for a child, derived rather than minted.
@@ -231,7 +269,7 @@ export interface Session {
   /** @internal Raw recovery snapshot used to rebuild the prompt. */
   readonly history: ReadonlyArray<ConversationRecord.Envelope>;
 
-  /** @internal Bounded aggregate suffix used to restore durable state. */
+  /** @internal Bounded aggregate suffix used to restore recorded state. */
   readonly stateHistory: ReadonlyArray<ConversationRecord.Envelope>;
 
   /**

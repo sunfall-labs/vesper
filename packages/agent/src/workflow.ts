@@ -8,7 +8,7 @@ import {
 } from 'effect/unstable/workflow';
 
 import { Agent } from './agent.js';
-import { AgentSignals } from './signal.js';
+import { Conversation } from './conversation.js';
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
@@ -213,9 +213,12 @@ export const make = <
   });
 
   const layer = workflow.toLayer((payload) =>
-    agent
-      .resume(payload.conversationId, options.input?.(payload) ?? payload.input)
-      .pipe(Effect.mapError(options.mapError)),
+    Conversation.make(agent, payload.conversationId)
+      .resume(options.input?.(payload) ?? payload.input)
+      .pipe(
+        Effect.mapError((error) => error as Agent.Error<A>),
+        Effect.mapError(options.mapError),
+      ),
   );
 
   const identify = (
@@ -244,7 +247,7 @@ export const make = <
 
   const cancel = (identity: Identity, signal: CancelSignal) =>
     Effect.gen(function* () {
-      yield* AgentSignals.send(identity.conversationId, {
+      yield* Conversation.make(agent, identity.conversationId).send({
         kind: 'cancel',
         text: signal.text,
         source: signal.source,

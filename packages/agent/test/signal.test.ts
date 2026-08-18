@@ -12,8 +12,8 @@ import {
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
-import { AgentLog } from '../src/log.js';
-import { AgentSignals } from '../src/signal.js';
+import { Conversation, type Signal } from '../src/conversation.js';
+import * as AgentSignals from '../src/internal/signal-store.js';
 import { Stop } from '../src/stop.js';
 
 // Signals: out-of-band input to a running conversation.
@@ -92,6 +92,7 @@ const agent = Agent.make({
   instructions: 'be terse',
   toolkit: Toolkit.make(),
 });
+const conversation = Conversation.make(agent, CONVERSATION);
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
@@ -105,13 +106,9 @@ const run = <A, E>(
   );
 
 const readAll = Effect.fn('test.readAll')(function* () {
-  const store = yield* LogStore.Service;
-  const page = yield* store
-    .read(AgentLog.pathFor(LogVocabulary.ConversationId.make(CONVERSATION)), {
-      limit: 1000,
-    })
-    .pipe(Effect.orDie);
-  return page.records;
+  return Array.from(
+    yield* conversation.records().pipe(Stream.runCollect, Effect.orDie),
+  );
 });
 
 const received = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
@@ -140,13 +137,15 @@ describe('steering', () => {
 
         const result = yield* run(
           Effect.gen(function* () {
-            yield* AgentSignals.send(CONVERSATION, {
-              kind: 'steer',
-              text: 'too large',
-              source: 'operator',
-            }).pipe(Effect.orDie);
-            const events = yield* bounded
-              .recordingTo(CONVERSATION)
+            const conversation = Conversation.make(bounded, CONVERSATION);
+            yield* conversation
+              .send({
+                kind: 'steer',
+                text: 'too large',
+                source: 'operator',
+              })
+              .pipe(Effect.orDie);
+            const events = yield* conversation
               .stream('hi')
               .pipe(Stream.runCollect, Effect.orDie);
             return { events, records: yield* readAll() };
@@ -184,14 +183,15 @@ describe('steering', () => {
         const events = yield* run(
           Effect.gen(function* () {
             for (const text of ['first', 'second']) {
-              yield* AgentSignals.send(CONVERSATION, {
-                kind: 'steer',
-                text,
-                source: 'operator',
-              }).pipe(Effect.orDie);
+              yield* Conversation.make(bounded, CONVERSATION)
+                .send({
+                  kind: 'steer',
+                  text,
+                  source: 'operator',
+                })
+                .pipe(Effect.orDie);
             }
-            return yield* bounded
-              .recordingTo(CONVERSATION)
+            return yield* Conversation.make(bounded, CONVERSATION)
               .stream('hi')
               .pipe(Stream.runCollect, Effect.orDie);
           }),
@@ -213,13 +213,15 @@ describe('steering', () => {
 
       yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'also check the invoice',
-            source: 'operator',
-          }).pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'also check the invoice',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
 
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* conversation.run('hi').pipe(Effect.orDie);
         }),
         scripted,
       );
@@ -235,16 +237,15 @@ describe('steering', () => {
 
       const result = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'keep going',
-            source: 'operator',
-          }).pipe(Effect.orDie);
-
-          return yield* agent
-            .recordingTo(CONVERSATION)
-            .run('hi')
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'keep going',
+              source: 'operator',
+            })
             .pipe(Effect.orDie);
+
+          return yield* conversation.run('hi').pipe(Effect.orDie);
         }),
         scripted,
       );
@@ -262,13 +263,15 @@ describe('steering', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'keep going',
-            source: 'operator',
-          }).pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'keep going',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
 
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* conversation.run('hi').pipe(Effect.orDie);
           return yield* readAll();
         }),
         scripted,
@@ -308,17 +311,16 @@ describe('steering', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'keep going',
-            source: 'operator',
-          }).pipe(Effect.orDie);
-
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-          yield* agent
-            .recordingTo(CONVERSATION)
-            .run('again')
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'keep going',
+              source: 'operator',
+            })
             .pipe(Effect.orDie);
+
+          yield* conversation.run('hi').pipe(Effect.orDie);
+          yield* conversation.run('again').pipe(Effect.orDie);
           return yield* readAll();
         }),
         scripted,
@@ -338,20 +340,19 @@ describe('steering', () => {
 
       const observed = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'keep going',
-            source: 'operator',
-          }).pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'keep going',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
 
-          return yield* agent
-            .recordingTo(CONVERSATION)
-            .stream('hi')
-            .pipe(
-              Stream.filter((event) => event._tag === 'Signalled'),
-              Stream.runCollect,
-              Effect.orDie,
-            );
+          return yield* conversation.stream('hi').pipe(
+            Stream.filter((event) => event._tag === 'Signalled'),
+            Stream.runCollect,
+            Effect.orDie,
+          );
         }),
         scripted,
       );
@@ -383,16 +384,16 @@ describe('cancelling', () => {
 
         const result = yield* run(
           Effect.gen(function* () {
-            yield* AgentSignals.send(CONVERSATION, {
-              kind: 'cancel',
-              text: 'user closed the tab',
-              source: 'ui',
-            }).pipe(Effect.orDie);
-
-            return yield* persistent
-              .recordingTo(CONVERSATION)
-              .run('hi')
+            const conversation = Conversation.make(persistent, CONVERSATION);
+            yield* conversation
+              .send({
+                kind: 'cancel',
+                text: 'user closed the tab',
+                source: 'ui',
+              })
               .pipe(Effect.orDie);
+
+            return yield* conversation.run('hi').pipe(Effect.orDie);
           }),
           scripted,
         );
@@ -410,7 +411,9 @@ describe('cancelling', () => {
       const scripted = model();
 
       const result = yield* run(
-        persistent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie),
+        Conversation.make(persistent, CONVERSATION)
+          .run('hi')
+          .pipe(Effect.orDie),
         scripted,
       );
 
@@ -426,13 +429,15 @@ describe('cancelling', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'cancel',
-            text: 'user closed the tab',
-            source: 'ui',
-          }).pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'cancel',
+              text: 'user closed the tab',
+              source: 'ui',
+            })
+            .pipe(Effect.orDie);
 
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* conversation.run('hi').pipe(Effect.orDie);
           return yield* readAll();
         }),
         scripted,
@@ -448,21 +453,22 @@ describe('cancelling', () => {
 
       const result = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'keep going',
-            source: 'operator',
-          }).pipe(Effect.orDie);
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'cancel',
-            text: 'never mind',
-            source: 'ui',
-          }).pipe(Effect.orDie);
-
-          return yield* agent
-            .recordingTo(CONVERSATION)
-            .run('hi')
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'keep going',
+              source: 'operator',
+            })
             .pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'cancel',
+              text: 'never mind',
+              source: 'ui',
+            })
+            .pipe(Effect.orDie);
+
+          return yield* conversation.run('hi').pipe(Effect.orDie);
         }),
         scripted,
       );
@@ -508,22 +514,23 @@ describe('cancelling', () => {
           );
 
           const running = yield* Effect.forkChild(
-            agent
-              .recordingTo(CONVERSATION)
-              .run('hi')
-              .pipe(Effect.provide(blocking)),
+            conversation.run('hi').pipe(Effect.provide(blocking)),
           );
           yield* Deferred.await(entered);
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'steer',
-            text: 'change direction',
-            source: 'operator',
-          }).pipe(Effect.orDie);
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'cancel',
-            text: 'stop now',
-            source: 'ui',
-          }).pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'steer',
+              text: 'change direction',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'cancel',
+              text: 'stop now',
+              source: 'ui',
+            })
+            .pipe(Effect.orDie);
 
           const completed = yield* Fiber.join(running);
           yield* Deferred.await(stopped);
@@ -583,14 +590,16 @@ describe('cancelling', () => {
       const outcome = yield* run(
         Effect.gen(function* () {
           const running = yield* Effect.forkChild(
-            bounded.recordingTo(CONVERSATION).run('hi'),
+            Conversation.make(bounded, CONVERSATION).run('hi'),
           );
           yield* Deferred.await(entered);
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'cancel',
-            text: 'too large',
-            source: 'ui',
-          }).pipe(Effect.orDie);
+          yield* Conversation.make(bounded, CONVERSATION)
+            .send({
+              kind: 'cancel',
+              text: 'too large',
+              source: 'ui',
+            })
+            .pipe(Effect.orDie);
           return yield* Fiber.join(running);
         }).pipe(Effect.result),
         blocking,
@@ -624,17 +633,22 @@ describe('cancelling', () => {
 
         const outcome = yield* run(
           Effect.gen(function* () {
-            yield* AgentSignals.send(CONVERSATION, {
-              kind: 'steer',
-              text: 'older',
-              source: 'operator',
-            }).pipe(Effect.orDie);
-            yield* AgentSignals.send(CONVERSATION, {
-              kind: 'cancel',
-              text: 'newer',
-              source: 'ui',
-            }).pipe(Effect.orDie);
-            return yield* bounded.recordingTo(CONVERSATION).run('hi');
+            const conversation = Conversation.make(bounded, CONVERSATION);
+            yield* conversation
+              .send({
+                kind: 'steer',
+                text: 'older',
+                source: 'operator',
+              })
+              .pipe(Effect.orDie);
+            yield* conversation
+              .send({
+                kind: 'cancel',
+                text: 'newer',
+                source: 'ui',
+              })
+              .pipe(Effect.orDie);
+            return yield* conversation.run('hi');
           }).pipe(Effect.result),
           blocked,
         );
@@ -649,12 +663,14 @@ describe('cancelling', () => {
         const scripted = model();
 
         const result = yield* Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'cancel',
-            text: 'stop at boundary',
-            source: 'ui',
-          }).pipe(Effect.orDie);
-          return yield* agent.recordingTo(CONVERSATION).run('hi');
+          yield* conversation
+            .send({
+              kind: 'cancel',
+              text: 'stop at boundary',
+              source: 'ui',
+            })
+            .pipe(Effect.orDie);
+          return yield* conversation.run('hi');
         }).pipe(
           Effect.provide(scripted.layer),
           Effect.provide(
@@ -732,8 +748,7 @@ describe('cancelling', () => {
           }),
         );
 
-        const result = yield* agent
-          .recordingTo(CONVERSATION)
+        const result = yield* conversation
           .run('hi')
           .pipe(Effect.provide(waitingProvider), Effect.provide(instrumented));
         yield* Deferred.await(stopped);
@@ -767,8 +782,7 @@ describe('cancelling', () => {
             ),
           ).pipe(Layer.provide(LogStoreMemory.layer));
 
-          yield* agent
-            .recordingTo(CONVERSATION)
+          yield* conversation
             .run('hi')
             .pipe(Effect.provide(scripted.layer), Effect.provide(instrumented));
           yield* Deferred.await(stopped);
@@ -869,7 +883,7 @@ const workThenTalk = (toolTurns: number): Model => {
  * `sendOn` is keyed by turn so a test can put a signal at a chosen boundary
  * without the model script and the signal script having to agree twice.
  */
-const signallingAgent = (sendOn: ReadonlyMap<number, AgentSignals.Signal>) => {
+const signallingAgent = (sendOn: ReadonlyMap<number, Signal>) => {
   const turns = { count: 0 };
   return Agent.make({
     name: 'test',
@@ -885,7 +899,9 @@ const signallingAgent = (sendOn: ReadonlyMap<number, AgentSignals.Signal>) => {
         turns.count += 1;
         const signal = sendOn.get(turns.count);
         if (signal !== undefined) {
-          yield* AgentSignals.send(CONVERSATION, signal).pipe(Effect.orDie);
+          yield* Conversation.make(agent, CONVERSATION)
+            .send(signal)
+            .pipe(Effect.orDie);
         }
         return { ok: true };
       }),
@@ -899,7 +915,7 @@ describe('a signal that arrives while the run is in flight', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* signallingAgent(
+          const signalling = signallingAgent(
             new Map([
               [
                 2,
@@ -907,11 +923,11 @@ describe('a signal that arrives while the run is in flight', () => {
                   kind: 'steer',
                   text: 'also check the invoice',
                   source: 'operator',
-                } satisfies AgentSignals.Signal,
+                } satisfies Signal,
               ],
             ]),
-          )
-            .recordingTo(CONVERSATION)
+          );
+          yield* Conversation.make(signalling, CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
 
@@ -944,19 +960,21 @@ describe('a signal that arrives while the run is in flight', () => {
       const scripted = workThenTalk(4);
 
       const result = yield* run(
-        signallingAgent(
-          new Map([
-            [
-              1,
-              {
-                kind: 'cancel',
-                text: 'user closed the tab',
-                source: 'ui',
-              } satisfies AgentSignals.Signal,
-            ],
-          ]),
+        Conversation.make(
+          signallingAgent(
+            new Map([
+              [
+                1,
+                {
+                  kind: 'cancel',
+                  text: 'user closed the tab',
+                  source: 'ui',
+                } satisfies Signal,
+              ],
+            ]),
+          ),
+          CONVERSATION,
         )
-          .recordingTo(CONVERSATION)
           .run('hi')
           .pipe(Effect.orDie),
         scripted,
@@ -994,7 +1012,7 @@ describe('a signal that arrives while the run is in flight', () => {
 
         const observed = yield* run(
           Effect.gen(function* () {
-            const result = yield* signallingAgent(
+            const signalling = signallingAgent(
               new Map([
                 [
                   1,
@@ -1002,12 +1020,14 @@ describe('a signal that arrives while the run is in flight', () => {
                     kind: 'cancel',
                     text: 'stop after work',
                     source: 'ui',
-                  } satisfies AgentSignals.Signal,
+                  } satisfies Signal,
                 ],
               ]),
-            )
-              .recordingTo(CONVERSATION)
-              .run('hi');
+            );
+            const result = yield* Conversation.make(
+              signalling,
+              CONVERSATION,
+            ).run('hi');
             return { result, records: yield* readAll() };
           }),
           scripted,
@@ -1030,8 +1050,7 @@ describe('a signal that arrives while the run is in flight', () => {
       const scripted = workThenTalk(4);
 
       const result = yield* run(
-        signallingAgent(new Map())
-          .recordingTo(CONVERSATION)
+        Conversation.make(signallingAgent(new Map()), CONVERSATION)
           .run('hi')
           .pipe(Effect.orDie),
         scripted,
@@ -1054,7 +1073,7 @@ describe('a signal that arrives while the run is in flight', () => {
 
         const written = yield* run(
           Effect.gen(function* () {
-            yield* signallingAgent(
+            const signalling = signallingAgent(
               new Map([
                 [
                   1,
@@ -1062,7 +1081,7 @@ describe('a signal that arrives while the run is in flight', () => {
                     kind: 'steer',
                     text: 'first instruction',
                     source: 'operator',
-                  } satisfies AgentSignals.Signal,
+                  } satisfies Signal,
                 ],
                 [
                   3,
@@ -1070,11 +1089,11 @@ describe('a signal that arrives while the run is in flight', () => {
                     kind: 'steer',
                     text: 'second instruction',
                     source: 'operator',
-                  } satisfies AgentSignals.Signal,
+                  } satisfies Signal,
                 ],
               ]),
-            )
-              .recordingTo(CONVERSATION)
+            );
+            yield* Conversation.make(signalling, CONVERSATION)
               .run('hi')
               .pipe(Effect.orDie);
 
@@ -1117,16 +1136,14 @@ describe('a signal that arrives while the run is in flight', () => {
                   kind: 'steer',
                   text: 'mid-run instruction',
                   source: 'operator',
-                } satisfies AgentSignals.Signal,
+                } satisfies Signal,
               ],
             ]),
           );
 
-          yield* sending.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
-          yield* sending
-            .recordingTo(CONVERSATION)
-            .run('again')
-            .pipe(Effect.orDie);
+          const conversation = Conversation.make(sending, CONVERSATION);
+          yield* conversation.run('hi').pipe(Effect.orDie);
+          yield* conversation.run('again').pipe(Effect.orDie);
           return yield* readAll();
         }),
         scripted,
@@ -1144,11 +1161,13 @@ describe('an agent that is not recording', () => {
 
       const result = yield* run(
         Effect.gen(function* () {
-          yield* AgentSignals.send(CONVERSATION, {
-            kind: 'cancel',
-            text: 'never mind',
-            source: 'ui',
-          }).pipe(Effect.orDie);
+          yield* conversation
+            .send({
+              kind: 'cancel',
+              text: 'never mind',
+              source: 'ui',
+            })
+            .pipe(Effect.orDie);
 
           return yield* agent.run('hi').pipe(Effect.orDie);
         }),

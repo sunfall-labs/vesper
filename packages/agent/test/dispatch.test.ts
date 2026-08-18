@@ -12,10 +12,10 @@ import {
 } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
 import { AgentLog } from '../src/log.js';
 import { ToolDispatch } from '../src/dispatch.js';
-import { AgentSignals } from '../src/signal.js';
 
 // The tool-dispatch seam.
 //
@@ -265,8 +265,7 @@ describe('recovering a tool call from the log', () => {
       const written = yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, outcome]);
-          yield* agentWith(ran)
-            .recordingTo(CONVERSATION)
+          yield* Conversation.make(agentWith(ran), CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
           return yield* readAll();
@@ -290,8 +289,7 @@ describe('recovering a tool call from the log', () => {
       yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, outcome]);
-          yield* agentWith(ran)
-            .recordingTo(CONVERSATION)
+          yield* Conversation.make(agentWith(ran), CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
         }),
@@ -312,8 +310,7 @@ describe('recovering a tool call from the log', () => {
       const written = yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, outcome, settledRun]);
-          yield* agentWith(ran)
-            .recordingTo(CONVERSATION)
+          yield* Conversation.make(agentWith(ran), CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
           return yield* readAll();
@@ -336,8 +333,7 @@ describe('recovering a tool call from the log', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agentWith(ran)
-            .recordingTo(CONVERSATION)
+          yield* Conversation.make(agentWith(ran), CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
           return yield* readAll();
@@ -362,8 +358,7 @@ describe('recovering a tool call from the log', () => {
               called,
               { ...outcome, _tag: 'ToolOutcome', name: 'something_else' },
             ]);
-            yield* agentWith(ran)
-              .recordingTo(CONVERSATION)
+            yield* Conversation.make(agentWith(ran), CONVERSATION)
               .run('hi')
               .pipe(Effect.orDie);
           }),
@@ -385,17 +380,22 @@ describe('recovering indeterminate tool execution', () => {
         const result = yield* run(
           Effect.gen(function* () {
             yield* seed([started, called, toolStarted]);
-            yield* AgentSignals.send(CONVERSATION, {
+            const conversation = Conversation.make(
+              agentWith(ran),
+              CONVERSATION,
+            );
+            yield* conversation.send({
               kind: 'cancel',
               text: 'stop before retry',
               source: 'test',
             });
-            return yield* agentWith(ran)
-              .intercepting({
+            return yield* Conversation.make(
+              agentWith(ran).intercepting({
                 onIndeterminateToolCall: () =>
                   Effect.succeed(Interception.retry),
-              })
-              .resume(CONVERSATION, 'hi');
+              }),
+              CONVERSATION,
+            ).resume('hi');
           }),
           prompts,
         );
@@ -415,20 +415,24 @@ describe('recovering indeterminate tool execution', () => {
         const result = yield* run(
           Effect.gen(function* () {
             yield* seed([started, called, toolStarted]);
-            return yield* agentWith(ran)
-              .intercepting({
+            const conversation = Conversation.make(
+              agentWith(ran).intercepting({
                 onIndeterminateToolCall: () =>
-                  AgentSignals.send(CONVERSATION, {
-                    kind: 'cancel',
-                    text: 'stop during recovery',
-                    source: 'test',
-                  }).pipe(
-                    Effect.orDie,
-                    Effect.andThen(Effect.sleep(20)),
-                    Effect.as(Interception.retry),
-                  ),
-              })
-              .resume(CONVERSATION, 'hi');
+                  Conversation.make(agentWith(ran), CONVERSATION)
+                    .send({
+                      kind: 'cancel',
+                      text: 'stop during recovery',
+                      source: 'test',
+                    })
+                    .pipe(
+                      Effect.orDie,
+                      Effect.andThen(Effect.sleep(20)),
+                      Effect.as(Interception.retry),
+                    ),
+              }),
+              CONVERSATION,
+            );
+            return yield* conversation.resume('hi');
           }),
         );
 
@@ -456,11 +460,13 @@ describe('recovering indeterminate tool execution', () => {
       const exit = yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, toolStarted]);
-          return yield* hanging
-            .intercepting({
+          return yield* Conversation.make(
+            hanging.intercepting({
               onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
-            })
-            .resume(CONVERSATION, 'hi')
+            }),
+            CONVERSATION,
+          )
+            .resume('hi')
             .pipe(Effect.result);
         }),
       );
@@ -480,8 +486,8 @@ describe('recovering indeterminate tool execution', () => {
 
         const exit = yield* Effect.gen(function* () {
           yield* seed([started, called, toolStarted]);
-          return yield* agentWith(ran)
-            .resume(CONVERSATION, 'hi')
+          return yield* Conversation.make(agentWith(ran), CONVERSATION)
+            .resume('hi')
             .pipe(Effect.result);
         }).pipe(
           Effect.provide(differentCallProvider(calls)),
@@ -503,14 +509,16 @@ describe('recovering indeterminate tool execution', () => {
 
       const exit = yield* Effect.gen(function* () {
         yield* seed([started, toolStarted]);
-        return yield* agentWith(ran)
-          .intercepting({
+        return yield* Conversation.make(
+          agentWith(ran).intercepting({
             onIndeterminateToolCall: () => {
               resolved.count += 1;
               return Effect.succeed(Interception.retry);
             },
-          })
-          .resume(CONVERSATION, 'hi')
+          }),
+          CONVERSATION,
+        )
+          .resume('hi')
           .pipe(Effect.result);
       }).pipe(
         Effect.provide(differentCallProvider(calls)),
@@ -535,8 +543,8 @@ describe('recovering indeterminate tool execution', () => {
         yield* run(
           Effect.gen(function* () {
             yield* seed([started, toolStarted, called]);
-            yield* agentWith({ count: 0 })
-              .intercepting({
+            yield* Conversation.make(
+              agentWith({ count: 0 }).intercepting({
                 onIndeterminateToolCall: (call) => {
                   resolved.push(call.toolCallId!);
                   return Effect.succeed(
@@ -546,8 +554,9 @@ describe('recovering indeterminate tool execution', () => {
                     }),
                   );
                 },
-              })
-              .resume(CONVERSATION, 'hi');
+              }),
+              CONVERSATION,
+            ).resume('hi');
           }),
         );
 
@@ -571,8 +580,8 @@ describe('recovering indeterminate tool execution', () => {
       yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, secondCall, secondStart, toolStarted]);
-          yield* agentWith({ count: 0 })
-            .intercepting({
+          yield* Conversation.make(
+            agentWith({ count: 0 }).intercepting({
               onIndeterminateToolCall: (call) => {
                 seen.push(call.toolCallId!);
                 return Effect.succeed(
@@ -582,8 +591,9 @@ describe('recovering indeterminate tool execution', () => {
                   }),
                 );
               },
-            })
-            .resume(CONVERSATION, 'hi');
+            }),
+            CONVERSATION,
+          ).resume('hi');
         }),
       );
 
@@ -629,8 +639,7 @@ describe('recovering indeterminate tool execution', () => {
 
           const records = yield* run(
             Effect.gen(function* () {
-              yield* crashing
-                .recordingTo(CONVERSATION)
+              yield* Conversation.make(crashing, CONVERSATION)
                 .run('hi')
                 .pipe(Effect.result);
               return yield* readAll();
@@ -658,11 +667,13 @@ describe('recovering indeterminate tool execution', () => {
         const result = yield* run(
           Effect.gen(function* () {
             yield* seed([started, called, toolStarted]);
-            const exit = yield* agentWith(ran)
-              .intercepting({
+            const exit = yield* Conversation.make(
+              agentWith(ran).intercepting({
                 beforeToolCall: () => Effect.succeed(Interception.dispatch),
-              })
-              .resume(CONVERSATION, 'hi')
+              }),
+              CONVERSATION,
+            )
+              .resume('hi')
               .pipe(Effect.result);
             return { exit, records: yield* readAll() };
           }),
@@ -685,8 +696,8 @@ describe('recovering indeterminate tool execution', () => {
       const records = yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, toolStarted]);
-          yield* agentWith(ran)
-            .intercepting({
+          yield* Conversation.make(
+            agentWith(ran).intercepting({
               onIndeterminateToolCall: (call) => {
                 resolved.count += 1;
                 expect(call).toMatchObject({
@@ -696,8 +707,9 @@ describe('recovering indeterminate tool execution', () => {
                 });
                 return Effect.succeed(Interception.retry);
               },
-            })
-            .resume(CONVERSATION, 'hi');
+            }),
+            CONVERSATION,
+          ).resume('hi');
           return yield* readAll();
         }),
         prompts,
@@ -721,8 +733,8 @@ describe('recovering indeterminate tool execution', () => {
       const records = yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, toolStarted]);
-          yield* agentWith(ran)
-            .intercepting({
+          yield* Conversation.make(
+            agentWith(ran).intercepting({
               onIndeterminateToolCall: (call) => {
                 expect(call.toolCallId).toBe(CALL_ID);
                 expect(call.params).toEqual({ id: '42' });
@@ -733,8 +745,9 @@ describe('recovering indeterminate tool execution', () => {
                   }),
                 );
               },
-            })
-            .resume(CONVERSATION, 'hi');
+            }),
+            CONVERSATION,
+          ).resume('hi');
           return yield* readAll();
         }),
         prompts,
@@ -759,14 +772,15 @@ describe('recovering indeterminate tool execution', () => {
           const result = yield* run(
             Effect.gen(function* () {
               yield* seed([started, called, toolStarted]);
-              yield* agentWith(ran)
-                .intercepting({
+              yield* Conversation.make(
+                agentWith(ran).intercepting({
                   onIndeterminateToolCall: () =>
                     Effect.succeed(
                       Interception.reconcile({ staleShape: true }),
                     ),
-                })
-                .resume(CONVERSATION, 'hi');
+                }),
+                CONVERSATION,
+              ).resume('hi');
             }),
           ).pipe(Effect.result);
           expect(String(result)).toContain(
@@ -799,15 +813,17 @@ describe('recovering indeterminate tool execution', () => {
           const records = yield* run(
             Effect.gen(function* () {
               yield* seed([started, called, toolStarted]);
-              yield* crashing
-                .intercepting({
+              yield* Conversation.make(
+                crashing.intercepting({
                   onIndeterminateToolCall: () =>
                     Effect.succeed(Interception.retry),
-                })
-                .resume(CONVERSATION, 'hi')
+                }),
+                CONVERSATION,
+              )
+                .resume('hi')
                 .pipe(Effect.result);
-              yield* agentWith({ count: 0 })
-                .intercepting({
+              yield* Conversation.make(
+                agentWith({ count: 0 }).intercepting({
                   onIndeterminateToolCall: (call) => {
                     expect(call.toolCallId).toBe(CALL_ID);
                     return Effect.succeed(
@@ -817,8 +833,9 @@ describe('recovering indeterminate tool execution', () => {
                       }),
                     );
                   },
-                })
-                .resume(CONVERSATION, 'hi');
+                }),
+                CONVERSATION,
+              ).resume('hi');
               return yield* readAll();
             }),
           );
@@ -839,7 +856,7 @@ describe('what a tool outcome stores', () => {
 
         const records = yield* run(
           Effect.gen(function* () {
-            yield* agentWith(ran).recordingTo(CONVERSATION).run('hi');
+            yield* Conversation.make(agentWith(ran), CONVERSATION).run('hi');
             return yield* readAll();
           }),
         );
@@ -858,8 +875,7 @@ describe('what a tool outcome stores', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agentWith(ran)
-            .recordingTo(CONVERSATION)
+          yield* Conversation.make(agentWith(ran), CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
           return yield* readAll();
@@ -885,8 +901,7 @@ describe('what a tool outcome stores', () => {
       yield* run(
         Effect.gen(function* () {
           yield* seed([started, called, outcome]);
-          yield* agentWith(ran)
-            .recordingTo(CONVERSATION)
+          yield* Conversation.make(agentWith(ran), CONVERSATION)
             .stream('hi')
             .pipe(
               Stream.runForEach((event) =>
@@ -932,8 +947,7 @@ describe('what a tool outcome stores', () => {
           const result = yield* run(
             Effect.gen(function* () {
               yield* seed([started, called, { ...outcome, result: encoded }]);
-              yield* agentWith(ran)
-                .recordingTo(CONVERSATION)
+              yield* Conversation.make(agentWith(ran), CONVERSATION)
                 .stream('hi')
                 .pipe(Stream.runDrain);
             }),

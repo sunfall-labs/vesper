@@ -1,9 +1,22 @@
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import { defineConfig } from 'tsdown';
 
-const packages = ['agent', 'attachments', 'log', 'workspace'];
+const packages = ['agent', 'attachments', 'log', 'workspace'] as const;
+
+const packageEntries = (name: (typeof packages)[number]): string[] => {
+  const manifest = JSON.parse(
+    readFileSync(resolve(`packages/${name}/package.json`), 'utf8'),
+  ) as { readonly exports: Record<string, unknown> };
+  return Object.entries(manifest.exports).flatMap(([specifier, target]) =>
+    typeof target === 'object' && target !== null
+      ? [`src/${specifier.slice(2)}.ts`]
+      : [],
+  );
+};
 
 const shared = {
-  entry: 'src/**/*.ts',
   root: 'src',
   outDir: 'dist',
   clean: true,
@@ -25,6 +38,10 @@ const shared = {
 
 export default defineConfig(
   packages.map((name) =>
-    Object.assign({}, shared, { name, cwd: `packages/${name}` }),
+    Object.assign({}, shared, {
+      name,
+      cwd: `packages/${name}`,
+      entry: packageEntries(name),
+    }),
   ),
 );

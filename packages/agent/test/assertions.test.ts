@@ -4,6 +4,7 @@ import { Context, Effect, Schema, type Stream } from 'effect';
 import { AiError, LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
 import type { AgentLog } from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
@@ -219,8 +220,9 @@ const _otherHandlerServiceKept: Has<
   Db,
   Agent.Requires<typeof stateful>
 > = 'yes';
+const durable = Conversation.make(handled, 'durable');
 const _exactRecording: Exact<
-  Agent.Requires<ReturnType<typeof handled.recordingTo>>,
+  EffR<ReturnType<typeof durable.run>>,
   HandledBase | LogStore.Service
 > = true;
 const _exactPlainError: Exact<
@@ -228,19 +230,19 @@ const _exactPlainError: Exact<
   AiError.AiError
 > = true;
 const _exactRecordingError: Exact<
-  EffE<ReturnType<ReturnType<typeof handled.recordingTo>['run']>>,
+  EffE<ReturnType<typeof durable.run>>,
   AiError.AiError | AgentLog.CompatibilityError
 > = true;
 const _exactResume: Exact<
-  EffR<ReturnType<typeof handled.resume>>,
+  EffR<ReturnType<typeof durable.resume>>,
   HandledBase | LogStore.Service
 > = true;
 const _exactBranch: Exact<
-  EffR<ReturnType<typeof handled.branchFrom>>,
+  EffR<ReturnType<typeof durable.branchFrom>>,
   HandledBase | LogStore.Service
 > = true;
 const _exactFork: Exact<
-  EffR<ReturnType<typeof handled.forkFrom>>,
+  EffR<ReturnType<typeof durable.forkFrom>>,
   HandledBase | LogStore.Service
 > = true;
 // @ts-expect-error Session/runtime invocation is not public Agent API.
@@ -251,6 +253,18 @@ const _noPublicDelegationHandler: 'handler' extends keyof typeof Subagent
 const _noPublicDelegationCompiler: 'delegateTo' extends keyof typeof Subagent
   ? false
   : true = true;
+const _noLegacyRecording: 'recordingTo' extends keyof typeof handled
+  ? false
+  : true = true;
+const _noLegacyResume: 'resume' extends keyof typeof handled ? false : true =
+  true;
+const _noLegacyBranch: 'branchFrom' extends keyof typeof handled
+  ? false
+  : true = true;
+const _noLegacyFork: 'forkFrom' extends keyof typeof handled ? false : true =
+  true;
+const _noLegacyTail: 'streamFrom' extends keyof typeof Agent ? false : true =
+  true;
 
 // @ts-expect-error Session values are created by AgentLog, not structurally.
 const _fabricatedSession: AgentLog.Session = { conversationId: 'forged' };
@@ -267,9 +281,13 @@ class SecondPolicy extends Context.Service<
 const recordingPolicy = {
   prompt: (prompt: unknown) => Effect.as(FirstPolicy, prompt),
 } satisfies RecordingPolicy.Policy<FirstPolicy>;
-const filteredRecording = handled.recordingTo('filtered', recordingPolicy);
+const filteredRecording = Conversation.recording(
+  handled,
+  'filtered',
+  recordingPolicy,
+);
 const _exactFilteredRecording: Exact<
-  Agent.Requires<typeof filteredRecording>,
+  EffR<ReturnType<typeof filteredRecording.run>>,
   HandledBase | LogStore.Service | FirstPolicy
 > = true;
 

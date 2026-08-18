@@ -15,6 +15,7 @@ import {
 import { describe, expect, it, test } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentEvents } from '../src/event.js';
 import { Interception } from '../src/interception.js';
 import { AgentLog } from '../src/log.js';
@@ -194,13 +195,13 @@ describe('beforeTurn', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agentWith(ran)
-            .intercepting({
+          yield* Conversation.make(
+            agentWith(ran).intercepting({
               beforeTurn: () =>
                 Effect.succeed(Interception.proceedWith('persisted rewrite')),
-            })
-            .recordingTo(CONVERSATION)
-            .run('discarded original');
+            }),
+            CONVERSATION,
+          ).run('discarded original');
           return yield* readAll();
         }),
       );
@@ -277,9 +278,12 @@ describe('beforeTurn', () => {
 
           const tags = yield* run(
             Effect.gen(function* () {
-              yield* agentWith(ran)
-                .intercepting({ beforeTurn: () => Effect.fail(refused) })
-                .recordingTo(CONVERSATION)
+              yield* Conversation.make(
+                agentWith(ran).intercepting({
+                  beforeTurn: () => Effect.fail(refused),
+                }),
+                CONVERSATION,
+              )
                 .run('refused input')
                 .pipe(Effect.result);
               return (yield* readAll()).map((envelope) => envelope.record._tag);
@@ -428,12 +432,13 @@ describe('beforeToolCall', () => {
 
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agentWith(ran)
-            .intercepting({
+          yield* Conversation.make(
+            agentWith(ran).intercepting({
               beforeToolCall: () =>
                 Effect.succeed(Interception.refuse('denied')),
-            })
-            .recordingTo(CONVERSATION)
+            }),
+            CONVERSATION,
+          )
             .run('hi')
             .pipe(Effect.orDie);
           return yield* readAll();
@@ -557,15 +562,16 @@ describe('when the log and an interceptor both have an opinion', () => {
         const written = yield* run(
           Effect.gen(function* () {
             yield* seed(crashed);
-            yield* agentWith(ran)
-              .intercepting({
+            yield* Conversation.make(
+              agentWith(ran).intercepting({
                 beforeToolCall: (context) =>
                   Effect.sync(() => {
                     consulted.push(context.name);
                     return Interception.refuse('denied');
                   }),
-              })
-              .recordingTo(CONVERSATION)
+              }),
+              CONVERSATION,
+            )
               .run('hi')
               .pipe(Effect.orDie);
             return yield* readAll();
@@ -602,15 +608,16 @@ describe('when the log and an interceptor both have an opinion', () => {
               usage: { input: 0, output: 0 },
             },
           ]);
-          yield* agentWith(ran)
-            .intercepting({
+          yield* Conversation.make(
+            agentWith(ran).intercepting({
               beforeToolCall: (context) =>
                 Effect.sync(() => {
                   consulted.push(context.name);
                   return Interception.dispatch;
                 }),
-            })
-            .recordingTo(CONVERSATION)
+            }),
+            CONVERSATION,
+          )
             .run('hi')
             .pipe(Effect.orDie);
         }),
@@ -630,8 +637,8 @@ describe('when the log and an interceptor both have an opinion', () => {
 
       yield* run(
         Effect.gen(function* () {
-          yield* agentWith(ran)
-            .intercepting({
+          yield* Conversation.make(
+            agentWith(ran).intercepting({
               beforeToolCall: (context) =>
                 Effect.sync(() => {
                   seen.push(context.conversationId);
@@ -642,8 +649,9 @@ describe('when the log and an interceptor both have an opinion', () => {
                   seen.push(context.conversationId);
                   return Interception.proceed;
                 }),
-            })
-            .recordingTo(CONVERSATION)
+            }),
+            CONVERSATION,
+          )
             .run('hi')
             .pipe(Effect.orDie);
         }),

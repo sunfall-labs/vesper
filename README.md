@@ -1,5 +1,8 @@
 # Vesper
 
+Migrating from the former Agent durability methods? See
+[Migrating to Conversation](docs/migrating-to-conversation.md).
+
 An Effect-first agent harness built on `effect/unstable/ai`.
 
 `effect/unstable/ai` supplies `LanguageModel`, `Tool`, `Toolkit`, `Prompt`,
@@ -100,6 +103,7 @@ and estimates only the messages after it.
 
 ```ts
 import { Agent } from '@sunfall/vesper-agent/agent';
+import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { Context, Effect, Schema } from 'effect';
@@ -230,7 +234,7 @@ tool concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
 Handlers attach as a method rather than a `Definition` field, mirroring
 `toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
 twice replaces the handlers rather than stacking a second set beneath them,
-which is also how `recordingTo` and `intercepting` behave.
+which is also how `intercepting` behaves.
 
 ## What the types buy
 
@@ -298,28 +302,32 @@ into the resulting history.
 
 ```ts
 Effect.gen(function* () {
-  const recording = supportAgent.recordingTo(conversationId);
-  const result = yield* recording.run('where is order_1042?');
+  const conversation = Conversation.make(supportAgent, conversationId);
+  const result = yield* conversation.run('where is order_1042?');
 });
 
 // elsewhere, in another fiber or another process
-const records = Agent.streamFrom(conversationId, lastOffsetSeen);
+const records = Conversation.make(supportAgent, conversationId).follow(
+  lastOffsetSeen,
+);
 ```
 
-`recordingTo` returns an agent that writes each run into
-`@sunfall/vesper-log` as it happens: the run's input, model text, tool calls,
-durable handler starts and outcomes, turn boundaries, compactions, signals
-taken, completion, settlement. `streamFrom` replays those and then follows live, which is
-`Tail.from` with a path convention rather than a second read-then-follow loop.
+`Conversation.make` binds an agent to a durable conversation and writes each
+run into `@sunfall/vesper-log` as it happens: the run's input, model text, tool
+calls, durable handler starts and outcomes, turn boundaries, compactions,
+signals taken, completion, settlement. `follow` replays those and then follows
+live, which is `Tail.from` with a path convention rather than a second
+read-then-follow loop.
 It yields records, not events — synthesising events would mean inventing text
-deltas nobody sent.
+deltas nobody sent. Use `conversation.records(after)` instead when the caller
+needs a finite snapshot rather than a live tail.
 
 Raw persistence is the explicit default. An application can filter only the
 recorded representation without changing the values the live model and tools
 see:
 
 ```ts
-const recording = supportAgent.recordingTo(conversationId, {
+const conversation = Conversation.recording(supportAgent, conversationId, {
   prompt: (prompt) => Redaction.redactPrompt(prompt),
   toolParameters: (params, call) => Redaction.redactTool(call.name, params),
   toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
@@ -336,7 +344,7 @@ filters should preserve enough shape for the tool and prompt codecs involved.
 
 **Logging is optional, and the type says which you have.** `run` does not
 require a `LogStore` and every non-recording call site is unchanged; the agent
-`recordingTo` hands back requires `LogStore.Service`, so a caller who has not
+bound by `Conversation.make` requires `LogStore.Service`, so a caller who has not
 provided one does not compile. It is deliberately not an ambient
 `Context.Reference` with a no-op default: persistence behind a defaulted
 reference gives a caller who forgot plausible behaviour and no signal.
@@ -373,15 +381,16 @@ providing the official `PgClient` and generic `SqlClient` services.
 
 ```ts
 Effect.gen(function* () {
-  const result = yield* supportAgent.resume(conversationId, 'and then?');
+  const conversation = Conversation.make(supportAgent, conversationId);
+  const result = yield* conversation.resume('and then?');
 });
 ```
 
-`recordingTo` puts a conversation down; `resume` picks it back up — rebuilding
-the prompt from records, seeding it under the agent's _current_ instructions,
-and continuing from the next turn. A conversation that does not exist yet
-starts as one. The returned `usage` is cumulative across the whole conversation
-rather than this run alone.
+`conversation.run` puts a conversation down; `conversation.resume` picks it
+back up — rebuilding the prompt from records, seeding it under the agent's
+_current_ instructions, and continuing from the next turn. A conversation that
+does not exist yet starts as one. The returned `usage` is cumulative across the
+whole conversation rather than this run alone.
 
 Every `Agent.make` definition requires a non-empty application revision. Vesper
 persists that revision, the agent name, and its conversation-format version in
@@ -452,7 +461,8 @@ already holds the store.
 
 ```ts
 Effect.gen(function* () {
-  yield* AgentSignals.send(conversationId, {
+  const conversation = Conversation.make(supportAgent, conversationId);
+  yield* conversation.send({
     kind: 'steer',
     text: 'also check the invoice',
     source: 'operator',
@@ -482,7 +492,7 @@ Signal reads are bounded by `maxSignalsPerBoundary`; a backlog emits
 Oversized signals and steers over the run's cumulative byte budget emit
 `SignalRejected` and are persisted as rejected `SignalReceived` records, so
 advancing the cursor never silently discards them.
-`AgentSignals.send` persists its separate incoming record raw. A queued signal
+`conversation.send` persists its separate incoming record raw. A queued signal
 cannot be both recoverable with its original text and redacted at rest; apply
 ingress protection before calling `send` when the sender intentionally wants
 the delivered value transformed as well.
@@ -629,11 +639,12 @@ anything.
 - **No branch summarization.** Switching away from a branch records no summary
   of what it contained.
 
-  The concurrency half of this gap is closed. `agent.branchFrom(id, at, input)`
-  re-runs a conversation from an earlier record in the same stream — a
+  The concurrency half of this gap is closed.
+  `conversation.branchFrom(at, input)` re-runs a conversation from an earlier
+  record in the same stream — a
   `ConversationRecord.BranchedFrom` marker names the point and
   `AgentBranch.activePath` folds the tree back out — and because a stream has
-  one writer, two branches are sequential. `agent.forkFrom(id, at, forkId,
+  one writer, two branches are sequential. `conversation.forkFrom(at, forkId,
 input)` is the other trade: it seeds a **new** conversation from the same
   prefix, so two forks are two streams and run side by side. A fork copies the
   prefix rather than costing one record, its offsets are its own — `log.ts`'s

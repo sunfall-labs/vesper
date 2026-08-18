@@ -22,7 +22,8 @@ import {
 } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
-import { Session } from '../src/internal.js';
+import { Conversation } from '../src/conversation.js';
+import { Session } from '../src/internal/protocol.js';
 import { AgentLog } from '../src/log.js';
 import { AgentState } from '../src/state.js';
 
@@ -93,7 +94,7 @@ const model = Layer.effect(
   }),
 );
 
-describe('durable agent state', () => {
+describe('recorded agent state', () => {
   it('uses typed definition errors', () => {
     expect(() =>
       AgentState.make({
@@ -114,7 +115,7 @@ describe('durable agent state', () => {
     'provides state to handlers and restores it across agent runs',
     () => {
       const increment = Tool.make('increment', {
-        description: 'Increment the durable count.',
+        description: 'Increment the recorded count.',
         parameters: Schema.Struct({}),
         success: Schema.Struct({ count: Schema.Number }),
         failure: AgentState.error,
@@ -134,8 +135,9 @@ describe('durable agent state', () => {
       });
 
       return Effect.gen(function* () {
-        yield* agent.recordingTo('agent-state').run('first');
-        yield* agent.resume('agent-state', 'second');
+        const conversation = Conversation.make(agent, 'agent-state');
+        yield* conversation.run('first');
+        yield* conversation.resume('second');
         const session = yield* AgentLog.open(
           LogVocabulary.ConversationId.make('agent-state'),
           { compatibility },
@@ -144,7 +146,7 @@ describe('durable agent state', () => {
           count: 2,
         });
       }).pipe(
-        Effect.provide(AgentState.layerDurable(Count)),
+        Effect.provide(AgentState.layerRecorded(Count)),
         Effect.provide(model),
         Effect.provide(LogStoreMemory.layer),
         Effect.orDie,
@@ -165,10 +167,10 @@ describe('durable agent state', () => {
         yield* state.modify(({ count }) => [count, { count: count + 1 }]),
       ).toBe(1);
       expect(yield* state.get).toEqual({ count: 2 });
-    }).pipe(Effect.provide(AgentState.layerMemory(Count))),
+    }).pipe(Effect.provide(AgentState.layerEphemeral(Count))),
   );
 
-  it.effect('fails durable state outside a recorded session', () =>
+  it.effect('fails recorded state outside a recorded session', () =>
     Effect.gen(function* () {
       const state = yield* Count;
       const exit = yield* Effect.exit(state.get);
@@ -179,14 +181,14 @@ describe('durable agent state', () => {
           stateId: 'count',
         });
       }
-    }).pipe(Effect.provide(AgentState.layerDurable(Count))),
+    }).pipe(Effect.provide(AgentState.layerRecorded(Count))),
   );
 
   it.effect(
-    'isolates concurrent conversations sharing one durable layer',
+    'isolates concurrent conversations sharing one recorded layer',
     () => {
       const setCount = Tool.make('set_count', {
-        description: 'Set the durable count.',
+        description: 'Set the recorded count.',
         parameters: Schema.Struct({ count: Schema.Number }),
         success: Schema.Struct({ count: Schema.Number }),
         failure: AgentState.error,
@@ -205,7 +207,7 @@ describe('durable agent state', () => {
             return yield* state.get;
           }),
       });
-      const layer = AgentState.layerDurable(Count);
+      const layer = AgentState.layerRecorded(Count);
       const setCountModel = Layer.effect(
         LanguageModel.LanguageModel,
         Effect.gen(function* () {
@@ -252,8 +254,8 @@ describe('durable agent state', () => {
       return Effect.gen(function* () {
         yield* Effect.all(
           [
-            agent.recordingTo('state-left').run('set count to 1'),
-            agent.recordingTo('state-right').run('set count to 2'),
+            Conversation.make(agent, 'state-left').run('set count to 1'),
+            Conversation.make(agent, 'state-right').run('set count to 2'),
           ],
           { concurrency: 'unbounded' },
         );
@@ -281,7 +283,7 @@ describe('durable agent state', () => {
   );
 
   it.effect(
-    'serializes concurrent first access through the durable layer',
+    'serializes concurrent first access through the recorded layer',
     () =>
       Effect.gen(function* () {
         const session = yield* open();
@@ -296,7 +298,7 @@ describe('durable agent state', () => {
           expect(yield* state.get).toEqual({ count: 20 });
         }).pipe(
           Effect.provideService(Session, session),
-          Effect.provide(AgentState.layerDurable(Count)),
+          Effect.provide(AgentState.layerRecorded(Count)),
         );
         yield* program;
       }).pipe(Effect.provide(LogStoreMemory.layer)),

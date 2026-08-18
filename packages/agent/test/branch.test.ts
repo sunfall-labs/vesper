@@ -15,9 +15,9 @@ import {
 
 import { Agent } from '../src/agent.js';
 import { AgentBranch } from '../src/branch.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
-import { AgentSignals } from '../src/signal.js';
 
 // Branching: the conversation as a tree, in a log that is a line.
 //
@@ -130,6 +130,7 @@ const agent = Agent.make({
 });
 
 const CONVERSATION = LogVocabulary.ConversationId.make('branched-conversation');
+const conversation = Conversation.make(agent, CONVERSATION);
 const PATH = AgentLog.pathFor(CONVERSATION);
 
 beforeEach(() => {
@@ -148,9 +149,9 @@ const run = <A, E>(
   );
 
 const readAll = Effect.fn('test.readAll')(function* () {
-  const store = yield* LogStore.Service;
-  const page = yield* store.read(PATH, { limit: 1000 }).pipe(Effect.orDie);
-  return page.records;
+  return Array.from(
+    yield* conversation.records().pipe(Stream.runCollect, Effect.orDie),
+  );
 });
 
 const tags = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
@@ -460,11 +461,11 @@ describe('branching a live conversation', () => {
 
       return run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* conversation.run('hi').pipe(Effect.orDie);
           const first = yield* readAll();
 
-          yield* agent
-            .branchFrom(CONVERSATION, first[0]!.offset, 'actually, hello')
+          yield* conversation
+            .branchFrom(first[0]!.offset, 'actually, hello')
             .pipe(Effect.orDie);
 
           return yield* readAll();
@@ -501,18 +502,11 @@ describe('branching a live conversation', () => {
 
       return run(
         Effect.gen(function* () {
-          yield* agent
-            .recordingTo(CONVERSATION)
-            .run('what is the status?')
-            .pipe(Effect.orDie);
+          yield* conversation.run('what is the status?').pipe(Effect.orDie);
           const first = yield* readAll();
 
-          yield* agent
-            .branchFrom(
-              CONVERSATION,
-              first[0]!.offset,
-              'what is the status, precisely?',
-            )
+          yield* conversation
+            .branchFrom(first[0]!.offset, 'what is the status, precisely?')
             .pipe(Effect.orDie);
 
           return models.asked;
@@ -538,16 +532,13 @@ describe('branching a live conversation', () => {
 
     return run(
       Effect.gen(function* () {
-        yield* agent
-          .recordingTo(CONVERSATION)
-          .run('original')
-          .pipe(Effect.orDie);
+        yield* conversation.run('original').pipe(Effect.orDie);
         const first = yield* readAll();
 
-        yield* agent
-          .branchFrom(CONVERSATION, first[0]!.offset, 'edited')
+        yield* conversation
+          .branchFrom(first[0]!.offset, 'edited')
           .pipe(Effect.orDie);
-        yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
+        yield* conversation.resume('and then?').pipe(Effect.orDie);
 
         return models.asked;
       }),
@@ -574,14 +565,11 @@ describe('branching a live conversation', () => {
 
     return run(
       Effect.gen(function* () {
-        const first = yield* agent
-          .recordingTo(CONVERSATION)
-          .run('original')
-          .pipe(Effect.orDie);
+        const first = yield* conversation.run('original').pipe(Effect.orDie);
         const records = yield* readAll();
 
-        const branched = yield* agent
-          .branchFrom(CONVERSATION, records[0]!.offset, 'edited')
+        const branched = yield* conversation
+          .branchFrom(records[0]!.offset, 'edited')
           .pipe(Effect.orDie);
 
         return { first: first.usage, branched: branched.usage };
@@ -616,18 +604,20 @@ describe('a steer delivered before the branch', () => {
 
     return run(
       Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'also check the invoice',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+        yield* conversation
+          .send({
+            kind: 'steer',
+            text: 'also check the invoice',
+            source: 'operator',
+          })
+          .pipe(Effect.orDie);
 
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        yield* conversation.run('hi').pipe(Effect.orDie);
         const first = yield* readAll();
         const askedBeforeBranch = models.asked.length;
 
-        yield* agent
-          .branchFrom(CONVERSATION, first[0]!.offset, 'try again')
+        yield* conversation
+          .branchFrom(first[0]!.offset, 'try again')
           .pipe(Effect.orDie);
 
         return {
@@ -665,22 +655,26 @@ describe('a steer delivered before the branch', () => {
 
     return run(
       Effect.gen(function* () {
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'first steer',
-          source: 'operator',
-        }).pipe(Effect.orDie);
-        yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+        yield* conversation
+          .send({
+            kind: 'steer',
+            text: 'first steer',
+            source: 'operator',
+          })
+          .pipe(Effect.orDie);
+        yield* conversation.run('hi').pipe(Effect.orDie);
 
         const first = yield* readAll();
-        yield* AgentSignals.send(CONVERSATION, {
-          kind: 'steer',
-          text: 'second steer',
-          source: 'operator',
-        }).pipe(Effect.orDie);
+        yield* conversation
+          .send({
+            kind: 'steer',
+            text: 'second steer',
+            source: 'operator',
+          })
+          .pipe(Effect.orDie);
 
-        yield* agent
-          .branchFrom(CONVERSATION, first[0]!.offset, 'try again')
+        yield* conversation
+          .branchFrom(first[0]!.offset, 'try again')
           .pipe(Effect.orDie);
 
         return yield* readAll();
@@ -778,8 +772,8 @@ describe('a crashed run on the abandoned branch', () => {
         yield* seed(crashed);
         const before = yield* readAll();
 
-        yield* agent
-          .branchFrom(CONVERSATION, before[0]!.offset, 'where is order 43?')
+        yield* conversation
+          .branchFrom(before[0]!.offset, 'where is order 43?')
           .pipe(Effect.orDie);
 
         return { dispatchedTotal: dispatched.count, asked: models.asked };
@@ -808,7 +802,7 @@ describe('a crashed run on the abandoned branch', () => {
     return run(
       Effect.gen(function* () {
         yield* seed(crashed);
-        yield* agent.resume(CONVERSATION, 'and then?').pipe(Effect.orDie);
+        yield* conversation.resume('and then?').pipe(Effect.orDie);
         return { dispatchedTotal: dispatched.count, asked: models.asked };
       }),
       models.layer,

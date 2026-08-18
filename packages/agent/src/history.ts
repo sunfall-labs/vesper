@@ -10,7 +10,7 @@ import type { Stop } from './stop.js';
 
 // Records back into a runnable conversation.
 //
-// `Agent.streamFrom` is the reader half of the log and yields records; this is
+// `Conversation.follow` is the reader half of the log and yields records; this is
 // the writer half, and it is what makes the log a durability mechanism rather
 // than an audit trail. Without it a crashed run can only restart from turn one
 // — which is the gap `@sunfall/vesper-durable`'s checkpointer existed to cover, by

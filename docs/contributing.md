@@ -174,9 +174,10 @@ The provider-independent context policies live at the seam that consumes them:
 `agent -> log` is the one Vesper-package edge, admitted on a narrow argument.
 `log` depends on nothing but `effect`, and what it supplies is a data
 vocabulary — records, offsets, a store interface — not a provider and not a
-durability strategy. Recording is opt-in through `agent.recordingTo(id)` and
-`agent.resume(id, input)`, the only places that name `LogStore`; an agent that
-calls neither requires no new service and writes nothing. Do not read this as
+durability strategy. Recording is opt-in through
+`Conversation.make(agent, id)` and its bound `conversation.resume(input)`, the
+only entry points that name `LogStore`; an agent used through neither requires
+no new service and writes nothing. Do not read this as
 a precedent for `agent -> workspace`: the test it passed is that the
 dependency cannot reintroduce provider knowledge and leaves the ordinary path
 requiring exactly what it required before.
@@ -184,7 +185,7 @@ requiring exactly what it required before.
 ## One durability mechanism: the conversation log
 
 A run recording to a conversation appends what happened as it happens, and
-`agent.resume(conversationId, input)` rebuilds a `Chat` from those records and
+`conversation.resume(input)` rebuilds a `Chat` from those records and
 continues from the next turn. A crashed run re-pays the provider for nothing
 it completed and re-runs no tool call whose outcome was recorded. Do not add a
 second mechanism without beating the argument in

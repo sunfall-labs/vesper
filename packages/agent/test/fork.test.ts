@@ -14,9 +14,10 @@ import {
 } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
-import { AgentSignals } from '../src/signal.js';
+import * as AgentSignals from '../src/internal/signal-store.js';
 
 // Forking: a second conversation, seeded from a prefix of a first.
 //
@@ -126,6 +127,7 @@ const agent = Agent.make({
 });
 
 const ANCESTOR = LogVocabulary.ConversationId.make('ancestor-conversation');
+const ancestorConversation = Conversation.make(agent, ANCESTOR);
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
@@ -279,16 +281,11 @@ describe('two forks of one conversation', () => {
 
             const [left, right] = yield* Effect.all(
               [
-                agent
-                  .forkFrom(ANCESTOR, tip, 'fork-left', 'explore the left one')
+                ancestorConversation
+                  .forkFrom(tip, 'fork-left', 'explore the left one')
                   .pipe(Effect.orDie),
-                agent
-                  .forkFrom(
-                    ANCESTOR,
-                    tip,
-                    'fork-right',
-                    'explore the right one',
-                  )
+                ancestorConversation
+                  .forkFrom(tip, 'fork-right', 'explore the right one')
                   .pipe(Effect.orDie),
               ],
               { concurrency: 'unbounded' },
@@ -367,11 +364,11 @@ describe('a fork and the conversation it came from', () => {
         ]);
         const tip = (yield* session.recorded).at(-1)!.offset;
 
-        const first = yield* agent
-          .forkFrom(ANCESTOR, tip, 'usage-fork', 'fork once')
+        const first = yield* ancestorConversation
+          .forkFrom(tip, 'usage-fork', 'fork once')
           .pipe(Effect.orDie);
-        const second = yield* agent
-          .resume('usage-fork', 'fork twice')
+        const second = yield* Conversation.make(agent, 'usage-fork')
+          .resume('fork twice')
           .pipe(Effect.orDie);
         expect(first.usage).toEqual({ input: 10, output: 4 });
         expect(second.usage).toEqual({ input: 20, output: 8 });
@@ -402,8 +399,8 @@ describe('a fork and the conversation it came from', () => {
         ]);
 
         const before = yield* readPath(ANCESTOR);
-        yield* agent
-          .forkFrom(ANCESTOR, before.at(-1)!.offset, 'a-fork', 'a new idea')
+        yield* ancestorConversation
+          .forkFrom(before.at(-1)!.offset, 'a-fork', 'a new idea')
           .pipe(Effect.orDie);
 
         const after = yield* readPath(ANCESTOR);
@@ -443,17 +440,19 @@ describe('a fork and the conversation it came from', () => {
         ]);
         const tip = (yield* session.recorded).at(-1)!.offset;
 
-        yield* agent
-          .forkFrom(ANCESTOR, tip, 'a-fork', 'the fork question')
+        yield* ancestorConversation
+          .forkFrom(tip, 'a-fork', 'the fork question')
           .pipe(Effect.orDie);
 
         // The ancestor carries on independently, after the fork was taken.
-        yield* agent
-          .resume(ANCESTOR, 'the ancestor carries on')
+        yield* ancestorConversation
+          .resume('the ancestor carries on')
           .pipe(Effect.orDie);
 
         // And the fork carries on too. Its prompt is the evidence.
-        yield* agent.resume('a-fork', 'and the fork too').pipe(Effect.orDie);
+        yield* Conversation.make(agent, 'a-fork')
+          .resume('and the fork too')
+          .pipe(Effect.orDie);
 
         const forkLog = yield* readPath('a-fork');
         const laterFork = textIn(models.asked.at(-1)!);
@@ -612,16 +611,20 @@ describe('the offset pointers in a copied prefix', () => {
         Effect.gen(function* () {
           // Two signals to the ancestor, the second of them delivered, so the
           // recorded cursor is past the offset the fork's first signal will get.
-          yield* AgentSignals.send(ANCESTOR, {
-            kind: 'steer',
-            text: 'first ancestor steer',
-            source: 'operator',
-          }).pipe(Effect.orDie);
-          yield* AgentSignals.send(ANCESTOR, {
-            kind: 'steer',
-            text: 'second ancestor steer',
-            source: 'operator',
-          }).pipe(Effect.orDie);
+          yield* ancestorConversation
+            .send({
+              kind: 'steer',
+              text: 'first ancestor steer',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
+          yield* ancestorConversation
+            .send({
+              kind: 'steer',
+              text: 'second ancestor steer',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
 
           const ancestorSignals = yield* readSignals(ANCESTOR);
           const ancestor = yield* branchedAncestor(ancestorSignals[1]!.offset);
@@ -636,11 +639,13 @@ describe('the offset pointers in a copied prefix', () => {
             },
           );
 
-          yield* AgentSignals.send('a-fork', {
-            kind: 'steer',
-            text: 'a steer for the fork',
-            source: 'operator',
-          }).pipe(Effect.orDie);
+          yield* Conversation.make(agent, 'a-fork')
+            .send({
+              kind: 'steer',
+              text: 'a steer for the fork',
+              source: 'operator',
+            })
+            .pipe(Effect.orDie);
 
           const forkSignals = yield* readSignals('a-fork');
           const copied = fork.history.find(

@@ -1,7 +1,5 @@
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Tail } from '@sunfall/vesper-log/tail';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Exit, Layer, Option, Ref, Schema, Stream } from 'effect';
 import {
@@ -19,7 +17,13 @@ import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
-import { hasProtocol, register, Session, StateCleanup } from './internal.js';
+import {
+  type AgentProtocol,
+  hasProtocol,
+  register,
+  Session,
+  StateCleanup,
+} from './internal/protocol.js';
 import type { Interception } from './interception.js';
 import { AgentLog } from './log.js';
 import { RecordingPolicy } from './recording-policy.js';
@@ -50,8 +54,8 @@ import { SubagentRuntime } from './subagent-runtime.js';
 // It does import `@sunfall/vesper-log`, which depends on nothing but `effect`. That
 // is a data vocabulary — records, offsets, a store interface — not a provider
 // and not a durability strategy, so it cannot smuggle either back in.
-// Recording is opt-in through `recordingTo` and `resume`, the only two things
-// here that mention `LogStore`.
+// Recording is opt-in through `Conversation`, the only public API that names
+// `LogStore`.
 
 /**
  * @category type ids
@@ -325,189 +329,11 @@ export interface Instance<
   >;
 
   /**
-   * Record every run into `conversationId`'s conversation log.
-   *
-   * All four entry points on the returned agent append as they go — text
-   * coalesced, tool calls and their outcomes as they settle, turn boundaries,
-   * delegations, signal deliveries, completion, and how the run settled — and
-   * emit exactly the events they emitted before. {@link streamFrom} reads that
-   * log back.
-   *
-   * A recording run is also the only kind that can be **steered or
-   * cancelled** (a signal is addressed to a conversation, and this is what
-   * gives a run one) and the only kind whose tool calls **survive a crash**
-   * (the dispatch seam serves outcomes an unsettled earlier run recorded
-   * rather than re-running the tool).
-   *
-   * **This is how logging stays optional without being hidden.** `LogStore`
-   * is not a requirement of `run`, so every existing call site is untouched;
-   * and it is not an ambient `Context.Reference` with a no-op default either,
-   * because a defaulted reference is how persistence gets hidden — a caller
-   * who forgot gets plausible behaviour and no signal. Here the choice
-   * is a method call, and its consequence is in the type: the agent this
-   * returns requires `LogStore.Service`, and a caller who has not provided
-   * one does not compile. Nothing about a recording agent is discoverable
-   * only at runtime.
-   *
-   * Claiming the stream fences whatever producer held it last, so two
-   * concurrent runs against one conversation do not interleave: the older
-   * one fails its next append rather than writing a history that never
-   * happened.
-   */
-  recordingTo(
-    conversationId: string,
-  ): Instance<
-    Name,
-    OwnTools,
-    BaseRequires | LogStore.Service | InterceptorRequires,
-    RuntimeTools,
-    BaseRequires | LogStore.Service,
-    InterceptorRequires,
-    RunError | AgentLog.CompatibilityError
-  >;
-  recordingTo<const P extends object>(
-    conversationId: string,
-    policy: P & RecordingPolicy.Policy<RecordingPolicy.Services<P>>,
-  ): Instance<
-    Name,
-    OwnTools,
-    | BaseRequires
-    | LogStore.Service
-    | InterceptorRequires
-    | RecordingPolicy.Services<P>,
-    RuntimeTools,
-    BaseRequires | LogStore.Service | RecordingPolicy.Services<P>,
-    InterceptorRequires,
-    RunError | AgentLog.CompatibilityError
-  >;
-
-  /**
-   * Continue a recorded conversation, rebuilding it from its own log.
-   *
-   * The counterpart of {@link recordingTo}: that one writes a conversation
-   * down, this one picks it back up. History comes from the records — model
-   * text, tool calls and their results, steers that redirected it — seeded
-   * under this agent's current instructions, and the run continues from the
-   * next turn. A conversation that does not exist yet starts as one, so a
-   * caller does not branch on first contact.
-   *
-   * **This is what makes the log a durability mechanism.** A run that crashed
-   * mid-conversation resumes without re-asking the provider for turns it
-   * already completed and without re-running the tool calls those turns made
-   * — the two things provider-seam checkpointing could offer only the first
-   * of, and only by replaying the whole loop to get there.
-   *
-   * Everything {@link recordingTo} says about recording applies: the run is
-   * written down as it happens, it can be steered or cancelled, and its tool
-   * calls survive a crash. `LogStore.Service` is in the type for the same
-   * reason.
-   *
-   * `usage` on the result is cumulative across the whole conversation rather
-   * than this run alone. A resumed conversation that reset the count would
-   * under-report every turn after the first.
-   *
-   * Call it on the agent, not on one already returned by {@link recordingTo}:
-   * this names a conversation itself, so chaining the two would open two
-   * claims and write every record twice.
-   */
-  readonly resume: (
-    conversationId: string,
-    input: Prompt.RawInput,
-  ) => Effect.Effect<
-    Result,
-    RunError | AgentLog.CompatibilityError,
-    Requires | LogStore.Service
-  >;
-
-  /**
-   * Continue a recorded conversation from an **earlier point in it**.
-   *
-   * {@link resume} picks a conversation up at its end; this picks it up in the
-   * middle. Everything after `at` becomes an abandoned branch — still in the
-   * log, still readable, no longer in the prompt — and the run continues as if
-   * the conversation had stopped there. That is "edit an earlier message and
-   * re-run", and it is the one capability the log was missing against a
-   * session model that stores a tree.
-   *
-   * `at` is the offset of the last record to keep, **inclusive**, as
-   * {@link streamFrom} hands them out. Branching to a point that is already
-   * the conversation's end is legal and does nothing observable, which is what
-   * lets a caller pass a position it read without first checking whether
-   * anything came after it.
-   *
-   * **It costs one record.** No history is copied and no offsets are rewritten
-   * — a `ConversationRecord.BranchedFrom` marker names the point, and the same
-   * stream carries every branch. So the conversation stays one stream with one
-   * id: one tail follows it across a branch, `usage` still counts what the
-   * abandoned attempts cost, and a steer that was already delivered stays
-   * delivered rather than arriving a second time on the new path.
-   *
-   * The consequence of one stream is that branches are **sequential, not
-   * concurrent**. The store gives a conversation one writer, so this cannot
-   * run two variants of a prompt side by side; it moves where the single
-   * conversation continues from. {@link forkFrom} is the answer to that, and
-   * it makes the opposite trade. Everything {@link recordingTo} says about
-   * recording otherwise applies unchanged.
-   */
-  readonly branchFrom: (
-    conversationId: string,
-    at: LogOffset.Offset,
-    input: Prompt.RawInput,
-  ) => Effect.Effect<
-    Result,
-    RunError | AgentLog.CompatibilityError,
-    Requires | LogStore.Service
-  >;
-
-  /**
-   * Start a **new conversation** from a prefix of an existing one, and run it.
-   *
-   * {@link branchFrom} re-roots one conversation; this makes a second one. The
-   * fork is seeded with the ancestor's records up to and including `at` — the
-   * same prefix `branchFrom` would have continued from — and then lives its
-   * own life under `forkConversationId`.
-   *
-   * **This is the concurrent case, and the only reason to prefer it.** A
-   * branch shares the ancestor's stream and therefore its single writer, so
-   * two branches cannot run at once. Two forks are two streams with two
-   * producer claims, so they can: side-by-side variants of a prompt, explored
-   * at the same time, neither fencing the other.
-   *
-   * The ancestor is read and not claimed. A fork does not disturb it: it
-   * writes nothing into it, does not fence a run that is live on it, and
-   * leaves no record in it that a fork was taken — so records the ancestor
-   * appends after the fork are the ancestor's alone and never appear here.
-   * The relationship is therefore not navigable from the ancestor's side, and
-   * that is the trade against `branchFrom`'s single tail.
-   *
-   * The other trade is cost and identity. A branch costs one record; a fork
-   * copies the prefix, so it is O(prefix) records and the copy has its own
-   * offsets. `usage` on the result counts this conversation, which now starts
-   * at the fork — the ancestor's spend stays reported against the ancestor,
-   * where it was billed, rather than being counted a second time by every fork
-   * taken from it.
-   *
-   * Forking into an id that already holds a conversation is a defect rather
-   * than an append into it. Everything {@link recordingTo} says about
-   * recording applies to the fork.
-   */
-  readonly forkFrom: (
-    conversationId: string,
-    at: LogOffset.Offset,
-    forkConversationId: string,
-    input: Prompt.RawInput,
-  ) => Effect.Effect<
-    Result,
-    RunError | AgentLog.CompatibilityError,
-    Requires | LogStore.Service
-  >;
-
-  /**
    * Give something a say at the loop's named seams.
    *
    * `interception.ts` is where the seams and their permissions are written
    * down; this is only how one is attached. Attaching is the same shape of
-   * decision as {@link recordingTo}: a method call whose consequence is in the
+   * decision as `Conversation.recording`: a call whose consequence is in the
    * type — the agent this returns requires whatever the interceptor's seams
    * require, and an agent that never calls it requires exactly what it
    * required before and runs the same code, because the loop checks for the
@@ -521,7 +347,7 @@ export interface Instance<
    * error, and there is no way to be intercepted without having said so.
    *
    * Calling it again replaces the interceptor rather than stacking a second
-   * one under it, matching {@link withHandlers} and {@link recordingTo}. Two
+   * one under it, matching {@link withHandlers}. Two
    * interceptors at one seam would need a composition order, and every order
    * is wrong for somebody; composing them is the caller's job, where the
    * intent is known.
@@ -677,6 +503,7 @@ export type Error<A> =
     ? RunError
     : never;
 
+/** @internal Continue a durable conversation while retaining its recording policy. */
 /**
  * @category guards
  * @since 0.1.0
@@ -1767,8 +1594,8 @@ const steeringInput = (
 /**
  * Collapse an event stream into a {@link Result}.
  *
- * Module scope rather than a closure inside `make`, because `recordingTo`
- * needs it too: a recording agent's `run` has to be a fold of its *recorded*
+ * Module scope rather than a closure inside `make`, because `Conversation`
+ * needs it too: a durable run has to be a fold of its *recorded*
  * stream, not of the unrecorded one `make` closed over. Keeping one fold is
  * what stops `run` and `stream` from drifting — the property the comment at
  * the top of this file exists to protect.
@@ -1804,7 +1631,7 @@ const foldToResult = <Tools extends Record<string, Tool.Any>, E, R>(
 /**
  * Replay a recorded conversation, then follow it live.
  *
- * The counterpart of `agent.recordingTo(id)`, and a free function rather than
+ * The live reader behind `Conversation.follow`, independent of an agent
  * a method because reading a conversation needs no agent: a UI reattaching
  * after a refresh, a second pod tailing a run it did not start, and an
  * operator inspecting a finished conversation all want this and none of them
@@ -1823,25 +1650,12 @@ const foldToResult = <Tools extends Record<string, Tool.Any>, E, R>(
  * resuming reader gets is what actually happened, at the granularity it was
  * written.
  */
-export const streamFrom = (
-  conversationId: string,
-  after: LogOffset.Offset = LogOffset.START,
-): Stream.Stream<
-  ConversationRecord.Envelope,
-  LogStore.LogStoreError,
-  LogStore.Service
-> =>
-  Tail.from(
-    AgentLog.pathFor(LogVocabulary.ConversationId.make(conversationId)),
-    after,
-  );
-
 /**
  * The two primitive event streams for one session.
  *
  * Split out from {@link Parts} because they are the part that varies with the
  * session and the rest is not. `withHandlers` composes over an entry;
- * `recordingTo` replaces one.
+ * durable recording replaces one.
  */
 interface Entry<Tools extends Record<string, Tool.Any>, Requires, Error> {
   readonly stream: (
@@ -1900,7 +1714,7 @@ interface Wiring {
  * session has to reach *inside* the loop — the dispatch seam consults it, the
  * turn boundary drains signals through it, delegation opens grandchildren from
  * it — and wrapping the finished stream from outside, which is all
- * `recordingTo` used to do, cannot reach any of that. An interceptor has the
+ * durable recording does, cannot reach any of that. An interceptor has the
  * same requirement for the same reason, which is why Phase 7 needed no new
  * mechanism. Threading them as arguments keeps them lexical: there is no
  * ambient value to provide, forget, or default.
@@ -2104,6 +1918,61 @@ const fromParts = <
       ),
     );
 
+  const recordStream = (
+    conversationId: string,
+    input: Prompt.RawInput,
+    policy?: RecordingPolicy.Policy<never>,
+  ) => {
+    const target = LogVocabulary.ConversationId.make(conversationId);
+    const recorded = (
+      input: Prompt.RawInput,
+      events: (
+        session: AgentLog.Session,
+      ) => Stream.Stream<
+        AgentEvents.Event<RuntimeTools>,
+        RunError | AgentLog.CompatibilityError,
+        BaseRequires
+      >,
+    ): Stream.Stream<
+      AgentEvents.Event<RuntimeTools>,
+      RunError | AgentLog.CompatibilityError,
+      BaseRequires | LogStore.Service
+    > =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          let session = yield* AgentLog.open(target, {
+            compatibility: { agent: parts.name, revision: parts.revision },
+          });
+          if (policy !== undefined) {
+            const context = yield* Effect.context<never>();
+            session = AgentLog.withRecordingPolicy(
+              session,
+              RecordingPolicyRuntime.compile(policy, context),
+            );
+          }
+          return AgentLog.record(
+            session,
+            streamWithSession(session, events(session)),
+          );
+        }),
+      );
+
+    return recorded(input, (session) =>
+      parts
+        .entry(
+          wiring(session, {
+            startRun: (effective) =>
+              AgentLog.start(session, {
+                agent: parts.name,
+                revision: parts.revision,
+                input: effective,
+              }),
+          }),
+        )
+        .stream(input),
+    );
+  };
+
   const agent: Instance<
     Name,
     OwnTools,
@@ -2122,140 +1991,6 @@ const fromParts = <
     ...publicPlain,
 
     of: (handlers) => handlers,
-
-    resume: (conversationId: string, input: Prompt.RawInput) =>
-      continueFrom(
-        AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
-          compatibility: { agent: parts.name, revision: parts.revision },
-        }),
-        input,
-      ),
-
-    branchFrom: (
-      conversationId: string,
-      at: LogOffset.Offset,
-      input: Prompt.RawInput,
-    ) =>
-      continueFrom(
-        AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
-          branchFrom: at,
-          compatibility: { agent: parts.name, revision: parts.revision },
-        }),
-        input,
-      ),
-
-    forkFrom: (
-      conversationId: string,
-      at: LogOffset.Offset,
-      forkConversationId: string,
-      input: Prompt.RawInput,
-    ) =>
-      continueFrom(
-        AgentLog.fork(
-          LogVocabulary.ConversationId.make(conversationId),
-          at,
-          LogVocabulary.ConversationId.make(forkConversationId),
-          { agent: parts.name, revision: parts.revision },
-        ),
-        input,
-      ),
-
-    // Rebuilt from `parts` like `withHandlers` is, and for the same reason:
-    // recording twice replaces the target conversation instead of appending a
-    // run to two logs at once, which no caller wants and which would double
-    // every record if it happened by accident.
-    //
-    // `run` and `runIn` fold the *recorded* stream rather than delegating to
-    // the plain entry. Delegating would run the loop through an unrecorded
-    // path and silently produce results with no history — the exact failure
-    // this whole file's "run is a fold of stream" rule prevents.
-    //
-    // The session argument to the new `entry` is ignored: naming a
-    // conversation explicitly is a stronger statement than inheriting a
-    // parent's, and quietly recording somewhere else would make
-    // `recordingTo` mean different things depending on who called it.
-    recordingTo: (
-      conversationId: string,
-      policy?: RecordingPolicy.Policy<never>,
-    ) => {
-      const target = LogVocabulary.ConversationId.make(conversationId);
-      const recorded = (
-        input: Prompt.RawInput,
-        events: (
-          session: AgentLog.Session,
-        ) => Stream.Stream<
-          AgentEvents.Event<RuntimeTools>,
-          RunError | AgentLog.CompatibilityError,
-          BaseRequires
-        >,
-      ): Stream.Stream<
-        AgentEvents.Event<RuntimeTools>,
-        RunError | AgentLog.CompatibilityError,
-        BaseRequires | LogStore.Service
-      > =>
-        Stream.unwrap(
-          Effect.gen(function* () {
-            let session = yield* AgentLog.open(target, {
-              compatibility: { agent: parts.name, revision: parts.revision },
-            });
-            if (policy !== undefined) {
-              const context = yield* Effect.context<never>();
-              session = AgentLog.withRecordingPolicy(
-                session,
-                RecordingPolicyRuntime.compile(policy, context),
-              );
-            }
-            return AgentLog.record(
-              session,
-              streamWithSession(session, events(session)),
-            );
-          }),
-        );
-
-      const recordedEntry = (
-        build: (
-          session: AgentLog.Session,
-        ) => Entry<RuntimeTools, BaseRequires, RunError>,
-      ): Entry<
-        RuntimeTools,
-        BaseRequires | LogStore.Service,
-        RunError | AgentLog.CompatibilityError
-      > => ({
-        stream: (input) =>
-          recorded(input, (session) => build(session).stream(input)),
-        streamIn: (chat, input) =>
-          recorded(input, (session) => build(session).streamIn(chat, input)),
-      });
-
-      return fromParts<
-        Name,
-        OwnTools,
-        RuntimeTools,
-        BaseRequires | LogStore.Service,
-        InterceptorRequires,
-        RunError | AgentLog.CompatibilityError
-      >({
-        ...parts,
-        entry: () => {
-          const entry = recordedEntry((session) =>
-            parts.entry(
-              wiring(session, {
-                startRun: (effective) =>
-                  AgentLog.start(session, {
-                    agent: parts.name,
-                    revision: parts.revision,
-                    input: effective,
-                  }),
-              }),
-            ),
-          );
-          return {
-            stream: (input) => entry.stream(input),
-            streamIn: (chat, input) => entry.streamIn(chat, input),
-          };
-        },
-      });
-    },
 
     // The one assertion in this file, and — unlike the two that shipped bugs —
     // it can only widen. Those subtracted a term from a requirement channel,
@@ -2317,6 +2052,37 @@ const fromParts = <
     },
   };
   register(agent, {
+    record: recordStream as AgentProtocol<BaseRequires, RuntimeTools>['record'],
+    continue: ((conversationId, input, options) => {
+      const compatibility = { agent: parts.name, revision: parts.revision };
+      const opener =
+        options?.forkConversationId === undefined
+          ? AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
+              compatibility,
+              ...(options?.branchFrom === undefined
+                ? {}
+                : { branchFrom: options.branchFrom }),
+            })
+          : AgentLog.fork(
+              LogVocabulary.ConversationId.make(conversationId),
+              options.branchFrom ?? LogOffset.START,
+              LogVocabulary.ConversationId.make(options.forkConversationId),
+              compatibility,
+            );
+      return continueFrom(
+        Effect.flatMap(opener, (session) =>
+          options?.policy === undefined
+            ? Effect.succeed(session)
+            : Effect.map(Effect.context<never>(), (context) =>
+                AgentLog.withRecordingPolicy(
+                  session,
+                  RecordingPolicyRuntime.compile(options.policy!, context),
+                ),
+              ),
+        ),
+        input,
+      );
+    }) as AgentProtocol<BaseRequires, RuntimeTools>['continue'],
     run: (
       runtime: RunPolicyRuntime.Runtime,
       session: AgentLog.Session | undefined,

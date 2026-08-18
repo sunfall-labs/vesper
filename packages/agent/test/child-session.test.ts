@@ -13,7 +13,8 @@ import {
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
-import { protocolOf } from '../src/internal.js';
+import { Conversation } from '../src/conversation.js';
+import { protocolOf } from '../src/internal/protocol.js';
 import { AgentLog } from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
@@ -294,7 +295,9 @@ describe('a recorded delegation', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
+          yield* Conversation.make(supervisor, PARENT)
+            .run('go')
+            .pipe(Effect.orDie);
           return yield* readAll(PARENT);
         }),
         oneDelegation,
@@ -317,7 +320,9 @@ describe('a recorded delegation', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
+          yield* Conversation.make(supervisor, PARENT)
+            .run('go')
+            .pipe(Effect.orDie);
           return yield* readAll(CHILD);
         }),
         oneDelegation,
@@ -341,7 +346,9 @@ describe('a recorded delegation', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
+          yield* Conversation.make(supervisor, PARENT)
+            .run('go')
+            .pipe(Effect.orDie);
           return yield* readAll(CHILD);
         }),
         oneDelegation,
@@ -365,11 +372,9 @@ describe('a recorded delegation', () => {
       Effect.gen(function* () {
         const first = yield* run(
           Effect.gen(function* () {
-            yield* supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie);
-            yield* supervisor
-              .recordingTo(PARENT)
-              .run('again')
-              .pipe(Effect.orDie);
+            const conversation = Conversation.make(supervisor, PARENT);
+            yield* conversation.run('go').pipe(Effect.orDie);
+            yield* conversation.run('again').pipe(Effect.orDie);
             const store = yield* LogStore.Service;
             return yield* store
               .meta(AgentLog.pathFor(CHILD))
@@ -387,7 +392,7 @@ describe('a recorded delegation', () => {
   it.effect('still hands the parent only what the child said', () =>
     Effect.gen(function* () {
       const result = yield* run(
-        supervisor.recordingTo(PARENT).run('go').pipe(Effect.orDie),
+        Conversation.make(supervisor, PARENT).run('go').pipe(Effect.orDie),
         oneDelegation,
       );
 
@@ -492,7 +497,9 @@ describe('a recorded delegation', () => {
             'do the researcher part',
           );
 
-          const resumed = yield* supervisor.resume(PARENT, 'continue');
+          const resumed = yield* Conversation.make(supervisor, PARENT).resume(
+            'continue',
+          );
           return { resumed, childRecords: yield* readAll(CHILD) };
         }).pipe(
           Effect.orDie,
@@ -635,7 +642,7 @@ describe('depth', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* chief.recordingTo(PARENT).run('go').pipe(Effect.orDie);
+          yield* Conversation.make(chief, PARENT).run('go').pipe(Effect.orDie);
           return yield* readAll(CHILD);
         }),
         twoLevels,
@@ -757,8 +764,7 @@ describe('a delegation chain that reaches the cap', () => {
     Effect.gen(function* () {
       const observed = yield* run(
         Effect.gen(function* () {
-          const result = yield* top
-            .recordingTo(PARENT)
+          const result = yield* Conversation.make(top, PARENT)
             .run('go')
             .pipe(Effect.orDie);
 

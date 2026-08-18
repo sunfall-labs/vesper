@@ -220,18 +220,19 @@ blips**. Producer fencing overlaps none of them — it decides which writer owns
 a stream, not whether work re-runs.
 
 `@sunfall/vesper-agent/workflow` composes these seams rather than merging them.
-It binds an application-owned workflow payload to `agent.resume`, returning an
-ordinary Effect `Workflow` and its registration layer. The application still
-chooses and provides `WorkflowEngine`; Vesper neither wraps
+It binds an application-owned workflow payload to `conversation.resume`,
+returning an ordinary Effect `Workflow` and its registration layer. The
+application still chooses and provides `WorkflowEngine`; Vesper neither wraps
 `ClusterWorkflowEngine` nor treats its message storage as conversation history.
 
 ## Not built, and why
 
-**Branch summarization.** Branching is built: `agent.branchFrom(id, at, input)`
-re-runs a conversation from an earlier record, and it costs one record case
-rather than a parent pointer per record because offsets are a total order.
-Concurrency is built too, as the deliberately different thing it is:
-`agent.forkFrom(id, at, forkId, input)` seeds a new conversation from the same
+**Branch summarization.** Branching is built:
+`conversation.branchFrom(at, input)` re-runs a conversation from an earlier
+record, and it costs one record case rather than a parent pointer per record
+because offsets are a total order. Concurrency is built too, as the deliberately
+different thing it is:
+`conversation.forkFrom(at, forkId, input)` seeds a new conversation from the same
 prefix, so two forks are two streams and two producer claims and can run at
 once, where two branches share one writer and cannot. The cost of the second
 stream is what the marker avoided — the prefix is copied, and every

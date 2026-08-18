@@ -3,6 +3,8 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Clock, Effect } from 'effect';
 
+import type { Signal } from '../conversation.js';
+
 // Out-of-band input to a running conversation: steering, and cancel.
 //
 // ## Why this is a second stream and not a second record in the first one
@@ -52,15 +54,6 @@ import { Clock, Effect } from 'effect';
 export const pathFor = (conversationId: LogVocabulary.ConversationId): string =>
   `signals/${conversationId}`;
 
-/** What a sender says. Structural, so a caller needs no schema import. */
-export interface Signal {
-  readonly kind: 'steer' | 'cancel';
-  /** Steering text, or a cancellation reason. */
-  readonly text: string;
-  /** Who sent it — a user id, a service name. Opaque here. */
-  readonly source: string;
-}
-
 /**
  * Send a signal to a conversation, whether or not anything is running.
  *
@@ -76,18 +69,23 @@ export interface Signal {
  * stop its first provider call before it begins; its durable acknowledgement
  * still occurs through the ordinary first-turn boundary drain.
  */
-export const send = Effect.fn('AgentSignals.send')(function* (
+/** @internal */
+export const append = Effect.fn('AgentSignals.append')(function* (
   conversationId: string,
   signal: Signal,
 ) {
   const store = yield* LogStore.Service;
-  yield* append(store, LogVocabulary.ConversationId.make(conversationId), {
-    _tag: 'Signal',
-    ...signal,
-  });
+  yield* appendRecord(
+    store,
+    LogVocabulary.ConversationId.make(conversationId),
+    {
+      _tag: 'Signal',
+      ...signal,
+    },
+  );
 });
 
-const append = (
+const appendRecord = (
   store: LogStore.Interface,
   conversationId: LogVocabulary.ConversationId,
   record: ConversationRecord.RecordOf<'Signal'>,
@@ -124,5 +122,3 @@ const append = (
     });
   });
 };
-
-export * as AgentSignals from './signal.js';

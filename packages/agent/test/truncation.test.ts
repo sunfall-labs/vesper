@@ -7,6 +7,7 @@ import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
 
 // A turn the provider cut off at the output cap, rather than one the model
@@ -78,7 +79,9 @@ const run = <A, E>(
 const conversationOf = (reason: 'stop' | 'length') =>
   run(
     Effect.gen(function* () {
-      yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+      yield* Conversation.make(agent, CONVERSATION)
+        .run('hi')
+        .pipe(Effect.orDie);
       const store = yield* LogStore.Service;
       const page = yield* store
         .read(
@@ -127,8 +130,7 @@ describe('a turn the provider truncated at the output cap', () => {
     Effect.gen(function* () {
       const outcome = yield* run(
         Effect.gen(function* () {
-          const result = yield* agent
-            .recordingTo(CONVERSATION)
+          const result = yield* Conversation.make(agent, CONVERSATION)
             .run('hi')
             .pipe(Effect.orDie);
 

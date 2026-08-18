@@ -8,6 +8,7 @@ import { Deferred, Effect, Fiber, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
 
 const finish: Response.StreamPartEncoded = {
@@ -175,7 +176,9 @@ describe('durable compatibility', () => {
       const result = yield* run(
         Effect.gen(function* () {
           yield* seed('matching', [started()]);
-          return yield* definition().resume('matching', 'continue');
+          return yield* Conversation.make(definition(), 'matching').resume(
+            'continue',
+          );
         }),
         calls,
       );
@@ -201,7 +204,9 @@ describe('durable compatibility', () => {
       const failure = yield* run(
         Effect.gen(function* () {
           yield* seed('incompatible', [record]);
-          yield* definition().resume('incompatible', 'continue');
+          yield* Conversation.make(definition(), 'incompatible').resume(
+            'continue',
+          );
         }),
         calls,
       ).pipe(Effect.flip);
@@ -276,11 +281,10 @@ describe('durable compatibility', () => {
             started('test', '2'),
             { _tag: 'Text', step: 1, text: 'abandon' },
           ]);
-          return yield* definition().branchFrom(
+          return yield* Conversation.make(
+            definition(),
             'branch-source',
-            records[1]!.offset,
-            'continue',
-          );
+          ).branchFrom(records[1]!.offset, 'continue');
         }),
         calls,
       );
@@ -299,8 +303,7 @@ describe('durable compatibility', () => {
             started(),
             { _tag: 'Text', step: 1, text: 'keep' },
           ]);
-          return yield* definition().forkFrom(
-            'fork-source',
+          return yield* Conversation.make(definition(), 'fork-source').forkFrom(
             records[1]!.offset,
             'fork-target',
             'continue',
@@ -325,16 +328,15 @@ describe('durable compatibility', () => {
               started(),
               { _tag: 'Text', step: 1, text: 'keep' },
             ]);
-            const branch = yield* definition('test', '2')
-              .branchFrom('incompatible-source', records[1]!.offset, 'continue')
+            const incompatible = Conversation.make(
+              definition('test', '2'),
+              'incompatible-source',
+            );
+            const branch = yield* incompatible
+              .branchFrom(records[1]!.offset, 'continue')
               .pipe(Effect.exit);
-            const fork = yield* definition('test', '2')
-              .forkFrom(
-                'incompatible-source',
-                records[1]!.offset,
-                'incompatible-target',
-                'continue',
-              )
+            const fork = yield* incompatible
+              .forkFrom(records[1]!.offset, 'incompatible-target', 'continue')
               .pipe(Effect.exit);
             const store = yield* LogStore.Service;
             return {

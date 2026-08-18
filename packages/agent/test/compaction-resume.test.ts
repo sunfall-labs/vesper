@@ -3,14 +3,14 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, type Layer } from 'effect';
+import { Effect, type Layer, Stream } from 'effect';
 import { LanguageModel, Prompt, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
+import { Conversation } from '../src/conversation.js';
 import { fakeProvider, turnOf } from './compaction-fixtures.js';
 import { AgentHistory } from '../src/history.js';
-import { AgentLog } from '../src/log.js';
 
 // Compaction across a resumption — the gap the `Compacted` record used to be.
 //
@@ -46,7 +46,6 @@ const LIMIT = 500;
 const BULK = 'L'.repeat(4000);
 
 const CONVERSATION = LogVocabulary.ConversationId.make('compacted-1');
-const PATH = AgentLog.pathFor(CONVERSATION);
 
 const POLICY = {
   reserveTokens: 0,
@@ -61,6 +60,7 @@ const agent = Agent.make({
   toolkit: Toolkit.make(),
   compaction: POLICY,
 });
+const conversation = Conversation.recording(agent, CONVERSATION, POLICY);
 
 const run = <A, E>(
   effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
@@ -74,9 +74,7 @@ const run = <A, E>(
   );
 
 const readAll = Effect.fn('test.readAll')(function* () {
-  const store = yield* LogStore.Service;
-  const page = yield* store.read(PATH, { limit: 1000 });
-  return page.records;
+  return Array.from(yield* conversation.records().pipe(Stream.runCollect));
 });
 
 const textIn = (prompt: Prompt.Prompt): string =>
@@ -91,10 +89,10 @@ const textIn = (prompt: Prompt.Prompt): string =>
  */
 const threeRuns = (models: ReturnType<typeof fakeProvider>) =>
   Effect.gen(function* () {
-    yield* agent.recordingTo(CONVERSATION).run('question one');
-    yield* agent.resume(CONVERSATION, 'question two');
+    yield* conversation.run('question one');
+    yield* conversation.resume('question two');
     const summariesAfterCompacting = models.summaries.length;
-    yield* agent.resume(CONVERSATION, 'question three');
+    yield* conversation.resume('question three');
 
     return {
       records: yield* readAll(),

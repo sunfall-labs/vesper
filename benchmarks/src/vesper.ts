@@ -6,9 +6,9 @@
 // configuration nobody ships is not a number about the library.
 
 import { Agent } from '@sunfall/vesper-agent/agent';
+import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { AgentLog } from '@sunfall/vesper-agent/log';
 import { AgentHistory } from '@sunfall/vesper-agent/history';
-import { AgentSignals } from '@sunfall/vesper-agent/signal';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
@@ -233,8 +233,8 @@ const callsFor = async (
 /**
  * One submission of `steps` model turns.
  *
- * `recording` picks `agent.recordingTo(id).run(...)` over `agent.run(...)` —
- * the only difference between the two rows in the report.
+ * `recording` picks `Conversation.make(agent, id).run(...)` over
+ * `agent.run(...)` — the only difference between the two rows in the report.
  */
 const runTurn = async (recording: boolean): Promise<ScenarioResult> => {
   const samples: number[] = [];
@@ -243,16 +243,22 @@ const runTurn = async (recording: boolean): Promise<ScenarioResult> => {
   const once = async (index: number, measured: boolean): Promise<void> => {
     const { handle, runtime } = await readyRuntime();
     loadScript(handle, TURN_STEPS);
-    const agent = recording
-      ? benchAgent.recordingTo(`bench-${index}`)
-      : benchAgent;
     const before = handle.state.totalCalls;
     const t0 = performance.now();
-    await callsFor(handle, TURN_STEPS, () =>
-      runtime.runPromise(
-        Effect.orDie(agent.run(USER_MESSAGE)) as Effect.Effect<unknown>,
-      ),
-    );
+    const execute = recording
+      ? () =>
+          runtime.runPromise(
+            Conversation.make(benchAgent, `bench-${index}`)
+              .run(USER_MESSAGE)
+              .pipe(Effect.orDie) as Effect.Effect<unknown>,
+          )
+      : () =>
+          runtime.runPromise(
+            benchAgent
+              .run(USER_MESSAGE)
+              .pipe(Effect.orDie) as Effect.Effect<unknown>,
+          );
+    await callsFor(handle, TURN_STEPS, execute);
     const elapsed = performance.now() - t0;
     if (measured) {
       samples.push(elapsed);
@@ -291,7 +297,7 @@ export const runComparison = async (
   for (let i = 0; i < COMPARISON_WARMUP + COMPARISON_ITERATIONS; i++) {
     const { handle, runtime } = await readyRuntime();
     loadScript(handle, steps);
-    const agent = benchAgent.recordingTo(`${workload}-${i}`);
+    const agent = Conversation.make(benchAgent, `${workload}-${i}`);
     const before = handle.state.totalCalls;
     const t0 = performance.now();
     await callsFor(handle, steps, () =>
@@ -328,7 +334,7 @@ const runComparisonStartup = async (): Promise<ComparisonResult> => {
   await callsFor(handle, 1, () =>
     runtime.runPromise(
       Effect.orDie(
-        benchAgent.recordingTo('startup').run(USER_MESSAGE),
+        Conversation.make(benchAgent, 'startup').run(USER_MESSAGE),
       ) as Effect.Effect<unknown>,
     ),
   );
@@ -360,6 +366,10 @@ const runComparisonGrowth = async (): Promise<ComparisonResult> => {
   let modelCalls = 0;
   for (let repeat = 0; repeat <= COMPARISON_GROWTH_REPEATS; repeat++) {
     const { handle, runtime } = await readyRuntime();
+    const conversation = Conversation.make(
+      benchAgent,
+      `comparison-growth-${repeat}`,
+    );
     for (let message = 0; message < COMPARISON_GROWTH_MESSAGES; message++) {
       loadScript(handle, 1);
       const before = handle.state.totalCalls;
@@ -367,10 +377,7 @@ const runComparisonGrowth = async (): Promise<ComparisonResult> => {
       await callsFor(handle, 1, () =>
         runtime.runPromise(
           Effect.orDie(
-            benchAgent.resume(
-              `comparison-growth-${repeat}`,
-              `${USER_MESSAGE} (${message})`,
-            ),
+            conversation.resume(`${USER_MESSAGE} (${message})`),
           ) as Effect.Effect<unknown>,
         ),
       );
@@ -407,6 +414,7 @@ const collect = (): void => {
 
 const runComparisonMemory = async (): Promise<ComparisonResult> => {
   const { handle, runtime } = await readyRuntime();
+  const conversation = Conversation.make(benchAgent, 'comparison-memory');
   collect();
   const baseline = process.memoryUsage();
   for (let message = 0; message < COMPARISON_MEMORY_MESSAGES; message++) {
@@ -414,10 +422,7 @@ const runComparisonMemory = async (): Promise<ComparisonResult> => {
     await callsFor(handle, 1, () =>
       runtime.runPromise(
         Effect.orDie(
-          benchAgent.resume(
-            'comparison-memory',
-            `${USER_MESSAGE} (${message})`,
-          ),
+          conversation.resume(`${USER_MESSAGE} (${message})`),
         ) as Effect.Effect<unknown>,
       ),
     );
@@ -458,9 +463,10 @@ const runComparisonConcurrency = async (): Promise<ComparisonResult> => {
       Array.from({ length: COMPARISON_CONCURRENCY }, (_, index) =>
         runtime.runPromise(
           Effect.orDie(
-            benchAgent
-              .recordingTo(`comparison-concurrent-${repeat}-${index}`)
-              .run(USER_MESSAGE),
+            Conversation.make(
+              benchAgent,
+              `comparison-concurrent-${repeat}-${index}`,
+            ).run(USER_MESSAGE),
           ) as Effect.Effect<unknown>,
         ),
       ),
@@ -649,14 +655,12 @@ export const runConformance = async (): Promise<ConformanceResult> => {
           },
         }),
       );
+      const cancellation = Conversation.make(benchAgent, 'comparison-cancel');
       const running = yield* Effect.forkChild(
-        benchAgent
-          .recordingTo('comparison-cancel')
-          .run(USER_MESSAGE)
-          .pipe(Effect.provide(blocking)),
+        cancellation.run(USER_MESSAGE).pipe(Effect.provide(blocking)),
       );
       yield* Deferred.await(entered);
-      yield* AgentSignals.send('comparison-cancel', {
+      yield* cancellation.send({
         kind: 'cancel',
         text: 'benchmark in-flight cancellation probe',
         source: 'comparison',
@@ -738,9 +742,9 @@ export const runConformance = async (): Promise<ConformanceResult> => {
  * conversation, each running `CONVERSATION_STEPS` model turns.
  *
  * Recording is not optional here. Continuing a conversation means having one,
- * and `agent.resume` rebuilds the prompt from the log. One sample is the whole
- * conversation rather than a single message, because the cost being measured
- * is how the loop behaves as history accumulates.
+ * and `conversation.resume` rebuilds the prompt from the log. One sample is
+ * the whole conversation rather than a single message, because the cost being
+ * measured is how the loop behaves as history accumulates.
  */
 const runConversation = async (): Promise<ScenarioResult> => {
   const samples: number[] = [];
@@ -749,6 +753,7 @@ const runConversation = async (): Promise<ScenarioResult> => {
   const once = async (index: number, measured: boolean): Promise<void> => {
     const { handle, runtime } = await readyRuntime();
     const id = `conv-${index}`;
+    const conversation = Conversation.make(benchAgent, id);
     const before = handle.state.totalCalls;
     const t0 = performance.now();
     let turns = 0;
@@ -757,7 +762,7 @@ const runConversation = async (): Promise<ScenarioResult> => {
       await callsFor(handle, CONVERSATION_STEPS, () =>
         runtime.runPromise(
           Effect.orDie(
-            benchAgent.resume(id, `${USER_MESSAGE} (${m})`),
+            conversation.resume(`${USER_MESSAGE} (${m})`),
           ) as Effect.Effect<unknown>,
         ),
       );
@@ -846,6 +851,7 @@ const runMemory = async (): Promise<ScenarioResult> => {
   const handle = makeProvider();
   const runtime = ManagedRuntime.make(layerFor(handle));
   const id = 'memory-conversation';
+  const conversation = Conversation.make(benchAgent, id);
 
   await runtime.runPromise(Effect.void);
 
@@ -866,7 +872,7 @@ const runMemory = async (): Promise<ScenarioResult> => {
     await callsFor(handle, CONVERSATION_STEPS, () =>
       runtime.runPromise(
         Effect.orDie(
-          benchAgent.resume(id, `${USER_MESSAGE} (${m})`),
+          conversation.resume(`${USER_MESSAGE} (${m})`),
         ) as Effect.Effect<unknown>,
       ),
     );
@@ -915,15 +921,21 @@ const runScaling = async (recording: boolean): Promise<ScenarioResult> => {
     for (let i = 0; i < SCALING_ITERATIONS + WARMUP; i++) {
       const { handle, runtime } = await readyRuntime();
       loadScript(handle, turns);
-      const agent = recording
-        ? benchAgent.recordingTo(`scale-${turns}-${i}`)
-        : benchAgent;
       const t0 = performance.now();
-      await callsFor(handle, turns, () =>
-        runtime.runPromise(
-          Effect.orDie(agent.run(USER_MESSAGE)) as Effect.Effect<unknown>,
-        ),
-      );
+      const execute = recording
+        ? () =>
+            runtime.runPromise(
+              Conversation.make(benchAgent, `scale-${turns}-${i}`)
+                .run(USER_MESSAGE)
+                .pipe(Effect.orDie) as Effect.Effect<unknown>,
+            )
+        : () =>
+            runtime.runPromise(
+              benchAgent
+                .run(USER_MESSAGE)
+                .pipe(Effect.orDie) as Effect.Effect<unknown>,
+            );
+      await callsFor(handle, turns, execute);
       const elapsed = performance.now() - t0;
       if (i >= WARMUP) {
         samples.push(elapsed);
@@ -965,13 +977,14 @@ const runGrowth = async (): Promise<ScenarioResult> => {
   for (let repeat = 0; repeat < GROWTH_REPEATS + 1; repeat++) {
     const { handle, runtime } = await readyRuntime();
     const id = `growth-${repeat}`;
+    const conversation = Conversation.make(benchAgent, id);
     for (let m = 0; m < GROWTH_MESSAGES; m++) {
       loadScript(handle, CONVERSATION_STEPS);
       const t0 = performance.now();
       await callsFor(handle, CONVERSATION_STEPS, () =>
         runtime.runPromise(
           Effect.orDie(
-            benchAgent.resume(id, `${USER_MESSAGE} (${m})`),
+            conversation.resume(`${USER_MESSAGE} (${m})`),
           ) as Effect.Effect<unknown>,
         ),
       );
@@ -1026,15 +1039,14 @@ const runParts = async (recording: boolean): Promise<ScenarioResult> => {
     for (let i = 0; i < PART_ITERATIONS + WARMUP; i++) {
       const { handle, runtime } = await readyRuntime();
       loadParts(handle, parts);
-      const agent = recording
-        ? benchAgent.recordingTo(`parts-${parts}-${i}`)
-        : benchAgent;
       let observedParts = 0;
       let observedBytes = 0;
       const t0 = performance.now();
-      await callsFor(handle, 1, () =>
+      const drain = <E, R>(
+        events: Stream.Stream<AgentEvents.ObservedEvent<any>, E, R>,
+      ) =>
         runtime.runPromise(
-          agent.stream(USER_MESSAGE).pipe(
+          events.pipe(
             Stream.tap((event) =>
               Effect.sync(() => {
                 if (event._tag === 'Part' && event.part.type === 'text-delta') {
@@ -1046,7 +1058,15 @@ const runParts = async (recording: boolean): Promise<ScenarioResult> => {
             Stream.runDrain,
             Effect.orDie,
           ) as Effect.Effect<unknown>,
-        ),
+        );
+      await callsFor(handle, 1, () =>
+        recording
+          ? drain(
+              Conversation.make(benchAgent, `parts-${parts}-${i}`).stream(
+                USER_MESSAGE,
+              ),
+            )
+          : drain(benchAgent.stream(USER_MESSAGE)),
       );
       const elapsed = performance.now() - t0;
       assertEqual(observedParts, parts, `parts scenario deltas at ${parts}`);
@@ -1221,14 +1241,13 @@ const runBackpressure = async (recording: boolean): Promise<ScenarioResult> => {
   for (let i = 0; i < BACKPRESSURE_ITERATIONS + WARMUP; i++) {
     const { handle, runtime } = await readyRuntime();
     loadParts(handle, BACKPRESSURE_PARTS);
-    const agent = recording
-      ? benchAgent.recordingTo(`backpressure-${i}`)
-      : benchAgent;
     let observed = 0;
     const t0 = performance.now();
-    await callsFor(handle, 1, () =>
+    const drain = <E, R>(
+      events: Stream.Stream<AgentEvents.ObservedEvent<any>, E, R>,
+    ) =>
       runtime.runPromise(
-        agent.stream(USER_MESSAGE).pipe(
+        events.pipe(
           Stream.tap((event) =>
             event._tag === 'Part' && event.part.type === 'text-delta'
               ? Effect.sleep(`${BACKPRESSURE_DELAY_MS} millis`).pipe(
@@ -1239,7 +1258,15 @@ const runBackpressure = async (recording: boolean): Promise<ScenarioResult> => {
           Stream.runDrain,
           Effect.orDie,
         ) as Effect.Effect<unknown>,
-      ),
+      );
+    await callsFor(handle, 1, () =>
+      recording
+        ? drain(
+            Conversation.make(benchAgent, `backpressure-${i}`).stream(
+              USER_MESSAGE,
+            ),
+          )
+        : drain(benchAgent.stream(USER_MESSAGE)),
     );
     const elapsed = performance.now() - t0;
     assertEqual(observed, BACKPRESSURE_PARTS, 'backpressure consumed deltas');

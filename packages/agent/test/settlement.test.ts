@@ -13,7 +13,8 @@ import {
 } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
-import { protocolOf } from '../src/internal.js';
+import { Conversation } from '../src/conversation.js';
+import { protocolOf } from '../src/internal/protocol.js';
 import { AgentLog } from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
@@ -150,7 +151,9 @@ describe('how a run settles', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* agent.recordingTo(CONVERSATION).run('hi').pipe(Effect.orDie);
+          yield* Conversation.make(agent, CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
           return yield* readAll();
         }),
       );
@@ -186,8 +189,7 @@ describe('how a run settles', () => {
   it.effect('records a failed run, and does not swallow the failure', () =>
     Effect.gen(function* () {
       const observed = yield* Effect.gen(function* () {
-        const outcome = yield* agent
-          .recordingTo(CONVERSATION)
+        const outcome = yield* Conversation.make(agent, CONVERSATION)
           .run('hi')
           .pipe(Effect.result);
         return { outcome, written: yield* readAll() };
@@ -214,8 +216,7 @@ describe('how a run settles', () => {
       const written = yield* Effect.gen(function* () {
         const reached = yield* Deferred.make<void>();
 
-        const running = yield* agent
-          .recordingTo(CONVERSATION)
+        const running = yield* Conversation.make(agent, CONVERSATION)
           .run('hi')
           .pipe(
             Effect.orDie,
@@ -244,8 +245,7 @@ describe('how a run settles', () => {
           Effect.gen(function* () {
             // A consumer that takes what it wants and walks away. The run did not
             // finish, and saying "success" here would claim a result nobody got.
-            yield* agent
-              .recordingTo(CONVERSATION)
+            yield* Conversation.make(agent, CONVERSATION)
               .stream('hi')
               .pipe(Stream.take(2), Stream.runDrain, Effect.orDie);
 
