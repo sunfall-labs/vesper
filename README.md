@@ -1,71 +1,38 @@
-# Vesper
+<p align="center">
+  <img src="./vesper.png" alt="Vesper — an abstract violet bat emerging from the dark" width="680" />
+</p>
 
-Migrating from the former Agent durability methods? See
-[Migrating to Conversation](docs/migrating-to-conversation.md).
+<h1 align="center">Vesper</h1>
 
-An Effect-first agent harness built on `effect/unstable/ai`.
+<p align="center">
+  <strong>Effect-native agents with compile-time requirements and durable conversations.</strong>
+</p>
 
-`effect/unstable/ai` supplies `LanguageModel`, `Tool`, `Toolkit`, `Prompt`,
-`Response`, and `Chat`. What it does not supply is an agent loop:
-`generateText` is one round trip. Vesper adds that loop and two things that are
-hard to get any other way: **agent
-definitions whose unmet service requirements are a compile error**, and an
-**event-sourced conversation log** a run is recorded to, resumed from, and
-steered through.
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#packages">Packages</a> ·
+  <a href="#complete-example">Complete example</a> ·
+  <a href="./Design.md">Design</a>
+</p>
 
-Provider integration comes directly from official Effect AI packages. Vesper
-does not wrap provider SDKs or maintain a second provider registry.
-[`Design.md`](Design.md) explains the boundary.
+Vesper is an agent loop built directly on `effect/unstable/ai`. Effect supplies
+the provider seam, tools, prompts, responses, and chat; Vesper adds the repeated
+turn loop and makes two difficult properties ordinary:
 
-**Status: pre-1.0, preparing its first `alpha` publish.** It was extracted from
-the system it was built for. Read [maturity and deliberate
-constraints](#maturity-and-deliberate-constraints) before picking it up.
+| Compile-time confidence                                                               | Durable execution                                                                                    | Native composition                                                                              |
+| ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Missing tool, subagent, state, and interceptor requirements fail during typechecking. | Conversations are recorded, resumed, branched, steered, compacted, and recovered from one event log. | Providers, Workflow, Cluster, Schema, Stream, Layer, tracing, and MCP remain Effect primitives. |
 
-## Packages
+Vesper does not wrap provider SDKs or maintain a second provider registry.
+Official Effect AI packages provide `LanguageModel` directly.
 
-Vesper publishes six packages:
+> [!IMPORTANT]
+> **Vesper is pre-1.0 and preparing its first alpha release.** Read the
+> [maturity and deliberate constraints](#maturity-and-deliberate-constraints)
+> before adopting it. Migrating from the former durability methods? Start with
+> [Migrating to Conversation](docs/migrating-to-conversation.md).
 
-| Package                                               | What it does                                                    |
-| ----------------------------------------------------- | --------------------------------------------------------------- |
-| [`@sunfall/vesper-agent`](packages/agent)             | The loop, typed evals, skills, recording, resumption, subagents |
-| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory adapter   |
-| [`@sunfall/vesper-log-pg`](packages/log-pg)           | Opt-in PostgreSQL adapter and migration                         |
-| [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                  |
-| [`@sunfall/vesper-attachments`](packages/attachments) | Verified blobs with memory and filesystem adapters              |
-| [`@sunfall/vesper-mcp`](packages/mcp)                 | Effect-native MCP exposure for durable agents                   |
-
-`workspace` is standalone and never composed implicitly. Attachments remain a
-separate reusable package; recorded agent runs use its optional
-`AttachmentStore.Service` when one is provided and otherwise preserve inline
-prompt content.
-`WorkspaceAgent.standard` exposes the standard workspace toolkit, and
-`WorkspaceAgent.compose(applicationToolkit)` adds those tools to an application
-toolkit without hiding the required layers. `WorkspaceTools` remains the
-advanced lower-level interface for custom handler, root, and command-policy
-wiring; see the [workspace guide](docs/workspace.md).
-
-`@sunfall/vesper-agent/workflow` optionally binds a recorded agent to Effect's
-native `Workflow`: Effect Workflow or Cluster owns durable execution and
-wakeup, while Vesper's log owns durable conversation semantics. The binding
-returns the native workflow plus its registration layer, preserving the
-agent's complete `Requires` channel rather than hiding runtime wiring.
-`AgentWorkflow.step` is the corresponding tool-level primitive: a named Effect
-Workflow `Activity` whose completed result replays without rerunning its effect,
-with a mandatory input-derived key separating repeated logical calls. Its
-requirement channel prevents it being mistaken for durable work outside a
-workflow. `AgentWorkflow.wait` lets the same handler yield a typed external
-request and resume from a durable decision; each wait definition exposes a
-typed `awaitPending(conversation, key)` Effect for one independently keyed
-request. It is reconnectable and derived from the durable conversation tail
-rather than an ephemeral queue, while the conversation's wait stream remains
-the complete audit lifecycle.
-
-`@sunfall/vesper-agent/eval` runs the same typed agent used in production and
-captures its result, events, timing, and typed tool evidence for deterministic
-or effectful scoring. It preserves the agent's error and requirement channels,
-does not retain prompt input, and stays independent of any test framework.
-
-## Install
+## Quick start
 
 ```bash
 npm install @sunfall/vesper-agent \
@@ -73,11 +40,67 @@ npm install @sunfall/vesper-agent \
             @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
 ```
 
-Effect and its provider packages are pinned together at `4.0.0-rc.109` while
-the APIs are release candidates. Every Vesper package peers on that exact
-`effect` version so an application has one Effect service identity.
+```ts
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { Conversation } from '@sunfall/vesper-agent/conversation';
+import { Effect } from 'effect';
+import { Toolkit } from 'effect/unstable/ai';
 
-## A worked example
+const support = Agent.make({
+  name: 'support',
+  revision: '1',
+  instructions: 'Resolve the customer’s request clearly and accurately.',
+  toolkit: Toolkit.make(),
+});
+
+const program = Effect.gen(function* () {
+  // One unrecorded run.
+  const answer = yield* support.run('Where is my order?');
+
+  // Or bind the same definition to durable conversation history.
+  const conversation = Conversation.make(support, 'customer-42');
+  const durableAnswer = yield* conversation.run('Where is my order?');
+
+  return { answer, durableAnswer };
+});
+```
+
+Provide an official Effect `LanguageModel` layer for both forms. Durable
+conversations additionally require a Vesper `LogStore` and Effect `Crypto`
+implementation; those requirements remain visible in the Effect channel and
+are compile-time errors until provided.
+
+Effect and its provider packages are pinned together at `4.0.0-rc.109` while
+the interfaces are release candidates, ensuring one Effect service identity in
+the application.
+
+## Packages
+
+Vesper publishes six focused packages:
+
+| Package                                               | Purpose                                                                          |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------- |
+| [`@sunfall/vesper-agent`](packages/agent)             | Agent loop, typed evals, workflows, skills, recording, resumption, and subagents |
+| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, and the memory adapter            |
+| [`@sunfall/vesper-log-pg`](packages/log-pg)           | PostgreSQL log adapter and authoritative migration                               |
+| [`@sunfall/vesper-workspace`](packages/workspace)     | Filesystem and shell tools behind a swappable driver                             |
+| [`@sunfall/vesper-attachments`](packages/attachments) | Verified content-addressed blobs with memory and filesystem adapters             |
+| [`@sunfall/vesper-mcp`](packages/mcp)                 | Effect-native MCP exposure for durable agents                                    |
+
+Workspace authority is always composed explicitly. Attachments remain a
+separate reusable package and are only externalized when an
+`AttachmentStore.Service` is provided.
+
+### Documentation
+
+- [Design and architectural boundaries](Design.md)
+- [Agent guide](packages/agent/README.md)
+- [Workspace composition](docs/workspace.md)
+- [Conversation migration guide](docs/migrating-to-conversation.md)
+- [Contributing and package layering](docs/contributing.md)
+- [Benchmarks and operational probes](benchmarks/README.md)
+
+## Complete example
 
 `examples/support-agent` is compiled with requirement-channel assertions and
 runs entirely against a scripted model, in-memory application adapters, and the
@@ -107,7 +130,13 @@ and models no vendor. Its strict script found the extra turn caused by an
 accepted steer while this example was built. Application behavior is the same
 definition used with a real provider; only Layers change.
 
-### Defining the agent
+### Agent definition
+
+<details>
+<summary><strong>View the complete typed agent and workflow</strong></summary>
+
+This definition exercises tools, application requirements, subagents, skills,
+run budgets, compaction, durable approval, and idempotent Workflow activities.
 
 ```ts
 import { Agent } from '@sunfall/vesper-agent/agent';
@@ -268,6 +297,8 @@ const supportWorkflow = AgentWorkflow.make(supportAgent, {
 });
 ```
 
+</details>
+
 ### Running it
 
 ```ts
@@ -329,7 +360,9 @@ Handlers attach as a method rather than a `Definition` field, mirroring
 twice replaces the handlers rather than stacking a second set beneath them,
 which is also how `intercepting` behaves.
 
-## What the types buy
+## Core concepts
+
+### Compile-time guarantees
 
 `Agent.Instance<Name, Tools, Requires>` — and `Requires`, what still has to be
 provided to run it, is the only parameter a caller normally writes. Two
@@ -355,7 +388,7 @@ the build, not just the assertion.
 None of it is expressible over an agent API whose `execute` returns a
 `Promise`. That is the architectural reason this exists.
 
-## Subagents and skills
+### Subagents and skills
 
 A subagent is an agent definition compiled to a tool named `task_<child>` on
 its parent, so delegation composes through the ordinary toolkit machinery.
@@ -371,7 +404,7 @@ validation rather than returning an empty string the model may not notice.
 
 Skills here are values passed to `Agent.make`; there is no discovery from disk.
 
-## Compaction and the context window
+### Compaction and the context window
 
 Compaction replaces old history with a model-written summary. There are two
 triggers. The reactive one fires when the provider rejects the request as too
@@ -689,7 +722,9 @@ An interceptor belongs to the agent it was attached to. A subagent is its own
 loop and does not inherit its parent's — but the delegation itself is a tool
 call, so `beforeToolCall` sees `task_<child>` like anything else.
 
-## Trying durable approval locally
+## Examples
+
+### Durable approval locally
 
 ```bash
 nub run example:approval-cli
@@ -701,7 +736,7 @@ CLI lets you approve or deny it, and the same handler resumes before the agent
 reacts to the result. For a non-interactive run, use
 `nub run example:approval-cli --decision approve` or `--decision deny`.
 
-## Trying it against a real model
+### Real providers
 
 ```bash
 ANTHROPIC_API_KEY=... nub run example:compliance-relay
