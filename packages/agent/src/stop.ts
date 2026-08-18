@@ -28,8 +28,8 @@ export interface State<Tools extends Record<string, Tool.Any>> {
  * to decode it. The same-name interface keeps call sites reading naturally.
  */
 export const Usage = Schema.Struct({
-  input: Schema.Number,
-  output: Schema.Number,
+  input: Schema.Natural,
+  output: Schema.Natural,
 });
 export interface Usage extends Schema.Struct.Type<typeof Usage.fields> {}
 

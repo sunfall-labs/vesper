@@ -41,28 +41,34 @@ export const FORMAT_VERSION = 1;
 
 /** Cumulative token usage. Mirrors `Stop.Usage` without importing it. */
 export const Usage = Schema.Struct({
-  input: Schema.Number,
-  output: Schema.Number,
+  input: Schema.Natural,
+  output: Schema.Natural,
 });
 export interface Usage extends Schema.Struct.Type<typeof Usage.fields> {}
 
+/** Non-negative counters and indexes carried by durable records. */
+const Count = Schema.Natural;
+
+/** Epoch milliseconds may predate Unix epoch, but must be finite integers. */
+const Timestamp = Schema.Int;
+
 const CompletedValue = Schema.Struct({
-  outcome: Schema.optional(Schema.Literals(['success', 'cancelled'])),
+  outcome: Schema.optionalKey(Schema.Literals(['success', 'cancelled'])),
   text: Schema.String,
-  steps: Schema.Number,
+  steps: Count,
   usage: Usage,
 });
 
 const ResumeState = Schema.Struct({
   /** Optional only so legacy records decode and can be rejected deliberately. */
-  formatVersion: Schema.optional(Schema.Number),
-  agent: Schema.optional(Schema.String),
-  agentRevision: Schema.optional(LogVocabulary.AgentRevision),
+  formatVersion: Schema.optionalKey(Count),
+  agent: Schema.optionalKey(Schema.String),
+  agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
   usage: Usage,
   signalCursor: LogOffset.Offset,
-  completed: Schema.optional(CompletedValue),
-  latestTurnUsage: Schema.optional(Usage),
-  state: Schema.optional(
+  completed: Schema.optionalKey(CompletedValue),
+  latestTurnUsage: Schema.optionalKey(Usage),
+  state: Schema.optionalKey(
     Schema.Struct({
       id: Schema.String,
       version: Schema.String,
@@ -107,8 +113,8 @@ export const Record = Schema.TaggedUnion({
   RunStarted: {
     agent: Schema.String,
     /** Optional only so legacy records decode and can be rejected deliberately. */
-    formatVersion: Schema.optional(Schema.Number),
-    agentRevision: Schema.optional(LogVocabulary.AgentRevision),
+    formatVersion: Schema.optionalKey(Count),
+    agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
     /** Encoded `Prompt.RawInput`, held opaque. */
     prompt: Schema.Unknown,
   },
@@ -117,14 +123,16 @@ export const Record = Schema.TaggedUnion({
    * at the top of this file.
    */
   Text: {
-    step: Schema.Number,
+    step: Count,
     text: Schema.String,
   },
   ToolCall: {
-    step: Schema.Number,
+    step: Count,
     /** Provider-assigned call id, unique within the conversation. */
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
+    /** Whether the provider executed this call outside Vesper's toolkit. */
+    providerExecuted: Schema.optionalKey(Schema.Boolean),
     params: Schema.Unknown,
   },
   /**
@@ -141,6 +149,68 @@ export const Record = Schema.TaggedUnion({
     name: Schema.String,
   },
   /**
+   * A tool handler deliberately yielded to an external actor.
+   *
+   * Unlike a bare `ToolStarted`, this is safe to enter again: the workflow
+   * engine owns the handler's replay and returns recorded activity results
+   * until it reaches the named durable wait. `token` addresses that wait and
+   * `request` is the application-owned value presented to the actor.
+   */
+  ToolSuspended: {
+    id: LogVocabulary.ToolCallId,
+    name: Schema.String,
+    /** Application-defined stable name of the wait point. */
+    wait: Schema.String,
+    /** Effect Workflow durable-deferred token, opaque to the log package. */
+    token: Schema.String,
+    /** Schema-encoded application request shown outside the agent run. */
+    request: Schema.Unknown,
+  },
+  /**
+   * Effect Workflow deliberately re-entered a previously suspended handler.
+   *
+   * This is an audit fact, not a state transition back to indeterminate: until
+   * `ToolOutcome` is durable, another crash remains safe for workflow replay.
+   */
+  ToolResumed: {
+    id: LogVocabulary.ToolCallId,
+    name: Schema.String,
+    /** The durable wait whose completion caused this replay. */
+    token: Schema.String,
+  },
+  /**
+   * The durable wait's externally supplied result was observed by its handler.
+   *
+   * `result` is the schema-encoded Effect `Exit`, so both typed success and
+   * typed failure decisions remain auditable without the log package knowing
+   * the application's schemas. This record does not settle the tool call;
+   * only `ToolOutcome` does that.
+   */
+  ToolWaitCompleted: {
+    id: LogVocabulary.ToolCallId,
+    name: Schema.String,
+    /** Application-defined stable name of the wait point. */
+    wait: Schema.String,
+    /** The exact durable wait that supplied this result. */
+    token: Schema.String,
+    outcome: Schema.Literals(['success', 'failure']),
+    /** Schema-encoded Effect Exit supplied by the external actor. */
+    result: Schema.Unknown,
+  },
+  /**
+   * A branch or fork deliberately chose a new future for a suspended call.
+   *
+   * Recovery invokes the original provider call as a fresh handler execution;
+   * the old token remains an audit fact but can never resume this new path.
+   */
+  ToolWaitRestarted: {
+    id: LogVocabulary.ToolCallId,
+    name: Schema.String,
+    wait: Schema.String,
+    /** Token owned by the abandoned or source workflow execution. */
+    priorToken: Schema.String,
+  },
+  /**
    * How a tool call ended.
    *
    * The fine-grained case the roadmap flags as the one thing
@@ -149,9 +219,11 @@ export const Record = Schema.TaggedUnion({
    * outcome was written down separately.
    */
   ToolOutcome: {
-    step: Schema.Number,
+    step: Count,
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
+    /** Whether the provider, rather than Vesper, supplied this outcome. */
+    providerExecuted: Schema.optionalKey(Schema.Boolean),
     outcome: Schema.Literals(['success', 'failure']),
     /**
      * The tool's result in the form the provider is shown — the toolkit's own
@@ -169,7 +241,7 @@ export const Record = Schema.TaggedUnion({
     result: Schema.Unknown,
   },
   TurnFinished: {
-    step: Schema.Number,
+    step: Count,
     /** Cumulative across the run, not just this turn. */
     usage: Usage,
   },
@@ -191,10 +263,10 @@ export const Record = Schema.TaggedUnion({
    */
   Compacted: {
     /** Optional only so legacy records decode and can be rejected deliberately. */
-    formatVersion: Schema.optional(Schema.Number),
-    agent: Schema.optional(Schema.String),
-    agentRevision: Schema.optional(LogVocabulary.AgentRevision),
-    step: Schema.Number,
+    formatVersion: Schema.optionalKey(Count),
+    agent: Schema.optionalKey(Schema.String),
+    agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    step: Count,
     /** What the summarized history was replaced by. */
     summary: Schema.String,
     /**
@@ -218,8 +290,8 @@ export const Record = Schema.TaggedUnion({
      * question about counts — and load-bearing for nothing: neither is enough
      * to rebuild anything, which is the mistake this record used to make.
      */
-    summarizedMessages: Schema.Number,
-    keptMessages: Schema.Number,
+    summarizedMessages: Count,
+    keptMessages: Count,
   },
 
   /**
@@ -260,9 +332,9 @@ export const Record = Schema.TaggedUnion({
 
   Completed: {
     /** Optional only so records written before terminal outcomes still decode. */
-    outcome: Schema.optional(Schema.Literals(['success', 'cancelled'])),
+    outcome: Schema.optionalKey(Schema.Literals(['success', 'cancelled'])),
     text: Schema.String,
-    steps: Schema.Number,
+    steps: Count,
     usage: Usage,
   },
 
@@ -295,7 +367,7 @@ export const Record = Schema.TaggedUnion({
     parentConversationId: LogVocabulary.ConversationId,
     childConversationId: LogVocabulary.ConversationId,
     /** The child's delegation depth; 1 for a top-level agent's child. */
-    depth: Schema.Number,
+    depth: Count,
   },
 
   /**
@@ -320,12 +392,18 @@ export const Record = Schema.TaggedUnion({
    */
   SignalReceived: {
     ...SignalBody.fields,
-    step: Schema.Number,
+    step: Count,
     at: LogOffset.Offset,
     /** Present only when policy rejected rather than delivered the signal. */
-    disposition: Schema.optional(Schema.Literal('rejected')),
+    disposition: Schema.optionalKey(Schema.Literal('rejected')),
     /** Stable hard-limit name explaining a rejection. */
-    reason: Schema.optional(Schema.String),
+    reason: Schema.optionalKey(
+      Schema.Literals([
+        'signal_bytes',
+        'signals_per_boundary',
+        'steered_bytes',
+      ]),
+    ),
   },
 
   /**
@@ -357,10 +435,10 @@ export const Record = Schema.TaggedUnion({
       'interrupted',
     ]),
     detail: Schema.String,
-    steps: Schema.Number,
+    steps: Count,
     usage: Usage,
     /** Bounded cumulative state used as the sole resume aggregate. */
-    resume: Schema.optional(ResumeState),
+    resume: Schema.optionalKey(ResumeState),
   },
 });
 export type Record = typeof Record.Type;
@@ -382,7 +460,7 @@ export type RecordOf<Tag extends Record['_tag']> = Extract<
 export const Entry = Schema.Struct({
   conversationId: LogVocabulary.ConversationId,
   /** Epoch milliseconds, from the producer's clock. */
-  timestamp: Schema.Number,
+  timestamp: Timestamp,
   record: Record,
 });
 export interface Entry extends Schema.Struct.Type<typeof Entry.fields> {}
@@ -391,7 +469,7 @@ export interface Entry extends Schema.Struct.Type<typeof Entry.fields> {}
 export const Envelope = Schema.Struct({
   offset: LogOffset.Offset,
   conversationId: LogVocabulary.ConversationId,
-  timestamp: Schema.Number,
+  timestamp: Timestamp,
   record: Record,
 });
 export interface Envelope extends Schema.Struct.Type<typeof Envelope.fields> {}

@@ -1,5 +1,6 @@
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Stream } from 'effect';
+import { Deferred, Effect, Fiber, Layer, Stream } from 'effect';
 
 import { LogStoreMemory } from '../src/layer-memory.js';
 import { LogStore } from '../src/log-store.js';
@@ -7,6 +8,10 @@ import { LogOffset } from '../src/offset.js';
 import type { ConversationRecord } from '../src/record.js';
 import { Tail } from '../src/tail.js';
 import { LogVocabulary } from '../src/vocabulary.js';
+
+const memoryLayer = LogStoreMemory.layer.pipe(
+  Layer.provide(NodeServices.layer),
+);
 
 // `Tail` is derived rather than implemented per backend, so these are the
 // only tests it gets — the wake-up half is exercised once per backend by the
@@ -37,6 +42,35 @@ const setup = (path: string, count: number) =>
   });
 
 describe('Tail', () => {
+  it.effect('can subscribe before its stream exists', () =>
+    Effect.gen(function* () {
+      const store = yield* LogStore.Service;
+      const subscribed = yield* Deferred.make<void>();
+      const observingStore = LogStore.Service.of({
+        ...store,
+        changes: (path) =>
+          store
+            .changes(path)
+            .pipe(Stream.tap(() => Deferred.succeed(subscribed, undefined))),
+      });
+      const reader = yield* Tail.from('not-created-yet', LogOffset.START).pipe(
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.provideService(LogStore.Service, observingStore),
+        Effect.forkChild,
+      );
+
+      // The opening wake-up proves Tail is already subscribed and has tried
+      // its first read before the producer exists.
+      yield* Deferred.await(subscribed);
+      yield* setup('not-created-yet', 1);
+
+      expect((yield* Fiber.join(reader))[0]?.record).toMatchObject({
+        text: 'r0',
+      });
+    }).pipe(Effect.provide(memoryLayer)),
+  );
+
   it.effect('replays everything already written before following', () =>
     Effect.gen(function* () {
       yield* setup('short', 3);
@@ -50,7 +84,7 @@ describe('Tail', () => {
           envelope.record._tag === 'Text' ? envelope.record.text : '',
         ),
       ).toEqual(['r0', 'r1', 'r2']);
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(memoryLayer)),
   );
 
   // Catch-up pages: one `read` cannot return more than the backend's limit,
@@ -69,7 +103,7 @@ describe('Tail', () => {
       expect(collected[collected.length - 1]?.record).toMatchObject({
         text: `r${total - 1}`,
       });
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(memoryLayer)),
   );
 
   // Resumption from inside a batch, which is only possible because offsets
@@ -90,6 +124,6 @@ describe('Tail', () => {
           envelope.record._tag === 'Text' ? envelope.record.text : '',
         ),
       ).toEqual(['r2', 'r3']);
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(memoryLayer)),
   );
 });

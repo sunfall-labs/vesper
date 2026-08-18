@@ -58,9 +58,21 @@ export const from = (
         LogStore.LogStoreError
       > = Stream.unwrap(
         Effect.gen(function* () {
-          const page = yield* store.read(path, {
-            after: yield* Ref.get(cursor),
-          });
+          const after = yield* Ref.get(cursor);
+          const page = yield* store.read(path, { after }).pipe(
+            // A tail may be installed before its producer creates the stream.
+            // `changes` deliberately supports that ordering; keep the
+            // subscription alive until a later append wakes this drain.
+            Effect.catchIf(
+              (error) => error.reason === 'not_found',
+              () =>
+                Effect.succeed({
+                  records: [],
+                  cursor: after,
+                  upToDate: true,
+                } satisfies LogStore.Page),
+            ),
+          );
           yield* Ref.set(cursor, page.cursor);
 
           const emitted = Stream.fromIterable(page.records);

@@ -62,6 +62,103 @@ describe('tool recovery state', () => {
     });
   });
 
+  it('keeps an intentionally resumed wait safely suspended until outcome', () => {
+    const snapshot = Recovery.fold(
+      orphan([
+        started,
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: toolCallId,
+          name: 'lookup',
+          params: { id: '42' },
+        },
+        { _tag: 'ToolStarted', id: toolCallId, name: 'lookup' },
+        {
+          _tag: 'ToolSuspended',
+          id: toolCallId,
+          name: 'lookup',
+          wait: 'review',
+          token: 'workflow-token',
+          request: { id: '42' },
+        },
+        {
+          _tag: 'ToolResumed',
+          id: toolCallId,
+          name: 'lookup',
+          token: 'workflow-token',
+        },
+        {
+          _tag: 'ToolWaitCompleted',
+          id: toolCallId,
+          name: 'lookup',
+          wait: 'review',
+          token: 'workflow-token',
+          outcome: 'success',
+          result: { _tag: 'Success', value: { approved: true } },
+        },
+      ]),
+    );
+
+    expect(snapshot.indeterminate).toEqual([]);
+    expect(snapshot.suspended).toEqual([
+      {
+        step: 1,
+        name: 'lookup',
+        toolCallId,
+        params: { id: '42' },
+        wait: 'review',
+        token: 'workflow-token',
+        request: { id: '42' },
+      },
+    ]);
+    expect(snapshot.recoveries.get('lookup\u001fcall-1')).toEqual({
+      _tag: 'Suspended',
+      wait: 'review',
+      token: 'workflow-token',
+      request: { id: '42' },
+    });
+    expect(snapshot.completedWaitTokens).toEqual(new Set(['workflow-token']));
+  });
+
+  it('turns an explicitly restarted wait into an automatic fresh dispatch', () => {
+    const snapshot = Recovery.fold(
+      orphan([
+        started,
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: toolCallId,
+          name: 'lookup',
+          params: { id: '42' },
+        },
+        { _tag: 'ToolStarted', id: toolCallId, name: 'lookup' },
+        {
+          _tag: 'ToolSuspended',
+          id: toolCallId,
+          name: 'lookup',
+          wait: 'review',
+          token: 'old-workflow-token',
+          request: { id: '42' },
+        },
+        {
+          _tag: 'ToolWaitRestarted',
+          id: toolCallId,
+          name: 'lookup',
+          wait: 'review',
+          priorToken: 'old-workflow-token',
+        },
+      ]),
+    );
+
+    expect(snapshot.recoveries.get('lookup\u001fcall-1')).toEqual({
+      _tag: 'Restarting',
+    });
+    expect(snapshot.pending).toHaveLength(1);
+    expect(snapshot.indeterminate).toEqual([]);
+    expect(snapshot.suspended).toEqual([]);
+  });
+
   it('clears a settled run and ignores an abandoned branch', () => {
     const settled = Recovery.fold(
       orphan([
@@ -114,6 +211,33 @@ describe('tool recovery state', () => {
     expect(snapshot.indeterminate).toEqual([]);
   });
 
+  it('rejects a suspension without its durable handler start as corruption', () => {
+    const snapshot = Recovery.fold(
+      orphan([
+        started,
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: toolCallId,
+          name: 'lookup',
+          params: { id: '42' },
+        },
+        {
+          _tag: 'ToolSuspended',
+          id: toolCallId,
+          name: 'lookup',
+          wait: 'review',
+          token: 'workflow-token',
+          request: { id: '42' },
+        },
+      ]),
+    );
+
+    expect(snapshot.corruption).toContain(
+      'ToolSuspended has no matching ToolStarted',
+    );
+  });
+
   it.effect(
     'tracks live records and releases waiters after durable outcomes',
     () =>
@@ -139,6 +263,19 @@ describe('tool recovery state', () => {
           _tag: 'Indeterminate',
         });
         expect(yield* tracker.hasPendingToolCalls).toBe(true);
+        expect(yield* tracker.pendingToolState).toBe('indeterminate');
+
+        yield* tracker.track([
+          {
+            _tag: 'ToolSuspended',
+            id: toolCallId,
+            name: 'lookup',
+            wait: 'review',
+            token: 'workflow-token',
+            request: { id: '42' },
+          },
+        ]);
+        expect(yield* tracker.pendingToolState).toBe('suspended');
 
         yield* tracker.track([
           { _tag: 'ToolStarted', id: secondToolCallId, name: 'lookup' },
@@ -180,6 +317,7 @@ describe('tool recovery state', () => {
           result: { status: 'ok' },
         });
         expect(yield* tracker.hasPendingToolCalls).toBe(false);
+        expect(yield* tracker.pendingToolState).toBe('none');
       }),
   );
 });

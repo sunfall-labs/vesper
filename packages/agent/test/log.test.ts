@@ -3,8 +3,18 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
+import {
+  Crypto,
+  Deferred,
+  Effect,
+  Fiber,
+  Layer,
+  Ref,
+  Schema,
+  Stream,
+} from 'effect';
 import {
   LanguageModel,
   type Response,
@@ -15,6 +25,11 @@ import {
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // What these have to prove, beyond "records appear":
 //
@@ -101,17 +116,63 @@ const agent = Agent.make({
   lookup: ({ id }) => Effect.succeed({ status: `shipped:${id}` }),
 });
 
+const transformedLookup = Tool.make('transformed_lookup', {
+  description: 'look an order up at a specific time',
+  parameters: Schema.Struct({ at: Schema.DateFromString }),
+  success: Schema.Struct({ status: Schema.String }),
+});
+
+const transformedAgent = Agent.make({
+  name: 'transformed-params',
+  revision: '1',
+  instructions: 'be terse',
+  toolkit: Toolkit.make(transformedLookup),
+}).withHandlers({
+  transformed_lookup: ({ at }) =>
+    Effect.succeed({ status: `at:${at.toISOString()}` }),
+});
+
 const CONVERSATION = LogVocabulary.ConversationId.make('conversation-1');
 const PATH = AgentLog.pathFor(CONVERSATION);
 
+const TRANSFORMED_CONVERSATION = LogVocabulary.ConversationId.make(
+  'transformed-params-conversation',
+);
+const transformedCallingTurn: Response.StreamPartEncoded[] = [
+  {
+    type: 'tool-call',
+    id: 'transformed-call-1',
+    name: 'transformed_lookup',
+    params: { at: '2026-01-02T03:04:05.000Z' },
+  },
+  finish('tool-calls'),
+];
+
+const runTransformed = <A, E>(
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
+) =>
+  effect.pipe(
+    Effect.orDie,
+    Effect.provide(scripted([transformedCallingTurn, answeringTurn])),
+    Effect.provide(testLogLayer),
+  );
+
 /** Defects fail the test with their real cause rather than a cast. */
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(scripted([callingTurn, answeringTurn])),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
   );
 
 const readAll = Effect.fn('test.readAll')(function* (path = PATH) {
@@ -227,6 +288,28 @@ describe('recording a run', () => {
         name: 'lookup',
         outcome: 'success',
         result: { status: 'shipped:42' },
+      });
+    }),
+  );
+
+  it.effect('persists transformed tool parameters in encoded form', () =>
+    Effect.gen(function* () {
+      const written = yield* runTransformed(
+        Effect.gen(function* () {
+          yield* Conversation.make(transformedAgent, TRANSFORMED_CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* readAll(AgentLog.pathFor(TRANSFORMED_CONVERSATION));
+        }),
+      );
+
+      const toolCall = written.find(
+        (envelope) => envelope.record._tag === 'ToolCall',
+      )?.record;
+      expect(toolCall).toMatchObject({
+        _tag: 'ToolCall',
+        name: 'transformed_lookup',
+        params: { at: '2026-01-02T03:04:05.000Z' },
       });
     }),
   );

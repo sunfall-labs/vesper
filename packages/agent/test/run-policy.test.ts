@@ -1,3 +1,4 @@
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
 import {
@@ -33,8 +34,9 @@ const model = (calls: Ref.Ref<number>) =>
     }),
   );
 
-const failedWith = <A, E>(effect: Effect.Effect<A, E>) =>
+const failedWith = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   Effect.exit(effect).pipe(
+    Effect.provide(NodeServices.layer),
     Effect.map((exit) => {
       expect(exit._tag).toBe('Failure');
       return String(exit);
@@ -163,11 +165,10 @@ describe('hard run policy', () => {
       const fiberA = yield* Effect.forkChild(child);
       yield* Deferred.await(firstEntered);
       const fiberB = yield* Effect.forkChild(child);
-      yield* Effect.sleep(10);
-      expect(yield* Ref.get(peak)).toBe(1);
       yield* Deferred.succeed(release, undefined);
       yield* Fiber.join(fiberA);
       yield* Fiber.join(fiberB);
+      expect(yield* Ref.get(peak)).toBe(1);
 
       const rendered = yield* failedWith(runtime.delegation(Effect.void));
       expect(rendered).toContain('delegated_tasks');
@@ -198,44 +199,6 @@ describe('hard run policy', () => {
         expect(rendered).toContain('deadline');
       }),
     2_000,
-  );
-
-  it('clamps unbounded requested tool concurrency to application policy', () => {
-    expect(RunPolicyRuntime.clampConcurrency('unbounded', 3)).toBe(3);
-    expect(RunPolicyRuntime.clampConcurrency(12, 3)).toBe(3);
-    expect(RunPolicyRuntime.clampConcurrency(2, 3)).toBe(2);
-  });
-
-  it.live(
-    'shares tool concurrency across every loop using the root runtime',
-    () =>
-      Effect.gen(function* () {
-        const runtime = yield* RunPolicyRuntime.create(
-          RunPolicy.make({ maxToolConcurrency: 1 }),
-        );
-        const entered = yield* Deferred.make<void>();
-        const release = yield* Deferred.make<void>();
-        const active = yield* Ref.make(0);
-        const peak = yield* Ref.make(0);
-        const tool = runtime.tool(
-          Effect.gen(function* () {
-            const now = yield* Ref.updateAndGet(active, (value) => value + 1);
-            yield* Ref.update(peak, (value) => Math.max(value, now));
-            yield* Deferred.succeed(entered, undefined);
-            yield* Deferred.await(release);
-            yield* Ref.update(active, (value) => value - 1);
-          }),
-        );
-
-        const first = yield* Effect.forkChild(tool);
-        yield* Deferred.await(entered);
-        const second = yield* Effect.forkChild(tool);
-        yield* Effect.sleep(10);
-        expect(yield* Ref.get(peak)).toBe(1);
-        yield* Deferred.succeed(release, undefined);
-        yield* Fiber.join(first);
-        yield* Fiber.join(second);
-      }),
   );
 
   it.live(
@@ -325,7 +288,12 @@ describe('hard run policy', () => {
 
         yield* Effect.gen(function* () {
           const running = yield* Effect.forkChild(
-            parent.run('go').pipe(Effect.provide(provider)),
+            parent
+              .run('go')
+              .pipe(
+                Effect.provide(provider),
+                Effect.provide(NodeServices.layer),
+              ),
           );
           yield* Deferred.await(entered);
           yield* Effect.sleep(20);
@@ -396,9 +364,18 @@ describe('hard run policy', () => {
         const cumulative = yield* runtime.signal('steer', 'four', 0);
         const oversized = yield* runtime.signal('steer', 'large', 0);
         const backlog = yield* runtime.signal('steer', 'x', 1);
-        expect(cumulative.exhaustion?.limit).toBe('steered_bytes');
-        expect(oversized.exhaustion?.limit).toBe('signal_bytes');
-        expect(backlog.exhaustion?.limit).toBe('signals_per_boundary');
+        expect(cumulative).toMatchObject({
+          accepted: false,
+          exhaustion: { limit: 'steered_bytes' },
+        });
+        expect(oversized).toMatchObject({
+          accepted: false,
+          exhaustion: { limit: 'signal_bytes' },
+        });
+        expect(backlog).toMatchObject({
+          accepted: false,
+          exhaustion: { limit: 'signals_per_boundary' },
+        });
       }),
   );
 });

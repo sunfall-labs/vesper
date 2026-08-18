@@ -17,8 +17,8 @@ const conversation = Conversation.make(agent, conversationId);
 | --------------------------------------- | ---------------------------------------------------------- |
 | `agent.recordingTo(id).run(input)`      | `Conversation.make(agent, id).run(input)`                  |
 | `agent.recordingTo(id).stream(input)`   | `Conversation.make(agent, id).stream(input)`               |
-| `agent.recordingTo(id, policy)`         | `Conversation.recording(agent, id, policy)`                |
-| `agent.resume(id, input)`               | `Conversation.make(agent, id).resume(input)`               |
+| `agent.recordingTo(id, policy)`         | `Conversation.withRecordingPolicy(agent, id, policy)`      |
+| `agent.resume(id, input)`               | `Conversation.make(agent, id).run(input)`                  |
 | `agent.branchFrom(id, at, input)`       | `Conversation.make(agent, id).branchFrom(at, input)`       |
 | `agent.forkFrom(id, at, target, input)` | `Conversation.make(agent, id).forkFrom(at, target, input)` |
 | `Agent.streamFrom(id, after)`           | `Conversation.make(agent, id).follow(after)`               |
@@ -34,13 +34,17 @@ Bind once when several operations share an identity:
 const conversation = Conversation.make(agent, conversationId);
 
 yield * conversation.run('Start');
-yield * conversation.resume('Continue');
+yield * conversation.run('Continue'); // automatically continues the history
 const records = yield * conversation.records().pipe(Stream.runCollect);
 ```
 
-Recording policy is also bound once and applies to initial runs, resumes,
-branches, and forks:
+Recording policy is also bound once and applies to every continuation, branch,
+and fork:
 
 ```ts
-const conversation = Conversation.recording(agent, conversationId, policy);
+const conversation = Conversation.withRecordingPolicy(
+  agent,
+  conversationId,
+  policy,
+);
 ```

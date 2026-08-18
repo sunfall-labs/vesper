@@ -71,15 +71,11 @@ export interface Ref extends Schema.Struct.Type<typeof Ref.fields> {}
  * caller has a recovery worth writing. Keeping it out of the error channel is
  * what lets `put` fail only for reasons a caller can act on.
  */
-export const digestOf = Effect.fn('AiAttachments.AttachmentRef.digestOf')(
-  function* (bytes: Uint8Array) {
-    const crypto = yield* Crypto.Crypto;
-    const hash = yield* crypto
-      .digest(DIGEST_ALGORITHM, bytes)
-      .pipe(Effect.orDie);
-    return Digest.make(`${DIGEST_PREFIX}:${Encoding.encodeHex(hash)}`);
-  },
-);
+export const digestOf = Effect.fnUntraced(function* (bytes: Uint8Array) {
+  const crypto = yield* Crypto.Crypto;
+  const hash = yield* crypto.digest(DIGEST_ALGORITHM, bytes).pipe(Effect.orDie);
+  return Digest.make(`${DIGEST_PREFIX}:${Encoding.encodeHex(hash)}`);
+});
 
 /**
  * Build a reference by hashing the bytes it will point at.
@@ -87,15 +83,16 @@ export const digestOf = Effect.fn('AiAttachments.AttachmentRef.digestOf')(
  * This is the only honest way to make one. A reference assembled from a digest
  * somebody else computed is a claim; this is a measurement.
  */
-export const fromBytes = Effect.fn('AiAttachments.AttachmentRef.fromBytes')(
-  function* (bytes: Uint8Array, options: { readonly mediaType: string }) {
-    const digest = yield* digestOf(bytes);
-    return Ref.make({
-      digest,
-      mediaType: options.mediaType,
-      byteLength: bytes.byteLength,
-    });
-  },
-);
+export const fromBytes = Effect.fnUntraced(function* (
+  bytes: Uint8Array,
+  options: { readonly mediaType: string },
+) {
+  const digest = yield* digestOf(bytes);
+  return Ref.make({
+    digest,
+    mediaType: options.mediaType,
+    byteLength: bytes.byteLength,
+  });
+});
 
 export * as AttachmentRef from './ref.js';

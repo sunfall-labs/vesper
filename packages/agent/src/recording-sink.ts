@@ -4,7 +4,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Cause, Effect, Exit, Option, Stream } from 'effect';
 import type { Response, Tool } from 'effect/unstable/ai';
 
-import type { AgentEvents } from './event.js';
+import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
 import type { Session } from './log.js';
 import type { Stop } from './stop.js';
@@ -82,17 +82,37 @@ const settle = (
       usage: pending.usage,
     };
 
-    const write = Effect.flatMap(session.hasPendingToolCalls, (pending) =>
-      pending
-        ? Effect.logError(
-            `Conversation ${session.conversationId} has indeterminate tool execution; leaving the run orphaned`,
-          )
-        : session.append([settlement], session.settlementTimeoutMillis),
-    ).pipe(
+    const write = Effect.flatMap(session.pendingToolState, (state) => {
+      switch (state) {
+        case 'none':
+          return session.append([settlement], session.settlementTimeoutMillis);
+        case 'suspended':
+          // The absent RunSettled record is deliberate: Effect Workflow will
+          // re-enter this handler after its external result arrives.
+          return Effect.void;
+        case 'indeterminate':
+          return Effect.logError(
+            'Agent run has indeterminate tool execution; leaving the run orphaned',
+          );
+        default: {
+          const exhaustive: never = state;
+          return exhaustive;
+        }
+      }
+    }).pipe(
+      Effect.annotateLogs({
+        'vesper.component': 'agent',
+        'vesper.event': 'run_settlement_indeterminate_tool',
+      }),
       Effect.catchCause((cause) =>
         Effect.logError(
-          `Conversation ${session.conversationId} could not record how its run settled`,
+          'Agent run could not record how its run settled',
           cause,
+        ).pipe(
+          Effect.annotateLogs({
+            'vesper.component': 'agent',
+            'vesper.event': 'run_settlement_append_failure',
+          }),
         ),
       ),
     );
@@ -104,7 +124,12 @@ const settle = (
         );
         if (Option.isNone(completed)) {
           yield* Effect.logError(
-            `Conversation ${session.conversationId} settlement append timed out after ${session.settlementTimeoutMillis}ms; leaving the run orphaned`,
+            `Agent settlement append timed out after ${session.settlementTimeoutMillis}ms; leaving the run orphaned`,
+          ).pipe(
+            Effect.annotateLogs({
+              'vesper.component': 'agent',
+              'vesper.event': 'run_settlement_timeout',
+            }),
           );
         }
       }),
@@ -168,17 +193,21 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
   pending: Pending,
   event: AgentEvents.Event<Tools>,
 ): ReadonlyArray<ConversationRecord.Record> => {
-  switch (event._tag) {
-    case 'TurnStarted':
-      return [];
-    case 'TurnFinished':
+  if (event._tag === 'Part') {
+    return partRecords(pending, event.step, event.encodedPart);
+  }
+
+  return AgentEvents.Lifecycle.match(event, {
+    TurnStarted: () => [],
+    TurnFinished: (event) => {
       pending.steps = event.step;
       pending.usage = event.usage;
       return [
         ...flush(pending),
         { _tag: 'TurnFinished', step: event.step, usage: event.usage },
       ];
-    case 'Signalled':
+    },
+    Signalled: (event) => {
       if (event.kind === 'cancel') pending.cancelled = true;
       return [
         ...flush(pending),
@@ -191,23 +220,22 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
           at: signalOffset(event.at),
         },
       ];
-    case 'SignalRejected':
-      return [
-        ...flush(pending),
-        {
-          _tag: 'SignalReceived',
-          kind: event.kind,
-          text: event.text,
-          source: event.source,
-          step: event.step,
-          at: signalOffset(event.at),
-          disposition: 'rejected',
-          reason: event.reason,
-        },
-      ];
-    case 'SignalBacklog':
-      return [];
-    case 'Completed':
+    },
+    SignalRejected: (event) => [
+      ...flush(pending),
+      {
+        _tag: 'SignalReceived',
+        kind: event.kind,
+        text: event.text,
+        source: event.source,
+        step: event.step,
+        at: signalOffset(event.at),
+        disposition: 'rejected',
+        reason: event.reason,
+      },
+    ],
+    SignalBacklog: () => [],
+    Completed: (event) => {
       pending.completed = true;
       pending.steps = event.steps;
       pending.usage = event.usage;
@@ -221,19 +249,16 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
           usage: event.usage,
         },
       ];
-    case 'Compacted':
-      return [];
-    case 'Part':
-      return partRecords(pending, event.step, event.part);
-  }
+    },
+    Compacted: () => [],
+  });
 };
 
-const partRecords = <Tools extends Record<string, Tool.Any>>(
+const partRecords = (
   pending: Pending,
   step: number,
-  part: Response.StreamPart<Tools>,
+  encoded: Response.StreamPartEncoded,
 ): ReadonlyArray<ConversationRecord.Record> => {
-  const encoded = part as Response.StreamPartEncoded;
   switch (encoded.type) {
     case 'text-delta':
       pending.step = step;
@@ -247,6 +272,9 @@ const partRecords = <Tools extends Record<string, Tool.Any>>(
           step,
           id: LogVocabulary.ToolCallId.make(encoded.id),
           name: encoded.name,
+          ...(encoded.providerExecuted === true
+            ? { providerExecuted: true }
+            : {}),
           params: encoded.params,
         },
       ];
@@ -258,12 +286,31 @@ const partRecords = <Tools extends Record<string, Tool.Any>>(
           step,
           id: LogVocabulary.ToolCallId.make(encoded.id),
           name: encoded.name,
+          ...(encoded.providerExecuted === true
+            ? { providerExecuted: true }
+            : {}),
           outcome: encoded.isFailure ? 'failure' : 'success',
-          result: (part as Response.ToolResultPart<string, unknown, unknown>)
-            .encodedResult,
+          result: encoded.result,
         },
       ];
-    default:
+    case 'text-start':
+    case 'text-end':
+    case 'reasoning-start':
+    case 'reasoning-delta':
+    case 'reasoning-end':
+    case 'tool-params-start':
+    case 'tool-params-delta':
+    case 'tool-params-end':
+    case 'tool-approval-request':
+    case 'file':
+    case 'source':
+    case 'response-metadata':
+    case 'finish':
+    case 'error':
       return [];
+    default: {
+      const exhaustive: never = encoded;
+      return exhaustive;
+    }
   }
 };

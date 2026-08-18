@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { Crypto, Effect, Encoding, Schema } from 'effect';
 
 import { LogOffset } from './offset.js';
 import { Entry, Envelope } from './record.js';
@@ -18,12 +18,11 @@ export const encodeEnvelope = Schema.encodeEffect(Envelope);
 export const encodeEntry = Schema.encodeEffect(Entry);
 
 /** A record that cannot be turned into its persisted form. */
-export class EncodeError extends Schema.TaggedError<EncodeError>()(
-  '@sunfall/vesper-log/RecordEncodeError',
-  {
-    detail: Schema.String,
-  },
-) {}
+export class EncodeError extends Schema.TaggedError<EncodeError>(
+  '@sunfall/vesper-log/EncodeError',
+)('EncodeError', {
+  detail: Schema.String,
+}) {}
 
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -127,19 +126,22 @@ export const prepareUnknown = (
           }),
   });
 
-const sha256 = (material: string): Effect.Effect<string, EncodeError> =>
-  Effect.tryPromise({
-    try: async () => {
-      const bytes = new TextEncoder().encode(material);
-      const digest = await crypto.subtle.digest('SHA-256', bytes);
-      return Array.from(new Uint8Array(digest), (byte) =>
-        byte.toString(16).padStart(2, '0'),
-      ).join('');
-    },
-    catch: (cause) =>
-      new EncodeError({
-        detail: `cannot fingerprint records: ${String(cause)}`,
-      }),
+const sha256 = (
+  material: string,
+): Effect.Effect<string, EncodeError, Crypto.Crypto> =>
+  Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
+    const digest = yield* crypto
+      .digest('SHA-256', new TextEncoder().encode(material))
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new EncodeError({
+              detail: `cannot fingerprint records: ${String(cause)}`,
+            }),
+        ),
+      );
+    return Encoding.encodeHex(digest);
   });
 
 export interface PreparedBatch {
@@ -154,7 +156,7 @@ export interface PreparedBatch {
 /** Prepare the one representation every backend stores and fingerprints. */
 export const prepare = (
   entries: ReadonlyArray<Entry>,
-): Effect.Effect<PreparedBatch, EncodeError> =>
+): Effect.Effect<PreparedBatch, EncodeError, Crypto.Crypto> =>
   Effect.gen(function* () {
     const encoded = yield* Effect.forEach(entries, (entry) =>
       encodeEntry(entry),

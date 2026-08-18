@@ -3,8 +3,18 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Exit, Layer, Ref, Schema, Stream } from 'effect';
+import {
+  Crypto,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Ref,
+  Schema,
+  Stream,
+} from 'effect';
 import {
   LanguageModel,
   Prompt,
@@ -18,6 +28,11 @@ import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
 import * as AgentSignals from '../src/internal/signal-store.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // Forking: a second conversation, seeded from a prefix of a first.
 //
@@ -130,13 +145,17 @@ const ANCESTOR = LogVocabulary.ConversationId.make('ancestor-conversation');
 const ancestorConversation = Conversation.make(agent, ANCESTOR);
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   models: Layer.Layer<LanguageModel.LanguageModel>,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(models),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
@@ -166,48 +185,51 @@ const readSignals = Effect.fn('test.readSignals')(function* (
 const failsOnceAfter = (
   operation: 'create' | 'acquire' | 'append',
   conversationId: string,
-): Layer.Layer<LogStore.Service> =>
-  Layer.effect(
-    LogStore.Service,
-    Effect.gen(function* () {
-      const store = yield* LogStore.Service;
-      const failed = yield* Ref.make(false);
-      const path = AgentLog.pathFor(
-        LogVocabulary.ConversationId.make(conversationId),
-      );
-      const inject = <A>(effect: Effect.Effect<A, LogStore.LogStoreError>) =>
-        Effect.gen(function* () {
-          const value = yield* effect;
-          if (!(yield* Ref.getAndSet(failed, true))) {
-            return yield* Effect.fail(
-              new LogStore.LogStoreError({
-                path,
-                operation,
-                reason: 'storage',
-                detail: `crashed after ${operation}`,
-              }),
-            );
-          }
-          return value;
-        });
+) =>
+  Layer.mergeAll(
+    Layer.effect(
+      LogStore.Service,
+      Effect.gen(function* () {
+        const store = yield* LogStore.Service;
+        const failed = yield* Ref.make(false);
+        const path = AgentLog.pathFor(
+          LogVocabulary.ConversationId.make(conversationId),
+        );
+        const inject = <A>(effect: Effect.Effect<A, LogStore.LogStoreError>) =>
+          Effect.gen(function* () {
+            const value = yield* effect;
+            if (!(yield* Ref.getAndSet(failed, true))) {
+              return yield* Effect.fail(
+                new LogStore.LogStoreError({
+                  path,
+                  operation,
+                  reason: 'storage',
+                  detail: `crashed after ${operation}`,
+                }),
+              );
+            }
+            return value;
+          });
 
-      return LogStore.Service.of({
-        ...store,
-        create: (requested, identity) =>
-          operation === 'create' && requested === path
-            ? inject(store.create(requested, identity))
-            : store.create(requested, identity),
-        acquire: (requested, producerId, expected) =>
-          operation === 'acquire' && requested === path
-            ? inject(store.acquire(requested, producerId, expected))
-            : store.acquire(requested, producerId, expected),
-        append: (input) =>
-          operation === 'append' && input.path === path
-            ? inject(store.append(input))
-            : store.append(input),
-      });
-    }),
-  ).pipe(Layer.provide(LogStoreMemory.layer));
+        return LogStore.Service.of({
+          ...store,
+          create: (requested, identity) =>
+            operation === 'create' && requested === path
+              ? inject(store.create(requested, identity))
+              : store.create(requested, identity),
+          acquire: (requested, producerId, expected) =>
+            operation === 'acquire' && requested === path
+              ? inject(store.acquire(requested, producerId, expected))
+              : store.acquire(requested, producerId, expected),
+          append: (input) =>
+            operation === 'append' && input.path === path
+              ? inject(store.append(input))
+              : store.append(input),
+        });
+      }),
+    ).pipe(Layer.provide(testLogLayer)),
+    NodeServices.layer,
+  );
 
 const tags = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   records.map((envelope) => envelope.record._tag);
@@ -245,6 +267,88 @@ const settled: ConversationRecord.Record = {
 
 /** Text records only, as plain strings — what the model was shown, in order. */
 const textsIn = (prompt: Prompt.Prompt): string => JSON.stringify(prompt);
+
+describe('suspended workflow boundaries', () => {
+  it.effect('rejects both branch and fork through an owned durable wait', () =>
+    Effect.gen(function* () {
+      const sourceId = LogVocabulary.ConversationId.make('suspended-source');
+      const callId = LogVocabulary.ToolCallId.make('approval-call');
+      const compatibility = {
+        agent: 'test',
+        revision: LogVocabulary.AgentRevision.make('1'),
+      };
+      const source = yield* AgentLog.open(sourceId, { compatibility });
+      yield* source.append([
+        started('approve this'),
+        {
+          _tag: 'ToolCall',
+          step: 1,
+          id: callId,
+          name: 'approve',
+          params: {},
+        },
+        { _tag: 'ToolStarted', id: callId, name: 'approve' },
+        {
+          _tag: 'ToolSuspended',
+          id: callId,
+          name: 'approve',
+          wait: 'human-approval',
+          token: 'owned-workflow-token',
+          request: { action: 'approve this' },
+        },
+      ]);
+      const sourceRecords = yield* source.recorded;
+      const suspendedAt = sourceRecords.at(-1)?.offset;
+      expect(suspendedAt).toBeDefined();
+      if (suspendedAt === undefined) return;
+
+      const branched = yield* Effect.exit(
+        AgentLog.open(sourceId, {
+          compatibility,
+          branchFrom: suspendedAt,
+        }),
+      );
+      const forked = yield* Effect.exit(
+        AgentLog.fork(
+          sourceId,
+          suspendedAt,
+          LogVocabulary.ConversationId.make('suspended-fork'),
+          compatibility,
+        ),
+      );
+      const errorTag = (exit: typeof branched | typeof forked) => {
+        if (Exit.isSuccess(exit)) return undefined;
+        const error = Exit.findErrorOption(exit);
+        return Option.isSome(error) ? error.value._tag : undefined;
+      };
+
+      expect(errorTag(branched)).toBe('SuspendedConversationError');
+      expect(errorTag(forked)).toBe('SuspendedConversationError');
+
+      const restartedBranch = yield* AgentLog.open(sourceId, {
+        compatibility,
+        branchFrom: suspendedAt,
+        pendingWait: 'restart',
+      });
+      const branchRecovery = restartedBranch.recovery('approve', callId);
+      expect(
+        Option.isSome(branchRecovery) ? branchRecovery.value._tag : undefined,
+      ).toBe('Restarting');
+
+      const restartedFork = yield* AgentLog.fork(
+        sourceId,
+        suspendedAt,
+        LogVocabulary.ConversationId.make('restarted-suspended-fork'),
+        compatibility,
+        'restart',
+      );
+      const forkRecovery = restartedFork.recovery('approve', callId);
+      expect(
+        Option.isSome(forkRecovery) ? forkRecovery.value._tag : undefined,
+      ).toBe('Restarting');
+    }).pipe(Effect.provide(testLogLayer), Effect.scoped),
+  );
+});
 
 describe('two forks of one conversation', () => {
   // The capability. `branchFrom` cannot do this at all: both variants would be
@@ -368,7 +472,7 @@ describe('a fork and the conversation it came from', () => {
           .forkFrom(tip, 'usage-fork', 'fork once')
           .pipe(Effect.orDie);
         const second = yield* Conversation.make(agent, 'usage-fork')
-          .resume('fork twice')
+          .run('fork twice')
           .pipe(Effect.orDie);
         expect(first.usage).toEqual({ input: 10, output: 4 });
         expect(second.usage).toEqual({ input: 20, output: 8 });
@@ -446,12 +550,12 @@ describe('a fork and the conversation it came from', () => {
 
         // The ancestor carries on independently, after the fork was taken.
         yield* ancestorConversation
-          .resume('the ancestor carries on')
+          .run('the ancestor carries on')
           .pipe(Effect.orDie);
 
         // And the fork carries on too. Its prompt is the evidence.
         yield* Conversation.make(agent, 'a-fork')
-          .resume('and the fork too')
+          .run('and the fork too')
           .pipe(Effect.orDie);
 
         const forkLog = yield* readPath('a-fork');

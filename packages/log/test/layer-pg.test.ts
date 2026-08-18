@@ -1,12 +1,89 @@
 import { PgClient } from '@effect/sql-pg';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, Fiber, Stream } from 'effect';
 
 import { LogStorePg } from '../src/layer-pg.js';
 import { LogOffset } from '../src/offset.js';
+import { correctedListen } from '../src/internal/pg-listen.js';
 import { LogVocabulary } from '../src/vocabulary.js';
 
+type ListenerClient = ReturnType<
+  NonNullable<Parameters<typeof correctedListen>[1]>
+>;
+
+class FakeListenerClient {
+  endCalls = 0;
+
+  constructor(readonly connectImpl: () => Promise<void>) {}
+
+  on(_event: string, _listener: (...args: never[]) => void): this {
+    return this;
+  }
+
+  off(_event: string, _listener: (...args: never[]) => void): this {
+    return this;
+  }
+
+  connect(): Promise<void> {
+    return this.connectImpl();
+  }
+
+  query(_text: string): Promise<void> {
+    return Promise.resolve();
+  }
+
+  end(): Promise<void> {
+    this.endCalls += 1;
+    return Promise.resolve();
+  }
+}
+
+const asListenerClient = (client: FakeListenerClient): ListenerClient =>
+  client as unknown as ListenerClient;
+
 describe('LogStore Postgres SQL', () => {
+  it.effect('closes a listener client when connect fails', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const client = new FakeListenerClient(() =>
+          Promise.reject(new Error('connect failed')),
+        );
+        const outcome = yield* correctedListen({}, () =>
+          asListenerClient(client),
+        )('failed-connect').pipe(Stream.runDrain, Effect.result);
+
+        expect(outcome._tag).toBe('Failure');
+        expect(client.endCalls).toBe(1);
+      }),
+    ),
+  );
+
+  it.effect('closes a listener client when connect is interrupted', () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let resolveStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          resolveStarted = resolve;
+        });
+        const client = new FakeListenerClient(
+          () =>
+            new Promise<void>(() => {
+              resolveStarted();
+            }),
+        );
+        const fiber = yield* correctedListen({}, () =>
+          asListenerClient(client),
+        )('interrupted-connect').pipe(Stream.runDrain, Effect.forkChild);
+
+        yield* Effect.promise(() => started);
+        yield* Fiber.interrupt(fiber);
+
+        expect(client.endCalls).toBe(1);
+      }),
+    ),
+  );
+
   it.effect(
     'uses one fixed-parameter recordset statement for the whole batch',
     () => {
@@ -48,7 +125,8 @@ describe('LogStore Postgres SQL', () => {
       }));
 
       return Effect.gen(function* () {
-        yield* LogStorePg.make(client).append({
+        const store = yield* LogStorePg.make(client);
+        yield* store.append({
           path: 'large',
           producerId: LogVocabulary.ProducerId.make('producer'),
           epoch: LogVocabulary.Epoch.make(1),
@@ -64,12 +142,13 @@ describe('LogStore Postgres SQL', () => {
         expect(write.text).toContain('advanced AS');
         expect(write.text).toContain('pg_notify($11, $12)');
         expect(write.params).toHaveLength(12);
+        expect(write.params[11]).toBe('');
         const encoded = JSON.parse(String(write.params[5])) as Array<{
           record: { params: Record<string, number> };
         }>;
         expect(encoded).toHaveLength(1_000);
         expect(Object.keys(encoded[0]!.record.params)).toEqual(['a', 'z']);
-      });
+      }).pipe(Effect.provide(NodeServices.layer));
     },
   );
 
@@ -95,7 +174,8 @@ describe('LogStore Postgres SQL', () => {
     }> = [];
 
     return Effect.gen(function* () {
-      const claim = yield* LogStorePg.make(clientFor(statements)).acquire(
+      const store = yield* LogStorePg.make(clientFor(statements));
+      const claim = yield* store.acquire(
         'stream',
         LogVocabulary.ProducerId.make('producer'),
         {
@@ -115,7 +195,7 @@ describe('LogStore Postgres SQL', () => {
         3,
         '0000000000000000_0000000000000007',
       ]);
-    });
+    }).pipe(Effect.provide(NodeServices.layer));
   });
 
   it.effect('leaves expected predicates disabled for legacy acquire', () => {
@@ -125,13 +205,91 @@ describe('LogStore Postgres SQL', () => {
     }> = [];
 
     return Effect.gen(function* () {
-      yield* LogStorePg.make(clientFor(statements)).acquire(
-        'stream',
-        LogVocabulary.ProducerId.make('producer'),
-      );
+      const store = yield* LogStorePg.make(clientFor(statements));
+      yield* store.acquire('stream', LogVocabulary.ProducerId.make('producer'));
 
       expect(statements).toHaveLength(1);
       expect(statements[0]!.params).toEqual(['stream', 'producer', null, null]);
-    });
+    }).pipe(Effect.provide(NodeServices.layer));
   });
+
+  const metaClientFor = (row: Readonly<Record<string, unknown>>) =>
+    ({
+      unsafe: () => Effect.succeed([row]),
+      withTransaction: () => Effect.die('not used'),
+      listen: () => Effect.die('not used'),
+    }) as unknown as PgClient.PgClient;
+
+  const validStreamRow = {
+    identity: 'identity',
+    epoch: 1,
+    producer_id: 'producer',
+    next_sequence: '0',
+    next_producer_sequence: '0',
+    last_fingerprint: '',
+    last_offset: '-1',
+  };
+
+  it.effect(
+    'rejects null and object stream columns instead of coercing them',
+    () =>
+      Effect.gen(function* () {
+        const nullIdentity = yield* LogStorePg.make(
+          metaClientFor({ ...validStreamRow, identity: null }),
+        );
+        const nullError = yield* Effect.flip(nullIdentity.meta('stream'));
+        expect(nullError).toMatchObject({
+          _tag: 'LogStoreError',
+          operation: 'meta',
+          reason: 'storage',
+        });
+
+        const objectSequence = yield* LogStorePg.make(
+          metaClientFor({ ...validStreamRow, next_sequence: {} }),
+        );
+        const objectError = yield* Effect.flip(objectSequence.meta('stream'));
+        expect(objectError).toMatchObject({
+          _tag: 'LogStoreError',
+          operation: 'meta',
+          reason: 'storage',
+        });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    'rejects non-finite numeric stream columns as storage corruption',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* LogStorePg.make(
+          metaClientFor({ ...validStreamRow, epoch: Number.POSITIVE_INFINITY }),
+        );
+        const error = yield* Effect.flip(store.meta('stream'));
+        expect(error).toMatchObject({
+          _tag: 'LogStoreError',
+          operation: 'meta',
+          reason: 'storage',
+        });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    'rejects malformed persisted record columns as storage corruption',
+    () =>
+      Effect.gen(function* () {
+        const store = yield* LogStorePg.make(
+          metaClientFor({
+            record_offset: '0000000000000000_0000000000000000',
+            conversation_id: 'conversation',
+            record_timestamp: Number.POSITIVE_INFINITY,
+            record: { _tag: 'Text', step: 0, text: 'hello' },
+          }),
+        );
+        const error = yield* Effect.flip(store.read('stream'));
+        expect(error).toMatchObject({
+          _tag: 'LogStoreError',
+          operation: 'read',
+          reason: 'storage',
+        });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

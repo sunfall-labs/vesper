@@ -1,0 +1,28 @@
+{
+  "name": "@sunfall/vesper-example-approval-cli",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "description": "A credential-free CLI story demonstrating one keyed durable approval and resumption inside a tool handler.",
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "examples/approval-cli"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-strip-types src/main.ts",
+    "typecheck": "tsgo -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@effect/platform-node": "catalog:",
+    "@sunfall/vesper-agent": "workspace:*",
+    "@sunfall/vesper-log": "workspace:*",
+    "effect": "catalog:"
+  }
+}

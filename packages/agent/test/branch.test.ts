@@ -3,8 +3,9 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { beforeEach, describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Ref, Schema, Stream } from 'effect';
+import { Crypto, Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   LanguageModel,
   Prompt,
@@ -18,6 +19,11 @@ import { AgentBranch } from '../src/branch.js';
 import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // Branching: the conversation as a tree, in a log that is a line.
 //
@@ -138,13 +144,17 @@ beforeEach(() => {
 });
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   models: Layer.Layer<LanguageModel.LanguageModel>,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(models),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
@@ -538,7 +548,7 @@ describe('branching a live conversation', () => {
         yield* conversation
           .branchFrom(first[0]!.offset, 'edited')
           .pipe(Effect.orDie);
-        yield* conversation.resume('and then?').pipe(Effect.orDie);
+        yield* conversation.run('and then?').pipe(Effect.orDie);
 
         return models.asked;
       }),
@@ -802,7 +812,7 @@ describe('a crashed run on the abandoned branch', () => {
     return run(
       Effect.gen(function* () {
         yield* seed(crashed);
-        yield* conversation.resume('and then?').pipe(Effect.orDie);
+        yield* conversation.run('and then?').pipe(Effect.orDie);
         return { dispatchedTotal: dispatched.count, asked: models.asked };
       }),
       models.layer,

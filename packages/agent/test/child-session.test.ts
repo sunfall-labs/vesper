@@ -2,7 +2,9 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
+import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
+import * as NodeServices from '@effect/platform-node/NodeServices';
+import { Crypto, Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -19,6 +21,11 @@ import { AgentLog } from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 import { MAX_DEPTH } from '../src/subagent.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
+  NodeServices.layer,
+);
 
 // Child sessions.
 //
@@ -111,13 +118,17 @@ const researcher = Agent.make({
 });
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   turns: ReadonlyArray<Response.StreamPartEncoded[]>,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(scripted(turns)),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
@@ -127,7 +138,11 @@ const runInSession = <R>(
   input: string,
 ) =>
   Effect.flatMap(RunPolicyRuntime.create(RunPolicy.defaultLimits), (runtime) =>
-    protocolOf<R>(child)!.run(runtime, session, input),
+    protocolOf<R, Agent.Error<typeof child>>(child)!.run(
+      runtime,
+      session,
+      input,
+    ),
   );
 
 const readAll = Effect.fn('test.readAll')(function* (conversationId: string) {
@@ -198,7 +213,7 @@ const failsOnceAfterChildStage = (
         },
       });
     }),
-  ).pipe(Layer.provide(LogStoreMemory.layer));
+  ).pipe(Layer.provide(testLogLayer));
 
 const supervisor = Agent.make({
   name: 'supervisor',
@@ -281,7 +296,10 @@ describe('a recorded delegation', () => {
             parent: childSessions(yield* readAll(PARENT)),
             child: childSessions(yield* readAll(childId)),
           };
-        }).pipe(Effect.provide(failsOnceAfterChildStage(stage, childId)));
+        }).pipe(
+          Effect.provide(failsOnceAfterChildStage(stage, childId)),
+          Effect.provide(NodeCrypto.layer),
+        );
 
         expect(Exit.isFailure(result.first)).toBe(true);
         expect(result.parent).toHaveLength(1);
@@ -437,7 +455,7 @@ describe('a recorded delegation', () => {
           Effect.provide(
             scripted([says('researched'), says('repeated')], prompts),
           ),
-          Effect.provide(LogStoreMemory.layer),
+          Effect.provide(testLogLayer),
         );
 
         expect(result.resumed.text).toBe('researched');
@@ -497,7 +515,7 @@ describe('a recorded delegation', () => {
             'do the researcher part',
           );
 
-          const resumed = yield* Conversation.make(supervisor, PARENT).resume(
+          const resumed = yield* Conversation.make(supervisor, PARENT).run(
             'continue',
           );
           return { resumed, childRecords: yield* readAll(CHILD) };
@@ -513,7 +531,7 @@ describe('a recorded delegation', () => {
               prompts,
             ),
           ),
-          Effect.provide(LogStoreMemory.layer),
+          Effect.provide(testLogLayer),
         );
 
         expect(result.resumed.text).toBe('parent finished');
@@ -593,7 +611,7 @@ describe('a recorded delegation', () => {
         });
         const resumed = yield* runInSession(worker, reopened, 'continue');
         return { failed, resumed };
-      }).pipe(Effect.provide(models), Effect.provide(LogStoreMemory.layer));
+      }).pipe(Effect.provide(models), Effect.provide(testLogLayer));
 
       expect(result.failed._tag).toBe('Failure');
       expect(result.resumed.text).toBe('resumed turn');
@@ -862,7 +880,11 @@ describe('delegation without recording', () => {
     Effect.gen(function* () {
       const result = yield* supervisor
         .run('go')
-        .pipe(Effect.orDie, Effect.provide(scripted(oneDelegation)));
+        .pipe(
+          Effect.orDie,
+          Effect.provide(scripted(oneDelegation)),
+          Effect.provide(NodeCrypto.layer),
+        );
 
       // No `LogStoreMemory.layer` in this pipeline. If delegation had started
       // requiring one, this would not compile.

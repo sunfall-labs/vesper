@@ -1,18 +1,20 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
+import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Context, Effect, Layer, Stream } from 'effect';
-import {
-  AiError,
-  LanguageModel,
-  type Response,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { Context, Crypto, Effect, Layer, Stream } from 'effect';
+import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import type { AgentLog } from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
+  NodeServices.layer,
+);
 
 const finish: Response.FinishPartEncoded = {
   type: 'finish',
@@ -45,11 +47,15 @@ const agent = Agent.make({
 });
 
 const provide = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
 ) =>
   effect.pipe(
     Effect.provide(model),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
@@ -70,21 +76,133 @@ const policy = {
 } satisfies RecordingPolicy.Policy<Redactor>;
 
 const plain = Conversation.make(agent, 'typed');
-const filtered = Conversation.recording(agent, 'typed-filtered', policy);
+const filtered = Conversation.withRecordingPolicy(
+  agent,
+  'typed-filtered',
+  policy,
+);
+const storageFailure = (
+  operation: LogStore.LogStoreError['operation'],
+  path: string,
+) =>
+  new LogStore.LogStoreError({
+    path,
+    operation,
+    reason: 'storage',
+    detail: 'offline',
+  });
+
+const failingStore = (
+  override: (store: LogStore.Interface) => Partial<LogStore.Interface>,
+) =>
+  Layer.effect(
+    LogStore.Service,
+    Effect.map(LogStore.Service, (store) =>
+      LogStore.Service.of({ ...store, ...override(store) }),
+    ),
+  ).pipe(Layer.provide(testLogLayer));
+
 const _plainRequirements: Exact<
   EffR<ReturnType<typeof plain.run>>,
-  LanguageModel.LanguageModel | LogStore.Service
+  LanguageModel.LanguageModel | LogStore.Service | Crypto.Crypto
 > = true;
 const _plainError: Exact<
   EffE<ReturnType<typeof plain.run>>,
-  AiError.AiError | AgentLog.CompatibilityError
+  Conversation.Error<typeof agent>
 > = true;
 const _policyRequirements: Exact<
-  EffR<ReturnType<typeof filtered.resume>>,
-  LanguageModel.LanguageModel | LogStore.Service | Redactor
+  EffR<ReturnType<typeof filtered.run>>,
+  LanguageModel.LanguageModel | LogStore.Service | Redactor | Crypto.Crypto
 > = true;
 
 describe('Conversation', () => {
+  it.effect('keeps storage failures typed while opening a run', () =>
+    Effect.gen(function* () {
+      const failing = failingStore(() => ({
+        meta: (path) => Effect.fail(storageFailure('meta', path)),
+      }));
+      const error = yield* Conversation.make(agent, 'storage-failure')
+        .run('hello')
+        .pipe(
+          Effect.provide(model),
+          Effect.provide(failing),
+          Effect.provide(NodeCrypto.layer),
+          Effect.flip,
+        );
+      expect(error).toMatchObject({ reason: 'storage' });
+    }),
+  );
+
+  it.effect('keeps continuation storage failures typed', () =>
+    Effect.gen(function* () {
+      const failingOpen = failingStore(() => ({
+        meta: (path) => Effect.fail(storageFailure('meta', path)),
+      }));
+      const failingFork = failingStore(() => ({
+        read: (path) => Effect.fail(storageFailure('read', path)),
+      }));
+      const conversation = Conversation.make(agent, 'continue-failure');
+      const cases = [
+        { operation: conversation.run('resume'), store: failingOpen },
+        {
+          operation: conversation.branchFrom(LogOffset.START, 'branch'),
+          store: failingOpen,
+        },
+        {
+          operation: conversation.forkFrom(
+            LogOffset.START,
+            'fork-failure',
+            'fork',
+          ),
+          store: failingFork,
+        },
+      ];
+
+      for (const { operation, store } of cases) {
+        const error = yield* operation.pipe(
+          Effect.provide(model),
+          Effect.provide(store),
+          Effect.provide(NodeCrypto.layer),
+          Effect.flip,
+        );
+        expect(error).toMatchObject({ reason: 'storage' });
+      }
+    }),
+  );
+
+  it.effect('keeps snapshot and follow read failures typed', () =>
+    Effect.gen(function* () {
+      const failing = failingStore(() => ({
+        read: (path) => Effect.fail(storageFailure('read', path)),
+      }));
+      const conversation = Conversation.make(agent, 'read-failure');
+      const snapshotError = yield* conversation
+        .records()
+        .pipe(Stream.runDrain, Effect.provide(failing), Effect.flip);
+      const followError = yield* conversation
+        .follow()
+        .pipe(Stream.runDrain, Effect.provide(failing), Effect.flip);
+      expect(snapshotError).toMatchObject({ reason: 'storage' });
+      expect(followError).toMatchObject({ reason: 'storage' });
+    }),
+  );
+
+  it.effect('keeps signal write failures typed', () =>
+    Effect.gen(function* () {
+      const failing = failingStore(() => ({
+        create: (path) => Effect.fail(storageFailure('create', path)),
+      }));
+      const error = yield* Conversation.make(agent, 'signal-failure')
+        .send({ kind: 'cancel', text: 'stop', source: 'test' })
+        .pipe(
+          Effect.provide(failing),
+          Effect.provide(NodeCrypto.layer),
+          Effect.flip,
+        );
+      expect(error).toMatchObject({ reason: 'storage' });
+    }),
+  );
+
   it.effect(
     'binds identity and exposes events, records, and signals separately',
     () =>
@@ -132,7 +250,7 @@ describe('Conversation', () => {
     () =>
       provide(
         Effect.gen(function* () {
-          const conversation = Conversation.recording(
+          const conversation = Conversation.withRecordingPolicy(
             agent,
             'policy-source',
             policy,
@@ -142,7 +260,7 @@ describe('Conversation', () => {
             .records()
             .pipe(Stream.take(5), Stream.runCollect);
           const at = Array.from(records)[0]!.offset;
-          yield* conversation.resume('resume secret');
+          yield* conversation.run('resume secret');
           yield* conversation.branchFrom(at, 'branch secret');
           yield* conversation.forkFrom(at, 'policy-fork', 'fork secret');
           records = yield* conversation

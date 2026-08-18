@@ -1,4 +1,4 @@
-import { Effect, Schema } from 'effect';
+import { Crypto, Effect, Schema } from 'effect';
 
 import { LogStore } from './log-store.js';
 import { ConversationRecord } from './record.js';
@@ -15,15 +15,7 @@ import { LogVocabulary } from './vocabulary.js';
  * owns those decisions without knowing how an accepted batch is persisted.
  */
 
-type Operation = LogStore.LogStoreError['operation'];
 type Reason = LogStore.LogStoreError['reason'];
-
-export type Failure = (
-  path: string,
-  operation: Operation,
-  reason: Reason,
-  detail: string,
-) => LogStore.LogStoreError;
 
 export interface ValidatedInput {
   readonly path: string;
@@ -54,12 +46,16 @@ export interface AppendDecision {
  */
 export const validateInput = (
   input: LogStore.AppendInput,
-  failure: Failure,
 ): Effect.Effect<ValidatedInput, LogStore.LogStoreError> =>
   Effect.gen(function* () {
     if (input.records.length === 0) {
       return yield* Effect.fail(
-        failure(input.path, 'append', 'empty', 'append carried no records'),
+        LogStore.makeError(
+          input.path,
+          'append',
+          'empty',
+          'append carried no records',
+        ),
       );
     }
 
@@ -67,7 +63,7 @@ export const validateInput = (
       LogVocabulary.ProducerSequence,
     )(input.sequence).pipe(
       Effect.mapError(() =>
-        failure(
+        LogStore.makeError(
           input.path,
           'append',
           'conflict',
@@ -79,7 +75,7 @@ export const validateInput = (
       input.epoch,
     ).pipe(
       Effect.mapError(() =>
-        failure(
+        LogStore.makeError(
           input.path,
           'append',
           'conflict',
@@ -91,7 +87,7 @@ export const validateInput = (
       LogVocabulary.ProducerId,
     )(input.producerId).pipe(
       Effect.mapError(() =>
-        failure(
+        LogStore.makeError(
           input.path,
           'append',
           'conflict',
@@ -117,11 +113,10 @@ export const validateInput = (
 export const decide = (
   input: ValidatedInput,
   state: FencingState,
-  failure: Failure,
-): Effect.Effect<AppendDecision, LogStore.LogStoreError> =>
+): Effect.Effect<AppendDecision, LogStore.LogStoreError, Crypto.Crypto> =>
   Effect.gen(function* () {
     const reject = (reason: Reason, detail: string) =>
-      Effect.fail(failure(input.path, 'append', reason, detail));
+      Effect.fail(LogStore.makeError(input.path, 'append', reason, detail));
 
     if (input.epoch !== state.epoch) {
       return yield* reject(
@@ -138,7 +133,7 @@ export const decide = (
 
     const prepared = yield* RecordBatch.prepare(input.records).pipe(
       Effect.mapError((error) =>
-        failure(input.path, 'append', 'encoding', error.detail),
+        LogStore.makeError(input.path, 'append', 'encoding', error.detail),
       ),
     );
 

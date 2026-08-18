@@ -1,7 +1,8 @@
-import { Context, type Effect, Schema } from 'effect';
+import { Context, Crypto, type Effect, Schema } from 'effect';
 import { Tool } from 'effect/unstable/ai';
 
 import type { Agent } from './agent.js';
+import { RunPolicy } from './run-policy.js';
 
 // Delegation. A subagent is not a special mechanism — it compiles to an
 // ordinary `Tool` on the parent, so it flows through the toolkit machinery
@@ -29,7 +30,7 @@ const Parameters = Schema.Struct({
 
 const Success = Schema.Struct({
   result: Schema.String,
-  steps: Schema.Number,
+  steps: Schema.Natural,
 });
 
 const Failure = Schema.Struct({
@@ -94,7 +95,7 @@ export const tool = <const Name extends string>(
       `Delegate a self-contained task to the ${child.name} agent.`,
     parameters: Parameters,
     success: Success,
-    failure: Failure,
+    failure: Schema.Union([Failure, RunPolicy.RunPolicyExhausted]),
     // Refusal goes back to the model rather than aborting the run: an agent
     // told it cannot delegate any further can still do the work itself.
     failureMode: 'return',
@@ -143,7 +144,7 @@ export type Services<Children extends ReadonlyArray<Agent.Named>> = [
         // oxlint-disable-next-line no-explicit-any
         readonly run: (input: any) => Effect.Effect<any, any, infer R>;
       }
-    ? R
-    : never;
+    ? Crypto.Crypto | R
+    : Crypto.Crypto;
 
 export * as Subagent from './subagent.js';

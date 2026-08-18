@@ -3,8 +3,9 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { beforeEach, describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Ref, Schema, Stream } from 'effect';
+import { Crypto, Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   type LanguageModel as LanguageModelNamespace,
   LanguageModel,
@@ -20,6 +21,11 @@ import { ContextWindow } from '../src/context-window.js';
 import { AgentEvents } from '../src/event.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // Resumption from the log — the writer half, and the parity evidence for
 // deleting `@sunfall/vesper-durable`'s checkpointer.
@@ -82,6 +88,19 @@ const answeringTurn: Response.StreamPartEncoded[] = [
 const laterTurn: Response.StreamPartEncoded[] = [
   ...text('c', ['again']),
   finish(),
+];
+
+/** A provider-executed call has no Vesper ToolOutcome by design. */
+const providerExecutedTurn: Response.StreamPartEncoded[] = [
+  ...text('remote', ['searched']),
+  {
+    type: 'tool-call' as const,
+    id: 'provider-call-1',
+    name: 'lookup',
+    params: { id: '42' },
+    providerExecuted: true,
+  },
+  finish('tool-calls'),
 ];
 
 /**
@@ -150,13 +169,17 @@ beforeEach(() => {
 });
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   models: Layer.Layer<LanguageModel.LanguageModel>,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(models),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
   );
 
 const rolesOf = (prompt: Prompt.Prompt) =>
@@ -212,7 +235,7 @@ describe('resuming a crashed run', () => {
 
             // Run two: the same conversation, picked back up.
             const result = yield* conversation
-              .resume('and then?')
+              .run('and then?')
               .pipe(Effect.orDie);
 
             return {
@@ -286,7 +309,7 @@ describe('resuming a crashed run', () => {
             Effect.orDie,
           );
 
-          yield* conversation.resume('and then?').pipe(Effect.orDie);
+          yield* conversation.run('and then?').pipe(Effect.orDie);
           return (yield* readAll()).map((envelope) => envelope.record._tag);
         }),
         models.layer,
@@ -317,7 +340,7 @@ describe('resuming an ordinary conversation', () => {
       const asked = yield* run(
         Effect.gen(function* () {
           yield* Conversation.make(agent, 'fresh')
-            .resume('hello')
+            .run('hello')
             .pipe(Effect.orDie);
           return models.asked;
         }),
@@ -337,8 +360,8 @@ describe('resuming an ordinary conversation', () => {
 
       const asked = yield* run(
         Effect.gen(function* () {
-          yield* conversation.resume('first').pipe(Effect.orDie);
-          yield* conversation.resume('second').pipe(Effect.orDie);
+          yield* conversation.run('first').pipe(Effect.orDie);
+          yield* conversation.run('second').pipe(Effect.orDie);
           return models.asked;
         }),
         models.layer,
@@ -356,6 +379,36 @@ describe('resuming an ordinary conversation', () => {
     }),
   );
 
+  it.effect('streams the same continuation and lifetime usage as run', () =>
+    Effect.gen(function* () {
+      const models = provider([answeringTurn, laterTurn]);
+
+      const observed = yield* run(
+        Effect.gen(function* () {
+          const first = yield* conversation.run('first').pipe(Effect.orDie);
+          const events = yield* conversation
+            .stream('second')
+            .pipe(Stream.runCollect, Effect.orDie);
+          const completed = Array.from(events).find(
+            (event) => event._tag === 'Completed',
+          );
+          return { first, completed, asked: models.asked };
+        }),
+        models.layer,
+      );
+
+      expect(textIn(observed.asked[1]!)).toContain('first');
+      expect(textIn(observed.asked[1]!)).toContain('second');
+      expect(observed.completed).toMatchObject({
+        _tag: 'Completed',
+        usage: {
+          input: observed.first.usage.input * 2,
+          output: observed.first.usage.output * 2,
+        },
+      });
+    }),
+  );
+
   it.effect('keeps separate conversations separate', () =>
     Effect.gen(function* () {
       const models = provider([answeringTurn, laterTurn]);
@@ -363,10 +416,10 @@ describe('resuming an ordinary conversation', () => {
       const asked = yield* run(
         Effect.gen(function* () {
           yield* Conversation.make(agent, 'conv-a')
-            .resume('first')
+            .run('first')
             .pipe(Effect.orDie);
           yield* Conversation.make(agent, 'conv-b')
-            .resume('first')
+            .run('first')
             .pipe(Effect.orDie);
           return models.asked;
         }),
@@ -385,10 +438,8 @@ describe('resuming an ordinary conversation', () => {
 
       const totals = yield* run(
         Effect.gen(function* () {
-          const first = yield* conversation.resume('first').pipe(Effect.orDie);
-          const second = yield* conversation
-            .resume('second')
-            .pipe(Effect.orDie);
+          const first = yield* conversation.run('first').pipe(Effect.orDie);
+          const second = yield* conversation.run('second').pipe(Effect.orDie);
           return { first: first.usage, second: second.usage };
         }),
         models.layer,
@@ -428,14 +479,50 @@ describe('resuming an ordinary conversation', () => {
         yield* run(
           Effect.gen(function* () {
             const conversation = Conversation.make(anchored, CONVERSATION);
-            yield* conversation.resume('first');
-            yield* conversation.resume('second');
+            yield* conversation.run('first');
+            yield* conversation.run('second');
           }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
           models.layer,
         );
 
         expect(seen).toEqual([undefined, { inputTokens: 10, outputTokens: 4 }]);
       }),
+  );
+});
+
+describe('resuming provider-executed tool calls', () => {
+  it.effect('keeps a provider-executed call without a Vesper outcome', () =>
+    Effect.gen(function* () {
+      const models = provider([providerExecutedTurn, answeringTurn, laterTurn]);
+
+      const records = yield* run(
+        Effect.gen(function* () {
+          yield* conversation.run('search remotely');
+          yield* conversation.run('continue');
+          return yield* conversation.records().pipe(Stream.runCollect);
+        }),
+        models.layer,
+      );
+
+      const recordedCall = Array.from(records).find(
+        (envelope) => envelope.record._tag === 'ToolCall',
+      );
+      expect(recordedCall?.record).toMatchObject({
+        _tag: 'ToolCall',
+        providerExecuted: true,
+      });
+
+      const assistant = models.asked[2]!.content.find(
+        (message) => message.role === 'assistant',
+      );
+      const toolCall = assistant?.content.find(
+        (part) => part.type === 'tool-call' && part.id === 'provider-call-1',
+      );
+      expect(toolCall).toMatchObject({
+        type: 'tool-call',
+        providerExecuted: true,
+      });
+    }),
   );
 });
 

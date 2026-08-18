@@ -1,39 +1,46 @@
-import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Exit, Layer, Option, Ref, Schema, Stream } from 'effect';
+import {
+  Effect,
+  Exit,
+  Layer,
+  Match,
+  Option,
+  Ref,
+  Schema,
+  Stream,
+} from 'effect';
 import {
   AiError,
   Chat,
   LanguageModel,
   Prompt,
-  type Response,
+  Response,
   type Tool,
   Toolkit,
 } from 'effect/unstable/ai';
 
 import { Compaction } from './compaction.js';
+import { CompatibilityError } from './conversation-error.js';
 import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
-import {
-  type AgentProtocol,
-  hasProtocol,
-  register,
-  Session,
-  StateCleanup,
-} from './internal/protocol.js';
+import { foldToResult } from './internal/fold-to-result.js';
+import { protocolOf, register } from './internal/protocol.js';
 import type { Interception } from './interception.js';
 import { AgentLog } from './log.js';
-import { RecordingPolicy } from './recording-policy.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
 import { Skill } from './skill.js';
 import { Stop } from './stop.js';
+import { AgentState } from './state.js';
 import { Subagent } from './subagent.js';
 import { SubagentRuntime } from './subagent-runtime.js';
+
+/** Recoverable failures produced by an unrecorded agent run. */
+export type RunFailure = AiError.AiError | RunPolicy.RunPolicyExhausted;
 
 // The loop. This is the piece `effect/unstable/ai` does not have:
 // `LanguageModel.generateText` performs exactly one turn — prompt, model,
@@ -85,6 +92,7 @@ export interface Definition<
   Children extends ReadonlyArray<Named> = readonly [],
   Skills extends ReadonlyArray<Skill.Skill> = readonly [],
   StopR = never,
+  StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
 > {
   readonly name: Name;
   /** Stable application-defined compatibility revision for durable history. */
@@ -129,6 +137,8 @@ export interface Definition<
   readonly compaction?: Compaction.Policy | false;
   /** Hard limits shared by this run and every descendant delegation. */
   readonly runPolicy?: Partial<RunPolicy.Limits>;
+  /** One optional state document, opened separately for every run. */
+  readonly state?: StateDefinition;
 }
 
 /**
@@ -142,7 +152,7 @@ export const Result = Schema.Struct({
   outcome: Schema.Literals(['success', 'cancelled']),
   /** Concatenated text of the final turn. */
   text: Schema.String,
-  steps: Schema.Number,
+  steps: Schema.Natural,
   usage: Stop.Usage,
 });
 export interface Result extends Schema.Struct.Type<typeof Result.fields> {}
@@ -174,7 +184,28 @@ export type WithOwnHandlers<Tools extends Record<string, Tool.Any>> =
   // `any`. An earlier comment claimed otherwise; `types.test.ts` pins the
   // truth, because the difference decides whether callers inherit an `any`.
   | Tool.HandlerServices<Tools[keyof Tools]>
-  | Tool.ResultDecodingServices<Tools[keyof Tools]>;
+  | Tool.ResultDecodingServices<Tools[keyof Tools]>
+  // The live model stream yields decoded tool-call parameters. Recording the
+  // provider-facing form requires encoding those parameters again, so expose
+  // the corresponding codec services at the same boundary.
+  | ParameterEncodingServices<Tools>;
+
+type ParameterEncodingServices<Tools extends Record<string, Tool.Any>> =
+  Tools[keyof Tools] extends infer Candidate
+    ? Candidate extends Tool.Any
+      ? Tool.ParametersSchema<Candidate>['EncodingServices']
+      : never
+    : never;
+
+type WithOwnHandlersForState<
+  Tools extends Record<string, Tool.Any>,
+  StateDefinition extends AgentState.AnyDefinition | undefined,
+> =
+  | LanguageModel.LanguageModel
+  | Tool.HandlersFor<Tools>
+  | WithoutState<Tool.HandlerServices<Tools[keyof Tools]>, StateDefinition>
+  | Tool.ResultDecodingServices<Tools[keyof Tools]>
+  | ParameterEncodingServices<Tools>;
 
 /**
  * Discharge an agent's own tool handlers from whatever it required.
@@ -194,6 +225,16 @@ export type WithoutOwnHandlers<
   Requires,
   Tools extends Record<string, Tool.Any>,
 > = Exclude<Requires, Tool.HandlersFor<Tools>>;
+
+/**
+ * The state layer opens the definition's handle for the run. Remove that
+ * handle from tool/handler requirements while retaining codec services, which
+ * the layer deliberately leaves for the caller to provide.
+ */
+export type WithoutState<
+  Requires,
+  Definition extends AgentState.AnyDefinition | undefined,
+> = Definition extends undefined ? Requires : Exclude<Requires, Definition>;
 
 /**
  * An autonomous loop over a `LanguageModel`, with a toolkit, optional
@@ -230,8 +271,8 @@ export interface Instance<
   in out RuntimeTools extends Record<string, Tool.Any> = OwnTools,
   out BaseRequires = Requires,
   out InterceptorRequires = never,
-  out RunError extends AiError.AiError | AgentLog.CompatibilityError =
-    AiError.AiError,
+  out RunError extends RunFailure | CompatibilityError = RunFailure,
+  out StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
 > {
   readonly [TypeId]: TypeId;
   readonly name: Name;
@@ -246,6 +287,7 @@ export interface Instance<
    * identically to the one `run` would have built.
    */
   readonly instructions: string;
+  readonly state: StateDefinition | undefined;
 
   /**
    * Observe the run as it happens: model output arrives token by token,
@@ -325,7 +367,8 @@ export interface Instance<
     RuntimeTools,
     WithoutOwnHandlers<BaseRequires, OwnTools>,
     InterceptorRequires,
-    RunError
+    RunError,
+    StateDefinition
   >;
 
   /**
@@ -333,7 +376,7 @@ export interface Instance<
    *
    * `interception.ts` is where the seams and their permissions are written
    * down; this is only how one is attached. Attaching is the same shape of
-   * decision as `Conversation.recording`: a call whose consequence is in the
+   * decision as `Conversation.withRecordingPolicy`: a call whose consequence is in the
    * type — the agent this returns requires whatever the interceptor's seams
    * require, and an agent that never calls it requires exactly what it
    * required before and runs the same code, because the loop checks for the
@@ -361,7 +404,8 @@ export interface Instance<
     RuntimeTools,
     BaseRequires,
     Interception.Services<I>,
-    RunError
+    RunError,
+    StateDefinition
   >;
 }
 
@@ -395,7 +439,7 @@ export interface Named<Name extends string = string, R = unknown> {
   readonly description?: string | undefined;
   readonly run: (
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, AiError.AiError, R>;
+  ) => Effect.Effect<Result, RunFailure, R>;
 }
 
 /**
@@ -416,7 +460,16 @@ export interface Named<Name extends string = string, R = unknown> {
  * @since 0.1.0
  */
 // oxlint-disable-next-line no-explicit-any
-export interface Any extends Instance<any, any, any, any, any, any, any> {}
+export interface Any extends Instance<
+  any,
+  any,
+  any,
+  any,
+  any,
+  any,
+  any,
+  AgentState.AnyDefinition | undefined
+> {}
 
 /**
  * Extract an agent's name.
@@ -432,7 +485,8 @@ export type Name<A> =
     infer _Runtime,
     infer _Base,
     infer _Interceptor,
-    infer _Error
+    infer _Error,
+    infer _State
   >
     ? _Name
     : never;
@@ -451,7 +505,8 @@ export type Tools<A> =
     infer _Runtime,
     infer _Base,
     infer _Interceptor,
-    infer _Error
+    infer _Error,
+    infer _State
   >
     ? _Runtime
     : never;
@@ -465,7 +520,8 @@ export type OwnTools<A> =
     infer _Runtime,
     infer _Base,
     infer _Interceptor,
-    infer _Error
+    infer _Error,
+    infer _State
   >
     ? _Own
     : never;
@@ -484,7 +540,8 @@ export type Requires<A> =
     infer _Runtime,
     infer _Base,
     infer _Interceptor,
-    infer _Error
+    infer _Error,
+    infer _State
   >
     ? _R
     : never;
@@ -498,12 +555,12 @@ export type Error<A> =
     infer _Runtime,
     infer _Base,
     infer _Interceptor,
-    infer RunError
+    infer RunError,
+    infer _State
   >
     ? RunError
     : never;
 
-/** @internal Continue a durable conversation while retaining its recording policy. */
 /**
  * @category guards
  * @since 0.1.0
@@ -512,7 +569,7 @@ export const isAgent = (u: unknown): u is Any =>
   typeof u === 'object' &&
   u !== null &&
   (u as { readonly [TypeId]?: unknown })[TypeId] === TypeId &&
-  hasProtocol(u);
+  protocolOf<unknown, RunFailure>(u) !== undefined;
 
 /** Every tool visible to the model after declarative capabilities compile. */
 export type CompiledTools<
@@ -583,23 +640,46 @@ export const make = <
   const Children extends ReadonlyArray<Named> = readonly [],
   const Skills extends ReadonlyArray<Skill.Skill> = readonly [],
   StopR = never,
+  const StateDefinition extends AgentState.AnyDefinition | undefined =
+    undefined,
 >(
-  definition: Definition<Name, Tools, Children, Skills, StopR> &
+  definition: Definition<
+    Name,
+    Tools,
+    Children,
+    Skills,
+    StopR,
+    StateDefinition
+  > &
     CollisionFreeDefinition<Tools, Children, Skills>,
 ): Instance<
   Name,
   Tools,
-  WithOwnHandlers<Tools> | Subagent.Services<Children> | StopR,
+  | WithOwnHandlersForState<Tools, StateDefinition>
+  | Subagent.Services<Children>
+  | StopR
+  | (StateDefinition extends AgentState.AnyDefinition
+      ? AgentState.Services<StateDefinition>
+      : never),
   CompiledTools<Tools, Children, Skills>,
-  WithOwnHandlers<Tools> | Subagent.Services<Children> | StopR,
+  | WithOwnHandlersForState<Tools, StateDefinition>
+  | Subagent.Services<Children>
+  | StopR
+  | (StateDefinition extends AgentState.AnyDefinition
+      ? AgentState.Services<StateDefinition>
+      : never),
   never,
-  AiError.AiError
+  RunFailure,
+  StateDefinition
 > => {
   type RuntimeTools = CompiledTools<Tools, Children, Skills>;
   type BaseRequires =
-    | WithOwnHandlers<Tools>
+    | WithOwnHandlersForState<Tools, StateDefinition>
     | Subagent.Services<Children>
-    | StopR;
+    | StopR
+    | (StateDefinition extends AgentState.AnyDefinition
+        ? AgentState.Services<StateDefinition>
+        : never);
 
   if (definition.revision.trim() === '') {
     throw new Error(`Agent "${definition.name}" revision must be non-empty`);
@@ -681,7 +761,7 @@ export const make = <
   // what happens to be in the context.
   const entryFor = (
     wiring: Wiring,
-  ): Entry<RuntimeTools, BaseRequires, AiError.AiError> => {
+  ): Entry<RuntimeTools, BaseRequires, RunFailure> => {
     const session = wiring.session;
     const interceptor = wiring.interceptor;
     const runtime = wiring.runtime;
@@ -712,17 +792,36 @@ export const make = <
     // Fixed arity rather than spreading `...(x ? [l] : [])`: the spread form
     // widens `mergeAll`'s result, which then leaks into anything that provides
     // this layer.
-    const layer = Layer.mergeAll(
+    const generated = Layer.mergeAll(
       delegation === undefined
         ? Layer.empty
         : delegation.layer(session, runtime),
       loader === undefined ? Layer.empty : loader.layer,
     );
-
-    const turnOptions = (arbitration: ToolDispatch.TurnArbitration) => ({
-      toolkit: dispatching(arbitration),
-      concurrency: definition.concurrency,
-    });
+    const layer =
+      definition.state === undefined
+        ? generated
+        : Layer.merge(
+            generated,
+            Layer.effect(
+              definition.state,
+              AgentState.open(definition.state, session).pipe(
+                Effect.mapError(
+                  (error) =>
+                    new AiError.AiError({
+                      module: 'AgentState',
+                      method: 'open',
+                      reason: new AiError.InvalidRequestError({
+                        description: error.message,
+                        metadata: {
+                          vesper: stateErrorMetadata(error),
+                        },
+                      }),
+                    }),
+                ),
+              ),
+            ),
+          );
 
     /**
      * The provider call, and the seam that sits in front of it.
@@ -743,11 +842,16 @@ export const make = <
       arbitration: ToolDispatch.TurnArbitration,
     ): Stream.Stream<
       AgentEvents.Event<RuntimeTools>,
-      AiError.AiError,
+      RunFailure,
       WithOwnHandlers<RuntimeTools>
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
+          // Chat exposes decoded parts so tool handlers receive their typed
+          // parameters. Resolve the same toolkit here to encode each part
+          // back to the provider representation before it reaches observers
+          // or the durable recording sink.
+          const resolvedToolkit = yield* dispatching(arbitration);
           if (interceptor?.beforeModelCall !== undefined) {
             yield* interceptor.beforeModelCall({
               agent: definition.name,
@@ -760,19 +864,28 @@ export const make = <
           const remaining =
             runtime === undefined ? undefined : yield* runtime.remainingMillis;
           const asked = chat
-            .streamText({ prompt: input, ...turnOptions(arbitration) })
+            .streamText({
+              prompt: input,
+              toolkit: resolvedToolkit,
+              concurrency: definition.concurrency,
+            })
             .pipe(
               Stream.mapEffect((part) =>
                 part.type === 'error'
                   ? Effect.fail(
                       normalizeProviderError(part.error, part.metadata),
                     )
-                  : Effect.succeed(part),
+                  : encodePart(
+                      part as Response.StreamPart<RuntimeTools>,
+                      resolvedToolkit,
+                    ).pipe(
+                      Effect.map((encodedPart) => ({ part, encodedPart })),
+                    ),
               ),
-              Stream.tap((part) =>
+              Stream.tap(({ encodedPart }) =>
                 Effect.sync(() => {
                   seen.started = true;
-                  observe(seen, part as Response.StreamPartEncoded);
+                  observe(seen, encodedPart);
                 }).pipe(
                   Effect.andThen(
                     runtime === undefined
@@ -782,10 +895,14 @@ export const make = <
                 ),
               ),
               Stream.map(
-                (part): AgentEvents.Event<RuntimeTools> => ({
+                ({ part, encodedPart }): AgentEvents.Event<RuntimeTools> => ({
                   _tag: 'Part',
                   step,
+                  // The toolkit resolver preserves the same runtime tool map;
+                  // this assertion only repairs the conditional generic
+                  // relationship after Chat has decoded the provider part.
                   part: part as Response.StreamPart<RuntimeTools>,
+                  encodedPart,
                 }),
               ),
             );
@@ -807,7 +924,7 @@ export const make = <
         }),
       ) as Stream.Stream<
         AgentEvents.Event<RuntimeTools>,
-        AiError.AiError,
+        RunFailure,
         WithOwnHandlers<RuntimeTools>
       >;
 
@@ -821,7 +938,7 @@ export const make = <
       step: number,
       totals: Stop.Usage,
       input: Prompt.RawInput,
-    ): Effect.Effect<Prompt.RawInput, AiError.AiError> =>
+    ): Effect.Effect<Prompt.RawInput, RunFailure> =>
       interceptor?.beforeTurn === undefined
         ? Effect.succeed(input)
         : Effect.map(
@@ -857,7 +974,7 @@ export const make = <
       input: Prompt.RawInput,
     ): Effect.Effect<
       Compaction.Summarized | undefined,
-      AiError.AiError,
+      RunFailure,
       LanguageModel.LanguageModel
     > =>
       Effect.gen(function* () {
@@ -883,7 +1000,7 @@ export const make = <
       policy: Compaction.Policy,
     ): Effect.Effect<
       Compaction.Summarized | undefined,
-      AiError.AiError,
+      RunFailure,
       LanguageModel.LanguageModel
     > =>
       Effect.gen(function* () {
@@ -912,7 +1029,7 @@ export const make = <
       pending: Prompt.RawInput,
     ): Stream.Stream<
       AgentEvents.Event<RuntimeTools>,
-      AiError.AiError,
+      RunFailure,
       WithOwnHandlers<RuntimeTools> | StopR
     > =>
       Stream.unwrap(
@@ -988,68 +1105,75 @@ export const make = <
                   // already replaced and compacted again on its first turn. A
                   // no-op compaction announces nothing, because nothing was
                   // replaced.
-                  Stream.catchIf(Compaction.isContextOverflow, (error) =>
-                    Stream.unwrap(
-                      Effect.gen(function* () {
-                        // Once a part escaped, retrying can duplicate visible
-                        // text or tool side effects. Provider retries belong
-                        // below this seam; compaction is safe only for a request
-                        // rejected before it produced anything.
-                        if (initial.emitted) return Stream.fail(error);
+                  Stream.catchIf(
+                    (error) =>
+                      AiError.isAiError(error) &&
+                      Compaction.isContextOverflow(error),
+                    (error) =>
+                      Stream.unwrap(
+                        Effect.gen(function* () {
+                          // Once a part escaped, retrying can duplicate visible
+                          // text or tool side effects. Provider retries belong
+                          // below this seam; compaction is safe only for a request
+                          // rejected before it produced anything.
+                          if (initial.emitted) return Stream.fail(error);
 
-                        // State the history the summarizer should see rather
-                        // than inherit whatever the rejected turn left behind.
-                        //
-                        // It is the conversation as it was, plus the input this
-                        // turn was rejected for — the request the provider
-                        // refused, which is exactly what has to be made to fit.
-                        // Including the input matters: it is the newest message,
-                        // so `splitAt` protects it as the recent tail and
-                        // summarizes the history behind it, which is the only
-                        // split that can shrink a request whose bulk *is* the
-                        // input.
-                        //
-                        // `Chat.streamText` happens to leave something close to
-                        // this behind — it writes `history + input` from a
-                        // finalizer that runs on failure too — but that is one
-                        // implementation's detail and the retry below depends
-                        // on it being exactly right, so it is not assumed.
-                        yield* Ref.set(
-                          chat.history,
-                          Prompt.concat(historyBefore, Prompt.make(input)),
-                        );
-                        const summarized = yield* compactWithBudget(
-                          chat,
-                          compaction,
-                        );
-                        // Retrying an unchanged prompt repeats the same refusal
-                        // and can loop provider-side work for no gain.
-                        if (summarized === undefined) return Stream.fail(error);
-                        if (runtime !== undefined) {
-                          yield* runtime.addUsage(summarized.usage);
-                        }
-                        yield* Ref.update(usage, (current) =>
-                          addStopUsage(current, summarized.usage),
-                        );
+                          // State the history the summarizer should see rather
+                          // than inherit whatever the rejected turn left behind.
+                          //
+                          // It is the conversation as it was, plus the input this
+                          // turn was rejected for — the request the provider
+                          // refused, which is exactly what has to be made to fit.
+                          // Including the input matters: it is the newest message,
+                          // so `splitAt` protects it as the recent tail and
+                          // summarizes the history behind it, which is the only
+                          // split that can shrink a request whose bulk *is* the
+                          // input.
+                          //
+                          // `Chat.streamText` happens to leave something close to
+                          // this behind — it writes `history + input` from a
+                          // finalizer that runs on failure too — but that is one
+                          // implementation's detail and the retry below depends
+                          // on it being exactly right, so it is not assumed.
+                          yield* Ref.set(
+                            chat.history,
+                            Prompt.concat(historyBefore, Prompt.make(input)),
+                          );
+                          const summarized = yield* compactWithBudget(
+                            chat,
+                            compaction,
+                          );
+                          // Retrying an unchanged prompt repeats the same refusal
+                          // and can loop provider-side work for no gain.
+                          if (summarized === undefined)
+                            return Stream.fail(error);
+                          if (runtime !== undefined) {
+                            yield* runtime.addUsage(summarized.usage);
+                          }
+                          yield* Ref.update(usage, (current) =>
+                            addStopUsage(current, summarized.usage),
+                          );
 
-                        const retry = emptyTurnState();
-                        yield* Ref.set(active, retry);
-                        // Empty, not `input`. The input is in the history above
-                        // and `Chat.streamText` appends whatever it is given.
-                        const retried = askModel(
-                          chat,
-                          retry,
-                          step,
-                          Prompt.empty,
-                          'after-compaction',
-                          arbitration,
-                        );
-                        return Stream.concat(
-                          Stream.make(AgentEvents.compacted(step, summarized)),
-                          retried,
-                        );
-                      }),
-                    ),
+                          const retry = emptyTurnState();
+                          yield* Ref.set(active, retry);
+                          // Empty, not `input`. The input is in the history above
+                          // and `Chat.streamText` appends whatever it is given.
+                          const retried = askModel(
+                            chat,
+                            retry,
+                            step,
+                            Prompt.empty,
+                            'after-compaction',
+                            arbitration,
+                          );
+                          return Stream.concat(
+                            Stream.make(
+                              AgentEvents.compacted(step, summarized),
+                            ),
+                            retried,
+                          );
+                        }),
+                      ),
                   ),
                 );
 
@@ -1135,7 +1259,7 @@ export const make = <
                         : AgentEvents.signalRejected(
                             step,
                             decision.signal,
-                            decision.exhaustion!,
+                            decision.exhaustion,
                           ),
                     )
                     .concat(
@@ -1229,9 +1353,15 @@ export const make = <
                     ),
                     Effect.catch((error) =>
                       Effect.logError(
-                        `Conversation ${session.conversationId} responsive cancel watcher failed; cancellation remains available at the next turn boundary`,
+                        'Agent responsive cancel watcher failed; cancellation remains available at the next turn boundary',
                         error,
-                      ).pipe(Effect.andThen(Effect.never)),
+                      ).pipe(
+                        Effect.annotateLogs({
+                          'vesper.component': 'agent',
+                          'vesper.event': 'responsive_cancel_watcher_failure',
+                        }),
+                        Effect.andThen(Effect.never),
+                      ),
                     ),
                   );
 
@@ -1250,7 +1380,7 @@ export const make = <
         }),
       ) as Stream.Stream<
         AgentEvents.Event<RuntimeTools>,
-        AiError.AiError,
+        RunFailure,
         WithOwnHandlers<RuntimeTools> | StopR
       >;
 
@@ -1264,7 +1394,7 @@ export const make = <
               input,
             ) as Stream.Stream<
               AgentEvents.Event<RuntimeTools>,
-              AiError.AiError,
+              RunFailure,
               WithOwnHandlers<RuntimeTools> | StopR
             >;
           }
@@ -1301,7 +1431,7 @@ export const make = <
                     : AgentEvents.signalRejected(
                         0,
                         decision.signal,
-                        decision.exhaustion!,
+                        decision.exhaustion,
                       ),
                 )
                 .concat(
@@ -1357,9 +1487,15 @@ export const make = <
                 ),
                 Effect.catch((error) =>
                   Effect.logError(
-                    `Conversation ${session.conversationId} recovery cancel watcher failed; cancellation remains available at the next boundary`,
+                    'Agent recovery cancel watcher failed; cancellation remains available at the next boundary',
                     error,
-                  ).pipe(Effect.andThen(Effect.never)),
+                  ).pipe(
+                    Effect.annotateLogs({
+                      'vesper.component': 'agent',
+                      'vesper.event': 'responsive_cancel_watcher_failure',
+                    }),
+                    Effect.andThen(Effect.never),
+                  ),
                 ),
               );
 
@@ -1425,7 +1561,7 @@ export const make = <
                             : AgentEvents.signalRejected(
                                 0,
                                 decision.signal,
-                                decision.exhaustion!,
+                                decision.exhaustion,
                               ),
                         ),
                       ),
@@ -1461,14 +1597,14 @@ export const make = <
                       : { lastTurn: wiring.lastTurn }),
                   }).streamIn(chat, effective) as Stream.Stream<
                     AgentEvents.Event<RuntimeTools>,
-                    AiError.AiError,
+                    RunFailure,
                     WithOwnHandlers<RuntimeTools> | StopR
                   >;
                 }),
               ),
             ) as Stream.Stream<
               AgentEvents.Event<RuntimeTools>,
-              AiError.AiError,
+              RunFailure,
               WithOwnHandlers<RuntimeTools> | StopR
             >;
           }
@@ -1517,7 +1653,7 @@ export const make = <
     return provideEntry({ stream, streamIn }, layer) as Entry<
       RuntimeTools,
       BaseRequires,
-      AiError.AiError
+      RunFailure
     >;
   };
 
@@ -1527,7 +1663,8 @@ export const make = <
     RuntimeTools,
     BaseRequires,
     never,
-    AiError.AiError
+    RunFailure,
+    StateDefinition
   >({
     name: definition.name,
     revision,
@@ -1535,6 +1672,7 @@ export const make = <
     ownToolkit: definition.toolkit,
     toolkit,
     instructions,
+    state: definition.state,
     interceptor: undefined,
     runPolicy,
     entry: entryFor,
@@ -1569,6 +1707,33 @@ const validateGeneratedToolNames = (
   if (skills.length > 0) reserve(Skill.TOOL_NAME, 'skills');
 };
 
+const stateErrorMetadata = (error: AgentState.Error) => {
+  switch (error._tag) {
+    case 'StateDefinitionError':
+      return {
+        tag: error._tag,
+        ...(error.stateId === undefined ? {} : { stateId: error.stateId }),
+      };
+    case 'StateCompatibilityError':
+      return {
+        tag: error._tag,
+        stateId: error.stateId,
+        stateVersion: error.stateVersion,
+        persistedId: error.persistedId,
+        persistedVersion: error.persistedVersion,
+      };
+    case 'StateDecodeError':
+    case 'StateEncodeError':
+    case 'StateJsonError':
+      return {
+        tag: error._tag,
+        stateId: error.stateId,
+        stateVersion: error.stateVersion,
+        cause: error.cause,
+      };
+  }
+};
+
 /**
  * What a batch of steering instructions becomes for the next turn.
  *
@@ -1590,43 +1755,6 @@ const steeringInput = (
           content: steers.map((steer) => steer.text).join('\n\n'),
         },
       ]);
-
-/**
- * Collapse an event stream into a {@link Result}.
- *
- * Module scope rather than a closure inside `make`, because `Conversation`
- * needs it too: a durable run has to be a fold of its *recorded*
- * stream, not of the unrecorded one `make` closed over. Keeping one fold is
- * what stops `run` and `stream` from drifting — the property the comment at
- * the top of this file exists to protect.
- */
-const foldToResult = <Tools extends Record<string, Tool.Any>, E, R>(
-  events: Stream.Stream<AgentEvents.Event<Tools>, E, R>,
-): Effect.Effect<Result, E, R> =>
-  Effect.gen(function* () {
-    const completed = yield* events.pipe(
-      Stream.runFold(
-        (): AgentEvents.Lifecycle | undefined => undefined,
-        (last, event) => (event._tag === 'Completed' ? event : last),
-      ),
-    );
-
-    // The loop always terminates by emitting `Completed`. Reaching here
-    // without one means the loop changed and this fold did not, which is a
-    // defect rather than a failure a caller could handle.
-    if (completed?._tag !== 'Completed') {
-      return yield* Effect.die(
-        new Error('Agent stream ended without completing'),
-      );
-    }
-
-    return {
-      outcome: completed.outcome,
-      text: completed.text,
-      steps: completed.steps,
-      usage: completed.usage,
-    } satisfies Result;
-  });
 
 /**
  * Replay a recorded conversation, then follow it live.
@@ -1730,6 +1858,7 @@ interface Parts<
   RuntimeTools extends Record<string, Tool.Any>,
   BaseRequires,
   RunError,
+  StateDefinition extends AgentState.AnyDefinition | undefined,
 > {
   readonly name: Name;
   readonly revision: LogVocabulary.AgentRevision;
@@ -1737,6 +1866,7 @@ interface Parts<
   readonly ownToolkit: Toolkit.Toolkit<OwnTools>;
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
   readonly instructions: string;
+  readonly state: StateDefinition | undefined;
   readonly interceptor: Interception.Interceptor | undefined;
   readonly runPolicy: RunPolicy.Limits;
   readonly entry: (
@@ -1757,10 +1887,17 @@ const fromParts = <
   RuntimeTools extends Record<string, Tool.Any>,
   BaseRequires,
   InterceptorRequires,
-  RunError extends AiError.AiError | AgentLog.CompatibilityError =
-    AiError.AiError,
+  RunError extends RunFailure | CompatibilityError = RunFailure,
+  StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
 >(
-  parts: Parts<Name, OwnTools, RuntimeTools, BaseRequires, RunError>,
+  parts: Parts<
+    Name,
+    OwnTools,
+    RuntimeTools,
+    BaseRequires,
+    RunError,
+    StateDefinition
+  >,
 ): Instance<
   Name,
   OwnTools,
@@ -1768,7 +1905,8 @@ const fromParts = <
   RuntimeTools,
   BaseRequires,
   InterceptorRequires,
-  RunError
+  RunError,
+  StateDefinition
 > => {
   // How every entry point below reaches the loop: the agent's interceptor,
   // and whichever session that entry point has. Read from `parts` rather than
@@ -1783,62 +1921,42 @@ const fromParts = <
     ...options,
   });
 
-  // Every public result fold crosses the same tracing seam. Keeping the span
-  // beside the fold means decorators can replace streams without quietly
-  // removing runs from telemetry.
-  const span = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-    Effect.withSpan(effect, `Agent.${parts.name}.run`);
-
-  const withSession = <A, E, R>(
-    session: AgentLog.Session,
-    effect: Effect.Effect<A, E, R>,
-  ) => {
-    const cleanup = new Set<
-      (session: AgentLog.Session) => Effect.Effect<void>
-    >();
-    return effect.pipe(
-      Effect.provideService(Session, session),
-      Effect.provideService(StateCleanup, cleanup),
-      Effect.ensuring(
-        Effect.forEach(cleanup, (release) => release(session), {
-          discard: true,
-        }),
-      ),
-    );
-  };
-
-  const streamWithSession = <A, E, R>(
-    session: AgentLog.Session,
+  // Keep one stable stream span around every run. Stream spans are important
+  // here: a run is pull-based, so an Effect span around stream construction
+  // would end before the provider, tools, and finalizers are consumed.
+  const runStream = <A, E, R>(
     stream: Stream.Stream<A, E, R>,
-  ) => {
-    const cleanup = new Set<
-      (session: AgentLog.Session) => Effect.Effect<void>
-    >();
-    return stream.pipe(
-      Stream.provideService(Session, session),
-      Stream.provideService(StateCleanup, cleanup),
-      Stream.ensuring(
-        Effect.forEach(cleanup, (release) => release(session), {
-          discard: true,
-        }),
-      ),
+    recorded: boolean,
+  ) =>
+    stream.pipe(
+      Stream.withSpan('Agent.run', {
+        attributes: {
+          'vesper.agent.name': parts.name,
+          'vesper.agent.revision': parts.revision,
+          'vesper.run.recorded': recorded,
+        },
+      }),
     );
-  };
 
   // The unrecorded entry, which is what the four public entry points are.
-  // Built once rather than per call so an agent value stays cheap to hold.
-  const plain = parts.entry(wiring(undefined));
+  // Construct the entry per invocation: its state layer owns exactly one
+  // handle, so sharing an entry would share ephemeral state across runs.
+  const plain = (input: Prompt.RawInput) =>
+    runStream(parts.entry(wiring(undefined)).stream(input), false);
+  const plainIn = (chat: Chat.Service, input: Prompt.RawInput) =>
+    runStream(parts.entry(wiring(undefined)).streamIn(chat, input), false);
   const publicPlain = {
-    ...plain,
-    run: (input: Prompt.RawInput) => span(foldToResult(plain.stream(input))),
+    stream: plain,
+    streamIn: plainIn,
+    run: (input: Prompt.RawInput) => foldToResult(plain(input)),
     runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
-      span(foldToResult(plain.streamIn(chat, input))),
+      foldToResult(plainIn(chat, input)),
   };
 
   // The writer half of the log, and the reason `@sunfall/vesper-durable`'s
-  // checkpointer could be deleted rather than merely shrunk. Shared by `resume`
-  // and `branchFrom`, which differ only in how the session was claimed — a
-  // branch writes its marker during `open`, so by the time this runs the
+  // checkpointer could be deleted rather than merely shrunk. Shared by every
+  // Conversation execution, which differs only in how the session was claimed
+  // — a branch writes its marker during `open`, so by the time this runs the
   // difference is already inside `session.history` and nothing below can
   // forget to account for it.
   //
@@ -1846,132 +1964,90 @@ const fromParts = <
   // the whole difference from an ordinary recorded run: `stream` opens a fresh
   // `Chat` seeded with instructions alone, and this seeds one with the
   // conversation the records describe. Everything else — recording, signals,
-  // the dispatch seam — is the same wiring `recordingTo` builds.
-  const continuing = (
+  // the dispatch seam — is shared by every Conversation execution.
+  const continuingStream = (
     session: AgentLog.Session,
     input: Prompt.RawInput,
     runtime?: RunPolicyRuntime.Runtime,
   ) =>
-    Effect.gen(function* () {
-      // Read before the run writes anything. `session.history` is the scan
-      // `open` already performed, so this cannot see this run's own records —
-      // which is the same timing property the recovery index rests on.
-      //
-      // `usageFrom` reads the whole history and `messagesFrom` reads only the
-      // active path within it. That asymmetry is deliberate and is the reason
-      // neither of them takes a pre-filtered array: an abandoned branch costs
-      // money that still has to be reported and says nothing the model should
-      // be shown. `branch.ts` carries the table.
-      const total = session.usage;
-      const prior = {
-        input: Math.max(0, total.input - session.inheritedUsage.input),
-        output: Math.max(0, total.output - session.inheritedUsage.output),
-      };
-      const latest = session.latestTurnUsage;
-      const chat = yield* Chat.fromPrompt(
-        Prompt.concat(
-          Prompt.make([{ role: 'system', content: parts.instructions }]),
-          AgentHistory.messagesFrom(session.history),
-        ),
-      );
+    Stream.unwrap(
+      Effect.gen(function* () {
+        // Read before the run writes anything. `session.history` is the scan
+        // `open` already performed, so this cannot see this run's own records —
+        // which is the same timing property the recovery index rests on.
+        //
+        // `usageFrom` reads the whole history and `messagesFrom` reads only the
+        // active path within it. That asymmetry is deliberate and is the reason
+        // neither of them takes a pre-filtered array: an abandoned branch costs
+        // money that still has to be reported and says nothing the model should
+        // be shown. `branch.ts` carries the table.
+        const total = session.usage;
+        const prior = {
+          input: Math.max(0, total.input - session.inheritedUsage.input),
+          output: Math.max(0, total.output - session.inheritedUsage.output),
+        };
+        const latest = session.latestTurnUsage;
+        const chat = yield* Chat.fromPrompt(
+          Prompt.concat(
+            Prompt.make([{ role: 'system', content: parts.instructions }]),
+            AgentHistory.messagesFrom(session.history),
+          ),
+        );
 
-      const entry = parts.entry(
-        wiring(session, {
-          runtime,
-          startRun: (effective) =>
-            AgentLog.start(session, {
-              agent: parts.name,
-              revision: parts.revision,
-              input: effective,
-            }),
-          lastTurn:
-            latest === undefined
-              ? undefined
-              : {
-                  inputTokens: latest.input,
-                  outputTokens: latest.output,
-                },
-        }),
-      );
-      const result = yield* withSession(
-        session,
-        foldToResult(AgentLog.record(session, entry.streamIn(chat, input))),
-      );
-
-      return {
-        ...result,
-        usage: {
-          input: prior.input + result.usage.input,
-          output: prior.output + result.usage.output,
-        },
-      } satisfies Result;
-    });
-
-  // The claim differs for resume, branch, and fork; continuation does not.
-  const continueFrom = <E, R>(
-    opener: Effect.Effect<AgentLog.Session, E, R>,
-    input: Prompt.RawInput,
-  ) =>
-    span(
-      Effect.flatMap(opener, (session) =>
-        withSession(session, continuing(session, input)),
-      ),
-    );
-
-  const recordStream = (
-    conversationId: string,
-    input: Prompt.RawInput,
-    policy?: RecordingPolicy.Policy<never>,
-  ) => {
-    const target = LogVocabulary.ConversationId.make(conversationId);
-    const recorded = (
-      input: Prompt.RawInput,
-      events: (
-        session: AgentLog.Session,
-      ) => Stream.Stream<
-        AgentEvents.Event<RuntimeTools>,
-        RunError | AgentLog.CompatibilityError,
-        BaseRequires
-      >,
-    ): Stream.Stream<
-      AgentEvents.Event<RuntimeTools>,
-      RunError | AgentLog.CompatibilityError,
-      BaseRequires | LogStore.Service
-    > =>
-      Stream.unwrap(
-        Effect.gen(function* () {
-          let session = yield* AgentLog.open(target, {
-            compatibility: { agent: parts.name, revision: parts.revision },
-          });
-          if (policy !== undefined) {
-            const context = yield* Effect.context<never>();
-            session = AgentLog.withRecordingPolicy(
-              session,
-              RecordingPolicyRuntime.compile(policy, context),
-            );
-          }
-          return AgentLog.record(
-            session,
-            streamWithSession(session, events(session)),
-          );
-        }),
-      );
-
-    return recorded(input, (session) =>
-      parts
-        .entry(
+        const entry = parts.entry(
           wiring(session, {
+            runtime,
             startRun: (effective) =>
               AgentLog.start(session, {
                 agent: parts.name,
                 revision: parts.revision,
                 input: effective,
               }),
+            lastTurn:
+              latest === undefined
+                ? undefined
+                : {
+                    inputTokens: latest.input,
+                    outputTokens: latest.output,
+                  },
           }),
-        )
-        .stream(input),
+        );
+        // Persist per-run usage, then expose lifetime conversation usage to the
+        // caller. Mapping before the recording sink would write cumulative totals
+        // into every run and count the same history again on the next open.
+        return AgentLog.record(session, entry.streamIn(chat, input)).pipe(
+          Stream.map((event) =>
+            event._tag === 'Completed'
+              ? AgentEvents.completed(
+                  event.text,
+                  event.steps,
+                  {
+                    input: prior.input + event.usage.input,
+                    output: prior.output + event.usage.output,
+                  },
+                  event.outcome,
+                )
+              : event,
+          ),
+        );
+      }),
     );
-  };
+
+  // The claim differs for ordinary continuation, branch, and fork; the stream
+  // after that claim does not.
+  const streamFrom = <E, R>(
+    opener: Effect.Effect<AgentLog.Session, E, R>,
+    input: Prompt.RawInput,
+    runtime?: RunPolicyRuntime.Runtime,
+  ) =>
+    runStream(
+      Stream.unwrap(
+        Effect.map(opener, (session) =>
+          continuingStream(session, input, runtime),
+        ),
+      ),
+      true,
+    );
 
   const agent: Instance<
     Name,
@@ -1980,7 +2056,8 @@ const fromParts = <
     RuntimeTools,
     BaseRequires,
     InterceptorRequires,
-    RunError
+    RunError,
+    StateDefinition
   > = {
     [TypeId]: TypeId,
     name: parts.name,
@@ -1988,6 +2065,7 @@ const fromParts = <
     description: parts.description,
     toolkit: parts.toolkit,
     instructions: parts.instructions,
+    state: parts.state,
     ...publicPlain,
 
     of: (handlers) => handlers,
@@ -2015,7 +2093,8 @@ const fromParts = <
         RuntimeTools,
         BaseRequires,
         Interception.Services<I>,
-        RunError
+        RunError,
+        StateDefinition
       >({
         ...parts,
         interceptor: interceptor as unknown as Interception.Interceptor,
@@ -2039,7 +2118,8 @@ const fromParts = <
         RuntimeTools,
         WithoutOwnHandlers<BaseRequires, OwnTools>,
         InterceptorRequires,
-        RunError
+        RunError,
+        StateDefinition
       >({
         ...parts,
         entry: (incoming: Wiring) =>
@@ -2052,24 +2132,27 @@ const fromParts = <
     },
   };
   register(agent, {
-    record: recordStream as AgentProtocol<BaseRequires, RuntimeTools>['record'],
-    continue: ((conversationId, input, options) => {
+    stream: (conversationId, input, options) => {
       const compatibility = { agent: parts.name, revision: parts.revision };
       const opener =
         options?.forkConversationId === undefined
-          ? AgentLog.open(LogVocabulary.ConversationId.make(conversationId), {
+          ? AgentLog.open(conversationId, {
               compatibility,
               ...(options?.branchFrom === undefined
                 ? {}
                 : { branchFrom: options.branchFrom }),
+              ...(options?.pendingWait === undefined
+                ? {}
+                : { pendingWait: options.pendingWait }),
             })
           : AgentLog.fork(
-              LogVocabulary.ConversationId.make(conversationId),
+              conversationId,
               options.branchFrom ?? LogOffset.START,
-              LogVocabulary.ConversationId.make(options.forkConversationId),
+              options.forkConversationId,
               compatibility,
+              options.pendingWait,
             );
-      return continueFrom(
+      return streamFrom(
         Effect.flatMap(opener, (session) =>
           options?.policy === undefined
             ? Effect.succeed(session)
@@ -2082,30 +2165,33 @@ const fromParts = <
         ),
         input,
       );
-    }) as AgentProtocol<BaseRequires, RuntimeTools>['continue'],
+    },
     run: (
       runtime: RunPolicyRuntime.Runtime,
       session: AgentLog.Session | undefined,
       input: Prompt.RawInput,
     ) =>
-      span(
-        session === undefined
-          ? foldToResult(
+      session === undefined
+        ? foldToResult(
+            runStream(
               parts.entry(wiring(undefined, { runtime })).stream(input),
-            )
-          : Effect.andThen(
-              AgentLog.assertCompatible(session, {
-                agent: parts.name,
-                revision: parts.revision,
-              }),
-              Effect.suspend(() => {
-                const completed = session.completed;
-                return completed === undefined
-                  ? continuing(session, input, runtime)
-                  : Effect.succeed(completed);
-              }),
+              false,
             ),
-      ),
+          )
+        : Effect.andThen(
+            AgentLog.assertCompatible(session, {
+              agent: parts.name,
+              revision: parts.revision,
+            }),
+            Effect.suspend(() => {
+              const completed = session.completed;
+              return completed === undefined
+                ? foldToResult(
+                    runStream(continuingStream(session, input, runtime), true),
+                  )
+                : Effect.succeed(completed);
+            }),
+          ),
   });
   return agent;
 };
@@ -2140,6 +2226,146 @@ const observe = (state: TurnState, part: Response.StreamPartEncoded): void => {
       break;
     default:
       break;
+  }
+};
+
+type EncodableStreamPart = Response.StreamPart<Record<string, Tool.Any>>;
+type EncodableToolCall = Extract<
+  EncodableStreamPart,
+  { readonly type: 'tool-call' }
+>;
+type EncodableToolResult = Extract<
+  EncodableStreamPart,
+  { readonly type: 'tool-result' }
+>;
+type EncodableFile = Extract<EncodableStreamPart, { readonly type: 'file' }>;
+
+type PartEncodingStrategy = 'identity' | 'tool-call' | 'tool-result' | 'file';
+
+const classifyPart = Match.type<EncodableStreamPart>().pipe(
+  Match.discriminatorsExhaustive('type')({
+    'text-start': () => 'identity' as const,
+    'text-delta': () => 'identity' as const,
+    'text-end': () => 'identity' as const,
+    'reasoning-start': () => 'identity' as const,
+    'reasoning-delta': () => 'identity' as const,
+    'reasoning-end': () => 'identity' as const,
+    'tool-params-start': () => 'identity' as const,
+    'tool-params-delta': () => 'identity' as const,
+    'tool-params-end': () => 'identity' as const,
+    'tool-call': () => 'tool-call' as const,
+    'tool-result': () => 'tool-result' as const,
+    'tool-approval-request': () => 'identity' as const,
+    file: () => 'file' as const,
+    source: () => 'identity' as const,
+    'response-metadata': () => 'identity' as const,
+    finish: () => 'identity' as const,
+    error: () => 'identity' as const,
+  }),
+);
+
+const encodePartError = (error: Schema.SchemaError): AiError.AiError =>
+  new AiError.AiError({
+    module: 'Agent',
+    method: 'encodePart',
+    reason: AiError.InvalidOutputError.fromSchemaError(error),
+  });
+
+const encodeIdentity = <Tools extends Record<string, Tool.Any>>(
+  part: Response.StreamPart<Tools>,
+): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
+  // The remaining part variants currently have no transformation in this
+  // module. Keep the cast local to this explicit identity branch so a new
+  // Response part must still be added to the exhaustive classifier above.
+  Effect.succeed(part as Response.StreamPartEncoded);
+
+const encodeToolCall = <Tools extends Record<string, Tool.Any>>(
+  part: EncodableToolCall,
+  toolkit: Toolkit.WithHandler<Tools>,
+): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
+  const tool = Object.hasOwn(toolkit.tools, part.name)
+    ? toolkit.tools[part.name]
+    : undefined;
+  if (tool === undefined) {
+    return Effect.fail(
+      new AiError.AiError({
+        module: 'Agent',
+        method: 'encodePart',
+        reason: new AiError.InvalidOutputError({
+          description: `Model emitted unknown tool ${part.name}`,
+        }),
+      }),
+    );
+  }
+  // The toolkit lookup erases the name-to-schema relationship. The runtime
+  // schema is still the one that produced `part.params`; this assertion only
+  // restores its encoding-service requirement for the generic helper, just as
+  // dispatch restores the handler relationship.
+  const encoded = Schema.encodeEffect(tool.parametersSchema)(
+    part.params,
+  ) as Effect.Effect<
+    unknown,
+    Schema.SchemaError,
+    ParameterEncodingServices<Tools>
+  >;
+  return encoded.pipe(
+    Effect.mapError(encodePartError),
+    Effect.map((params) => ({
+      type: 'tool-call',
+      id: part.id,
+      name: part.name,
+      params,
+      providerExecuted: part.providerExecuted,
+    })),
+  );
+};
+
+const encodeToolResult = (
+  part: EncodableToolResult,
+): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
+  // The decoded result can be a substituted value that deliberately does not
+  // satisfy the tool schema. `encodedResult` is already the exact
+  // provider-facing value in this case.
+  Effect.succeed({
+    type: 'tool-result',
+    id: part.id,
+    name: part.name,
+    result: part.encodedResult,
+    isFailure: part.isFailure,
+    providerExecuted: part.providerExecuted,
+    preliminary: part.preliminary,
+  });
+
+const encodeFile = (
+  part: EncodableFile,
+): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
+  Schema.encodeEffect(Response.FilePart)(part).pipe(
+    Effect.mapError(encodePartError),
+  );
+
+const assertPartEncodingStrategy = (strategy: never): never => {
+  throw new Error(`Unhandled response part encoding strategy: ${strategy}`);
+};
+
+/** Encode a decoded model part before it reaches observers or persistence. */
+const encodePart = <Tools extends Record<string, Tool.Any>>(
+  part: Response.StreamPart<Tools>,
+  toolkit: Toolkit.WithHandler<Tools>,
+): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
+  const strategy: PartEncodingStrategy = classifyPart(
+    part as EncodableStreamPart,
+  );
+  switch (strategy) {
+    case 'identity':
+      return encodeIdentity(part);
+    case 'tool-call':
+      return encodeToolCall(part as EncodableToolCall, toolkit);
+    case 'tool-result':
+      return encodeToolResult(part as EncodableToolResult);
+    case 'file':
+      return encodeFile(part as EncodableFile);
+    default:
+      return assertPartEncodingStrategy(strategy);
   }
 };
 

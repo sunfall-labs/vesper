@@ -14,6 +14,14 @@ export interface Policy<R = never> {
     value: unknown,
     record: ConversationRecord.RecordOf<'ToolOutcome'>,
   ) => Effect.Effect<unknown, never, R>;
+  readonly externalRequest?: (
+    value: unknown,
+    record: ConversationRecord.RecordOf<'ToolSuspended'>,
+  ) => Effect.Effect<unknown, never, R>;
+  readonly externalResult?: (
+    value: unknown,
+    record: ConversationRecord.RecordOf<'ToolWaitCompleted'>,
+  ) => Effect.Effect<unknown, never, R>;
   readonly signal?: (
     signal: Pick<SignalRecord, 'kind' | 'text' | 'source'>,
   ) => Effect.Effect<Pick<SignalRecord, 'kind' | 'text' | 'source'>, never, R>;
@@ -30,6 +38,10 @@ export type Services<P> =
   | FunctionServices<P extends { readonly prompt: infer F } ? F : never>
   | FunctionServices<P extends { readonly toolParameters: infer F } ? F : never>
   | FunctionServices<P extends { readonly toolResult: infer F } ? F : never>
+  | FunctionServices<
+      P extends { readonly externalRequest: infer F } ? F : never
+    >
+  | FunctionServices<P extends { readonly externalResult: infer F } ? F : never>
   | FunctionServices<P extends { readonly signal: infer F } ? F : never>
   | FunctionServices<P extends { readonly cause: infer F } ? F : never>;
 

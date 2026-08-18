@@ -7,6 +7,7 @@ import {
 } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 
 import { Agent } from '../src/agent.js';
 import { Skill } from '../src/skill.js';
@@ -161,6 +162,7 @@ const drive = <R>(agent: Agent.Named<string, R>) =>
       .pipe(
         Effect.provide(pingHandlers),
         Effect.provide(recording(tools, system)),
+        Effect.provide(NodeServices.layer),
       );
 
     return { tools: yield* Ref.get(tools), system: yield* Ref.get(system) };

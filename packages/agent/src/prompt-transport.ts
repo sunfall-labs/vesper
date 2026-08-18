@@ -1,4 +1,5 @@
-import { Encoding, Result } from 'effect';
+import { Encoding, Effect, Result, Schema } from 'effect';
+import { Prompt } from 'effect/unstable/ai';
 
 const TAG = '@sunfall/vesper-agent/PromptFileData';
 
@@ -8,6 +9,13 @@ interface Envelope {
   readonly encoding: 'base64' | 'url';
   readonly value: string;
 }
+
+/** A persisted prompt could not be safely handed to the model. */
+export class DecodeError extends Schema.TaggedError<DecodeError>(
+  '@sunfall/vesper-agent/PromptDecodeError',
+)('PromptDecodeError', {
+  message: Schema.String,
+}) {}
 
 /** Make non-JSON file data durable without changing Effect's live prompt. */
 export const encode = (prompt: unknown): unknown =>
@@ -56,6 +64,33 @@ export const decode = (prompt: unknown): unknown =>
     );
   });
 
+/**
+ * Decode and validate a prompt read from durable history.
+ *
+ * `Prompt.make` intentionally has a synchronous convenience API and throws a
+ * schema parse error for malformed message arrays. History is read inside an
+ * Effect, so this boundary turns both transport failures and message-shape
+ * failures into a typed error before the prompt reaches the model.
+ */
+export const decodeMessages = (
+  prompt: unknown,
+): Effect.Effect<ReadonlyArray<Prompt.Message>, DecodeError> =>
+  Effect.try({
+    try: () => decode(prompt),
+    catch: (cause) => new DecodeError({ message: messageOf(cause) }),
+  }).pipe(
+    Effect.flatMap((decoded) =>
+      Schema.decodeUnknownEffect(Schema.Array(Prompt.Message))(decoded).pipe(
+        Effect.mapError(
+          (cause) =>
+            new DecodeError({
+              message: `Malformed persisted prompt messages: ${messageOf(cause)}`,
+            }),
+        ),
+      ),
+    ),
+  );
+
 const mapFileData = (
   prompt: unknown,
   transform: (data: unknown) => unknown,
@@ -86,5 +121,8 @@ const isEnvelopeCandidate = (
   value: unknown,
 ): value is Record<PropertyKey, unknown> =>
   isObject(value) && '_tag' in value && value._tag === TAG;
+
+const messageOf = (cause: unknown): string =>
+  cause instanceof Error ? cause.message : String(cause);
 
 export * as PromptTransport from './prompt-transport.js';

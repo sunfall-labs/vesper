@@ -1,77 +1,130 @@
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Context, Effect } from 'effect';
 
 import type { RecordingPolicy } from './recording-policy.js';
 
 /** Compiled policy carried by a session; it no longer has a requirement channel. */
 export interface Runtime {
-  readonly filter: <Tag extends ConversationRecord.Record['_tag']>(
-    record: ConversationRecord.RecordOf<Tag>,
-  ) => Effect.Effect<ConversationRecord.RecordOf<Tag>>;
+  readonly filter: (
+    record: ConversationRecord.Record,
+  ) => Effect.Effect<ConversationRecord.Record>;
 }
 
 /** Explicit default: records are persisted raw. */
 export const raw: Runtime = { filter: Effect.succeed };
 
+type CompiledFilter<R> = (
+  record: ConversationRecord.Record,
+) => Effect.Effect<ConversationRecord.Record, never, R>;
+
 export const compile = <R>(
   policy: RecordingPolicy.Policy<R>,
   context: Context.Context<R>,
-): Runtime => ({
-  filter: (record) =>
-    filter(policy, record).pipe(Effect.provide(context)) as Effect.Effect<
-      typeof record
-    >,
-});
+): Runtime => {
+  const compiled = compileFilter(policy);
+  return {
+    filter: (record) => compiled(record).pipe(Effect.provide(context)),
+  };
+};
 
 export const filter = <R>(
   policy: RecordingPolicy.Policy<R>,
   record: ConversationRecord.Record,
-): Effect.Effect<ConversationRecord.Record, never, R> => {
-  switch (record._tag) {
-    case 'RunStarted':
-      return policy.prompt === undefined
-        ? Effect.succeed(record)
-        : Effect.map(policy.prompt(record.prompt), (prompt) => ({
-            ...record,
-            prompt,
-          }));
-    case 'ToolCall':
-      return policy.toolParameters === undefined
-        ? Effect.succeed(record)
+): Effect.Effect<ConversationRecord.Record, never, R> =>
+  compileFilter(policy)(record);
+
+const compileFilter = <R>(
+  policy: RecordingPolicy.Policy<R>,
+): CompiledFilter<R> =>
+  ConversationRecord.Record.match<
+    Effect.Effect<ConversationRecord.Record, never, R>
+  >({
+    RunStarted: (record) =>
+      policy.prompt === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.prompt(record.prompt),
+            (prompt): ConversationRecord.Record => ({
+              ...record,
+              prompt,
+            }),
+          ),
+    ToolCall: (record) =>
+      policy.toolParameters === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
             policy.toolParameters(record.params, record),
-            (params) => ({
+            (params): ConversationRecord.Record => ({
               ...record,
               params,
             }),
-          );
-    case 'ToolStarted':
-      return Effect.succeed(record);
-    case 'ToolOutcome':
-      return policy.toolResult === undefined
-        ? Effect.succeed(record)
-        : Effect.map(policy.toolResult(record.result, record), (result) => ({
-            ...record,
-            result,
-          }));
-    case 'Signal':
-    case 'SignalReceived':
-      return policy.signal === undefined
-        ? Effect.succeed(record)
-        : Effect.map(policy.signal(record), (signal) => ({
-            ...record,
-            ...signal,
-          }));
-    case 'RunSettled':
-      return policy.cause === undefined
-        ? Effect.succeed(record)
-        : Effect.map(policy.cause(record.detail), (detail) => ({
-            ...record,
-            detail,
-          }));
-    default:
-      return Effect.succeed(record);
-  }
-};
+          ),
+    ToolStarted: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    ToolSuspended: (record) =>
+      policy.externalRequest === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.externalRequest(record.request, record),
+            (request): ConversationRecord.Record => ({ ...record, request }),
+          ),
+    ToolResumed: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    ToolWaitCompleted: (record) =>
+      policy.externalResult === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.externalResult(record.result, record),
+            (result): ConversationRecord.Record => ({ ...record, result }),
+          ),
+    ToolWaitRestarted: (record) =>
+      Effect.succeed<ConversationRecord.Record>(record),
+    ToolOutcome: (record) =>
+      policy.toolResult === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.toolResult(record.result, record),
+            (result): ConversationRecord.Record => ({
+              ...record,
+              result,
+            }),
+          ),
+    Signal: (record) =>
+      policy.signal === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.signal(record),
+            (signal): ConversationRecord.Record => ({
+              ...record,
+              ...signal,
+            }),
+          ),
+    SignalReceived: (record) =>
+      policy.signal === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.signal(record),
+            (signal): ConversationRecord.Record => ({
+              ...record,
+              ...signal,
+            }),
+          ),
+    RunSettled: (record) =>
+      policy.cause === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.cause(record.detail),
+            (detail): ConversationRecord.Record => ({
+              ...record,
+              detail,
+            }),
+          ),
+    Text: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    TurnFinished: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    Compacted: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    BranchedFrom: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    Completed: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    StateCheckpoint: (record) =>
+      Effect.succeed<ConversationRecord.Record>(record),
+    ChildSession: (record) => Effect.succeed<ConversationRecord.Record>(record),
+  });
 
 export * as RecordingPolicyRuntime from './recording-policy-runtime.js';

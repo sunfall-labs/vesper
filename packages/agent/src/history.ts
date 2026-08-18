@@ -1,5 +1,5 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
@@ -96,11 +96,12 @@ import type { Stop } from './stop.js';
  * The agent's system message is **not** included: it belongs to the agent, not
  * to the conversation, and an agent whose instructions changed since the
  * crashed run should resume under the instructions it has now. Callers seed it
- * themselves — `Agent.resume` does.
+ * themselves — `Conversation.run` does.
  *
- * Pure, and total for records this family wrote. A `RunStarted` whose stored
- * prompt is not a prompt throws, which becomes a defect at the call site: that
- * is corruption, and it is the same call `log.ts` makes for a store failure.
+ * Pure for trusted records this family wrote. A `RunStarted` whose stored
+ * prompt is malformed can throw through Prompt's synchronous convenience
+ * parser; `AgentLog.open` validates untrusted durable history before handing
+ * a session to callers.
  */
 export const messagesFrom = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
@@ -122,7 +123,7 @@ export const messagesFrom = (
  * The two message sequences line up because they are the same conversation
  * accumulated twice — `Chat`'s history is what the loop appended turn by turn,
  * and this is what the records of those same turns rebuild. That equivalence
- * is not a new assumption; it is the one `Agent.resume` has always rested on,
+ * is not a new assumption; it is the one `Conversation.run` rests on,
  * because it is what makes a rebuilt history a continuation rather than a
  * different conversation.
  *
@@ -254,7 +255,10 @@ const fold = (
     );
 
     const content = assistant.filter(
-      (part) => part.type !== 'tool-call' || answered.has(part.id),
+      (part) =>
+        part.type !== 'tool-call' ||
+        part.providerExecuted === true ||
+        answered.has(part.id),
     );
     const answers = results.filter((result) => asked.has(result.id));
 
@@ -277,92 +281,99 @@ const fold = (
     resultsAt = LogOffset.START;
   };
 
+  let currentOffset = LogOffset.START;
+  const matchRecord = ConversationRecord.Record.match({
+    RunStarted: (record) => {
+      // A previous run's input is a user message in this conversation, and
+      // `RunStarted.prompt` already holds it normalised to messages.
+      flush();
+      messages.push(
+        ...Prompt.make(
+          PromptTransport.decode(record.prompt) as Prompt.RawInput,
+        ).content.map((message) => ({ offset: currentOffset, message })),
+      );
+    },
+
+    Text: (record) => {
+      if (assistant.length === 0) assistantAt = currentOffset;
+      assistant.push(Prompt.makePart('text', { text: record.text }));
+    },
+
+    ToolCall: (record) => {
+      if (assistant.length === 0) assistantAt = currentOffset;
+      assistant.push(
+        Prompt.makePart('tool-call', {
+          id: record.id,
+          name: record.name,
+          providerExecuted: record.providerExecuted ?? false,
+          params: record.params,
+        }),
+      );
+    },
+
+    ToolOutcome: (record) => {
+      if (results.length === 0) resultsAt = currentOffset;
+      results.push(
+        Prompt.makePart('tool-result', {
+          id: record.id,
+          name: record.name,
+          isFailure: record.outcome === 'failure',
+          providerExecuted: record.providerExecuted ?? false,
+          // Already the toolkit's encoding — the form `Prompt` puts in front
+          // of the model — which is why `ToolOutcome.result` stores that and
+          // not the decoded value.
+          result: record.result,
+        }),
+      );
+    },
+
+    TurnFinished: () => {
+      flush();
+    },
+
+    SignalReceived: (record) => {
+      // A steer became a user message on the next turn, so it lands after
+      // the turn that consumed it. Flushing first is what puts the model's
+      // own words before the instruction that redirected it. A cancel
+      // changed no prompt; it ended a run.
+      flush();
+      if (record.kind === 'steer' && record.disposition !== 'rejected') {
+        messages.push({
+          offset: currentOffset,
+          message: Prompt.makeMessage('user', {
+            content: [Prompt.makePart('text', { text: record.text })],
+          }),
+        });
+      }
+    },
+
+    // Everything below contributes no message. `Compacted` is handled by
+    // {@link rebuild}, which has already decided which records reach here —
+    // a compaction that survived that decision is an earlier one the latest
+    // superseded, and replaying its summary would say a superseded thing
+    // twice. `Completed` repeats the final turn's text; `ChildSession`
+    // describes a delegation the parent already recorded as an ordinary tool
+    // call; `RunSettled` is bookkeeping; and `Signal` does not live in this
+    // stream at all. `BranchedFrom` is the same situation as `Compacted`
+    // seen once more — `AgentBranch.activePath` has already used it to
+    // decide which records reach here, so no marker ever survives to this
+    // fold and one that did would say nothing about the conversation.
+    Compacted: () => {},
+    BranchedFrom: () => {},
+    ToolStarted: () => {},
+    ToolSuspended: () => {},
+    ToolResumed: () => {},
+    ToolWaitCompleted: () => {},
+    ToolWaitRestarted: () => {},
+    Completed: () => {},
+    ChildSession: () => {},
+    RunSettled: () => {},
+    Signal: () => {},
+    StateCheckpoint: () => {},
+  });
   for (const { offset, record } of records) {
-    switch (record._tag) {
-      case 'RunStarted':
-        // A previous run's input is a user message in this conversation, and
-        // `RunStarted.prompt` already holds it normalised to messages.
-        flush();
-        messages.push(
-          ...Prompt.make(
-            PromptTransport.decode(record.prompt) as Prompt.RawInput,
-          ).content.map((message) => ({ offset, message })),
-        );
-        break;
-
-      case 'Text':
-        if (assistant.length === 0) assistantAt = offset;
-        assistant.push(Prompt.makePart('text', { text: record.text }));
-        break;
-
-      case 'ToolCall':
-        if (assistant.length === 0) assistantAt = offset;
-        assistant.push(
-          Prompt.makePart('tool-call', {
-            id: record.id,
-            name: record.name,
-            params: record.params,
-            providerExecuted: false,
-          }),
-        );
-        break;
-
-      case 'ToolOutcome':
-        if (results.length === 0) resultsAt = offset;
-        results.push(
-          Prompt.makePart('tool-result', {
-            id: record.id,
-            name: record.name,
-            isFailure: record.outcome === 'failure',
-            providerExecuted: false,
-            // Already the toolkit's encoding — the form `Prompt` puts in front
-            // of the model — which is why `ToolOutcome.result` stores that and
-            // not the decoded value.
-            result: record.result,
-          }),
-        );
-        break;
-
-      case 'TurnFinished':
-        flush();
-        break;
-
-      case 'SignalReceived':
-        // A steer became a user message on the next turn, so it lands after
-        // the turn that consumed it. Flushing first is what puts the model's
-        // own words before the instruction that redirected it. A cancel
-        // changed no prompt; it ended a run.
-        flush();
-        if (record.kind === 'steer' && record.disposition !== 'rejected') {
-          messages.push({
-            offset,
-            message: Prompt.makeMessage('user', {
-              content: [Prompt.makePart('text', { text: record.text })],
-            }),
-          });
-        }
-        break;
-
-      // Everything below contributes no message. `Compacted` is handled by
-      // {@link rebuild}, which has already decided which records reach here —
-      // a compaction that survived that decision is an earlier one the latest
-      // superseded, and replaying its summary would say a superseded thing
-      // twice. `Completed` repeats the final turn's text; `ChildSession`
-      // describes a delegation the parent already recorded as an ordinary tool
-      // call; `RunSettled` is bookkeeping; and `Signal` does not live in this
-      // stream at all. `BranchedFrom` is the same situation as `Compacted`
-      // seen once more — `AgentBranch.activePath` has already used it to
-      // decide which records reach here, so no marker ever survives to this
-      // switch and one that did would say nothing about the conversation.
-      case 'Compacted':
-      case 'BranchedFrom':
-      case 'ToolStarted':
-      case 'Completed':
-      case 'ChildSession':
-      case 'RunSettled':
-      case 'Signal':
-        break;
-    }
+    currentOffset = offset;
+    matchRecord(record);
   }
 
   // The last turn of a crashed run has no `TurnFinished` — that is what makes
@@ -394,28 +405,43 @@ export const usageFrom = (
   let total: Stop.Usage = { input: 0, output: 0 };
   let run: Stop.Usage = { input: 0, output: 0 };
 
+  const matchRecord = ConversationRecord.Record.match({
+    RunStarted: () => {
+      // Only non-zero for a run that reported usage and never settled, which
+      // takes a lost finalizer. Banking it is cheaper than losing it.
+      total = add(total, run);
+      run = { input: 0, output: 0 };
+    },
+    TurnFinished: (record) => {
+      run = record.usage;
+    },
+    Completed: (record) => {
+      run = record.usage;
+    },
+    RunSettled: (record) => {
+      total =
+        record.resume === undefined
+          ? add(total, record.usage)
+          : record.resume.usage;
+      run = { input: 0, output: 0 };
+    },
+    Text: () => {},
+    ToolCall: () => {},
+    ToolStarted: () => {},
+    ToolSuspended: () => {},
+    ToolResumed: () => {},
+    ToolWaitCompleted: () => {},
+    ToolWaitRestarted: () => {},
+    ToolOutcome: () => {},
+    Compacted: () => {},
+    BranchedFrom: () => {},
+    StateCheckpoint: () => {},
+    ChildSession: () => {},
+    Signal: () => {},
+    SignalReceived: () => {},
+  });
   for (const { record } of records) {
-    switch (record._tag) {
-      case 'RunStarted':
-        // Only non-zero for a run that reported usage and never settled, which
-        // takes a lost finalizer. Banking it is cheaper than losing it.
-        total = add(total, run);
-        run = { input: 0, output: 0 };
-        break;
-      case 'TurnFinished':
-      case 'Completed':
-        run = record.usage;
-        break;
-      case 'RunSettled':
-        total =
-          record.resume === undefined
-            ? add(total, record.usage)
-            : record.resume.usage;
-        run = { input: 0, output: 0 };
-        break;
-      default:
-        break;
-    }
+    matchRecord(record);
   }
 
   return add(total, run);

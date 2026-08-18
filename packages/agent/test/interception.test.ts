@@ -2,7 +2,17 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Context, Effect, Layer, Ref, Schema, Stream } from 'effect';
+import * as NodeServices from '@effect/platform-node/NodeServices';
+import {
+  Context,
+  Crypto,
+  Effect,
+  Layer,
+  Ref,
+  Result,
+  Schema,
+  Stream,
+} from 'effect';
 import {
   AiError,
   Chat,
@@ -19,6 +29,11 @@ import { Conversation } from '../src/conversation.js';
 import { AgentEvents } from '../src/event.js';
 import { Interception } from '../src/interception.js';
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // The three seams, and what each is allowed to do.
 //
@@ -107,6 +122,16 @@ const lookup = Tool.make('lookup', {
   success: Schema.Struct({ status: Schema.String }),
 });
 
+const DefectiveResult = Schema.declareConstructor<{
+  readonly status: string;
+}>()([], () => () => Effect.die(new Error('result decoder defect')));
+
+const defectiveLookup = Tool.make('lookup', {
+  description: 'look an order up',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: DefectiveResult,
+});
+
 const agentWith = (ran: { count: number }) =>
   Agent.make({
     name: 'test',
@@ -121,19 +146,33 @@ const agentWith = (ran: { count: number }) =>
       }),
   });
 
+const defectiveAgent = Agent.make({
+  name: 'test-defective-result',
+  revision: '1',
+  instructions: 'be terse',
+  toolkit: Toolkit.make(defectiveLookup),
+}).withHandlers({
+  lookup: () => Effect.succeed({ status: 'never' }),
+});
+
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   calls: ReadonlyArray<Call> = [callingTurn, answeringTurn],
   prompts: string[] = [],
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(scripted(calls, prompts)),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
-const runQuiet = <A>(effect: Effect.Effect<A>) => Effect.exit(effect);
+const runQuiet = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.exit(effect);
 
 // ---------------------------------------------------------------- beforeTurn
 
@@ -460,6 +499,29 @@ describe('beforeToolCall', () => {
         false,
       );
     }),
+  );
+
+  quiet(
+    'does not recover a defect from substituted-result decoding',
+    ({ disableErrorReporting: _disableErrorReporting }) =>
+      runQuiet(
+        run(
+          defectiveAgent
+            .intercepting({
+              beforeToolCall: () =>
+                Effect.succeed(Interception.answer({ status: 'denied' })),
+            })
+            .run('hi')
+            .pipe(Effect.result),
+        ).pipe(
+          Effect.tap((exit) =>
+            Effect.sync(() => {
+              expect(Result.isFailure(exit)).toBe(true);
+              expect(String(exit)).toContain('result decoder defect');
+            }),
+          ),
+        ),
+      ),
   );
 
   quiet(

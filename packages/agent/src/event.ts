@@ -1,7 +1,7 @@
 import { Schema } from 'effect';
 import type { Response, Tool } from 'effect/unstable/ai';
 
-import type { Stop } from './stop.js';
+import { Stop } from './stop.js';
 
 // What a caller observes while an agent runs.
 //
@@ -15,26 +15,20 @@ import type { Stop } from './stop.js';
 // exhaustively match, and so the whole event stream can be serialized —
 // which is what a transport (SSE, a Slack bridge, a durable stream) needs.
 
-export const Lifecycle = Schema.Union([
-  Schema.TaggedStruct('TurnStarted', {
-    step: Schema.Number,
-  }),
-  Schema.TaggedStruct('TurnFinished', {
-    step: Schema.Number,
-    usage: Schema.Struct({
-      input: Schema.Number,
-      output: Schema.Number,
-    }),
-  }),
-  Schema.TaggedStruct('Completed', {
+export const Lifecycle = Schema.TaggedUnion({
+  TurnStarted: {
+    step: Schema.Natural,
+  },
+  TurnFinished: {
+    step: Schema.Natural,
+    usage: Stop.Usage,
+  },
+  Completed: {
     outcome: Schema.Literals(['success', 'cancelled']),
     text: Schema.String,
-    steps: Schema.Number,
-    usage: Schema.Struct({
-      input: Schema.Number,
-      output: Schema.Number,
-    }),
-  }),
+    steps: Schema.Natural,
+    usage: Stop.Usage,
+  },
   /**
    * An out-of-band instruction reached the run and was acted on.
    *
@@ -53,8 +47,8 @@ export const Lifecycle = Schema.Union([
    * exhaustive match over `Lifecycle` has to grow a branch, which is the
    * point.
    */
-  Schema.TaggedStruct('Signalled', {
-    step: Schema.Number,
+  Signalled: {
+    step: Schema.Natural,
     kind: Schema.Literals(['steer', 'cancel']),
     text: Schema.String,
     source: Schema.String,
@@ -66,9 +60,9 @@ export const Lifecycle = Schema.Union([
      * so the brand is applied where the record is written instead.
      */
     at: Schema.String,
-  }),
-  Schema.TaggedStruct('SignalRejected', {
-    step: Schema.Number,
+  },
+  SignalRejected: {
+    step: Schema.Natural,
     kind: Schema.Literals(['steer', 'cancel']),
     text: Schema.String,
     source: Schema.String,
@@ -78,13 +72,13 @@ export const Lifecycle = Schema.Union([
       'signals_per_boundary',
       'steered_bytes',
     ]),
-    used: Schema.Number,
-    maximum: Schema.Number,
-  }),
-  Schema.TaggedStruct('SignalBacklog', {
-    step: Schema.Number,
-    maximum: Schema.Number,
-  }),
+    used: Schema.Natural,
+    maximum: Schema.Natural,
+  },
+  SignalBacklog: {
+    step: Schema.Natural,
+    maximum: Schema.Natural,
+  },
   /**
    * History was summarized to fit the context window.
    *
@@ -103,9 +97,9 @@ export const Lifecycle = Schema.Union([
    * Like `Signalled`, adding it is a public-API change: every exhaustive
    * match over `Lifecycle` grows a branch, which is the point.
    */
-  Schema.TaggedStruct('Compacted', {
+  Compacted: {
     /** The turn that overflowed and is about to be retried. */
-    step: Schema.Number,
+    step: Schema.Natural,
     /** The model's summary, unframed. `Compaction.summaryMessage` frames it. */
     summary: Schema.String,
     /**
@@ -117,10 +111,10 @@ export const Lifecycle = Schema.Union([
      * which does have offsets, resolves that to the record the tail starts
      * at.
      */
-    summarizedMessages: Schema.Number,
-    keptMessages: Schema.Number,
-  }),
-]);
+    summarizedMessages: Schema.Natural,
+    keptMessages: Schema.Natural,
+  },
+});
 
 /**
  * The events that mark where a run is, rather than what it said.
@@ -150,6 +144,15 @@ export type Event<Tools extends Record<string, Tool.Any>> =
       readonly _tag: 'Part';
       readonly step: number;
       readonly part: Response.StreamPart<Tools>;
+      /**
+       * The provider-facing representation of `part`.
+       *
+       * `part` is decoded so live consumers can use the tool's typed result
+       * and parameter values. The encoded sibling is what a recording sink
+       * must persist: a schema transformation (for example `DateFromString`)
+       * can make the two representations differ.
+       */
+      readonly encodedPart: Response.StreamPartEncoded;
     };
 
 /** Public events, including results that could not be schema-decoded. */
@@ -159,25 +162,21 @@ export type ObservedEvent<Tools extends Record<string, Tool.Any>> =
       readonly _tag: 'Part';
       readonly step: number;
       readonly part: StreamPart<Tools>;
+      readonly encodedPart: Response.StreamPartEncoded;
     };
 
-export const turnStarted = (step: number): Lifecycle => ({
-  _tag: 'TurnStarted',
-  step,
-});
+export const turnStarted = (step: number): Lifecycle =>
+  Lifecycle.cases.TurnStarted.make({ step });
 
-export const turnFinished = (step: number, usage: Stop.Usage): Lifecycle => ({
-  _tag: 'TurnFinished',
-  step,
-  usage,
-});
+export const turnFinished = (step: number, usage: Stop.Usage): Lifecycle =>
+  Lifecycle.cases.TurnFinished.make({ step, usage });
 
 export const completed = (
   text: string,
   steps: number,
   usage: Stop.Usage,
   outcome: 'success' | 'cancelled',
-): Lifecycle => ({ _tag: 'Completed', outcome, text, steps, usage });
+): Lifecycle => Lifecycle.cases.Completed.make({ outcome, text, steps, usage });
 
 export const signalled = (
   step: number,
@@ -187,7 +186,7 @@ export const signalled = (
     readonly source: string;
     readonly at: string;
   },
-): Lifecycle => ({ _tag: 'Signalled', step, ...signal });
+): Lifecycle => Lifecycle.cases.Signalled.make({ step, ...signal });
 
 export const signalRejected = (
   step: number,
@@ -202,20 +201,17 @@ export const signalRejected = (
     readonly used: number;
     readonly maximum: number;
   },
-): Lifecycle => ({
-  _tag: 'SignalRejected',
-  step,
-  ...signal,
-  reason: exhaustion.limit,
-  used: exhaustion.used,
-  maximum: exhaustion.maximum,
-});
+): Lifecycle =>
+  Lifecycle.cases.SignalRejected.make({
+    step,
+    ...signal,
+    reason: exhaustion.limit,
+    used: exhaustion.used,
+    maximum: exhaustion.maximum,
+  });
 
-export const signalBacklog = (step: number, maximum: number): Lifecycle => ({
-  _tag: 'SignalBacklog',
-  step,
-  maximum,
-});
+export const signalBacklog = (step: number, maximum: number): Lifecycle =>
+  Lifecycle.cases.SignalBacklog.make({ step, maximum });
 
 export const compacted = (
   step: number,
@@ -224,7 +220,7 @@ export const compacted = (
     readonly summarizedMessages: number;
     readonly keptMessages: number;
   },
-): Lifecycle => ({ _tag: 'Compacted', step, ...summarized });
+): Lifecycle => Lifecycle.cases.Compacted.make({ step, ...summarized });
 
 export const isPart = <Tools extends Record<string, Tool.Any>>(
   event: Event<Tools>,

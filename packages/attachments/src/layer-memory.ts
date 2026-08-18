@@ -45,7 +45,7 @@ const service = (blobs: MutableHashMap.MutableHashMap<string, Uint8Array>) =>
     ): Effect.Effect<A, E> =>
       Effect.provideService(effect, Crypto.Crypto, crypto);
 
-    const put = Effect.fn('AiAttachments.AttachmentStore.put')(function* (
+    const put = Effect.fn('AttachmentStore.put')(function* (
       bytes: Uint8Array,
       options: { readonly mediaType: string },
     ) {
@@ -54,7 +54,7 @@ const service = (blobs: MutableHashMap.MutableHashMap<string, Uint8Array>) =>
       return ref;
     });
 
-    const get = Effect.fn('AiAttachments.AttachmentStore.get')(function* (
+    const get = Effect.fn('AttachmentStore.get')(function* (
       ref: AttachmentRef.Ref,
     ) {
       const stored = MutableHashMap.get(blobs, ref.digest);
@@ -68,9 +68,8 @@ const service = (blobs: MutableHashMap.MutableHashMap<string, Uint8Array>) =>
     // `Effect.fn` with a plain function rather than a generator: the lookup is
     // synchronous and has nothing to yield, and an empty generator trips
     // `require-yield`.
-    const has = Effect.fn('AiAttachments.AttachmentStore.has')(
-      (ref: AttachmentRef.Ref) =>
-        Effect.sync(() => MutableHashMap.has(blobs, ref.digest)),
+    const has = Effect.fn('AttachmentStore.has')((ref: AttachmentRef.Ref) =>
+      Effect.sync(() => MutableHashMap.has(blobs, ref.digest)),
     );
 
     return AttachmentStore.Service.of({ put, get, has });

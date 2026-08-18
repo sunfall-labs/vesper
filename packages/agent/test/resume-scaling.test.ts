@@ -3,35 +3,44 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 interface Reads {
   calls: number;
   records: number;
 }
 
-const counted = (reads: Reads): Layer.Layer<LogStore.Service> =>
-  Layer.effect(
-    LogStore.Service,
-    Effect.gen(function* () {
-      const store = yield* LogStore.Service;
-      return LogStore.Service.of({
-        ...store,
-        readBackwards: (path, options) =>
-          store.readBackwards(path, options).pipe(
-            Effect.tap((page) =>
-              Effect.sync(() => {
-                reads.calls += 1;
-                reads.records += page.records.length;
-              }),
+const counted = (reads: Reads) =>
+  Layer.mergeAll(
+    Layer.effect(
+      LogStore.Service,
+      Effect.gen(function* () {
+        const store = yield* LogStore.Service;
+        return LogStore.Service.of({
+          ...store,
+          readBackwards: (path, options) =>
+            store.readBackwards(path, options).pipe(
+              Effect.tap((page) =>
+                Effect.sync(() => {
+                  reads.calls += 1;
+                  reads.records += page.records.length;
+                }),
+              ),
             ),
-          ),
-      });
-    }),
-  ).pipe(Layer.provide(LogStoreMemory.layer));
+        });
+      }),
+    ).pipe(Layer.provide(testLogLayer)),
+    NodeServices.layer,
+  );
 
 const text = (
   step: number,

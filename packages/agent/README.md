@@ -10,7 +10,9 @@ Every `Agent.make` definition requires a non-empty `revision`. Recorded runs
 persist conversation format, agent name, and revision, and all resumed entry
 points reject incompatible or unrevisioned history before model/tool work.
 Child sessions validate against the child definition, not the parent revision.
-Compatibility failures use the tagged `AgentLog.CompatibilityError` channel.
+Compatibility failures use the tagged `Conversation.CompatibilityError`
+channel, included by `Conversation.Error<A>` alongside the agent and store
+failures for that bound definition.
 `Agent.Result.outcome` is `success` or `cancelled`, and `steps` counts model
 turns that actually started rather than planned turn boundaries.
 
@@ -20,8 +22,44 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
-`/recording-policy`, `/stop`, `/skill`, `/state`, `/interception`, and
+`/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
 `/workflow`.
+
+## Evals
+
+`AgentEval.run` executes a real agent and captures its typed public evidence:
+the final result, event stream, duration, tool calls, and tool results. It keeps
+the agent's exact error and service requirement channels, so an eval cannot
+silently replace production wiring with a test-only runtime.
+
+```ts
+import { Effect } from 'effect';
+import { AgentEval } from '@sunfall/vesper-agent/eval';
+
+const program = Effect.gen(function* () {
+  const capture = yield* AgentEval.run(supportAgent, 'Where is order 1042?');
+
+  return yield* AgentEval.evaluate(
+    capture,
+    [
+      AgentEval.check('looked up the order', (sample) =>
+        AgentEval.toolCalled(sample, 'lookup_order'),
+      ),
+      AgentEval.makeScorer('answer quality', (sample) =>
+        judgeAnswer(sample.result.text),
+      ),
+    ],
+    { passThreshold: 0.8 },
+  );
+});
+```
+
+Scorers are ordinary Effects and can use a deterministic predicate, another
+model, or an application-owned service. Reports include every named score and
+their weighted mean; `passed` requires every criterion to meet the threshold.
+Scores outside `0..1` fail with `InvalidEvalScore`. The input is deliberately
+not retained because prompts commonly contain secrets or customer data; keep a
+dataset identifier beside the capture when a case needs one.
 
 ## Durable State
 
@@ -65,10 +103,17 @@ conversations keep their own state. Concurrent mutations are serialized. A
 checkpoint is independent of tool outcomes and external effects; use stable
 idempotency keys when those effects need replay safety.
 
+Callers do not select an ephemeral or recorded state layer for ordinary agent
+use. The agent opens the handle from the run's lexical session; low-level
+`AgentState.open` remains available for custom orchestration. If the codec
+requires Effect services, those services remain in `Agent.Requires` and must
+be provided by the caller; only the state handle itself is opened by the
+agent.
+
 State definition, compatibility, schema, and JSON-boundary failures use the
-schema-tagged `AgentState.Error`, with stable `reason` values:
-`invalid-definition`, `no-session`, `incompatible`, `decode`, `encode`, and
-`not-json-safe`.
+schema-tagged `AgentState.Error` union: `StateDefinitionError`,
+`StateCompatibilityError`, `StateDecodeError`, `StateEncodeError`, and
+`StateJsonError`.
 Direct state operations expose this error. Declare `failure: AgentState.error`
 when a tool handler lets mutation failures escape; state failures are never
 converted to defects.
@@ -82,9 +127,10 @@ introducing another workflow abstraction:
 import { AgentWorkflow } from '@sunfall/vesper-agent/workflow';
 import { Schema } from 'effect';
 
-class RunFailure extends Schema.TaggedError<RunFailure>()('RunFailure', {
-  message: Schema.String,
-}) {}
+class RunFailure extends Schema.TaggedError<RunFailure>('my-app/RunFailure')(
+  'RunFailure',
+  { message: Schema.String },
+) {}
 
 const SupportRequest = AgentWorkflow.request({
   submissionId: Schema.String,
@@ -155,6 +201,145 @@ activities, suspension, interruption, and wakeup. Use
 `WorkflowEngine.layerMemory` in tests or `ClusterWorkflowEngine.layer` for a
 cluster-backed runtime; Vesper does not wrap either one.
 
+### Yielding from a tool handler
+
+`AgentWorkflow.wait` is a typed durable wait for human review, webhooks, jobs,
+or any other externally supplied result. Mark tools that use workflow
+primitives with `AgentWorkflow.durable`; this keeps the workflow services in
+the tool's requirement type instead of hiding them:
+
+```ts
+const ApprovalRequest = Schema.Struct({
+  orderId: Schema.String,
+  amount: Schema.Number,
+});
+const ApprovalDecision = Schema.TaggedUnion({
+  Approved: { actor: Schema.String },
+  Denied: { actor: Schema.String, reason: Schema.String },
+});
+class ChargeDenied extends Schema.TaggedError<ChargeDenied>('ChargeDenied')(
+  'ChargeDenied',
+  { reason: Schema.String },
+) {}
+
+const reviewCharge = AgentWorkflow.wait({
+  name: 'review-charge',
+  key: ({ orderId }) => orderId,
+  request: ApprovalRequest,
+  success: ApprovalDecision,
+  error: Schema.Never,
+});
+
+const chargeCardTool = AgentWorkflow.durable(
+  Tool.make('charge_card', {
+    description: 'Charge an approved order',
+    parameters: Schema.Struct({
+      orderId: Schema.String,
+      amount: Schema.Number,
+    }),
+    success: ChargeReceipt,
+    failure: ChargeDenied,
+  }),
+);
+
+const billingAgent = Agent.make({
+  // ...
+  toolkit: Toolkit.make(chargeCardTool),
+}).withHandlers({
+  charge_card: (input) =>
+    Effect.gen(function* () {
+      const decision = yield* reviewCharge(input);
+      if (decision._tag === 'Denied') {
+        return yield* new ChargeDenied({ reason: decision.reason });
+      }
+      return yield* chargeCard(input);
+    }),
+});
+```
+
+The wait appends `ToolSuspended` with its encoded request and completion token,
+then suspends the owning Effect Workflow. The definition derives the same
+stable application key when projecting that request, so an approval service
+can wait for one independently keyed instance and complete it:
+
+```ts
+const pending =
+  yield *
+  reviewCharge.awaitPending(
+    Conversation.make(billingAgent, conversationId),
+    orderId,
+  );
+
+yield *
+  pending.complete({
+    _tag: 'Approved',
+    actor: 'alice@example.com',
+  });
+```
+
+`awaitPending` returns an Effect for one definition, conversation, and stable
+key. It completes immediately when that request is already actionable or waits
+on the full durable conversation until it becomes actionable. Internally it
+uses log notifications as wakeups and re-projects durable records rather than
+treating notification delivery as truth. Re-projecting also means an atomic
+append containing a branch or restart is observed as a whole rather than
+briefly exposing its superseded token.
+
+The lookup follows the conversation's active branch, decodes requests with the
+wait's request schema, and omits resumed, completed, restarted, superseded, and
+settled waits. In particular, a fork that copied the source's audit prefix
+exposes only its newly issued token. Schema decoding remains in the error and
+requirement channels. If `RecordingPolicy.externalRequest` redacts the stored
+request, its result must still satisfy this schema for typed discovery to work.
+
+`conversation.waits()` and `conversation.followWaits()` expose the raw wait
+lifecycle for auditing and projections. They are not an actionable approval
+queue; consumers must fold their complete lifecycle before acting on a token.
+
+`PendingWait.complete` supplies the typed success value; an application-level
+denial is normally one case of that value. `PendingWait.fail` supplies the
+wait's typed operational error. The definition's `complete(token, value)` and
+`fail(token, error)` forms support serialized callbacks where the bound object
+cannot cross an HTTP or process boundary. Re-running `awaitPending` returns an
+unresolved instance again. Completion is first-write-wins, so duplicate or
+concurrent submissions cannot overwrite the accepted result.
+
+One active token per definition, conversation, and key is a checked invariant.
+If durable history contains two different active tokens for that identity,
+`awaitPending` fails with typed `WaitStateError` rather than choosing one by log
+order.
+
+Completion is durable, first-write-wins, and wakes the workflow. Vesper appends
+`ToolResumed`, records the schema-encoded decision as `ToolWaitCompleted`,
+re-enters the same logical handler, and finally records `ToolOutcome`.
+`RecordingPolicy.externalResult` can redact the persisted decision without
+changing the live value. Re-entry is workflow replay, not a serialized
+JavaScript stack:
+ordinary effects before the wait can run again, so external effects belong in
+`AgentWorkflow.step` or must enforce `AgentWorkflow.idempotencyKey` themselves.
+If replay crashes again, `ToolResumed` leaves the call suspended and safe to
+re-enter; a bare `ToolStarted` without `ToolSuspended` remains indeterminate and
+still requires `onIndeterminateToolCall`.
+
+A branch or fork cannot silently copy a workflow-owned token. Restart it
+explicitly through the binding; the original provider call and parameters are
+re-entered under a new durable workflow execution and issue a new token:
+
+```ts
+const fork =
+  yield *
+  billingWorkflow.forkFrom(sourceIdentity, suspended.offset, forkPayload, {
+    discard: true,
+  });
+```
+
+`forkFrom` leaves the source workflow waiting independently. `branchFrom`
+interrupts the superseded source workflow first. With `{ discard: true }`,
+both return an `AgentWorkflow.Identity`, so the new path can itself be
+cancelled, branched, or forked. Low-level `Conversation.branchFrom` and
+`Conversation.forkFrom` require `{ pendingWait: 'restart' }`; omitting it
+returns a typed `SuspendedConversationError` instead of guessing.
+
 Every root run has hard production defaults for model/turn/token/delegation,
 deadline, concurrency, and signal budgets. Set `Definition.runPolicy` to make
 application limits stricter or larger; descendants share the root runtime and
@@ -162,9 +347,10 @@ cannot reset it by opening another agent loop. `StopCondition`s remain soft.
 
 Recording persists raw values by default. Pass an effectful
 `RecordingPolicy.Policy` as the third argument to
-`Conversation.recording(agent, id, policy)` to redact only
-the persisted prompt, tool parameters/results, delivered signals, and rendered
-failure causes. Its Effect services appear exactly in `Agent.Requires`.
+`Conversation.withRecordingPolicy(agent, id, policy)` to redact only
+the persisted prompt, tool parameters/results, external wait requests and
+results, delivered signals, and rendered failure causes. Its Effect services appear
+exactly in `Agent.Requires`.
 The separate incoming signal stream is explicitly raw so a resumed run can
 deliver the same value; transform signals before `send` when required.
 

@@ -3,8 +3,10 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
+import { Crypto, Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -18,6 +20,11 @@ import { protocolOf } from '../src/internal/protocol.js';
 import { AgentLog } from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
+  NodeServices.layer,
+);
 
 // Settlement: the durable half of "how did this end".
 //
@@ -103,7 +110,7 @@ const stallsSettlement = (interrupted: Ref.Ref<boolean>) =>
             : store.append(input),
       }),
     ),
-  ).pipe(Layer.provide(LogStoreMemory.layer));
+  ).pipe(Layer.provide(testLogLayer));
 
 const CONVERSATION = LogVocabulary.ConversationId.make('settling-conversation');
 
@@ -128,13 +135,17 @@ const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   model: Layer.Layer<LanguageModel.LanguageModel> = answering,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(model),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
   );
 
 const runInSession = <R>(
@@ -143,7 +154,11 @@ const runInSession = <R>(
   input: string,
 ) =>
   Effect.flatMap(RunPolicyRuntime.create(RunPolicy.defaultLimits), (runtime) =>
-    protocolOf<R>(child)!.run(runtime, session, input),
+    protocolOf<R, Agent.Error<typeof child>>(child)!.run(
+      runtime,
+      session,
+      input,
+    ),
   );
 
 describe('how a run settles', () => {
@@ -196,7 +211,7 @@ describe('how a run settles', () => {
       }).pipe(
         Effect.orDie,
         Effect.provide(failing),
-        Effect.provide(LogStoreMemory.layer),
+        Effect.provide(testLogLayer),
       );
 
       expect(observed.outcome._tag).toBe('Failure');
@@ -231,7 +246,7 @@ describe('how a run settles', () => {
         yield* Fiber.interrupt(running);
 
         return yield* readAll();
-      }).pipe(Effect.orDie, Effect.provide(LogStoreMemory.layer));
+      }).pipe(Effect.orDie, Effect.provide(testLogLayer));
 
       expect(settlement(written)).toMatchObject([{ outcome: 'interrupted' }]);
     }),
@@ -291,6 +306,7 @@ describe('how a run settles', () => {
         }).pipe(
           Effect.provide(answering),
           Effect.provide(stallsSettlement(interrupted)),
+          Effect.provide(NodeCrypto.layer),
         );
 
         expect(observed.result.text).toBe('done');

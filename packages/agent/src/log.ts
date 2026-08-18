@@ -5,6 +5,7 @@ import { Tail } from '@sunfall/vesper-log/tail';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Clock,
+  Crypto,
   Effect,
   Exit,
   Option,
@@ -12,14 +13,25 @@ import {
   Schema,
   Semaphore,
   Stream,
+  SynchronizedRef,
 } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
+import {
+  CompatibilityError,
+  SuspendedConversationError,
+} from './conversation-error.js';
 import { AgentHistory } from './history.js';
+import * as AgentIds from './internal/ids.js';
 import { PromptTransport } from './prompt-transport.js';
 import * as RecoveryState from './recovery.js';
 import { ResumeProjection } from './resume-projection.js';
+
+export {
+  CompatibilityError,
+  SuspendedConversationError,
+} from './conversation-error.js';
 import * as AgentSignals from './internal/signal-store.js';
 import type { Stop } from './stop.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
@@ -104,6 +116,8 @@ export type Settled = RecoveryState.Settled;
 export type Recovery = RecoveryState.Recovery;
 /** An orphaned handler start and the provider call that originally caused it. */
 export type IndeterminateToolCall = RecoveryState.IndeterminateToolCall;
+/** A deliberately suspended call and its external wait identity. */
+export type SuspendedToolCall = RecoveryState.SuspendedToolCall;
 
 /** A signal this run has taken delivery of. */
 export interface Delivered {
@@ -111,7 +125,7 @@ export interface Delivered {
   readonly text: string;
   readonly source: string;
   /** The signal's offset in the signal stream. */
-  readonly at: string;
+  readonly at: LogOffset.Offset;
 }
 
 export interface SignalDrain {
@@ -133,6 +147,8 @@ export interface OpenOptions {
    * lets every reader below stay unaware that branching exists.
    */
   readonly branchFrom?: LogOffset.Offset;
+  /** Explicitly re-enter a suspended provider call with a fresh wait token. */
+  readonly pendingWait?: 'restart';
 }
 
 /**
@@ -151,6 +167,7 @@ export interface OpenOptions {
  */
 interface ClaimOptions {
   readonly branchFrom?: LogOffset.Offset;
+  readonly pendingWait?: 'restart';
   readonly seed?: ReadonlyArray<ConversationRecord.Envelope>;
   readonly identity?: string;
   readonly compatibility: Compatibility;
@@ -161,19 +178,6 @@ export interface Compatibility {
   readonly agent: string;
   readonly revision: LogVocabulary.AgentRevision;
 }
-
-/** A durable conversation cannot be opened by this compatibility identity. */
-export class CompatibilityError extends Schema.TaggedError<CompatibilityError>()(
-  '@sunfall/vesper-agent/CompatibilityError',
-  {
-    message: Schema.String,
-    expectedAgent: Schema.String,
-    expectedRevision: Schema.String,
-    persistedFormat: Schema.optional(Schema.Number),
-    persistedAgent: Schema.optional(Schema.String),
-    persistedRevision: Schema.optional(LogVocabulary.AgentRevision),
-  },
-) {}
 
 /** Ensure a claimed session is handed only to the definition that claimed it. */
 export const assertCompatible = (
@@ -313,10 +317,22 @@ export interface Session {
   ) => Option.Option<Recovery>;
 
   /** @internal Orphaned calls in their original durable ToolCall order. */
+  readonly pendingToolCalls: ReadonlyArray<IndeterminateToolCall>;
+
+  /** @internal Indeterminate calls requiring an application decision. */
   readonly indeterminateToolCalls: ReadonlyArray<IndeterminateToolCall>;
+
+  /** @internal Deliberately suspended calls, safe for workflow replay. */
+  readonly suspendedToolCalls: ReadonlyArray<SuspendedToolCall>;
 
   /** @internal Corrupt recovery state that cannot be safely reconciled. */
   readonly recoveryCorruption: string | undefined;
+
+  /** @internal Whether an external wait result is already durably audited. */
+  readonly hasCompletedWait: (token: string) => boolean;
+
+  /** @internal Why an open tool call prevents this run from settling. */
+  readonly pendingToolState: Effect.Effect<RecoveryState.PendingToolState>;
 
   /** @internal Whether a durable handler start still lacks an outcome. */
   readonly hasPendingToolCalls: Effect.Effect<boolean>;
@@ -364,7 +380,11 @@ export interface Session {
   /** @internal Open a recorded child session for delegation. */
   readonly child: (
     options: ChildOptions,
-  ) => Effect.Effect<Session, CompatibilityError>;
+  ) => Effect.Effect<
+    Session,
+    CompatibilityError | SuspendedConversationError | LogStore.LogStoreError,
+    Crypto.Crypto
+  >;
 }
 
 /**
@@ -475,6 +495,7 @@ export const fork = Effect.fn('AgentLog.fork')(function* (
   at: LogOffset.Offset,
   forkConversationId: LogVocabulary.ConversationId,
   compatibility: Compatibility,
+  pendingWait?: 'restart',
 ) {
   yield* validateCompatibilityInput(compatibility);
   const store = yield* LogStore.Service;
@@ -487,6 +508,7 @@ export const fork = Effect.fn('AgentLog.fork')(function* (
     ancestor.filter((envelope) => !LogOffset.isAfter(envelope.offset, at)),
   );
   yield* validateCompatibility(prefix, compatibility);
+  yield* validateSuspendedBoundary(conversationId, prefix, pendingWait);
   const identity = forkIdentity({
     sourceConversationId: conversationId,
     at,
@@ -498,14 +520,52 @@ export const fork = Effect.fn('AgentLog.fork')(function* (
     seed: prefix,
     identity,
     compatibility,
+    ...(pendingWait === undefined ? {} : { pendingWait }),
   });
 });
+
+const restartWaits = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+): ReadonlyArray<ConversationRecord.RecordOf<'ToolWaitRestarted'>> =>
+  RecoveryState.fold(history).suspended.map((suspended) => ({
+    _tag: 'ToolWaitRestarted',
+    id: suspended.toolCallId,
+    name: suspended.name,
+    wait: suspended.wait,
+    priorToken: suspended.token,
+  }));
+
+const validateSuspendedBoundary = (
+  conversationId: LogVocabulary.ConversationId,
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+  pendingWait: 'restart' | undefined,
+): Effect.Effect<void, SuspendedConversationError> => {
+  const suspended = RecoveryState.fold(history).suspended[0];
+  return suspended === undefined || pendingWait === 'restart'
+    ? Effect.void
+    : Effect.fail(
+        new SuspendedConversationError({
+          message:
+            `Conversation ${conversationId} cannot branch or fork while ` +
+            `tool ${suspended.name} (${suspended.toolCallId}) is waiting at ` +
+            `"${suspended.wait}"; choose a boundary before the tool started ` +
+            'or after it records ToolOutcome',
+          conversationId,
+          toolCallId: suspended.toolCallId,
+          wait: suspended.wait,
+        }),
+      );
+};
 
 const openWith = (
   store: LogStore.Interface,
   conversationId: LogVocabulary.ConversationId,
   options: ClaimOptions,
-): Effect.Effect<Session, CompatibilityError> =>
+): Effect.Effect<
+  Session,
+  CompatibilityError | SuspendedConversationError | LogStore.LogStoreError,
+  Crypto.Crypto
+> =>
   Effect.gen(function* () {
     yield* validateCompatibilityInput(options.compatibility);
     const path = pathFor(conversationId);
@@ -517,11 +577,10 @@ const openWith = (
         (error) => error.reason === 'conflict',
         () => Effect.void,
       ),
-      orDie,
     );
 
     if (options?.identity !== undefined) {
-      const meta = yield* orDie(store.meta(path));
+      const meta = yield* store.meta(path);
       if (Option.isNone(meta) || meta.value.identity !== options.identity) {
         return yield* Effect.die(
           new Error(
@@ -537,7 +596,7 @@ const openWith = (
     let claim: LogStore.ProducerClaim | undefined;
     let lastConflict: LogStore.LogStoreError | undefined;
     for (let attempt = 0; attempt < ACQUIRE_ATTEMPTS; attempt += 1) {
-      const observed = Option.getOrThrow(yield* orDie(store.meta(path)));
+      const observed = Option.getOrThrow(yield* store.meta(path));
       const existing = yield* options.branchFrom === undefined
         ? readAggregateSuffix(store, path)
         : readAll(store, path);
@@ -551,8 +610,20 @@ const openWith = (
               ),
             );
       yield* validateCompatibility(retainedBeforeClaim, options.compatibility);
+      if (options.branchFrom !== undefined) {
+        yield* validateSuspendedBoundary(
+          conversationId,
+          retainedBeforeClaim,
+          options.pendingWait,
+        );
+      }
+      // Validate the active prompt before fencing the current producer. This
+      // is deliberately the same bounded suffix used for compatibility: a
+      // changed head is rejected by acquire and the post-claim full active
+      // path check below catches any prompt records outside the suffix.
+      yield* validatePromptHistory(retainedBeforeClaim, options.compatibility);
       const acquired = yield* store
-        .acquire(path, LogVocabulary.ProducerId.make(crypto.randomUUID()), {
+        .acquire(path, yield* AgentIds.producerId, {
           epoch: observed.epoch,
           head: observed.head,
         })
@@ -562,29 +633,30 @@ const openWith = (
         break;
       } else {
         const error = Exit.findErrorOption(acquired);
-        if (Option.isNone(error) || error.value.reason !== 'conflict') {
+        if (Option.isNone(error)) {
           return yield* Effect.die(acquired.cause);
+        }
+        if (error.value.reason !== 'conflict') {
+          return yield* Effect.fail(error.value);
         }
         lastConflict = error.value;
       }
     }
     if (claim === undefined) {
-      return yield* Effect.die(
-        lastConflict ?? new Error('compare-and-acquire retry exhausted'),
-      );
+      return yield* lastConflict === undefined
+        ? Effect.die(new Error('compare-and-acquire retry exhausted'))
+        : Effect.fail(lastConflict);
     }
-    const sequence = yield* Ref.make(claim.nextSequence);
-    const appendLock = yield* Semaphore.make(1);
+    const sequence = yield* SynchronizedRef.make(claim.nextSequence);
     const childLock = yield* Semaphore.make(1);
 
     const append: Session['append'] = (records, timeoutMillis) =>
       records.length === 0
         ? Effect.void
-        : appendLock.withPermits(1)(
+        : SynchronizedRef.modifyEffect(sequence, (next) =>
             Effect.uninterruptibleMask((restore) =>
               Effect.gen(function* () {
                 const timestamp = yield* Clock.currentTimeMillis;
-                const next = yield* Ref.get(sequence);
                 const persist = orDie(
                   store.append({
                     path,
@@ -616,16 +688,17 @@ const openWith = (
                       Effect.orDie,
                     );
 
-                // Advanced only on success, so a caller that retries a failed
-                // append reuses the sequence — which the store answers
-                // idempotently when the batch digest matches, and rejects when
-                // it does not. The permit covers both operations: without it,
-                // concurrent signal, event, and child writes can read the same
-                // sequence and submit different batches under one producer key.
-                yield* Ref.set(
-                  sequence,
+                // SynchronizedRef commits this next value only after the
+                // restored append succeeds. A failed append therefore reuses
+                // the sequence — which the store answers idempotently when
+                // the batch digest matches, and rejects when it does not. Its
+                // permit covers both operations, so concurrent signal, event,
+                // and child writes cannot submit different batches under one
+                // producer key.
+                return [
+                  undefined,
                   LogVocabulary.ProducerSequence.make(next + 1),
-                );
+                ] as const;
               }),
             ),
           );
@@ -638,14 +711,34 @@ const openWith = (
         ),
       );
       yield* validateCompatibility(prefix, options.compatibility);
-      yield* append([{ _tag: 'BranchedFrom', at: branchFrom }]);
+      yield* append([
+        { _tag: 'BranchedFrom', at: branchFrom },
+        ...(options.pendingWait === 'restart' ? restartWaits(prefix) : []),
+      ]);
     }
     if (options?.seed !== undefined) {
       yield* seedInto(options.seed, append, readAll(store, path));
+      if (options.pendingWait === 'restart') {
+        const existing = yield* readAll(store, path);
+        const restarted = new Set(
+          existing.flatMap(({ record }) =>
+            record._tag === 'ToolWaitRestarted' ? [record.priorToken] : [],
+          ),
+        );
+        yield* append(
+          restartWaits(options.seed).filter(
+            (record) => !restarted.has(record.priorToken),
+          ),
+        );
+      }
     }
 
     const opened = yield* loadOpenState(store, path);
     const history = opened.history;
+    // Prompt parsing is a typed open failure. Keeping it here means a caller
+    // never receives a claimed session whose first continuation would defect
+    // while rebuilding malformed durable messages.
+    yield* validatePromptHistory(history, options.compatibility);
     yield* validateCompatibility(
       options.branchFrom === undefined
         ? mergeByOffset(opened.aggregateSuffix, history)
@@ -706,10 +799,10 @@ const openWith = (
 
     const drainSignalsBounded = (limit: number) =>
       Effect.gen(function* () {
-        // Boundary persistence remains fatal: advancing the live conversation
-        // after a failed authoritative drain would diverge signal delivery.
-        const { page, drain } = yield* orDie(readSignalPage(limit));
-        yield* Ref.set(signalCursor, page.cursor);
+        // Reading is not acknowledgement. The cursor advances only when the
+        // corresponding SignalReceived record is durable in trackedAppend,
+        // preserving at-least-once delivery if this stream is interrupted.
+        const { drain } = yield* readSignalPage(limit);
         return drain;
       });
 
@@ -726,7 +819,11 @@ const openWith = (
 
     const child = (
       options: ChildOptions,
-    ): Effect.Effect<Session, CompatibilityError> =>
+    ): Effect.Effect<
+      Session,
+      CompatibilityError | SuspendedConversationError | LogStore.LogStoreError,
+      Crypto.Crypto
+    > =>
       childLock
         .withPermits(1)(
           Effect.gen(function* () {
@@ -766,7 +863,7 @@ const openWith = (
         )
         .pipe(Effect.withSpan('AgentLog.Session.child'));
 
-    const meta = yield* orDie(store.meta(path));
+    const meta = yield* store.meta(path);
     const inheritedUsage = Option.isSome(meta)
       ? (parseForkIdentity(meta.value.identity)?.inheritedUsage ?? {
           input: 0,
@@ -788,6 +885,15 @@ const openWith = (
           let persisted = records;
           const currentResume = yield* Ref.get(resume);
           const currentState = yield* Ref.get(state);
+          const currentSignalCursor = yield* Ref.get(signalCursor);
+          const nextSignalCursor = records.reduce(
+            (cursor, record) =>
+              record._tag === 'SignalReceived' &&
+              LogOffset.isAfter(record.at, cursor)
+                ? record.at
+                : cursor,
+            currentSignalCursor,
+          );
           const settlementIndex = records.findIndex(
             (record) => record._tag === 'RunSettled',
           );
@@ -804,11 +910,10 @@ const openWith = (
               ResumeProjection.updateState,
               currentState,
             );
-            const cursor = yield* Ref.get(signalCursor);
             const resumeSnapshot = resumeState(
               options.compatibility,
               addUsage(opened.usage, settlement.usage),
-              cursor,
+              nextSignalCursor,
               settlementResume.completed,
               settlementResume.latestTurnUsage,
               settlementState,
@@ -821,6 +926,7 @@ const openWith = (
           }
 
           yield* append(persisted, timeoutMillis);
+          yield* Ref.set(signalCursor, nextSignalCursor);
           yield* Ref.set(
             state,
             records.reduce(ResumeProjection.updateState, currentState),
@@ -845,18 +951,22 @@ const openWith = (
       recordingPolicy: RecordingPolicyRuntime.raw,
       history,
       stateHistory: projectionHistory,
-      recorded: readResumeHistory(store, path),
+      recorded: orDie(readResumeHistory(store, path)),
       append: trackedAppend,
       recovery: toolRecovery.recovery,
+      pendingToolCalls: toolRecovery.pendingToolCalls,
       indeterminateToolCalls: toolRecovery.indeterminateToolCalls,
+      suspendedToolCalls: toolRecovery.suspendedToolCalls,
       recoveryCorruption: toolRecovery.recoveryCorruption,
+      hasCompletedWait: toolRecovery.hasCompletedWait,
+      pendingToolState: toolRecovery.pendingToolState,
       hasPendingToolCalls: toolRecovery.hasPendingToolCalls,
       onToolSettled: toolRecovery.onToolSettled,
       drainSignals: Effect.map(
-        drainSignalsBounded(1_000),
+        orDie(drainSignalsBounded(1_000)),
         (page) => page.signals,
       ),
-      drainSignalsBounded,
+      drainSignalsBounded: (limit) => orDie(drainSignalsBounded(limit)),
       signalPages,
       child,
     } satisfies Session;
@@ -885,14 +995,17 @@ export const withRecordingPolicy = (
 const readAll = (
   store: LogStore.Interface,
   path: string,
-): Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>> =>
+): Effect.Effect<
+  ReadonlyArray<ConversationRecord.Envelope>,
+  LogStore.LogStoreError
+> =>
   Effect.gen(function* () {
     const all: ConversationRecord.Envelope[] = [];
     let cursor = LogOffset.START;
     let done = false;
 
     while (!done) {
-      const page = yield* orDie(store.read(path, { after: cursor }));
+      const page = yield* store.read(path, { after: cursor });
       all.push(...page.records);
       cursor = page.cursor;
       done = page.upToDate;
@@ -912,7 +1025,7 @@ interface OpenState {
 const loadOpenState = (
   store: LogStore.Interface,
   path: string,
-): Effect.Effect<OpenState> =>
+): Effect.Effect<OpenState, LogStore.LogStoreError> =>
   Effect.gen(function* () {
     const aggregateSuffix = yield* readAggregateSuffix(store, path);
     return {
@@ -927,18 +1040,19 @@ const loadOpenState = (
 const readAggregateSuffix = (
   store: LogStore.Interface,
   path: string,
-): Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>> =>
+): Effect.Effect<
+  ReadonlyArray<ConversationRecord.Envelope>,
+  LogStore.LogStoreError
+> =>
   Effect.gen(function* () {
     const newest: ConversationRecord.Envelope[] = [];
     let before: LogOffset.Offset | undefined;
     let done = false;
     while (!done) {
-      const page = yield* orDie(
-        store.readBackwards(path, {
-          ...(before === undefined ? {} : { before }),
-          limit: RESUME_READ_LIMIT,
-        }),
-      );
+      const page = yield* store.readBackwards(path, {
+        ...(before === undefined ? {} : { before }),
+        limit: RESUME_READ_LIMIT,
+      });
       for (const envelope of page.records) {
         newest.push(envelope);
         if (
@@ -1046,6 +1160,37 @@ const validateCompatibilityInput = (
     : Effect.fail(compatibilityError(compatibility, {}, problem));
 };
 
+/** Validate untrusted durable prompts before they reach the synchronous fold. */
+const validatePromptHistory = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+  expected: Compatibility,
+): Effect.Effect<void, CompatibilityError> =>
+  Effect.gen(function* () {
+    for (const { record } of AgentBranch.activePath(history)) {
+      if (record._tag === 'RunStarted') {
+        yield* PromptTransport.decodeMessages(record.prompt);
+      }
+    }
+    yield* Effect.try({
+      try: () => AgentHistory.messagesFrom(history),
+      catch: (cause) =>
+        new PromptTransport.DecodeError({
+          message: `Malformed persisted prompt messages: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+        }),
+    });
+  }).pipe(
+    Effect.asVoid,
+    Effect.mapError((error) =>
+      compatibilityError(
+        expected,
+        {},
+        `malformed persisted prompt: ${error.message}`,
+      ),
+    ),
+  );
+
 /** An actionable error for incompatible durable history. */
 const compatibilityError = (
   expected: Compatibility,
@@ -1076,7 +1221,10 @@ const compatibilityError = (
 const readResumeHistory = (
   store: LogStore.Interface,
   path: string,
-): Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>> =>
+): Effect.Effect<
+  ReadonlyArray<ConversationRecord.Envelope>,
+  LogStore.LogStoreError
+> =>
   Effect.gen(function* () {
     const newest: ConversationRecord.Envelope[] = [];
     let before: LogOffset.Offset | undefined;
@@ -1084,12 +1232,10 @@ const readResumeHistory = (
     let done = false;
 
     while (!done) {
-      const page = yield* orDie(
-        store.readBackwards(path, {
-          ...(before === undefined ? {} : { before }),
-          limit: RESUME_READ_LIMIT,
-        }),
-      );
+      const page = yield* store.readBackwards(path, {
+        ...(before === undefined ? {} : { before }),
+        limit: RESUME_READ_LIMIT,
+      });
       let jumped = false;
       for (const envelope of page.records) {
         if (envelope.record._tag === 'BranchedFrom') {
@@ -1185,9 +1331,9 @@ const forkIdentity = (identity: ForkIdentity): string =>
 const ForkIdentitySchema = Schema.Tuple([
   LogVocabulary.ConversationId,
   LogOffset.Offset,
-  Schema.Number,
-  Schema.Number,
-  Schema.Number,
+  Schema.Natural,
+  Schema.Natural,
+  Schema.Natural,
 ]);
 
 const parseForkIdentity = (identity: string): ForkIdentity | undefined => {
@@ -1254,18 +1400,20 @@ const ensureChildReference = (
 const seedInto = (
   prefix: ReadonlyArray<ConversationRecord.Envelope>,
   append: Session['append'],
-  recorded: Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>>,
-): Effect.Effect<void> =>
+  recorded: Effect.Effect<
+    ReadonlyArray<ConversationRecord.Envelope>,
+    LogStore.LogStoreError
+  >,
+): Effect.Effect<void, LogStore.LogStoreError> =>
   Effect.gen(function* () {
     const reseated = new Map<LogOffset.Offset, LogOffset.Offset>();
     let written = yield* recorded;
-    if (written.length > prefix.length) {
-      return yield* Effect.die(
-        new Error('Fork destination contains records beyond its seed prefix'),
-      );
-    }
 
-    for (let index = 0; index < written.length; index += 1) {
+    for (
+      let index = 0;
+      index < Math.min(written.length, prefix.length);
+      index += 1
+    ) {
       const source = prefix[index]!;
       const expected = reseat(source.record, reseated);
       if (JSON.stringify(written[index]!.record) !== JSON.stringify(expected)) {
@@ -1275,6 +1423,11 @@ const seedInto = (
       }
       reseated.set(source.offset, written[index]!.offset);
     }
+
+    // A matching fork identity may be opened again after its independent run
+    // has appended beyond the copied prefix. Validate the entire seed above,
+    // then leave those genuine destination records untouched.
+    if (written.length >= prefix.length) return;
 
     let copied = written.length;
     let pending: Array<ConversationRecord.Record> = [];
@@ -1351,6 +1504,10 @@ const reseat = (
     case 'Text':
     case 'ToolCall':
     case 'ToolStarted':
+    case 'ToolSuspended':
+    case 'ToolResumed':
+    case 'ToolWaitCompleted':
+    case 'ToolWaitRestarted':
     case 'ToolOutcome':
     case 'StateCheckpoint':
     case 'TurnFinished':
@@ -1431,7 +1588,7 @@ export const SETTLEMENT_TIMEOUT_MILLIS =
 const orDie = <A, R>(
   effect: Effect.Effect<A, LogStore.LogStoreError, R>,
 ): Effect.Effect<A, never, R> =>
-  Effect.catchTag(effect, '@sunfall/vesper-log/LogStoreError', (error) =>
+  Effect.catchTag(effect, 'LogStoreError', (error) =>
     Effect.die(
       new Error(
         `Conversation log ${error.operation} failed (${error.reason}) for ${error.path}: ${error.detail}` +

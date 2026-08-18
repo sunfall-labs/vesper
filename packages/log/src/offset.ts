@@ -40,12 +40,11 @@ export const Offset = Schema.String.check(
 ).pipe(Schema.brand('@sunfall/vesper-log/Offset'));
 export type Offset = typeof Offset.Type;
 
-export class OffsetError extends Schema.TaggedError<OffsetError>()(
+export class OffsetError extends Schema.TaggedError<OffsetError>(
   '@sunfall/vesper-log/OffsetError',
-  {
-    offset: Schema.String,
-  },
-) {}
+)('OffsetError', {
+  offset: Schema.String,
+}) {}
 
 /** Digits in one component. Fixed by the Durable Streams format. */
 export const COMPONENT_DIGITS = 16;

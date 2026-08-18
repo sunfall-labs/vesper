@@ -2,7 +2,17 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
+import * as NodeServices from '@effect/platform-node/NodeServices';
+import {
+  Crypto,
+  Deferred,
+  Effect,
+  Fiber,
+  Layer,
+  Ref,
+  Schema,
+  Stream,
+} from 'effect';
 import {
   LanguageModel,
   type Response,
@@ -14,7 +24,13 @@ import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '../src/agent.js';
 import { Conversation, type Signal } from '../src/conversation.js';
 import * as AgentSignals from '../src/internal/signal-store.js';
+import { AgentLog } from '../src/log.js';
 import { Stop } from '../src/stop.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // Signals: out-of-band input to a running conversation.
 //
@@ -95,13 +111,17 @@ const agent = Agent.make({
 const conversation = Conversation.make(agent, CONVERSATION);
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   scripted: Model,
 ) =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(scripted.layer),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
@@ -122,6 +142,38 @@ const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
   );
 
 describe('steering', () => {
+  it.effect('acknowledges a signal only after its receipt is durable', () => {
+    const id = LogVocabulary.ConversationId.make('durable-signal-ack');
+    const bound = Conversation.make(agent, id);
+    return Effect.gen(function* () {
+      yield* bound.send({ kind: 'steer', text: 'remember me', source: 'test' });
+      const session = yield* AgentLog.open(id, {
+        compatibility: {
+          agent: 'test',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        },
+      });
+
+      const first = yield* session.drainSignalsBounded(10);
+      const again = yield* session.drainSignalsBounded(10);
+      expect(again.signals).toEqual(first.signals);
+
+      const delivered = first.signals[0]!;
+      yield* session.append([
+        {
+          _tag: 'SignalReceived',
+          kind: delivered.kind,
+          text: delivered.text,
+          source: delivered.source,
+          step: 1,
+          at: delivered.at,
+        },
+      ]);
+
+      expect((yield* session.drainSignalsBounded(10)).signals).toEqual([]);
+    }).pipe(Effect.provide(testLogLayer));
+  });
+
   it.effect(
     'records and emits an oversized signal rejection without injecting it',
     () =>
@@ -491,25 +543,22 @@ describe('cancelling', () => {
               generateText: () =>
                 Effect.succeed<Response.PartEncoded[]>([finish()]),
               streamText: () =>
-                Stream.unwrap(
-                  Deferred.succeed(entered, undefined).pipe(
-                    Effect.as(
-                      Stream.concat(
-                        Stream.fromIterable([
-                          { type: 'text-start' as const, id: 'partial' },
-                          {
-                            type: 'text-delta' as const,
-                            id: 'partial',
-                            delta: 'partial answer',
-                          },
-                        ]),
-                        Stream.never,
-                      ).pipe(
-                        Stream.ensuring(Deferred.succeed(stopped, undefined)),
-                      ),
-                    ),
+                Stream.concat(
+                  Stream.fromIterable([
+                    { type: 'text-start' as const, id: 'partial' },
+                    {
+                      type: 'text-delta' as const,
+                      id: 'partial',
+                      delta: 'partial answer',
+                    },
+                  ]),
+                  Stream.concat(
+                    Stream.fromEffect(
+                      Deferred.succeed(entered, undefined),
+                    ).pipe(Stream.drain),
+                    Stream.never,
                   ),
-                ),
+                ).pipe(Stream.ensuring(Deferred.succeed(stopped, undefined))),
             }),
           );
 
@@ -535,7 +584,7 @@ describe('cancelling', () => {
           const completed = yield* Fiber.join(running);
           yield* Deferred.await(stopped);
           return { completed, records: yield* readAll() };
-        }).pipe(Effect.provide(LogStoreMemory.layer));
+        }).pipe(Effect.provide(testLogLayer));
 
         expect(result.completed.text).toBe('partial answer');
         expect(result.completed.steps).toBe(1);
@@ -674,10 +723,13 @@ describe('cancelling', () => {
         }).pipe(
           Effect.provide(scripted.layer),
           Effect.provide(
-            LogStoreMemory.layerFailingChanges(
-              AgentSignals.pathFor(
-                LogVocabulary.ConversationId.make(CONVERSATION),
-              ),
+            Layer.mergeAll(
+              LogStoreMemory.layerFailingChanges(
+                AgentSignals.pathFor(
+                  LogVocabulary.ConversationId.make(CONVERSATION),
+                ),
+              ).pipe(Layer.provide(NodeServices.layer)),
+              NodeServices.layer,
             ),
           ),
         );
@@ -695,39 +747,44 @@ describe('cancelling', () => {
         const readFailed = yield* Deferred.make<void>();
         const stopped = yield* Deferred.make<void>();
         let failNextSignalRead = true;
-        const instrumented = Layer.effect(
-          LogStore.Service,
-          Effect.map(LogStore.Service, (store) =>
-            LogStore.Service.of({
-              ...store,
-              read: (path, options) =>
-                path ===
-                  AgentSignals.pathFor(
-                    LogVocabulary.ConversationId.make(CONVERSATION),
-                  ) && failNextSignalRead
-                  ? Effect.sync(() => {
-                      failNextSignalRead = false;
-                    }).pipe(
-                      Effect.andThen(Deferred.succeed(readFailed, undefined)),
-                      Effect.andThen(
-                        Effect.fail(
-                          new LogStore.LogStoreError({
-                            path,
-                            operation: 'read',
-                            reason: 'storage',
-                            detail: 'injected watcher read failure',
-                          }),
+        const instrumented = Layer.mergeAll(
+          Layer.effect(
+            LogStore.Service,
+            Effect.map(LogStore.Service, (store) =>
+              LogStore.Service.of({
+                ...store,
+                read: (path, options) =>
+                  path ===
+                    AgentSignals.pathFor(
+                      LogVocabulary.ConversationId.make(CONVERSATION),
+                    ) && failNextSignalRead
+                    ? Effect.sync(() => {
+                        failNextSignalRead = false;
+                      }).pipe(
+                        Effect.andThen(Deferred.succeed(readFailed, undefined)),
+                        Effect.andThen(
+                          Effect.fail(
+                            new LogStore.LogStoreError({
+                              path,
+                              operation: 'read',
+                              reason: 'storage',
+                              detail: 'injected watcher read failure',
+                            }),
+                          ),
                         ),
-                      ),
-                    )
-                  : store.read(path, options),
-              changes: (path) =>
-                store
-                  .changes(path)
-                  .pipe(Stream.ensuring(Deferred.succeed(stopped, undefined))),
-            }),
-          ),
-        ).pipe(Layer.provide(LogStoreMemory.layer));
+                      )
+                    : store.read(path, options),
+                changes: (path) =>
+                  store
+                    .changes(path)
+                    .pipe(
+                      Stream.ensuring(Deferred.succeed(stopped, undefined)),
+                    ),
+              }),
+            ),
+          ).pipe(Layer.provide(testLogLayer)),
+          NodeServices.layer,
+        );
         const calls = { count: 0 };
         const waitingProvider = Layer.effect(
           LanguageModel.LanguageModel,
@@ -767,20 +824,23 @@ describe('cancelling', () => {
 
         yield* Effect.gen(function* () {
           const stopped = yield* Deferred.make<void>();
-          const instrumented = Layer.effect(
-            LogStore.Service,
-            Effect.map(LogStore.Service, (store) =>
-              LogStore.Service.of({
-                ...store,
-                changes: (path) =>
-                  store
-                    .changes(path)
-                    .pipe(
-                      Stream.ensuring(Deferred.succeed(stopped, undefined)),
-                    ),
-              }),
-            ),
-          ).pipe(Layer.provide(LogStoreMemory.layer));
+          const instrumented = Layer.mergeAll(
+            Layer.effect(
+              LogStore.Service,
+              Effect.map(LogStore.Service, (store) =>
+                LogStore.Service.of({
+                  ...store,
+                  changes: (path) =>
+                    store
+                      .changes(path)
+                      .pipe(
+                        Stream.ensuring(Deferred.succeed(stopped, undefined)),
+                      ),
+                }),
+              ),
+            ).pipe(Layer.provide(testLogLayer)),
+            NodeServices.layer,
+          );
 
           yield* conversation
             .run('hi')
@@ -833,7 +893,7 @@ const work = Tool.make('work', {
   // The handler sends a signal, which needs the store. Declared rather than
   // captured, so the requirement is visible on the tool the way any other
   // service-using tool declares it.
-  dependencies: [LogStore.Service],
+  dependencies: [LogStore.Service, Crypto.Crypto],
 });
 
 /**

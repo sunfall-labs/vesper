@@ -2,13 +2,19 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Layer, Stream } from 'effect';
+import * as NodeServices from '@effect/platform-node/NodeServices';
+import { Crypto, Effect, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // A turn the provider cut off at the output cap, rather than one the model
 // chose to end.
@@ -65,13 +71,17 @@ const agent = Agent.make({
 const CONVERSATION = 'truncated-conversation';
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    Crypto.Crypto | LogStore.Service | LanguageModel.LanguageModel
+  >,
   reason: 'stop' | 'length',
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(scripted(reason)),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 

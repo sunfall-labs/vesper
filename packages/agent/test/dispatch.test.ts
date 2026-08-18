@@ -2,9 +2,20 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it, test } from '@effect/vitest';
-import { Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
 import {
+  Crypto,
+  Effect,
+  Fiber,
+  Layer,
+  Option,
+  Ref,
+  Schema,
+  Stream,
+} from 'effect';
+import {
+  AiError,
   LanguageModel,
   type Response,
   Tool,
@@ -16,6 +27,11 @@ import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
 import { AgentLog } from '../src/log.js';
 import { ToolDispatch } from '../src/dispatch.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // The tool-dispatch seam.
 //
@@ -108,6 +124,13 @@ const lookup = Tool.make('lookup', {
   success: Schema.Struct({ status: Schema.String, at: Schema.DateFromString }),
 });
 
+const lookupWithTypedFailure = Tool.make('lookup', {
+  description: 'look an order up',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ status: Schema.String, at: Schema.DateFromString }),
+  failure: Schema.Struct({ code: Schema.String }),
+});
+
 const CONVERSATION = LogVocabulary.ConversationId.make('dispatch-conversation');
 const PATH = AgentLog.pathFor(CONVERSATION);
 const WHEN = new Date('2026-01-02T03:04:05.000Z');
@@ -129,17 +152,22 @@ const agentWith = (ran: { count: number }) =>
   });
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   prompts: string[] = [],
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(scripted(prompts)),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
-const runQuiet = <A>(effect: Effect.Effect<A>) => Effect.exit(effect);
+const runQuiet = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+  Effect.exit(effect);
 
 /**
  * Write a previous run's records straight into the conversation.
@@ -227,7 +255,7 @@ describe('responsive cancellation arbitration', () => {
       const arbitration = yield* ToolDispatch.makeTurnArbitration;
       yield* arbitration.cancel;
       const result = {
-        dispatched: yield* arbitration.dispatchCommits,
+        dispatched: Option.isSome(yield* arbitration.commit),
       };
 
       expect(result).toEqual({ dispatched: false });
@@ -237,22 +265,123 @@ describe('responsive cancellation arbitration', () => {
   it.effect('defers cancellation when dispatch commits first', () =>
     Effect.gen(function* () {
       const arbitration = yield* ToolDispatch.makeTurnArbitration;
-      const dispatched = yield* arbitration.dispatchCommits;
+      const permit = yield* arbitration.commit;
       const cancelled = yield* Ref.make(false);
       const cancelling = yield* Effect.forkChild(
         arbitration.cancel.pipe(Effect.andThen(Ref.set(cancelled, true))),
       );
       yield* Effect.yieldNow;
       const beforeSettlement = yield* Ref.get(cancelled);
-      yield* arbitration.settled;
+      expect(Option.isSome(permit)).toBe(true);
+      if (Option.isSome(permit)) yield* permit.value.settle;
       yield* Fiber.join(cancelling);
       const result = {
-        dispatched,
+        dispatched: Option.isSome(permit),
         beforeSettlement,
       };
 
       expect(result.dispatched).toBe(true);
       expect(result.beforeSettlement).toBe(false);
+    }),
+  );
+
+  it.effect('settles each committed dispatch at most once', () =>
+    Effect.gen(function* () {
+      const arbitration = yield* ToolDispatch.makeTurnArbitration;
+      const first = yield* arbitration.commit;
+      const second = yield* arbitration.commit;
+      expect(Option.isSome(first)).toBe(true);
+      expect(Option.isSome(second)).toBe(true);
+      if (Option.isNone(first) || Option.isNone(second)) return;
+
+      yield* first.value.settle;
+      yield* first.value.settle;
+
+      const cancelled = yield* Ref.make(false);
+      const cancelling = yield* Effect.forkChild(
+        arbitration.cancel.pipe(Effect.andThen(Ref.set(cancelled, true))),
+      );
+      yield* Effect.yieldNow;
+      expect(yield* Ref.get(cancelled)).toBe(false);
+
+      yield* second.value.settle;
+      yield* Fiber.join(cancelling);
+      expect(yield* Ref.get(cancelled)).toBe(true);
+    }),
+  );
+
+  it.effect('settles a dispatch that fails before returning its stream', () =>
+    Effect.gen(function* () {
+      const arbitration = yield* ToolDispatch.makeTurnArbitration;
+      const toolkit = Toolkit.make(lookup);
+      const gated = yield* ToolDispatch.gate(toolkit, {
+        agent: 'test',
+        arbitration,
+      }).pipe(
+        Effect.provide(
+          toolkit.toLayer({
+            lookup: () => Effect.succeed({ status: 'ok', at: WHEN }),
+          }),
+        ),
+      );
+      const dispatch = gated.handle as unknown as (
+        name: string,
+        params: unknown,
+        toolCallId: string,
+      ) => Effect.Effect<Stream.Stream<unknown, unknown, unknown>, unknown>;
+
+      const failed = yield* dispatch('lookup', { id: 42 }, 'setup-fails').pipe(
+        Effect.exit,
+      );
+      expect(failed._tag).toBe('Failure');
+
+      const cancelled = yield* arbitration.cancel.pipe(
+        Effect.timeout('100 millis'),
+        Effect.exit,
+      );
+      expect(cancelled._tag).toBe('Success');
+    }),
+  );
+
+  it.effect('settles a dispatch whose durable start append fails', () =>
+    Effect.gen(function* () {
+      const arbitration = yield* ToolDispatch.makeTurnArbitration;
+      const toolkit = Toolkit.make(lookup);
+      const session = {
+        conversationId: CONVERSATION,
+        recovery: () => Option.none(),
+        onToolSettled: () => {},
+        append: () => Effect.die('ToolStarted append failed'),
+      } as unknown as AgentLog.Session;
+      const gated = yield* ToolDispatch.gate(toolkit, {
+        agent: 'test',
+        arbitration,
+        session,
+      }).pipe(
+        Effect.provide(
+          toolkit.toLayer({
+            lookup: () => Effect.succeed({ status: 'ok', at: WHEN }),
+          }),
+        ),
+      );
+      const dispatch = gated.handle as unknown as (
+        name: string,
+        params: unknown,
+        toolCallId: string,
+      ) => Effect.Effect<Stream.Stream<unknown, unknown, unknown>, unknown>;
+
+      const failed = yield* dispatch(
+        'lookup',
+        { id: '42' },
+        'append-fails',
+      ).pipe(Effect.exit);
+      expect(failed._tag).toBe('Failure');
+
+      const cancelled = yield* arbitration.cancel.pipe(
+        Effect.timeout('100 millis'),
+        Effect.exit,
+      );
+      expect(cancelled._tag).toBe('Success');
     }),
   );
 });
@@ -395,7 +524,7 @@ describe('recovering indeterminate tool execution', () => {
                   Effect.succeed(Interception.retry),
               }),
               CONVERSATION,
-            ).resume('hi');
+            ).run('hi');
           }),
           prompts,
         );
@@ -426,13 +555,15 @@ describe('recovering indeterminate tool execution', () => {
                     })
                     .pipe(
                       Effect.orDie,
-                      Effect.andThen(Effect.sleep(20)),
-                      Effect.as(Interception.retry),
+                      // Stay inside recovery until the signal watcher observes
+                      // the durable cancel and interrupts the run. Returning a
+                      // retry here would reintroduce a timing race in the test.
+                      Effect.andThen(Effect.never),
                     ),
               }),
               CONVERSATION,
             );
-            return yield* conversation.resume('hi');
+            return yield* conversation.run('hi');
           }),
         );
 
@@ -466,7 +597,7 @@ describe('recovering indeterminate tool execution', () => {
             }),
             CONVERSATION,
           )
-            .resume('hi')
+            .run('hi')
             .pipe(Effect.result);
         }),
       );
@@ -487,11 +618,11 @@ describe('recovering indeterminate tool execution', () => {
         const exit = yield* Effect.gen(function* () {
           yield* seed([started, called, toolStarted]);
           return yield* Conversation.make(agentWith(ran), CONVERSATION)
-            .resume('hi')
+            .run('hi')
             .pipe(Effect.result);
         }).pipe(
           Effect.provide(differentCallProvider(calls)),
-          Effect.provide(LogStoreMemory.layer),
+          Effect.provide(testLogLayer),
           Effect.scoped,
         );
 
@@ -518,11 +649,11 @@ describe('recovering indeterminate tool execution', () => {
           }),
           CONVERSATION,
         )
-          .resume('hi')
+          .run('hi')
           .pipe(Effect.result);
       }).pipe(
         Effect.provide(differentCallProvider(calls)),
-        Effect.provide(LogStoreMemory.layer),
+        Effect.provide(testLogLayer),
         Effect.scoped,
       );
 
@@ -556,7 +687,7 @@ describe('recovering indeterminate tool execution', () => {
                 },
               }),
               CONVERSATION,
-            ).resume('hi');
+            ).run('hi');
           }),
         );
 
@@ -593,7 +724,7 @@ describe('recovering indeterminate tool execution', () => {
               },
             }),
             CONVERSATION,
-          ).resume('hi');
+          ).run('hi');
         }),
       );
 
@@ -673,7 +804,7 @@ describe('recovering indeterminate tool execution', () => {
               }),
               CONVERSATION,
             )
-              .resume('hi')
+              .run('hi')
               .pipe(Effect.result);
             return { exit, records: yield* readAll() };
           }),
@@ -709,7 +840,7 @@ describe('recovering indeterminate tool execution', () => {
               },
             }),
             CONVERSATION,
-          ).resume('hi');
+          ).run('hi');
           return yield* readAll();
         }),
         prompts,
@@ -722,6 +853,38 @@ describe('recovering indeterminate tool execution', () => {
         records.filter(({ record }) => record._tag === 'ToolStarted'),
       ).toHaveLength(2);
       expect(records.at(-1)?.record._tag).toBe('RunSettled');
+    }),
+  );
+
+  it.effect('normalizes a typed handler failure during retry', () =>
+    Effect.gen(function* () {
+      const failing = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(lookupWithTypedFailure),
+      }).withHandlers({
+        lookup: () => Effect.fail({ code: 'typed-failure' }),
+      });
+
+      const exit = yield* run(
+        Effect.gen(function* () {
+          yield* seed([started, called, toolStarted]);
+          return yield* Conversation.make(
+            failing.intercepting({
+              onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
+            }),
+            CONVERSATION,
+          )
+            .run('hi')
+            .pipe(Effect.result);
+        }),
+      );
+
+      expect(exit._tag).toBe('Failure');
+      if (exit._tag === 'Failure') {
+        expect(AiError.isAiError(exit.failure)).toBe(true);
+      }
     }),
   );
 
@@ -747,7 +910,7 @@ describe('recovering indeterminate tool execution', () => {
               },
             }),
             CONVERSATION,
-          ).resume('hi');
+          ).run('hi');
           return yield* readAll();
         }),
         prompts,
@@ -780,7 +943,7 @@ describe('recovering indeterminate tool execution', () => {
                     ),
                 }),
                 CONVERSATION,
-              ).resume('hi');
+              ).run('hi');
             }),
           ).pipe(Effect.result);
           expect(String(result)).toContain(
@@ -820,7 +983,7 @@ describe('recovering indeterminate tool execution', () => {
                 }),
                 CONVERSATION,
               )
-                .resume('hi')
+                .run('hi')
                 .pipe(Effect.result);
               yield* Conversation.make(
                 agentWith({ count: 0 }).intercepting({
@@ -835,7 +998,7 @@ describe('recovering indeterminate tool execution', () => {
                   },
                 }),
                 CONVERSATION,
-              ).resume('hi');
+              ).run('hi');
               return yield* readAll();
             }),
           );

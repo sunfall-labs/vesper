@@ -1,6 +1,7 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Context, Effect, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
@@ -10,6 +11,11 @@ import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
 import { RecordingPolicy } from '../src/recording-policy.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 const finish: Response.FinishPartEncoded = {
   type: 'finish',
@@ -63,9 +69,11 @@ describe('recording policy', () => {
       });
 
       const records = yield* Effect.gen(function* () {
-        yield* Conversation.recording(agent, conversation, policy).run(
-          'input secret',
-        );
+        yield* Conversation.withRecordingPolicy(
+          agent,
+          conversation,
+          policy,
+        ).run('input secret');
         const store = yield* LogStore.Service;
         return (yield* store.read(
           AgentLog.pathFor(LogVocabulary.ConversationId.make(conversation)),
@@ -76,7 +84,7 @@ describe('recording policy', () => {
       }).pipe(
         Effect.provideService(Redactor, { replacement: '[redacted prompt]' }),
         Effect.provide(model(seen)),
-        Effect.provide(LogStoreMemory.layer),
+        Effect.provide(testLogLayer),
       );
 
       expect(seen[0]).toContain('input secret');
@@ -98,6 +106,10 @@ describe('recording policy', () => {
             {
               toolParameters: () => Effect.succeed({ redacted: 'params' }),
               toolResult: () => Effect.succeed({ redacted: 'result' }),
+              externalRequest: () =>
+                Effect.succeed({ redacted: 'external request' }),
+              externalResult: () =>
+                Effect.succeed({ redacted: 'external result' }),
               signal: (signal) =>
                 Effect.succeed({ ...signal, text: '[redacted signal]' }),
               cause: () => Effect.succeed('[redacted cause]'),
@@ -127,6 +139,23 @@ describe('recording policy', () => {
                 name: 'tool',
               },
               {
+                _tag: 'ToolSuspended' as const,
+                id: LogVocabulary.ToolCallId.make('a'),
+                name: 'tool',
+                wait: 'review',
+                token: 'workflow-token',
+                request: { secret: true },
+              },
+              {
+                _tag: 'ToolWaitCompleted' as const,
+                id: LogVocabulary.ToolCallId.make('a'),
+                name: 'tool',
+                wait: 'review',
+                token: 'workflow-token',
+                outcome: 'success' as const,
+                result: { secret: true },
+              },
+              {
                 _tag: 'SignalReceived' as const,
                 kind: 'steer' as const,
                 text: 'secret',
@@ -150,6 +179,8 @@ describe('recording policy', () => {
           { params: { redacted: 'params' } },
           { result: { redacted: 'result' } },
           { _tag: 'ToolStarted', id: 'a', name: 'tool' },
+          { request: { redacted: 'external request' } },
+          { result: { redacted: 'external result' } },
           { text: '[redacted signal]' },
           { detail: '[redacted cause]' },
         ]);

@@ -2,7 +2,7 @@
   "name": "@sunfall/vesper-example-live-smoke",
   "version": "0.1.0-alpha.1",
   "private": true,
-  "description": "Drives every package against a real model: tools, delegation, skills, logging, branching, forking, and both compaction triggers.",
+  "description": "Drives every package against a real model, including durability across fresh PostgreSQL pools.",
   "homepage": "https://github.com/sunfall-labs/vesper#readme",
   "bugs": {
     "url": "https://github.com/sunfall-labs/vesper/issues"

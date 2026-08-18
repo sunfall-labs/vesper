@@ -1,4 +1,5 @@
 import { PgClient } from '@effect/sql-pg';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, beforeAll, describe, expect, it } from '@effect/vitest';
 import {
   Deferred,
@@ -46,7 +47,10 @@ describeIntegration('LogStore Postgres backend', () => {
       VesperPgClient.layer({ url: Redacted.make(database.connectionString) }),
     ),
   );
-  const storeLayer = LogStorePg.layer().pipe(Layer.provide(pgLayer));
+  const storeLayer = LogStorePg.layer().pipe(
+    Layer.provide(pgLayer),
+    Layer.provide(NodeServices.layer),
+  );
 
   LogStoreContract.logStoreContract('postgres', { layer: storeLayer });
 
@@ -62,6 +66,7 @@ describeIntegration('LogStore Postgres backend', () => {
                 url: Redacted.make(database.connectionString),
               }),
             ),
+            Layer.provide(NodeServices.layer),
           ),
         );
         const writer = ManagedRuntime.make(
@@ -71,6 +76,7 @@ describeIntegration('LogStore Postgres backend', () => {
                 url: Redacted.make(database.connectionString),
               }),
             ),
+            Layer.provide(NodeServices.layer),
           ),
         );
 

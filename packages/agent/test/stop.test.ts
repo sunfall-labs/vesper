@@ -1,7 +1,8 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Ref } from 'effect';
+import { Effect, Ref, Schema } from 'effect';
 import type { Response } from 'effect/unstable/ai';
 
+import { AgentEvents } from '../src/event.js';
 import { Stop } from '../src/stop.js';
 
 // The stop conditions decide when an agent stops calling the model, which is
@@ -25,6 +26,29 @@ const decide = <T extends Record<string, never>>(
 ) => condition(state(over) as Stop.State<T>);
 
 describe('stop conditions', () => {
+  it.effect('rejects non-finite token usage', () =>
+    Effect.gen(function* () {
+      const result = yield* Schema.decodeUnknownEffect(Stop.Usage)({
+        input: Number.NaN,
+        output: Number.POSITIVE_INFINITY,
+      }).pipe(Effect.result);
+
+      expect(result._tag).toBe('Failure');
+    }),
+  );
+
+  it.effect('rejects invalid lifecycle counters', () =>
+    Effect.gen(function* () {
+      const result = yield* Schema.decodeUnknownEffect(AgentEvents.Lifecycle)({
+        _tag: 'SignalBacklog',
+        step: -1,
+        maximum: Number.POSITIVE_INFINITY,
+      }).pipe(Effect.result);
+
+      expect(result._tag).toBe('Failure');
+    }),
+  );
+
   it.effect(
     'stops when a turn requests no tools, and continues when it does',
     () =>

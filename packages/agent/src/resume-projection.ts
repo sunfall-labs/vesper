@@ -69,8 +69,24 @@ export const update = (
                   },
             latestTurnUsage: record.resume.latestTurnUsage,
           };
-    default:
+    case 'Text':
+    case 'ToolCall':
+    case 'ToolStarted':
+    case 'ToolSuspended':
+    case 'ToolResumed':
+    case 'ToolWaitCompleted':
+    case 'ToolWaitRestarted':
+    case 'ToolOutcome':
+    case 'BranchedFrom':
+    case 'StateCheckpoint':
+    case 'ChildSession':
+    case 'Signal':
+    case 'SignalReceived':
       return current;
+    default: {
+      const _exhaustive: never = record;
+      return _exhaustive;
+    }
   }
 };
 
@@ -90,10 +106,35 @@ export const updateState = (
   current: State,
   record: ConversationRecord.Record,
 ): State => {
-  if (record._tag === 'StateCheckpoint') return record;
-  return record._tag === 'RunSettled' && record.resume?.state !== undefined
-    ? { _tag: 'StateCheckpoint', ...record.resume.state }
-    : current;
+  switch (record._tag) {
+    case 'StateCheckpoint':
+      return record;
+    case 'RunSettled':
+      return record.resume?.state !== undefined
+        ? { _tag: 'StateCheckpoint', ...record.resume.state }
+        : current;
+    case 'RunStarted':
+    case 'Text':
+    case 'ToolCall':
+    case 'ToolStarted':
+    case 'ToolSuspended':
+    case 'ToolResumed':
+    case 'ToolWaitCompleted':
+    case 'ToolWaitRestarted':
+    case 'ToolOutcome':
+    case 'TurnFinished':
+    case 'Compacted':
+    case 'BranchedFrom':
+    case 'Completed':
+    case 'ChildSession':
+    case 'Signal':
+    case 'SignalReceived':
+      return current;
+    default: {
+      const _exhaustive: never = record;
+      return _exhaustive;
+    }
+  }
 };
 
 /** Select the latest durable State checkpoint on the active branch. */

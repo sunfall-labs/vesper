@@ -39,6 +39,29 @@ const errnoCode = (error: unknown): string | undefined =>
     ? (error as { code: string }).code
     : undefined;
 
+const classifyWorkspaceFailure = (
+  operation: WorkspaceDriver.Operation,
+  path: string,
+  code: string | undefined,
+  cause: unknown,
+):
+  | WorkspaceDriver.PathNotFound
+  | WorkspaceDriver.PermissionDenied
+  | WorkspaceDriver.WorkspaceFailure => {
+  if (code === 'ENOENT' || code === 'NotFound') {
+    return new WorkspaceDriver.PathNotFound({ path, operation });
+  }
+  if (code === 'EACCES' || code === 'EPERM' || code === 'PermissionDenied') {
+    return new WorkspaceDriver.PermissionDenied({ path, operation });
+  }
+  return new WorkspaceDriver.WorkspaceFailure({
+    operation,
+    path,
+    code: code ?? 'Unknown',
+    cause,
+  });
+};
+
 /**
  * Classify a `node:fs` rejection.
  *
@@ -49,21 +72,8 @@ const errnoCode = (error: unknown): string | undefined =>
  */
 const fsFailure =
   (operation: WorkspaceDriver.Operation, path: string) =>
-  (error: unknown): WorkspaceDriver.FileError => {
-    const code = errnoCode(error);
-    if (code === 'ENOENT') {
-      return new WorkspaceDriver.PathNotFound({ path, operation });
-    }
-    if (code === 'EACCES' || code === 'EPERM') {
-      return new WorkspaceDriver.PermissionDenied({ path, operation });
-    }
-    return new WorkspaceDriver.WorkspaceFailure({
-      operation,
-      path,
-      code: code ?? 'Unknown',
-      cause: error,
-    });
-  };
+  (error: unknown): WorkspaceDriver.FileError =>
+    classifyWorkspaceFailure(operation, path, errnoCode(error), error);
 
 class ReadLimitExceeded extends Error {
   readonly code = 'ERR_FILE_READ_LIMIT';
@@ -173,18 +183,7 @@ const execFailure =
         ? String(reason.pathOrDescriptor)
         : cwd) ?? command;
 
-    if (reason._tag === 'NotFound') {
-      return new WorkspaceDriver.PathNotFound({ path, operation: 'exec' });
-    }
-    if (reason._tag === 'PermissionDenied') {
-      return new WorkspaceDriver.PermissionDenied({ path, operation: 'exec' });
-    }
-    return new WorkspaceDriver.WorkspaceFailure({
-      operation: 'exec',
-      path,
-      code: reason._tag,
-      cause: error,
-    });
+    return classifyWorkspaceFailure('exec', path, reason._tag, error);
   };
 
 export const layer: Layer.Layer<
@@ -198,7 +197,7 @@ export const layer: Layer.Layer<
 
     // `Effect.fn` with plain functions rather than generators wherever the
     // body has nothing to yield: an empty generator trips `require-yield`.
-    const readFile = Effect.fn('AiWorkspace.readFile')(
+    const readFile = Effect.fn('WorkspaceDriver.readFile')(
       (path: string, options?: WorkspaceDriver.ReadFileOptions) =>
         Effect.tryPromise({
           try: async (signal): Promise<string> => {
@@ -213,7 +212,7 @@ export const layer: Layer.Layer<
         }),
     );
 
-    const readFileBuffer = Effect.fn('AiWorkspace.readFileBuffer')(
+    const readFileBuffer = Effect.fn('WorkspaceDriver.readFileBuffer')(
       (path: string, options?: WorkspaceDriver.ReadFileOptions) =>
         Effect.tryPromise({
           try: (signal): Promise<Buffer> =>
@@ -230,7 +229,7 @@ export const layer: Layer.Layer<
         ),
     );
 
-    const writeFile = Effect.fn('AiWorkspace.writeFile')(
+    const writeFile = Effect.fn('WorkspaceDriver.writeFile')(
       (path: string, content: string | Uint8Array) =>
         Effect.tryPromise({
           try: (signal) => fs.writeFile(path, content, { signal }),
@@ -238,7 +237,7 @@ export const layer: Layer.Layer<
         }),
     );
 
-    const stat = Effect.fn('AiWorkspace.stat')((path: string) =>
+    const stat = Effect.fn('WorkspaceDriver.stat')((path: string) =>
       Effect.tryPromise({
         // `lstat`, so a symlink reports as a symlink. `stat` would follow it
         // and make `isSymbolicLink` unreachable.
@@ -257,14 +256,14 @@ export const layer: Layer.Layer<
       ),
     );
 
-    const readdir = Effect.fn('AiWorkspace.readdir')((path: string) =>
+    const readdir = Effect.fn('WorkspaceDriver.readdir')((path: string) =>
       Effect.tryPromise({
         try: (): Promise<ReadonlyArray<string>> => fs.readdir(path),
         catch: fsFailure('readdir', path),
       }).pipe(Effect.map((entries): ReadonlyArray<string> => entries)),
     );
 
-    const exists = Effect.fn('AiWorkspace.exists')((path: string) =>
+    const exists = Effect.fn('WorkspaceDriver.exists')((path: string) =>
       Effect.tryPromise({
         try: (): Promise<void> => fs.access(path),
         catch: fsFailure('exists', path),
@@ -272,13 +271,11 @@ export const layer: Layer.Layer<
         Effect.as(true),
         // Only absence answers `false`. A permission error still fails, so
         // "cannot tell" never reads as "not there".
-        Effect.catchTag('@sunfall/vesper-workspace/PathNotFound', () =>
-          Effect.succeed(false),
-        ),
+        Effect.catchTag('PathNotFound', () => Effect.succeed(false)),
       ),
     );
 
-    const mkdir = Effect.fn('AiWorkspace.mkdir')(
+    const mkdir = Effect.fn('WorkspaceDriver.mkdir')(
       (path: string, options?: WorkspaceDriver.MkdirOptions) =>
         Effect.tryPromise({
           try: (): Promise<string | undefined> =>
@@ -287,7 +284,7 @@ export const layer: Layer.Layer<
         }).pipe(Effect.asVoid),
     );
 
-    const rm = Effect.fn('AiWorkspace.rm')(
+    const rm = Effect.fn('WorkspaceDriver.rm')(
       (path: string, options?: WorkspaceDriver.RmOptions) =>
         Effect.tryPromise({
           try: (): Promise<void> =>
@@ -299,7 +296,7 @@ export const layer: Layer.Layer<
         }),
     );
 
-    const exec = Effect.fn('AiWorkspace.exec')((
+    const exec = Effect.fn('WorkspaceDriver.exec')((
       command: string,
       options?: WorkspaceDriver.ExecOptions,
     ): Effect.Effect<

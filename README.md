@@ -27,7 +27,7 @@ Vesper publishes four packages:
 
 | Package                                               | What it does                                                     |
 | ----------------------------------------------------- | ---------------------------------------------------------------- |
-| [`@sunfall/vesper-agent`](packages/agent)             | The loop, subagents, skills, interception, recording, resumption |
+| [`@sunfall/vesper-agent`](packages/agent)             | The loop, typed evals, skills, recording, resumption, subagents  |
 | [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory + Postgres |
 | [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                   |
 | [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                        |
@@ -49,7 +49,17 @@ agent's complete `Requires` channel rather than hiding runtime wiring.
 Workflow `Activity` whose completed result replays without rerunning its effect,
 with a mandatory input-derived key separating repeated logical calls. Its
 requirement channel prevents it being mistaken for durable work outside a
-workflow.
+workflow. `AgentWorkflow.wait` lets the same handler yield a typed external
+request and resume from a durable decision; each wait definition exposes a
+typed `awaitPending(conversation, key)` Effect for one independently keyed
+request. It is reconnectable and derived from the durable conversation tail
+rather than an ephemeral queue, while the conversation's wait stream remains
+the complete audit lifecycle.
+
+`@sunfall/vesper-agent/eval` runs the same typed agent used in production and
+captures its result, events, timing, and typed tool evidence for deterministic
+or effectful scoring. It preserves the agent's error and requirement channels,
+does not retain prompt input, and stays independent of any test framework.
 
 ## Install
 
@@ -327,25 +337,33 @@ recorded representation without changing the values the live model and tools
 see:
 
 ```ts
-const conversation = Conversation.recording(supportAgent, conversationId, {
-  prompt: (prompt) => Redaction.redactPrompt(prompt),
-  toolParameters: (params, call) => Redaction.redactTool(call.name, params),
-  toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
-  signal: (signal) => Redaction.redactSignal(signal),
-  cause: (rendered) => Redaction.redactCause(rendered),
-});
+const conversation = Conversation.withRecordingPolicy(
+  supportAgent,
+  conversationId,
+  {
+    prompt: (prompt) => Redaction.redactPrompt(prompt),
+    toolParameters: (params, call) => Redaction.redactTool(call.name, params),
+    toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
+    externalRequest: (request, wait) =>
+      Redaction.redactExternalRequest(wait.wait, request),
+    signal: (signal) => Redaction.redactSignal(signal),
+    cause: (rendered) => Redaction.redactCause(rendered),
+  },
+);
 ```
 
 Any Effect services those functions use are added to the returned agent's
-`Requires`; raw recording adds only `LogStore.Service`. The compiled filter is
-carried into child sessions. Since records are also the resumption source,
-future resumed prompts and recovered tool outcomes use the filtered values;
-filters should preserve enough shape for the tool and prompt codecs involved.
+`Requires`; raw recording adds `LogStore.Service` and Effect's `Crypto` service
+for portable identifiers. Node applications can provide `NodeServices.layer`.
+The compiled filter is carried into child sessions. Since records are also the
+resumption source, future resumed prompts and recovered tool outcomes use the
+filtered values; filters should preserve enough shape for the tool and prompt
+codecs involved.
 
 **Logging is optional, and the type says which you have.** `run` does not
 require a `LogStore` and every non-recording call site is unchanged; the agent
 bound by `Conversation.make` requires `LogStore.Service`, so a caller who has not
-provided one does not compile. It is deliberately not an ambient
+provided the log store and `Crypto` does not compile. It is deliberately not an ambient
 `Context.Reference` with a no-op default: persistence behind a defaulted
 reference gives a caller who forgot plausible behaviour and no signal.
 
@@ -382,15 +400,16 @@ providing the official `PgClient` and generic `SqlClient` services.
 ```ts
 Effect.gen(function* () {
   const conversation = Conversation.make(supportAgent, conversationId);
-  const result = yield* conversation.resume('and then?');
+  const result = yield* conversation.run('and then?');
 });
 ```
 
-`conversation.run` puts a conversation down; `conversation.resume` picks it
-back up — rebuilding the prompt from records, seeding it under the agent's
-_current_ instructions, and continuing from the next turn. A conversation that
-does not exist yet starts as one. The returned `usage` is cumulative across the
-whole conversation rather than this run alone.
+`conversation.run` always continues from the active durable history. It rebuilds
+the prompt from records, seeds it under the agent's _current_ instructions, and
+starts the next turn; when the conversation does not exist yet, the same method
+starts it. `conversation.stream` is the streaming form of that exact operation.
+The terminal `usage` is cumulative across the whole conversation rather than
+the latest run alone.
 
 Every `Agent.make` definition requires a non-empty application revision. Vesper
 persists that revision, the agent name, and its conversation-format version in
@@ -590,6 +609,18 @@ An interceptor belongs to the agent it was attached to. A subagent is its own
 loop and does not inherit its parent's — but the delegation itself is a tool
 call, so `beforeToolCall` sees `task_<child>` like anything else.
 
+## Trying durable approval locally
+
+```bash
+nub run example:approval-cli
+```
+
+`examples/approval-cli` needs no API key. A scripted agent asks its release
+tool to change production; the handler yields one keyed durable approval, the
+CLI lets you approve or deny it, and the same handler resumes before the agent
+reacts to the result. For a non-interactive run, use
+`nub run example:approval-cli --decision approve` or `--decision deny`.
+
 ## Trying it against a real model
 
 ```bash
@@ -603,9 +634,31 @@ is the output, so unreviewed text has no path out rather than being caught on
 the way.
 
 `examples/live-smoke` is the broader one: it drives tools, delegation, skills,
-logging, branching, forking, the workspace toolkit, and both compaction
-triggers against a real provider. Everything else in the repository runs
-against scripted Effect `LanguageModel` implementations.
+finite record snapshots, following, queued signals, resumption, branching,
+independent forks, the workspace toolkit, and both compaction triggers against
+a real provider. Everything else in the repository runs against scripted
+Effect `LanguageModel` implementations. Run only the conversation phase with
+`nub run example:live-smoke -- --phase log`.
+
+The opt-in `durability` phase uses PostgreSQL instead of the memory backend. It
+writes a run and queued signal, disposes that PostgreSQL runtime and pool, then
+creates an independently scoped runtime and pool to resume the same
+conversation. This demonstrates persistence across application resource
+replacement; it does not spawn a second OS process. Apply
+`packages/log/migrations/001-initial.sql` to the database first, then run:
+
+```bash
+OPENROUTER_API_KEY=... \
+VESPER_DATABASE_URL=postgres://... \
+nub run example:live-smoke -- \
+  --phase durability \
+  --provider openrouter \
+  --model openrouter/free
+```
+
+OpenRouter's free router still requires an account API key and is subject to
+free-tier availability and rate limits. Select a specific free model with
+`--model <model-id>:free` when deterministic model routing matters.
 
 Neither example has been run against a live provider since the persistence
 mechanisms were pruned to one.
@@ -652,6 +705,13 @@ input)` is the other trade: it seeds a **new** conversation from the same
   `SignalReceived.at` is reset, because the fork's signal stream is a different
   one — and it leaves the ancestor untouched, so the relationship is not
   navigable from the ancestor's side.
+
+  A boundary containing a suspended workflow wait must opt into
+  `{ pendingWait: 'restart' }`; Vesper records `ToolWaitRestarted`, re-enters
+  the original provider call under the new path's workflow execution, and
+  issues a fresh token. `AgentWorkflow.Binding.branchFrom` and `.forkFrom`
+  provide the durable high-level form. Omitting the option fails with a typed
+  `SuspendedConversationError` rather than copying a token owned elsewhere.
 
 - **No implicit harness toolkit or prompt templates.** Nothing installs shell,
   read, or edit tools on every agent by default. Applications explicitly opt in

@@ -18,6 +18,7 @@
   "scripts": {
     "build": "tsdown",
     "benchmark": "nub run --filter @sunfall/vesper-benchmarks bench",
+    "example:approval-cli": "node --experimental-strip-types examples/approval-cli/src/main.ts",
     "example:compliance-relay": "nub run --filter @sunfall/vesper-example-compliance-relay start",
     "example:live-smoke": "nub run --filter @sunfall/vesper-example-live-smoke start",
     "test": "vitest run",

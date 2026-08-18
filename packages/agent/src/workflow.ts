@@ -1,16 +1,22 @@
-import type { Layer, Schedule } from 'effect';
-import { Effect, Schema } from 'effect';
-import type { Prompt } from 'effect/unstable/ai';
+import type { LogStore } from '@sunfall/vesper-log/log-store';
+import { LogOffset } from '@sunfall/vesper-log/offset';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import type { Crypto, Schedule, SchemaIssue } from 'effect';
+import { Effect, Exit, Layer, Option, Schema, Stream } from 'effect';
+import { type Prompt, Tool } from 'effect/unstable/ai';
 import {
   Activity,
+  DurableDeferred,
   Workflow,
-  type WorkflowEngine,
+  WorkflowEngine,
 } from 'effect/unstable/workflow';
+import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
 
 import { Agent } from './agent.js';
+import { AgentBranch } from './branch.js';
 import { Conversation } from './conversation.js';
-import type { LogStore } from '@sunfall/vesper-log/log-store';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as ToolExecution from './internal/tool-execution.js';
 
 /** Durable request fields shared by execution, cancellation, and resumption. */
 export const RequestFields = {
@@ -43,12 +49,57 @@ const IdentityTypeId: unique symbol = Symbol.for(
 /** One exact workflow execution and its corresponding Vesper conversation. */
 export interface Identity {
   readonly [IdentityTypeId]: typeof IdentityTypeId;
+  readonly workflow: 'run' | 'path';
   readonly executionId: string;
   readonly conversationId: LogVocabulary.ConversationId;
 }
 
 type WorkflowPayload<Payload extends Workflow.AnyStructSchema> =
   Payload extends Schema.Struct.Fields ? Schema.Struct<Payload> : Payload;
+
+/** Recoverable failures shared by workflow-backed branch and fork execution. */
+export type PathFailure<Error extends Schema.Top> =
+  | Error['Type']
+  | Schema.SchemaError
+  | SchemaIssue.Issue
+  | PathError;
+
+/** Services shared by workflow-backed branch and fork execution. */
+export type PathRequirements<
+  Payload extends Workflow.AnyStructSchema,
+  Error extends Schema.Top,
+> =
+  | WorkflowEngine.WorkflowEngine
+  | Payload['EncodingServices']
+  | (typeof Agent.Result)['DecodingServices']
+  | Error['DecodingServices'];
+
+/** Start or await a new workflow-owned conversation path. */
+export interface PathOperation<
+  Payload extends Workflow.AnyStructSchema,
+  Error extends Schema.Top,
+> {
+  (
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: Payload['~type.make.in'],
+    options: { readonly discard: true },
+  ): Effect.Effect<
+    Identity,
+    PathFailure<Error>,
+    PathRequirements<Payload, Error>
+  >;
+  (
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: Payload['~type.make.in'],
+    options?: { readonly discard?: false },
+  ): Effect.Effect<
+    Agent.Result,
+    PathFailure<Error>,
+    PathRequirements<Payload, Error>
+  >;
+}
 
 /** A durable Effect workflow bound to one Vesper agent definition. */
 export interface Binding<
@@ -68,7 +119,7 @@ export interface Binding<
   /** Derive both durable identities from one validated workflow payload. */
   readonly identify: (
     payload: Payload['~type.make.in'],
-  ) => Effect.Effect<Identity>;
+  ) => Effect.Effect<Identity, SchemaIssue.Issue>;
   /** Persist Vesper cancellation intent, then terminally interrupt the workflow. */
   readonly cancel: (
     identity: Identity,
@@ -76,8 +127,12 @@ export interface Binding<
   ) => Effect.Effect<
     void,
     LogStore.LogStoreError,
-    WorkflowEngine.WorkflowEngine | LogStore.Service
+    WorkflowEngine.WorkflowEngine | LogStore.Service | Crypto.Crypto
   >;
+  /** Supersede a suspended source execution and restart its wait on a branch. */
+  readonly branchFrom: PathOperation<Payload, Error>;
+  /** Keep the source execution and restart its wait independently in a fork. */
+  readonly forkFrom: PathOperation<Payload, Error>;
 }
 
 export interface CancelSignal {
@@ -135,6 +190,434 @@ export interface StepOptions<
 }
 
 /**
+ * Mark a tool as requiring Effect Workflow's durable execution context.
+ *
+ * Use this for handlers that call {@link step} or {@link wait}. The added
+ * dependencies stay visible in the agent's requirement type and are supplied
+ * by {@link make}; the same handler cannot accidentally run durably through a
+ * plain agent invocation.
+ */
+export const durable = <
+  Name extends string,
+  Config extends {
+    readonly parameters: Schema.Constraint;
+    readonly success: Schema.Constraint;
+    readonly failure: Schema.Constraint;
+    readonly failureMode: Tool.FailureMode;
+  },
+  Requirements,
+>(
+  tool: Tool.Tool<Name, Config, Requirements>,
+) =>
+  tool
+    .addDependency(WorkflowEngine.WorkflowEngine)
+    .addDependency(WorkflowEngine.WorkflowInstance)
+    .addDependency(ToolExecution.Current);
+
+/** A malformed token, or one addressed to a different wait definition. */
+export class WaitTokenError extends Schema.TaggedError<WaitTokenError>(
+  '@sunfall/vesper-agent/AgentWorkflow/WaitTokenError',
+)('WaitTokenError', { message: Schema.String }) {}
+
+/** Ambiguous durable state for one independently keyed external wait. */
+export class WaitStateError extends Schema.TaggedError<WaitStateError>(
+  '@sunfall/vesper-agent/AgentWorkflow/WaitStateError',
+)('WaitStateError', {
+  message: Schema.String,
+  conversationId: LogVocabulary.ConversationId,
+  wait: Schema.String,
+  key: Schema.String,
+}) {}
+
+/** Invalid source/target identity for a workflow branch or fork. */
+export class PathError extends Schema.TaggedError<PathError>(
+  '@sunfall/vesper-agent/AgentWorkflow/PathError',
+)('PathError', { message: Schema.String }) {}
+
+interface PendingWaitFields<Request> {
+  readonly conversationId: LogVocabulary.ConversationId;
+  readonly offset: LogOffset.Offset;
+  readonly toolCallId: LogVocabulary.ToolCallId;
+  readonly toolName: string;
+  readonly key: string;
+  readonly token: string;
+  readonly request: Request;
+}
+
+/** One independently keyed external wait that can still be completed. */
+export interface PendingWait<
+  Request,
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint,
+> extends PendingWaitFields<Request> {
+  readonly complete: (
+    value: Success['Type'],
+  ) => Effect.Effect<
+    void,
+    Schema.SchemaError | WaitTokenError,
+    WorkflowEngine.WorkflowEngine | Success['EncodingServices']
+  >;
+  readonly fail: (
+    error: Error['Type'],
+  ) => Effect.Effect<
+    void,
+    Schema.SchemaError | WaitTokenError,
+    WorkflowEngine.WorkflowEngine | Error['EncodingServices']
+  >;
+}
+
+/** A named durable wait used from inside a recorded workflow tool handler. */
+export interface Wait<
+  Request extends Schema.Constraint,
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint,
+> {
+  (
+    request: Request['Type'],
+  ): Effect.Effect<
+    Success['Type'],
+    Error['Type'],
+    | WorkflowEngine.WorkflowEngine
+    | WorkflowInstance
+    | ToolExecution.Current
+    | Request['EncodingServices']
+    | Success['DecodingServices']
+    | Error['DecodingServices']
+  >;
+  readonly waitName: string;
+  readonly request: Request;
+  readonly success: Success;
+  readonly error: Error;
+  /** Wait for the independently keyed request that needs an external result. */
+  readonly awaitPending: <A extends Agent.Any, Requires>(
+    conversation: Conversation.Instance<A, Requires>,
+    key: string,
+  ) => Effect.Effect<
+    PendingWait<Request['Type'], Success, Error>,
+    LogStore.LogStoreError | Schema.SchemaError | WaitStateError,
+    LogStore.Service | Request['DecodingServices']
+  >;
+  /** Complete a serialized pending wait by its exact durable token. */
+  readonly complete: (
+    token: string,
+    value: Success['Type'],
+  ) => Effect.Effect<
+    void,
+    Schema.SchemaError | WaitTokenError,
+    WorkflowEngine.WorkflowEngine | Success['EncodingServices']
+  >;
+  readonly fail: (
+    token: string,
+    error: Error['Type'],
+  ) => Effect.Effect<
+    void,
+    Schema.SchemaError | WaitTokenError,
+    WorkflowEngine.WorkflowEngine | Error['EncodingServices']
+  >;
+}
+
+/** Options for one externally completed durable handler wait. */
+export interface WaitOptions<
+  Request extends Schema.Constraint,
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint,
+> {
+  readonly name: string;
+  /** Stable identity for this logical wait within one workflow execution. */
+  readonly key: (request: Request['Type']) => string;
+  readonly request: Request;
+  readonly success: Success;
+  readonly error: Error;
+}
+
+/**
+ * Define a durable external wait for use inside a tool handler.
+ *
+ * The request is written to the conversation as `ToolSuspended`; completing
+ * its token wakes the owning Effect Workflow. On replay, Vesper re-enters only
+ * the deliberately suspended handler and Effect Workflow restores completed
+ * activities before returning the external result here.
+ */
+export const wait = <
+  Request extends Schema.Constraint,
+  Success extends Schema.Constraint,
+  Error extends Schema.Constraint,
+>(
+  options: WaitOptions<Request, Success, Error>,
+): Wait<Request, Success, Error> => {
+  if (options.name.length === 0) {
+    throw new Error('AgentWorkflow.wait requires a non-empty name');
+  }
+  const error = options.error;
+  const prefix = `${options.name}/`;
+  const deferredFor = (key: string) =>
+    DurableDeferred.make(`${prefix}${encodeURIComponent(key)}`, {
+      success: options.success,
+      error,
+    });
+  const fromToken = (token: string) =>
+    Effect.gen(function* () {
+      const parsed = yield* Schema.decodeUnknownEffect(
+        DurableDeferred.TokenParsed.FromString,
+      )(token);
+      if (!parsed.deferredName.startsWith(prefix)) {
+        return yield* new WaitTokenError({
+          message: `Token is for wait "${parsed.deferredName}", not "${options.name}"`,
+        });
+      }
+      return {
+        token: parsed.asToken,
+        deferred: DurableDeferred.make(parsed.deferredName, {
+          success: options.success,
+          error,
+        }),
+      };
+    });
+
+  const run = (request: Request['Type']) =>
+    Effect.gen(function* () {
+      const execution = yield* ToolExecution.Current;
+      const key = options.key(request);
+      const deferred = deferredFor(key);
+      const token = yield* DurableDeferred.token(deferred);
+      const engine = yield* WorkflowEngine.WorkflowEngine;
+      const existing = yield* engine.deferredResult(deferred);
+      if (Option.isSome(existing)) {
+        if (!execution.session.hasCompletedWait(token)) {
+          const result = yield* Schema.encodeUnknownEffect(
+            Schema.toCodecJson(deferred.exitSchema),
+          )(existing.value).pipe(Effect.orDie);
+          yield* execution.session.append([
+            {
+              _tag: 'ToolWaitCompleted',
+              id: execution.toolCallId,
+              name: execution.name,
+              wait: options.name,
+              token,
+              outcome: Exit.isSuccess(existing.value) ? 'success' : 'failure',
+              result,
+            },
+          ]);
+        }
+        return yield* existing.value;
+      }
+
+      const encoded = yield* Schema.encodeUnknownEffect(options.request)(
+        request,
+      ).pipe(Effect.orDie);
+      yield* execution.session.append([
+        {
+          _tag: 'ToolSuspended',
+          id: execution.toolCallId,
+          name: execution.name,
+          wait: options.name,
+          token,
+          request: encoded,
+        },
+      ]);
+      return yield* DurableDeferred.await(deferred);
+    });
+
+  type SuspendedEnvelope = Conversation.WaitEnvelope & {
+    readonly record: Extract<
+      Conversation.WaitRecord,
+      { readonly _tag: 'ToolSuspended' }
+    >;
+  };
+
+  const projectPending = <A extends Agent.Any, Requires>(
+    conversation: Conversation.Instance<A, Requires>,
+    stored: ReadonlyArray<ConversationRecord.Envelope>,
+  ): Effect.Effect<
+    ReadonlyArray<PendingWaitFields<Request['Type']>>,
+    Schema.SchemaError,
+    Request['DecodingServices']
+  > => {
+    const actionable = new Map<string, SuspendedEnvelope>();
+
+    for (const envelope of AgentBranch.activePath(stored)) {
+      const { record } = envelope;
+      switch (record._tag) {
+        case 'ToolSuspended':
+          if (record.wait === options.name) {
+            actionable.set(record.token, {
+              ...envelope,
+              record,
+            });
+          }
+          break;
+        case 'ToolResumed':
+        case 'ToolWaitCompleted':
+          actionable.delete(record.token);
+          break;
+        case 'ToolWaitRestarted':
+          actionable.delete(record.priorToken);
+          break;
+        case 'ToolOutcome':
+          for (const [token, suspended] of actionable) {
+            if (suspended.record.id === record.id) {
+              actionable.delete(token);
+            }
+          }
+          break;
+        case 'RunSettled':
+        case 'Completed':
+          actionable.clear();
+          break;
+        default:
+          break;
+      }
+    }
+
+    return Effect.forEach(actionable.values(), (envelope) =>
+      Schema.decodeUnknownEffect(options.request)(envelope.record.request).pipe(
+        Effect.map(
+          (request): PendingWaitFields<Request['Type']> => ({
+            conversationId: conversation.id,
+            offset: envelope.offset,
+            toolCallId: envelope.record.id,
+            toolName: envelope.record.name,
+            key: options.key(request),
+            token: envelope.record.token,
+            request,
+          }),
+        ),
+      ),
+    );
+  };
+
+  const snapshot = <A extends Agent.Any, Requires>(
+    conversation: Conversation.Instance<A, Requires>,
+  ) =>
+    conversation.records().pipe(
+      Stream.runCollect,
+      // `execute(..., { discard: true })` may return before the workflow has
+      // created its conversation stream. A pending wait is a follower, so an
+      // absent stream is its empty initial state rather than a failed lookup.
+      Effect.catchIf(
+        (error) => error.reason === 'not_found',
+        () => Effect.succeed<ReadonlyArray<ConversationRecord.Envelope>>([]),
+      ),
+      Effect.flatMap((stored) =>
+        Effect.map(
+          projectPending(conversation, Array.from(stored)),
+          (items) => ({
+            items,
+            cursor: stored.at(-1)?.offset ?? LogOffset.START,
+          }),
+        ),
+      ),
+    );
+
+  const changesPending = (record: ConversationRecord.Record): boolean => {
+    switch (record._tag) {
+      case 'ToolSuspended':
+      case 'ToolResumed':
+      case 'ToolWaitCompleted':
+      case 'ToolWaitRestarted':
+      case 'ToolOutcome':
+      case 'RunSettled':
+      case 'Completed':
+      case 'BranchedFrom':
+        return true;
+      default:
+        return false;
+    }
+  };
+
+  const complete = (token: string, value: Success['Type']) =>
+    Effect.flatMap(fromToken(token), ({ deferred, token }) =>
+      DurableDeferred.succeed(deferred, { token, value }),
+    );
+
+  const fail = (token: string, failure: Error['Type']) =>
+    Effect.flatMap(fromToken(token), ({ deferred, token }) =>
+      DurableDeferred.fail(deferred, { token, error: failure }),
+    );
+
+  const selectPending = (
+    items: ReadonlyArray<PendingWaitFields<Request['Type']>>,
+    conversationId: LogVocabulary.ConversationId,
+    key: string,
+  ): Effect.Effect<
+    Option.Option<PendingWaitFields<Request['Type']>>,
+    WaitStateError
+  > => {
+    const matching = items.filter((pending) => pending.key === key);
+    if (matching.length > 1) {
+      return Effect.fail(
+        new WaitStateError({
+          message:
+            `Wait "${options.name}" has ${matching.length} active tokens ` +
+            `for key "${key}" in conversation ${conversationId}`,
+          conversationId,
+          wait: options.name,
+          key,
+        }),
+      );
+    }
+    return Effect.succeed(Option.fromNullishOr(matching[0]));
+  };
+
+  const bindPending = (
+    pending: PendingWaitFields<Request['Type']>,
+  ): PendingWait<Request['Type'], Success, Error> => ({
+    ...pending,
+    complete: (value) => complete(pending.token, value),
+    fail: (failure) => fail(pending.token, failure),
+  });
+
+  const awaitPending = <A extends Agent.Any, Requires>(
+    conversation: Conversation.Instance<A, Requires>,
+    key: string,
+  ): Effect.Effect<
+    PendingWait<Request['Type'], Success, Error>,
+    LogStore.LogStoreError | Schema.SchemaError | WaitStateError,
+    LogStore.Service | Request['DecodingServices']
+  > =>
+    Effect.gen(function* () {
+      const initial = yield* snapshot(conversation);
+      const existing = yield* selectPending(
+        initial.items,
+        conversation.id,
+        key,
+      );
+      if (Option.isSome(existing)) return bindPending(existing.value);
+
+      const found = yield* conversation.follow(initial.cursor).pipe(
+        Stream.filter(({ record }) => changesPending(record)),
+        // A log append is atomic but its records have individual offsets.
+        // Re-reading observes the whole append before selecting this key.
+        Stream.mapEffect(() => snapshot(conversation)),
+        Stream.mapEffect(({ items }) =>
+          selectPending(items, conversation.id, key),
+        ),
+        Stream.filter(Option.isSome),
+        Stream.map((pending) => pending.value),
+        Stream.runHead,
+      );
+      if (Option.isNone(found)) return yield* Effect.never;
+      return bindPending(found.value);
+    });
+
+  return Object.assign(run, {
+    waitName: options.name,
+    request: options.request,
+    success: options.success,
+    error,
+    awaitPending,
+    complete,
+    fail,
+  });
+};
+
+type WorkflowAgentError<A extends Agent.Any> = Conversation.Error<A>;
+type WorkflowAgentRequirements<A extends Agent.Any> = Exclude<
+  Agent.Requires<A>,
+  WorkflowEngine.WorkflowEngine | WorkflowInstance | ToolExecution.Current
+>;
+
+/**
  * Define one replayable workflow step for use inside an agent tool handler.
  *
  * The returned function creates an Effect `Activity` when called. Its stable
@@ -190,13 +673,13 @@ export const make = <
   Error extends Schema.Top,
 >(
   agent: A,
-  options: Options<Tag, Payload, Error, Agent.Error<A>>,
+  options: Options<Tag, Payload, Error, WorkflowAgentError<A>>,
 ): Binding<
   Tag,
   WorkflowPayload<Payload>,
   Error,
   | WorkflowEngine.WorkflowEngine
-  | Agent.Requires<A>
+  | WorkflowAgentRequirements<A>
   | LogStore.Service
   | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
   | (typeof Agent.Result)['EncodingServices']
@@ -212,38 +695,90 @@ export const make = <
       : { suspendedRetrySchedule: options.suspendedRetrySchedule }),
   });
 
-  const layer = workflow.toLayer((payload) =>
-    Conversation.make(agent, payload.conversationId)
-      .resume(options.input?.(payload) ?? payload.input)
-      .pipe(
-        Effect.mapError((error) => error as Agent.Error<A>),
-        Effect.mapError(options.mapError),
-      ),
+  const PathPayload = Schema.Struct({
+    mode: Schema.Literals(['branch', 'fork']),
+    sourceConversationId: LogVocabulary.ConversationId,
+    sourceExecutionId: Schema.String,
+    at: LogOffset.Offset,
+    targetExecutionId: Schema.String,
+    encodedPayload: Schema.Unknown,
+  });
+  const pathWorkflow = Workflow.make(`${options.tag}/RestartPath`, {
+    payload: PathPayload,
+    idempotencyKey: ({
+      at,
+      mode,
+      sourceConversationId,
+      sourceExecutionId,
+      targetExecutionId,
+    }) =>
+      `${mode}/${sourceConversationId}/${sourceExecutionId}/${at}/${targetExecutionId}`,
+    success: Agent.Result,
+    error: Schema.Union([options.error, PathError]),
+    ...(options.suspendedRetrySchedule === undefined
+      ? {}
+      : { suspendedRetrySchedule: options.suspendedRetrySchedule }),
+  });
+
+  const layer = Layer.merge(
+    workflow.toLayer((payload) =>
+      Conversation.make(agent, payload.conversationId)
+        .run(options.input?.(payload) ?? payload.input)
+        .pipe(Effect.mapError(options.mapError)),
+    ),
+    pathWorkflow.toLayer(({ at, encodedPayload, mode, sourceConversationId }) =>
+      Effect.gen(function* () {
+        const payload = yield* Schema.decodeUnknownEffect(
+          workflow.payloadSchema,
+        )(encodedPayload).pipe(
+          Effect.mapError(
+            (error) =>
+              new PathError({
+                message: `Cannot decode restarted workflow payload: ${error}`,
+              }),
+          ),
+        );
+        return yield* (
+          mode === 'branch'
+            ? Conversation.make(agent, sourceConversationId).branchFrom(
+                at,
+                options.input?.(payload) ?? payload.input,
+                { pendingWait: 'restart' },
+              )
+            : Conversation.make(agent, sourceConversationId).forkFrom(
+                at,
+                payload.conversationId,
+                options.input?.(payload) ?? payload.input,
+                { pendingWait: 'restart' },
+              )
+        ).pipe(Effect.mapError(options.mapError));
+      }),
+    ),
   );
 
   const identify = (
     payload: (typeof workflow.payloadSchema)['~type.make.in'],
   ) =>
-    Effect.map(
-      workflow.payloadSchema.makeEffect(payload).pipe(Effect.orDie),
-      (validated) => ({
-        conversationId: LogVocabulary.ConversationId.make(
-          validated.conversationId,
-        ),
-      }),
-    ).pipe(
-      Effect.flatMap(({ conversationId }) =>
-        Effect.map(
-          workflow.executionId(payload),
-          (executionId) =>
-            ({
-              [IdentityTypeId]: IdentityTypeId,
-              executionId,
-              conversationId,
-            }) satisfies Identity,
-        ),
-      ),
-    );
+    Effect.gen(function* () {
+      // Validate at the public boundary so malformed caller input stays a
+      // recoverable schema failure. Workflow.executionId validates internally
+      // as well, because its public interface accepts raw payloads; passing
+      // this validated value is the strongest guarantee available here.
+      const validated = yield* workflow.payloadSchema.makeEffect(payload);
+      const conversationId = yield* LogVocabulary.ConversationId.makeEffect(
+        validated.conversationId,
+      );
+      const executionId = yield* workflow.executionId(validated);
+      return {
+        [IdentityTypeId]: IdentityTypeId,
+        workflow: 'run',
+        executionId,
+        conversationId,
+      } satisfies Identity;
+    });
+
+  const ownerOf = (identity: Identity) =>
+    identity.workflow === 'run' ? workflow : pathWorkflow;
 
   const cancel = (identity: Identity, signal: CancelSignal) =>
     Effect.gen(function* () {
@@ -252,16 +787,155 @@ export const make = <
         text: signal.text,
         source: signal.source,
       });
-      yield* workflow.interrupt(identity.executionId);
+      yield* ownerOf(identity).interrupt(identity.executionId);
     });
 
-  return { workflow, layer, identify, cancel } satisfies Binding<
+  const validatePathPayload = (
+    source: Identity,
+    payload: Payload['~type.make.in'],
+    mode: 'branch' | 'fork',
+  ) =>
+    Effect.gen(function* () {
+      const validated = yield* workflow.payloadSchema.makeEffect(payload);
+      const target = yield* LogVocabulary.ConversationId.makeEffect(
+        validated.conversationId,
+      );
+      if (mode === 'branch' && target !== source.conversationId) {
+        return yield* new PathError({
+          message:
+            `Branch payload targets conversation ${target}; expected source ` +
+            source.conversationId,
+        });
+      }
+      if (mode === 'fork' && target === source.conversationId) {
+        return yield* new PathError({
+          message: `Fork payload must target a new conversation, not ${target}`,
+        });
+      }
+      const encodedPayload = yield* Schema.encodeUnknownEffect(
+        workflow.payloadSchema,
+      )(validated);
+      const targetExecutionId = yield* workflow.executionId(validated);
+      return { encodedPayload, target, targetExecutionId };
+    });
+
+  type PathInput = (typeof workflow.payloadSchema)['~type.make.in'];
+  type BoundPathFailure = PathFailure<Error>;
+  type BoundPathRequires = PathRequirements<
+    typeof workflow.payloadSchema,
+    Error
+  >;
+
+  function branchFrom(
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: PathInput,
+    executeOptions: { readonly discard: true },
+  ): Effect.Effect<Identity, BoundPathFailure, BoundPathRequires>;
+  function branchFrom(
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: PathInput,
+    executeOptions?: { readonly discard?: false },
+  ): Effect.Effect<Agent.Result, BoundPathFailure, BoundPathRequires>;
+  function branchFrom(
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: PathInput,
+    executeOptions?: { readonly discard?: boolean },
+  ): Effect.Effect<
+    Identity | Agent.Result,
+    BoundPathFailure,
+    BoundPathRequires
+  > {
+    return Effect.gen(function* () {
+      const validated = yield* validatePathPayload(source, payload, 'branch');
+      yield* ownerOf(source).interrupt(source.executionId);
+      const pathPayload = {
+        mode: 'branch' as const,
+        sourceConversationId: source.conversationId,
+        sourceExecutionId: source.executionId,
+        at,
+        targetExecutionId: validated.targetExecutionId,
+        encodedPayload: validated.encodedPayload,
+      };
+      if (executeOptions?.discard === true) {
+        const executionId = yield* pathWorkflow.execute(pathPayload, {
+          discard: true,
+        });
+        return {
+          [IdentityTypeId]: IdentityTypeId,
+          workflow: 'path',
+          executionId,
+          conversationId: validated.target,
+        } satisfies Identity;
+      }
+      return yield* pathWorkflow.execute(pathPayload);
+    });
+  }
+
+  function forkFrom(
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: PathInput,
+    executeOptions: { readonly discard: true },
+  ): Effect.Effect<Identity, BoundPathFailure, BoundPathRequires>;
+  function forkFrom(
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: PathInput,
+    executeOptions?: { readonly discard?: false },
+  ): Effect.Effect<Agent.Result, BoundPathFailure, BoundPathRequires>;
+  function forkFrom(
+    source: Identity,
+    at: LogOffset.Offset,
+    payload: PathInput,
+    executeOptions?: { readonly discard?: boolean },
+  ): Effect.Effect<
+    Identity | Agent.Result,
+    BoundPathFailure,
+    BoundPathRequires
+  > {
+    return Effect.gen(function* () {
+      const validated = yield* validatePathPayload(source, payload, 'fork');
+      const pathPayload = {
+        mode: 'fork' as const,
+        sourceConversationId: source.conversationId,
+        sourceExecutionId: source.executionId,
+        at,
+        targetExecutionId: validated.targetExecutionId,
+        encodedPayload: validated.encodedPayload,
+      };
+      if (executeOptions?.discard === true) {
+        const executionId = yield* pathWorkflow.execute(pathPayload, {
+          discard: true,
+        });
+        return {
+          [IdentityTypeId]: IdentityTypeId,
+          workflow: 'path',
+          executionId,
+          conversationId: validated.target,
+        } satisfies Identity;
+      }
+      return yield* pathWorkflow.execute(pathPayload);
+    });
+  }
+
+  return {
+    workflow,
+    layer,
+    identify,
+    cancel,
+    branchFrom,
+    forkFrom,
+  } satisfies Binding<
     Tag,
     WorkflowPayload<Payload>,
     Error,
     | WorkflowEngine.WorkflowEngine
-    | Agent.Requires<A>
+    | WorkflowAgentRequirements<A>
     | LogStore.Service
+    | Crypto.Crypto
     | WorkflowPayload<Payload>['DecodingServices' | 'EncodingServices']
     | (typeof Agent.Result)['EncodingServices']
     | Error['EncodingServices']

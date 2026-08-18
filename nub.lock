@@ -102,6 +102,21 @@ importers:
         specifier: 1.4.2
         version: 1.4.2(typescript@5.9.3)
 
+  examples/approval-cli:
+    dependencies:
+      '@effect/platform-node':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.109(@opentelemetry/api@1.9.0)(effect@4.0.0-rc.109)(redis@6.2.1)
+      '@sunfall/vesper-agent':
+        specifier: workspace:*
+        version: link:../../packages/agent
+      '@sunfall/vesper-log':
+        specifier: workspace:*
+        version: link:../../packages/log
+      effect:
+        specifier: 'catalog:'
+        version: 4.0.0-rc.109
+
   examples/compliance-relay:
     dependencies:
       '@effect/ai-anthropic':

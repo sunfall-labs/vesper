@@ -7,11 +7,12 @@
 
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
-import { AgentLog } from '@sunfall/vesper-agent/log';
+import { AgentLog } from '@sunfall/vesper-agent/unstable/log';
 import { AgentHistory } from '@sunfall/vesper-agent/history';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import {
   Deferred,
   Effect,
@@ -157,6 +158,10 @@ interface HistoryReads {
   records: number;
 }
 
+const memoryLogLayer = LogStoreMemory.layer.pipe(
+  Layer.provide(NodeServices.layer),
+);
+
 const countedLogLayer = (reads: HistoryReads) =>
   Layer.effect(
     LogStore.Service,
@@ -175,10 +180,11 @@ const countedLogLayer = (reads: HistoryReads) =>
           ),
       });
     }),
-  ).pipe(Layer.provide(LogStoreMemory.layer));
+  ).pipe(Layer.provide(memoryLogLayer));
 
 const layerFor = (handle: Handle, historyReads?: HistoryReads) =>
   Layer.mergeAll(
+    NodeServices.layer,
     Layer.effect(
       LanguageModel.LanguageModel,
       LanguageModel.make({
@@ -192,9 +198,7 @@ const layerFor = (handle: Handle, historyReads?: HistoryReads) =>
         },
       }),
     ),
-    historyReads === undefined
-      ? LogStoreMemory.layer
-      : countedLogLayer(historyReads),
+    historyReads === undefined ? memoryLogLayer : countedLogLayer(historyReads),
   );
 
 const assertEqual = (
@@ -377,7 +381,7 @@ const runComparisonGrowth = async (): Promise<ComparisonResult> => {
       await callsFor(handle, 1, () =>
         runtime.runPromise(
           Effect.orDie(
-            conversation.resume(`${USER_MESSAGE} (${message})`),
+            conversation.run(`${USER_MESSAGE} (${message})`),
           ) as Effect.Effect<unknown>,
         ),
       );
@@ -422,7 +426,7 @@ const runComparisonMemory = async (): Promise<ComparisonResult> => {
     await callsFor(handle, 1, () =>
       runtime.runPromise(
         Effect.orDie(
-          conversation.resume(`${USER_MESSAGE} (${message})`),
+          conversation.run(`${USER_MESSAGE} (${message})`),
         ) as Effect.Effect<unknown>,
       ),
     );
@@ -742,7 +746,7 @@ export const runConformance = async (): Promise<ConformanceResult> => {
  * conversation, each running `CONVERSATION_STEPS` model turns.
  *
  * Recording is not optional here. Continuing a conversation means having one,
- * and `conversation.resume` rebuilds the prompt from the log. One sample is
+ * and `conversation.run` rebuilds the prompt from the log. One sample is
  * the whole conversation rather than a single message, because the cost being
  * measured is how the loop behaves as history accumulates.
  */
@@ -762,7 +766,7 @@ const runConversation = async (): Promise<ScenarioResult> => {
       await callsFor(handle, CONVERSATION_STEPS, () =>
         runtime.runPromise(
           Effect.orDie(
-            conversation.resume(`${USER_MESSAGE} (${m})`),
+            conversation.run(`${USER_MESSAGE} (${m})`),
           ) as Effect.Effect<unknown>,
         ),
       );
@@ -872,7 +876,7 @@ const runMemory = async (): Promise<ScenarioResult> => {
     await callsFor(handle, CONVERSATION_STEPS, () =>
       runtime.runPromise(
         Effect.orDie(
-          conversation.resume(`${USER_MESSAGE} (${m})`),
+          conversation.run(`${USER_MESSAGE} (${m})`),
         ) as Effect.Effect<unknown>,
       ),
     );
@@ -984,7 +988,7 @@ const runGrowth = async (): Promise<ScenarioResult> => {
       await callsFor(handle, CONVERSATION_STEPS, () =>
         runtime.runPromise(
           Effect.orDie(
-            conversation.resume(`${USER_MESSAGE} (${m})`),
+            conversation.run(`${USER_MESSAGE} (${m})`),
           ) as Effect.Effect<unknown>,
         ),
       );

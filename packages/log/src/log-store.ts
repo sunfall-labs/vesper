@@ -48,52 +48,62 @@ import { LogVocabulary } from './vocabulary.js';
  * the log rather than retry; `offset_gone` means the reader has fallen off
  * the retained window and must restart from a snapshot.
  */
-export class LogStoreError extends Schema.TaggedError<LogStoreError>()(
+export class LogStoreError extends Schema.TaggedError<LogStoreError>(
   '@sunfall/vesper-log/LogStoreError',
-  {
-    path: Schema.String,
-    operation: Schema.Literals([
-      'create',
-      'acquire',
-      'append',
-      'read',
-      'readBackwards',
-      'meta',
-      'changes',
-    ]),
-    reason: Schema.Literals([
-      /** No stream at this path. */
-      'not_found',
-      /** A stream already exists at this path. */
-      'conflict',
-      /** The producer's epoch is not the current one; it has been superseded. */
-      'fenced',
-      /** The producer's sequence skipped ahead; writes were lost. */
-      'gap',
-      /**
-       * The requested offset predates what the backend still retains.
-       * Nothing implements retention yet — the reason exists so the Postgres
-       * backend has somewhere truthful to land when it does, rather than
-       * reporting a trimmed offset as `not_found`.
-       */
-      'offset_gone',
-      /** An append with no records. */
-      'empty',
-      /**
-       * A record cannot be turned into its persisted form. Not retryable —
-       * the same payload will fail the same way — which is why it is not
-       * folded into `storage`.
-       */
-      'encoding',
-      /** A read limit or offset is not valid at the wire boundary. */
-      'invalid',
-      /** The backend itself failed. */
-      'storage',
-    ]),
-    /** Human-readable context. Never matched on. */
-    detail: Schema.String,
-  },
-) {}
+)('LogStoreError', {
+  path: Schema.String,
+  operation: Schema.Literals([
+    'create',
+    'acquire',
+    'append',
+    'read',
+    'readBackwards',
+    'meta',
+    'changes',
+  ]),
+  reason: Schema.Literals([
+    /** No stream at this path. */
+    'not_found',
+    /** A stream already exists at this path. */
+    'conflict',
+    /** The producer's epoch is not the current one; it has been superseded. */
+    'fenced',
+    /** The producer's sequence skipped ahead; writes were lost. */
+    'gap',
+    /**
+     * The requested offset predates what the backend still retains.
+     * Nothing implements retention yet — the reason exists so the Postgres
+     * backend has somewhere truthful to land when it does, rather than
+     * reporting a trimmed offset as `not_found`.
+     */
+    'offset_gone',
+    /** An append with no records. */
+    'empty',
+    /**
+     * A record cannot be turned into its persisted form. Not retryable —
+     * the same payload will fail the same way — which is why it is not
+     * folded into `storage`.
+     */
+    'encoding',
+    /** A read limit or offset is not valid at the wire boundary. */
+    'invalid',
+    /** The backend itself failed. */
+    'storage',
+  ]),
+  /** Human-readable context. Never matched on. */
+  detail: Schema.String,
+}) {}
+
+export type Operation = LogStoreError['operation'];
+export type Reason = LogStoreError['reason'];
+
+/** Construct one operation-labelled failure consistently across backends. */
+export const makeError = (
+  path: string,
+  operation: Operation,
+  reason: Reason,
+  detail: string,
+): LogStoreError => new LogStoreError({ path, operation, reason, detail });
 
 /** What a stream is, apart from its contents. */
 export interface StreamMeta {
@@ -207,10 +217,9 @@ export interface NormalizedReadBackwardsOptions {
   readonly limit: number;
 }
 
-export class ReadOptionsError extends Schema.TaggedError<ReadOptionsError>()(
+export class ReadOptionsError extends Schema.TaggedError<ReadOptionsError>(
   '@sunfall/vesper-log/ReadOptionsError',
-  { detail: Schema.String },
-) {}
+)('ReadOptionsError', { detail: Schema.String }) {}
 
 /** Validate the read wire values identically before either backend is entered. */
 export const normalizeReadOptions = (

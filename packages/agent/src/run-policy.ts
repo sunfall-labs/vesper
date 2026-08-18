@@ -1,3 +1,31 @@
+import { Schema } from 'effect';
+
+export const Limit = Schema.Literals([
+  'turns',
+  'model_calls',
+  'delegated_tasks',
+  'deadline',
+  'input_tokens',
+  'output_tokens',
+  'signal_bytes',
+  'signals_per_boundary',
+  'steered_bytes',
+]);
+export type Limit = typeof Limit.Type;
+
+/** A non-overridable run budget was exhausted. */
+export class RunPolicyExhausted extends Schema.TaggedError<RunPolicyExhausted>(
+  '@sunfall/vesper-agent/RunPolicyExhausted',
+)('RunPolicyExhausted', {
+  limit: Limit,
+  used: Schema.Natural,
+  maximum: Schema.Natural,
+}) {
+  override get message(): string {
+    return `Hard run budget ${this.limit} exhausted (${this.used}/${this.maximum})`;
+  }
+}
+
 /** Non-overridable limits shared by a root run and every descendant loop. */
 export interface Limits {
   readonly maxTurns: number;

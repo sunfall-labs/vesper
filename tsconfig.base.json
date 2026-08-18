@@ -23,11 +23,14 @@
         "./packages/agent/src/conversation.ts"
       ],
       "@sunfall/vesper-agent/event": ["./packages/agent/src/event.ts"],
+      "@sunfall/vesper-agent/eval": ["./packages/agent/src/eval.ts"],
       "@sunfall/vesper-agent/history": ["./packages/agent/src/history.ts"],
       "@sunfall/vesper-agent/interception": [
         "./packages/agent/src/interception.ts"
       ],
-      "@sunfall/vesper-agent/log": ["./packages/agent/src/log.ts"],
+      "@sunfall/vesper-agent/unstable/log": [
+        "./packages/agent/src/unstable/log.ts"
+      ],
       "@sunfall/vesper-agent/recording-policy": [
         "./packages/agent/src/recording-policy.ts"
       ],

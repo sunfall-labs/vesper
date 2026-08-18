@@ -220,10 +220,27 @@ blips**. Producer fencing overlaps none of them — it decides which writer owns
 a stream, not whether work re-runs.
 
 `@sunfall/vesper-agent/workflow` composes these seams rather than merging them.
-It binds an application-owned workflow payload to `conversation.resume`,
+It binds an application-owned workflow payload to `conversation.run`,
 returning an ordinary Effect `Workflow` and its registration layer. The
 application still chooses and provides `WorkflowEngine`; Vesper neither wraps
 `ClusterWorkflowEngine` nor treats its message storage as conversation history.
+
+`AgentWorkflow.wait` is the external rendezvous inside that composition. Its
+handler call is an ordinary typed Effect, while the conversation records the
+request, token, replay, and observed decision. Operational consumers use the
+wait definition's `awaitPending(conversation, key)` Effect. The stable
+application key identifies one logical request within the definition and
+workflow execution; its token identifies the exact durable execution. The
+lookup folds only the active conversation path, removes resumed, completed,
+restarted, superseded, and settled waits, and decodes matching requests with
+that definition's schema. It then tails the complete durable conversation and
+re-projects after state-changing records until the requested key appears. The
+tail's notifications are wakeups rather than delivery authority; re-reading
+the log also observes every atomic append as a whole. The lower-level `waits`
+and `followWaits` streams intentionally remain audit lifecycles rather than
+pretending every historical `ToolSuspended` is still actionable. Two active
+tokens for the same definition, conversation, and key are ambiguous durable
+state and fail as typed `WaitStateError`; log order is not an ownership rule.
 
 ## Not built, and why
 
@@ -240,6 +257,12 @@ offset-valued pointer in a copied record has to be reseated onto the fork's own
 offsets or reset when it names a stream the fork does not share. There is no
 fork graph: the ancestor records nothing about having been forked, which keeps
 a fork from disturbing a run that is live on it.
+
+A suspended workflow token is execution-owned and is never copied as if it
+belonged to the new path. The explicit `{ pendingWait: 'restart' }` policy
+records `ToolWaitRestarted` and freshly dispatches the recorded provider call;
+the workflow binding supplies the new execution context and interrupts the
+superseded source for a branch while leaving it independent for a fork.
 
 What is _not_ built is summarization. Switching away from a branch records
 nothing about what it held; adding that requires a common-ancestor walk and a

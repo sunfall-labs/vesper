@@ -1,7 +1,14 @@
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { describe, expect, it } from '@effect/vitest';
-import { Context, Effect, Schema, type Stream } from 'effect';
-import { AiError, LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
+import {
+  Context,
+  Crypto,
+  Effect,
+  Schema,
+  SchemaTransformation,
+  type Stream,
+} from 'effect';
+import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
@@ -36,6 +43,10 @@ class Notebook extends Context.Service<Notebook, { readonly n: string }>()(
 class Db extends Context.Service<Db, { readonly q: string }>()(
   'assertions-test/Db',
 ) {}
+class StateCodecService extends Context.Service<
+  StateCodecService,
+  { readonly offset: number }
+>()('assertions-test/StateCodecService') {}
 
 const write = Tool.make('write', {
   description: 'child tool',
@@ -180,8 +191,13 @@ const _model: Has<
   EffR<ReturnType<typeof handled.run>>
 > = 'yes';
 
-type ParentBase = LanguageModel.LanguageModel | Handlers | Db | Notebook;
-type HandledBase = LanguageModel.LanguageModel | Db | Notebook;
+type ParentBase =
+  | Crypto.Crypto
+  | LanguageModel.LanguageModel
+  | Handlers
+  | Db
+  | Notebook;
+type HandledBase = Crypto.Crypto | LanguageModel.LanguageModel | Db | Notebook;
 
 const _exactPlain: Exact<Agent.Requires<typeof parent>, ParentBase> = true;
 const _exactHandled: Exact<Agent.Requires<typeof handled>, HandledBase> = true;
@@ -192,6 +208,31 @@ const State = AgentState.make({
   schema: Schema.Struct({ count: Schema.Number }),
   initial: { count: 0 },
 });
+const TransformedState = AgentState.make({
+  id: 'assertion-transformed-state',
+  version: '1',
+  schema: Schema.String.pipe(
+    Schema.decodeTo(
+      Schema.Number,
+      SchemaTransformation.transformOrFail<
+        number,
+        string,
+        StateCodecService,
+        StateCodecService
+      >({
+        decode: (value) =>
+          Effect.map(StateCodecService, ({ offset }) => Number(value) + offset),
+        encode: (value) =>
+          Effect.map(StateCodecService, ({ offset }) => String(value - offset)),
+      }),
+    ),
+  ),
+  initial: 0,
+});
+const _directTransformedCodecRequired: Has<
+  StateCodecService,
+  AgentState.Services<typeof TransformedState>
+> = 'yes';
 const stateTool = Tool.make('stateful', {
   description: 'state-aware handler',
   parameters: Schema.Struct({}),
@@ -204,6 +245,7 @@ const stateful = Agent.make({
   revision: '1',
   instructions: 'x',
   toolkit: Toolkit.make(stateTool),
+  state: State,
 }).withHandlers({
   stateful: () =>
     Effect.gen(function* () {
@@ -212,9 +254,34 @@ const stateful = Agent.make({
       return yield* state.update(({ count }) => ({ count: count + 1 }));
     }),
 });
-const _stateRequired: Has<
-  typeof State,
-  Agent.Requires<typeof stateful>
+const _stateRequired: Has<typeof State, Agent.Requires<typeof stateful>> = 'no';
+const transformedStateful = Agent.make({
+  name: 'transformed-stateful',
+  revision: '1',
+  instructions: 'x',
+  toolkit: Toolkit.make(
+    Tool.make('transformed', {
+      description: 'transformed state handler',
+      parameters: Schema.Struct({}),
+      success: Schema.Number,
+      failure: AgentState.error,
+      dependencies: AgentState.dependencies(
+        TransformedState,
+        StateCodecService,
+      ),
+    }),
+  ),
+  state: TransformedState,
+}).withHandlers({
+  transformed: () =>
+    Effect.gen(function* () {
+      const state = yield* TransformedState;
+      return yield* state.update((value) => value + 1);
+    }),
+});
+const _transformedCodecRequired: Has<
+  StateCodecService,
+  Agent.Requires<typeof transformedStateful>
 > = 'yes';
 const _otherHandlerServiceKept: Has<
   Db,
@@ -223,27 +290,33 @@ const _otherHandlerServiceKept: Has<
 const durable = Conversation.make(handled, 'durable');
 const _exactRecording: Exact<
   EffR<ReturnType<typeof durable.run>>,
-  HandledBase | LogStore.Service
+  HandledBase | LogStore.Service | Crypto.Crypto
 > = true;
 const _exactPlainError: Exact<
   EffE<ReturnType<typeof handled.run>>,
-  AiError.AiError
+  Agent.RunFailure
 > = true;
 const _exactRecordingError: Exact<
   EffE<ReturnType<typeof durable.run>>,
-  AiError.AiError | AgentLog.CompatibilityError
+  Conversation.Error<typeof handled>
 > = true;
-const _exactResume: Exact<
-  EffR<ReturnType<typeof durable.resume>>,
-  HandledBase | LogStore.Service
-> = true;
+// @ts-expect-error Durable continuation is the meaning of run, not a second method.
+durable.resume;
 const _exactBranch: Exact<
   EffR<ReturnType<typeof durable.branchFrom>>,
-  HandledBase | LogStore.Service
+  HandledBase | LogStore.Service | Crypto.Crypto
+> = true;
+const _exactBranchError: Exact<
+  EffE<ReturnType<typeof durable.branchFrom>>,
+  Conversation.Error<typeof handled>
 > = true;
 const _exactFork: Exact<
   EffR<ReturnType<typeof durable.forkFrom>>,
-  HandledBase | LogStore.Service
+  HandledBase | LogStore.Service | Crypto.Crypto
+> = true;
+const _exactForkError: Exact<
+  EffE<ReturnType<typeof durable.forkFrom>>,
+  Conversation.Error<typeof handled>
 > = true;
 // @ts-expect-error Session/runtime invocation is not public Agent API.
 handled.runInSession;
@@ -281,14 +354,17 @@ class SecondPolicy extends Context.Service<
 const recordingPolicy = {
   prompt: (prompt: unknown) => Effect.as(FirstPolicy, prompt),
 } satisfies RecordingPolicy.Policy<FirstPolicy>;
-const filteredRecording = Conversation.recording(
+const filteredRecording = Conversation.withRecordingPolicy(
   handled,
   'filtered',
   recordingPolicy,
 );
+const _noAmbiguousRecordingConstructor: 'recording' extends keyof typeof Conversation
+  ? false
+  : true = true;
 const _exactFilteredRecording: Exact<
   EffR<ReturnType<typeof filteredRecording.run>>,
-  HandledBase | LogStore.Service | FirstPolicy
+  HandledBase | LogStore.Service | Crypto.Crypto | FirstPolicy
 > = true;
 
 const _noRecordingRuntime: 'Runtime' extends keyof typeof RecordingPolicy
@@ -383,7 +459,7 @@ const _rejectAny: Exact<any, HandledBase> = false;
 const _rejectNever: Exact<never, HandledBase> = false;
 const _rejectUnknown: Exact<unknown, HandledBase> = false;
 
-describe('the eight narrowing assertions', () => {
+describe('the narrowing assertions', () => {
   it('keeps every entry point honest about what it still needs', () => {
     expect(_makeRun).toBe('yes');
     expect(_handledRun).toBe('yes');
@@ -399,7 +475,6 @@ describe('the eight narrowing assertions', () => {
       _exactPlainError,
       _exactRecordingError,
       _exactFilteredRecording,
-      _exactResume,
       _exactBranch,
       _exactFork,
       _exactReplacement,

@@ -3,7 +3,8 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, type Layer, Stream } from 'effect';
+import * as NodeServices from '@effect/platform-node/NodeServices';
+import { Crypto, Effect, Layer, Stream } from 'effect';
 import { LanguageModel, Prompt, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
@@ -11,6 +12,11 @@ import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { fakeProvider, turnOf } from './compaction-fixtures.js';
 import { AgentHistory } from '../src/history.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 // Compaction across a resumption — the gap the `Compacted` record used to be.
 //
@@ -60,16 +66,24 @@ const agent = Agent.make({
   toolkit: Toolkit.make(),
   compaction: POLICY,
 });
-const conversation = Conversation.recording(agent, CONVERSATION, POLICY);
+const conversation = Conversation.withRecordingPolicy(
+  agent,
+  CONVERSATION,
+  POLICY,
+);
 
 const run = <A, E>(
-  effect: Effect.Effect<A, E, LogStore.Service | LanguageModel.LanguageModel>,
+  effect: Effect.Effect<
+    A,
+    E,
+    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
+  >,
   models: Layer.Layer<LanguageModel.LanguageModel>,
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
     Effect.provide(models),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
     Effect.scoped,
   );
 
@@ -90,9 +104,9 @@ const textIn = (prompt: Prompt.Prompt): string =>
 const threeRuns = (models: ReturnType<typeof fakeProvider>) =>
   Effect.gen(function* () {
     yield* conversation.run('question one');
-    yield* conversation.resume('question two');
+    yield* conversation.run('question two');
     const summariesAfterCompacting = models.summaries.length;
-    yield* conversation.resume('question three');
+    yield* conversation.run('question three');
 
     return {
       records: yield* readAll(),

@@ -3,6 +3,7 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
@@ -10,6 +11,11 @@ import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { AgentLog } from '../src/log.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 const finish: Response.StreamPartEncoded = {
   type: 'finish',
@@ -113,7 +119,7 @@ const run = <A, E, R>(
 ) =>
   effect.pipe(
     Effect.provide(provider(calls)),
-    Effect.provide(LogStoreMemory.layer),
+    Effect.provide(testLogLayer),
   ) as Effect.Effect<A, E>;
 
 describe('durable compatibility', () => {
@@ -129,16 +135,15 @@ describe('durable compatibility', () => {
           AgentLog.open(LogVocabulary.ConversationId.make('invalid-input'), {
             compatibility: invalidCompatibility(compatibility),
           }).pipe(
-            Effect.catchTag(
-              '@sunfall/vesper-agent/CompatibilityError',
-              (error) => Effect.succeed(error),
+            Effect.catchTag('CompatibilityError', (error) =>
+              Effect.succeed(error),
             ),
           ),
           calls,
         );
 
-        expect(caught).toBeInstanceOf(AgentLog.CompatibilityError);
-        if (caught instanceof AgentLog.CompatibilityError) {
+        expect(caught).toBeInstanceOf(Conversation.CompatibilityError);
+        if (caught instanceof Conversation.CompatibilityError) {
           expect(caught.message).toContain(message);
         }
         expect(calls.count).toBe(0);
@@ -163,7 +168,7 @@ describe('durable compatibility', () => {
         expect(outcome).toMatchObject({
           _tag: 'Failure',
           failure: {
-            _tag: '@sunfall/vesper-agent/CompatibilityError',
+            _tag: 'CompatibilityError',
             expectedAgent: 'test',
           },
         });
@@ -176,7 +181,7 @@ describe('durable compatibility', () => {
       const result = yield* run(
         Effect.gen(function* () {
           yield* seed('matching', [started()]);
-          return yield* Conversation.make(definition(), 'matching').resume(
+          return yield* Conversation.make(definition(), 'matching').run(
             'continue',
           );
         }),
@@ -204,7 +209,7 @@ describe('durable compatibility', () => {
       const failure = yield* run(
         Effect.gen(function* () {
           yield* seed('incompatible', [record]);
-          yield* Conversation.make(definition(), 'incompatible').resume(
+          yield* Conversation.make(definition(), 'incompatible').run(
             'continue',
           );
         }),
@@ -377,24 +382,31 @@ describe('durable compatibility', () => {
         const acquireReached = yield* Deferred.make<void>();
         const allowAcquire = yield* Deferred.make<void>();
         let gateNextAcquire = false;
-        const gated = Layer.effect(
-          LogStore.Service,
-          Effect.gen(function* () {
-            const store = yield* LogStore.Service;
-            return LogStore.Service.of({
-              ...store,
-              acquire: (requested, producerId, expected) =>
-                Effect.gen(function* () {
-                  if (requested === path && gateNextAcquire) {
-                    gateNextAcquire = false;
-                    yield* Deferred.succeed(acquireReached, undefined);
-                    yield* Deferred.await(allowAcquire);
-                  }
-                  return yield* store.acquire(requested, producerId, expected);
-                }),
-            });
-          }),
-        ).pipe(Layer.provide(LogStoreMemory.layer));
+        const gated = Layer.mergeAll(
+          Layer.effect(
+            LogStore.Service,
+            Effect.gen(function* () {
+              const store = yield* LogStore.Service;
+              return LogStore.Service.of({
+                ...store,
+                acquire: (requested, producerId, expected) =>
+                  Effect.gen(function* () {
+                    if (requested === path && gateNextAcquire) {
+                      gateNextAcquire = false;
+                      yield* Deferred.succeed(acquireReached, undefined);
+                      yield* Deferred.await(allowAcquire);
+                    }
+                    return yield* store.acquire(
+                      requested,
+                      producerId,
+                      expected,
+                    );
+                  }),
+              });
+            }),
+          ).pipe(Layer.provide(testLogLayer)),
+          NodeServices.layer,
+        );
 
         const observed = yield* Effect.gen(function* () {
           const original = yield* AgentLog.open(conversationId, {
@@ -443,29 +455,32 @@ describe('durable compatibility', () => {
         const conversationId = LogVocabulary.ConversationId.make('contended');
         const path = AgentLog.pathFor(conversationId);
         let attempts = 0;
-        const contended = Layer.effect(
-          LogStore.Service,
-          Effect.gen(function* () {
-            const store = yield* LogStore.Service;
-            return LogStore.Service.of({
-              ...store,
-              acquire: (requested, producerId, expected) => {
-                if (requested !== path || expected === undefined) {
-                  return store.acquire(requested, producerId, expected);
-                }
-                attempts += 1;
-                return Effect.fail(
-                  new LogStore.LogStoreError({
-                    path,
-                    operation: 'acquire',
-                    reason: 'conflict',
-                    detail: 'forced contention',
-                  }),
-                );
-              },
-            });
-          }),
-        ).pipe(Layer.provide(LogStoreMemory.layer));
+        const contended = Layer.mergeAll(
+          Layer.effect(
+            LogStore.Service,
+            Effect.gen(function* () {
+              const store = yield* LogStore.Service;
+              return LogStore.Service.of({
+                ...store,
+                acquire: (requested, producerId, expected) => {
+                  if (requested !== path || expected === undefined) {
+                    return store.acquire(requested, producerId, expected);
+                  }
+                  attempts += 1;
+                  return Effect.fail(
+                    new LogStore.LogStoreError({
+                      path,
+                      operation: 'acquire',
+                      reason: 'conflict',
+                      detail: 'forced contention',
+                    }),
+                  );
+                },
+              });
+            }),
+          ).pipe(Layer.provide(testLogLayer)),
+          NodeServices.layer,
+        );
 
         const outcome = yield* AgentLog.open(conversationId, {
           compatibility: {

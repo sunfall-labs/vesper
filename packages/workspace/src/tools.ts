@@ -147,32 +147,28 @@ const ToolOperation = Schema.Literals([
 ]);
 
 /** The path resolved to somewhere outside the workspace root. */
-export class PathOutsideWorkspace extends Schema.TaggedError<PathOutsideWorkspace>()(
+export class PathOutsideWorkspace extends Schema.TaggedError<PathOutsideWorkspace>(
   '@sunfall/vesper-workspace/PathOutsideWorkspace',
-  {
-    path: Schema.String,
-    root: Schema.String,
-    reason: Schema.Literals(['escapes-root', 'nul-byte']),
-  },
-) {}
+)('PathOutsideWorkspace', {
+  path: Schema.String,
+  root: Schema.String,
+  reason: Schema.Literals(['escapes-root', 'nul-byte']),
+}) {}
 
 /** Nothing exists at the path. */
-export class FileNotFound extends Schema.TaggedError<FileNotFound>()(
+export class FileNotFound extends Schema.TaggedError<FileNotFound>(
   '@sunfall/vesper-workspace/FileNotFound',
-  { path: Schema.String },
-) {}
+)('FileNotFound', { path: Schema.String }) {}
 
 /** Something exists at the path, but it is not a regular file. */
-export class NotAFile extends Schema.TaggedError<NotAFile>()(
+export class NotAFile extends Schema.TaggedError<NotAFile>(
   '@sunfall/vesper-workspace/NotAFile',
-  { path: Schema.String },
-) {}
+)('NotAFile', { path: Schema.String }) {}
 
 /** Something exists at the path, but it is not a directory. */
-export class NotADirectory extends Schema.TaggedError<NotADirectory>()(
+export class NotADirectory extends Schema.TaggedError<NotADirectory>(
   '@sunfall/vesper-workspace/NotADirectory',
-  { path: Schema.String },
-) {}
+)('NotADirectory', { path: Schema.String }) {}
 
 /**
  * The file is not UTF-8 text.
@@ -181,19 +177,17 @@ export class NotADirectory extends Schema.TaggedError<NotADirectory>()(
  * returns a string of replacement characters that looks like content, and a
  * model has no way to tell that from a file of unusual glyphs.
  */
-export class BinaryContent extends Schema.TaggedError<BinaryContent>()(
+export class BinaryContent extends Schema.TaggedError<BinaryContent>(
   '@sunfall/vesper-workspace/BinaryContent',
-  {
-    path: Schema.String,
-    reason: Schema.Literals(['nul-byte', 'invalid-utf8']),
-  },
-) {}
+)('BinaryContent', {
+  path: Schema.String,
+  reason: Schema.Literals(['nul-byte', 'invalid-utf8']),
+}) {}
 
 /** A file exceeds the bounded read budget for model-visible content. */
-export class FileTooLarge extends Schema.TaggedError<FileTooLarge>()(
+export class FileTooLarge extends Schema.TaggedError<FileTooLarge>(
   '@sunfall/vesper-workspace/FileTooLarge',
-  { path: Schema.String, maxBytes: Schema.Number },
-) {}
+)('FileTooLarge', { path: Schema.String, maxBytes: Schema.Natural }) {}
 
 /**
  * The text to replace is not in the file.
@@ -202,10 +196,9 @@ export class FileTooLarge extends Schema.TaggedError<FileTooLarge>()(
  * back unchanged and reports success teaches the model its change landed, and
  * everything it concludes afterwards is built on that.
  */
-export class EditTargetMissing extends Schema.TaggedError<EditTargetMissing>()(
+export class EditTargetMissing extends Schema.TaggedError<EditTargetMissing>(
   '@sunfall/vesper-workspace/EditTargetMissing',
-  { path: Schema.String, target: Schema.String },
-) {}
+)('EditTargetMissing', { path: Schema.String, target: Schema.String }) {}
 
 /**
  * The text to replace occurs more than once and the caller did not say which.
@@ -213,32 +206,31 @@ export class EditTargetMissing extends Schema.TaggedError<EditTargetMissing>()(
  * Refusing beats replacing the first: "the first one" is not a thing the model
  * asked for, and the edit it wanted may be the third.
  */
-export class EditTargetAmbiguous extends Schema.TaggedError<EditTargetAmbiguous>()(
+export class EditTargetAmbiguous extends Schema.TaggedError<EditTargetAmbiguous>(
   '@sunfall/vesper-workspace/EditTargetAmbiguous',
-  {
-    path: Schema.String,
-    target: Schema.String,
-    occurrences: Schema.Number,
-  },
-) {}
+)('EditTargetAmbiguous', {
+  path: Schema.String,
+  target: Schema.String,
+  occurrences: Schema.Natural,
+}) {}
 
 /** The workspace refused the access. */
-export class AccessDenied extends Schema.TaggedError<AccessDenied>()(
+export class AccessDenied extends Schema.TaggedError<AccessDenied>(
   '@sunfall/vesper-workspace/AccessDenied',
-  { path: Schema.String, operation: WorkspaceDriver.Operation },
-) {}
+)('AccessDenied', {
+  path: Schema.String,
+  operation: WorkspaceDriver.Operation,
+}) {}
 
 /** The search pattern is not a valid regular expression. */
-export class InvalidPattern extends Schema.TaggedError<InvalidPattern>()(
+export class InvalidPattern extends Schema.TaggedError<InvalidPattern>(
   '@sunfall/vesper-workspace/InvalidPattern',
-  { pattern: Schema.String, reason: Schema.String },
-) {}
+)('InvalidPattern', { pattern: Schema.String, reason: Schema.String }) {}
 
 /** The command was killed at its deadline. */
-export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>()(
+export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>(
   '@sunfall/vesper-workspace/CommandTimedOut',
-  { command: Schema.String, timeoutMs: Schema.Number },
-) {}
+)('CommandTimedOut', { command: Schema.String, timeoutMs: Schema.Natural }) {}
 
 /**
  * The workspace failed in a way none of the above describes.
@@ -247,14 +239,13 @@ export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>()(
  * reaches the model as something it can quote rather than as a defect that
  * kills the run.
  */
-export class WorkspaceUnavailable extends Schema.TaggedError<WorkspaceUnavailable>()(
+export class WorkspaceUnavailable extends Schema.TaggedError<WorkspaceUnavailable>(
   '@sunfall/vesper-workspace/WorkspaceUnavailable',
-  {
-    tool: ToolOperation,
-    path: Schema.optionalKey(Schema.String),
-    code: Schema.String,
-  },
-) {}
+)('WorkspaceUnavailable', {
+  tool: ToolOperation,
+  path: Schema.optionalKey(Schema.String),
+  code: Schema.String,
+}) {}
 
 // ------------------------------------------------------------- the plumbing
 
@@ -295,13 +286,13 @@ type PathFailure =
 const fromFileError =
   (tool: typeof ToolOperation.Type, path: string) =>
   (error: WorkspaceDriver.FileError): PathFailure => {
-    if (error._tag === '@sunfall/vesper-workspace/PathNotFound') {
+    if (error._tag === 'PathNotFound') {
       return new FileNotFound({ path });
     }
-    if (error._tag === '@sunfall/vesper-workspace/PermissionDenied') {
+    if (error._tag === 'PermissionDenied') {
       return new AccessDenied({ path, operation: error.operation });
     }
-    if (error._tag === '@sunfall/vesper-workspace/FileReadLimitExceeded') {
+    if (error._tag === 'FileReadLimitExceeded') {
       return new FileTooLarge({ path, maxBytes: error.maxBytes });
     }
     if (error.code === 'EISDIR') {
@@ -317,7 +308,11 @@ const fromFileError =
 const resolvePath = (
   input: string,
 ): Effect.Effect<
-  { readonly root: string; readonly absolute: string },
+  {
+    readonly root: string;
+    readonly absolute: string;
+    readonly display: string;
+  },
   PathOutsideWorkspace,
   Root
 > =>
@@ -329,18 +324,23 @@ const resolvePath = (
       return yield* Effect.fail(
         new PathOutsideWorkspace({
           path: input,
-          root: normalizedRoot,
+          root: '.',
           reason: resolution.reason,
         }),
       );
     }
-    return { root: normalizedRoot, absolute: resolution.path };
+    return {
+      root: normalizedRoot,
+      absolute: resolution.path,
+      display: WorkspacePath.relative(normalizedRoot, resolution.path),
+    };
   });
 
 /** Read a file as text, refusing anything that is not UTF-8. */
 const readText = (
   tool: typeof ToolOperation.Type,
   absolute: string,
+  display: string,
 ): Effect.Effect<
   string,
   BinaryContent | PathFailure,
@@ -350,12 +350,12 @@ const readText = (
     const driver = yield* WorkspaceDriver.Service;
     const bytes = yield* driver
       .readFileBuffer(absolute, { maxBytes: MAX_READABLE_BYTES })
-      .pipe(Effect.mapError(fromFileError(tool, absolute)));
+      .pipe(Effect.mapError(fromFileError(tool, display)));
     const decoded = WorkspaceOutput.decodeText(bytes);
     return decoded.ok
       ? decoded.text
       : yield* Effect.fail(
-          new BinaryContent({ path: absolute, reason: decoded.reason }),
+          new BinaryContent({ path: display, reason: decoded.reason }),
         );
   });
 
@@ -394,6 +394,7 @@ interface WalkResult {
 const walk = (
   tool: typeof ToolOperation.Type,
   directory: string,
+  root: string,
 ): Effect.Effect<WalkResult, PathFailure, WorkspaceDriver.Service> =>
   Effect.gen(function* () {
     const driver = yield* WorkspaceDriver.Service;
@@ -413,7 +414,12 @@ const walk = (
 
       const listing = yield* driver
         .readdir(absolute)
-        .pipe(Effect.mapError(fromFileError(tool, absolute)), Effect.result);
+        .pipe(
+          Effect.mapError(
+            fromFileError(tool, WorkspacePath.relative(root, absolute)),
+          ),
+          Effect.result,
+        );
 
       if (listing._tag === 'Failure') {
         if (isRoot) {
@@ -448,7 +454,7 @@ const walk = (
         // and the check, or one we may not look at. Either way it is not
         // something to report a type for.
         if (stat._tag === 'Failure') {
-          if (stat.failure._tag !== '@sunfall/vesper-workspace/PathNotFound') {
+          if (stat.failure._tag !== 'PathNotFound') {
             unreadableEntries.push(childRelative);
           }
           continue;
@@ -608,9 +614,9 @@ const readFileTool = Tool.make('read_file', {
   success: Schema.Struct({
     path: Schema.String,
     content: Schema.String,
-    firstLine: Schema.Number,
-    lineCount: Schema.Number,
-    totalLines: Schema.Number,
+    firstLine: Schema.Natural,
+    lineCount: Schema.Natural,
+    totalLines: Schema.Natural,
     truncated: Schema.Boolean,
     truncatedBy: TruncatedBy,
   }),
@@ -637,7 +643,7 @@ const writeFileTool = Tool.make('write_file', {
   }),
   success: Schema.Struct({
     path: Schema.String,
-    bytesWritten: Schema.Number,
+    bytesWritten: Schema.Natural,
     created: Schema.Boolean,
   }),
   failure: Schema.Union([PathOutsideWorkspace, ...pathFailureSchemas]),
@@ -661,7 +667,7 @@ const editFileTool = Tool.make('edit_file', {
   }),
   success: Schema.Struct({
     path: Schema.String,
-    replacements: Schema.Number,
+    replacements: Schema.Natural,
   }),
   failure: Schema.Union([
     PathOutsideWorkspace,
@@ -710,7 +716,7 @@ const listFilesTool = Tool.make('list_files', {
 
 const SearchMatch = Schema.Struct({
   path: Schema.String,
-  line: Schema.Number,
+  line: Schema.Natural,
   text: Schema.String,
 });
 
@@ -733,11 +739,11 @@ const searchFilesTool = Tool.make('search_files', {
     directory: Schema.String,
     matches: Schema.Array(SearchMatch),
     truncated: Schema.Boolean,
-    filesSearched: Schema.Number,
-    binaryFilesSkipped: Schema.Number,
-    largeFilesSkipped: Schema.Number,
-    aggregateBudgetFilesSkipped: Schema.Number,
-    longLinesSkipped: Schema.Number,
+    filesSearched: Schema.Natural,
+    binaryFilesSkipped: Schema.Natural,
+    largeFilesSkipped: Schema.Natural,
+    aggregateBudgetFilesSkipped: Schema.Natural,
+    longLinesSkipped: Schema.Natural,
     unreadableFiles: Schema.Array(Schema.String),
     unreadableDirectories: Schema.Array(Schema.String),
     unreadableEntries: Schema.Array(Schema.String),
@@ -765,7 +771,7 @@ const runShellTool = Tool.make('run_shell', {
   }),
   success: Schema.Struct({
     command: Schema.String,
-    exitCode: Schema.Number,
+    exitCode: Schema.Int,
     stdout: Schema.String,
     stderr: Schema.String,
     stdoutTruncated: Schema.Boolean,
@@ -806,13 +812,13 @@ export const toolkit = Toolkit.make(
 
 // -------------------------------------------------------------- the handlers
 
-const handleRead = Effect.fnUntraced(function* (params: {
+const handleRead = Effect.fn('WorkspaceTools.readFile')(function* (params: {
   readonly path: string;
   readonly offset?: number;
   readonly limit?: number;
 }) {
-  const { absolute, root } = yield* resolvePath(params.path);
-  const text = yield* readText('read', absolute);
+  const { absolute, display, root } = yield* resolvePath(params.path);
+  const text = yield* readText('read', absolute, display);
 
   const allLines = text.split('\n');
   const firstLine = Math.min(
@@ -848,19 +854,19 @@ const handleRead = Effect.fnUntraced(function* (params: {
   };
 });
 
-const handleWrite = Effect.fnUntraced(function* (params: {
+const handleWrite = Effect.fn('WorkspaceTools.writeFile')(function* (params: {
   readonly path: string;
   readonly content: string;
 }) {
   const driver = yield* WorkspaceDriver.Service;
-  const { absolute, root } = yield* resolvePath(params.path);
+  const { absolute, display, root } = yield* resolvePath(params.path);
 
   const existing = yield* driver
     .stat(absolute)
-    .pipe(Effect.mapError(fromFileError('write', absolute)), Effect.result);
+    .pipe(Effect.mapError(fromFileError('write', display)), Effect.result);
 
   if (existing._tag === 'Success' && !existing.success.isFile) {
-    return yield* Effect.fail(new NotAFile({ path: absolute }));
+    return yield* Effect.fail(new NotAFile({ path: display }));
   }
   // A missing file is the ordinary case for a write; anything else that
   // blocked the `stat` will block the write too, and is reported there.
@@ -870,12 +876,16 @@ const handleWrite = Effect.fnUntraced(function* (params: {
   if (parent !== '' && parent !== root) {
     yield* driver
       .mkdir(parent, { recursive: true })
-      .pipe(Effect.mapError(fromFileError('write', parent)));
+      .pipe(
+        Effect.mapError(
+          fromFileError('write', WorkspacePath.relative(root, parent)),
+        ),
+      );
   }
 
   yield* driver
     .writeFile(absolute, params.content)
-    .pipe(Effect.mapError(fromFileError('write', absolute)));
+    .pipe(Effect.mapError(fromFileError('write', display)));
 
   return {
     path: WorkspacePath.relative(root, absolute),
@@ -884,26 +894,26 @@ const handleWrite = Effect.fnUntraced(function* (params: {
   };
 });
 
-const handleEdit = Effect.fnUntraced(function* (params: {
+const handleEdit = Effect.fn('WorkspaceTools.editFile')(function* (params: {
   readonly path: string;
   readonly oldText: string;
   readonly newText: string;
   readonly replaceAll?: boolean;
 }) {
   const driver = yield* WorkspaceDriver.Service;
-  const { absolute, root } = yield* resolvePath(params.path);
-  const text = yield* readText('write', absolute);
+  const { absolute, display, root } = yield* resolvePath(params.path);
+  const text = yield* readText('write', absolute, display);
 
   const occurrences = text.split(params.oldText).length - 1;
   if (occurrences === 0) {
     return yield* Effect.fail(
-      new EditTargetMissing({ path: absolute, target: params.oldText }),
+      new EditTargetMissing({ path: display, target: params.oldText }),
     );
   }
   if (occurrences > 1 && params.replaceAll !== true) {
     return yield* Effect.fail(
       new EditTargetAmbiguous({
-        path: absolute,
+        path: display,
         target: params.oldText,
         occurrences,
       }),
@@ -920,7 +930,7 @@ const handleEdit = Effect.fnUntraced(function* (params: {
 
   yield* driver
     .writeFile(absolute, updated)
-    .pipe(Effect.mapError(fromFileError('write', absolute)));
+    .pipe(Effect.mapError(fromFileError('write', display)));
 
   return {
     path: WorkspacePath.relative(root, absolute),
@@ -928,7 +938,7 @@ const handleEdit = Effect.fnUntraced(function* (params: {
   };
 });
 
-const handleList = Effect.fnUntraced(function* (params: {
+const handleList = Effect.fn('WorkspaceTools.listFiles')(function* (params: {
   readonly path?: string;
   readonly pattern?: string;
   readonly limit?: number;
@@ -938,7 +948,7 @@ const handleList = Effect.fnUntraced(function* (params: {
     params.pattern === undefined
       ? undefined
       : yield* compileGlob(params.pattern);
-  const walked = yield* walk('list', absolute);
+  const walked = yield* walk('list', absolute, root);
 
   const match = (path: string): boolean => expression?.test(path) ?? true;
 
@@ -955,156 +965,159 @@ const handleList = Effect.fnUntraced(function* (params: {
   };
 });
 
-const handleSearch = Effect.fnUntraced(function* (params: {
-  readonly pattern: string;
-  readonly path?: string;
-  readonly glob?: string;
-  readonly ignoreCase?: boolean;
-  readonly limit?: number;
-}) {
-  const driver = yield* WorkspaceDriver.Service;
-  const { absolute, root } = yield* resolvePath(params.path ?? '.');
+const handleSearch = Effect.fn('WorkspaceTools.searchFiles')(
+  function* (params: {
+    readonly pattern: string;
+    readonly path?: string;
+    readonly glob?: string;
+    readonly ignoreCase?: boolean;
+    readonly limit?: number;
+  }) {
+    const driver = yield* WorkspaceDriver.Service;
+    const { absolute, root } = yield* resolvePath(params.path ?? '.');
 
-  const unsafe = unsafeRegexReason(params.pattern);
-  if (unsafe !== undefined) {
-    return yield* Effect.fail(
-      new InvalidPattern({ pattern: params.pattern, reason: unsafe }),
-    );
-  }
-  const expression = yield* Effect.try({
-    try: () =>
-      new RegExp(params.pattern, params.ignoreCase === true ? 'iu' : 'u'),
-    catch: (error) => invalidPattern(params.pattern, error),
-  });
-  const glob =
-    params.glob === undefined ? undefined : yield* compileGlob(params.glob);
-
-  const walked = yield* walk('search', absolute);
-  const limit = Math.max(0, Math.trunc(params.limit ?? 200));
-
-  const candidates = walked.entries.filter(
-    (entry) =>
-      entry.type === 'file' && (glob === undefined || glob.test(entry.path)),
-  );
-
-  const matches: Array<{
-    readonly path: string;
-    readonly line: number;
-    readonly text: string;
-  }> = [];
-  let filesSearched = 0;
-  let binaryFilesSkipped = 0;
-  let largeFilesSkipped = 0;
-  let aggregateBudgetFilesSkipped = 0;
-  let longLinesSkipped = 0;
-  let truncated = walked.truncated;
-  const unreadableFiles: Array<string> = [];
-  const selected: Array<WalkEntry & { readonly budget: number }> = [];
-  let remainingBytes = MAX_SEARCH_BYTES;
-
-  for (const candidate of candidates) {
-    if (candidate.size !== undefined && candidate.size > MAX_SEARCHABLE_BYTES) {
-      largeFilesSkipped += 1;
-      continue;
+    const unsafe = unsafeRegexReason(params.pattern);
+    if (unsafe !== undefined) {
+      return yield* Effect.fail(
+        new InvalidPattern({ pattern: params.pattern, reason: unsafe }),
+      );
     }
-    const budget = Math.min(
-      MAX_SEARCHABLE_BYTES,
-      candidate.size ?? MAX_SEARCHABLE_BYTES,
+    const expression = yield* Effect.try({
+      try: () =>
+        new RegExp(params.pattern, params.ignoreCase === true ? 'iu' : 'u'),
+      catch: (error) => invalidPattern(params.pattern, error),
+    });
+    const glob =
+      params.glob === undefined ? undefined : yield* compileGlob(params.glob);
+
+    const walked = yield* walk('search', absolute, root);
+    const limit = Math.max(0, Math.trunc(params.limit ?? 200));
+
+    const candidates = walked.entries.filter(
+      (entry) =>
+        entry.type === 'file' && (glob === undefined || glob.test(entry.path)),
     );
-    if (budget > remainingBytes) {
-      aggregateBudgetFilesSkipped += 1;
-      truncated = true;
-      continue;
-    }
-    remainingBytes -= budget;
-    selected.push({ ...candidate, budget });
-  }
 
-  const reads = yield* Effect.forEach(
-    selected,
-    (candidate) =>
-      driver
-        .readFileBuffer(`${absolute}/${candidate.path}`, {
-          maxBytes: candidate.budget,
-        })
-        .pipe(Effect.result),
-    { concurrency: READ_CONCURRENCY },
-  );
+    const matches: Array<{
+      readonly path: string;
+      readonly line: number;
+      readonly text: string;
+    }> = [];
+    let filesSearched = 0;
+    let binaryFilesSkipped = 0;
+    let largeFilesSkipped = 0;
+    let aggregateBudgetFilesSkipped = 0;
+    let longLinesSkipped = 0;
+    let truncated = walked.truncated;
+    const unreadableFiles: Array<string> = [];
+    const selected: Array<WalkEntry & { readonly budget: number }> = [];
+    let remainingBytes = MAX_SEARCH_BYTES;
 
-  for (
-    let candidateIndex = 0;
-    candidateIndex < selected.length;
-    candidateIndex += 1
-  ) {
-    const candidate = selected[candidateIndex]!;
-    const bytes = reads[candidateIndex]!;
-    if (bytes._tag === 'Failure') {
+    for (const candidate of candidates) {
       if (
-        bytes.failure._tag === '@sunfall/vesper-workspace/FileReadLimitExceeded'
+        candidate.size !== undefined &&
+        candidate.size > MAX_SEARCHABLE_BYTES
       ) {
         largeFilesSkipped += 1;
-      } else {
-        unreadableFiles.push(candidate.path);
-      }
-      continue;
-    }
-
-    const decoded = WorkspaceOutput.decodeText(bytes.success);
-    if (!decoded.ok) {
-      binaryFilesSkipped += 1;
-      continue;
-    }
-
-    filesSearched += 1;
-    const lines = decoded.text.split('\n');
-    for (let index = 0; index < lines.length; index += 1) {
-      if (matches.length >= limit) {
-        truncated = true;
-        break;
-      }
-      const line = lines[index]!;
-      if (line.length > MAX_REGEX_LINE_CHARS) {
-        longLinesSkipped += 1;
         continue;
       }
-      // `lastIndex` is not carried between calls because the expression is
-      // built without `g`, so this stays a plain per-line predicate.
-      if (expression.test(line)) {
-        matches.push({
-          path: candidate.path,
-          line: index + 1,
-          text:
-            line.length > MATCH_LINE_MAX_CHARS
-              ? `${line.slice(0, MATCH_LINE_MAX_CHARS)}…`
-              : line,
-        });
+      const budget = Math.min(
+        MAX_SEARCHABLE_BYTES,
+        candidate.size ?? MAX_SEARCHABLE_BYTES,
+      );
+      if (budget > remainingBytes) {
+        aggregateBudgetFilesSkipped += 1;
+        truncated = true;
+        continue;
+      }
+      remainingBytes -= budget;
+      selected.push({ ...candidate, budget });
+    }
+
+    const reads = yield* Effect.forEach(
+      selected,
+      (candidate) =>
+        driver
+          .readFileBuffer(`${absolute}/${candidate.path}`, {
+            maxBytes: candidate.budget,
+          })
+          .pipe(Effect.result),
+      { concurrency: READ_CONCURRENCY },
+    );
+
+    for (
+      let candidateIndex = 0;
+      candidateIndex < selected.length;
+      candidateIndex += 1
+    ) {
+      const candidate = selected[candidateIndex]!;
+      const bytes = reads[candidateIndex]!;
+      if (bytes._tag === 'Failure') {
+        if (bytes.failure._tag === 'FileReadLimitExceeded') {
+          largeFilesSkipped += 1;
+        } else {
+          unreadableFiles.push(candidate.path);
+        }
+        continue;
+      }
+
+      const decoded = WorkspaceOutput.decodeText(bytes.success);
+      if (!decoded.ok) {
+        binaryFilesSkipped += 1;
+        continue;
+      }
+
+      filesSearched += 1;
+      const lines = decoded.text.split('\n');
+      for (let index = 0; index < lines.length; index += 1) {
+        if (matches.length >= limit) {
+          truncated = true;
+          break;
+        }
+        const line = lines[index]!;
+        if (line.length > MAX_REGEX_LINE_CHARS) {
+          longLinesSkipped += 1;
+          continue;
+        }
+        // `lastIndex` is not carried between calls because the expression is
+        // built without `g`, so this stays a plain per-line predicate.
+        if (expression.test(line)) {
+          matches.push({
+            path: candidate.path,
+            line: index + 1,
+            text:
+              line.length > MATCH_LINE_MAX_CHARS
+                ? `${line.slice(0, MATCH_LINE_MAX_CHARS)}…`
+                : line,
+          });
+        }
       }
     }
-  }
 
-  return {
-    directory: WorkspacePath.relative(root, absolute),
-    matches,
-    truncated,
-    filesSearched,
-    binaryFilesSkipped,
-    largeFilesSkipped,
-    aggregateBudgetFilesSkipped,
-    longLinesSkipped,
-    unreadableFiles,
-    unreadableDirectories: walked.unreadableDirectories,
-    unreadableEntries: walked.unreadableEntries,
-  };
-});
+    return {
+      directory: WorkspacePath.relative(root, absolute),
+      matches,
+      truncated,
+      filesSearched,
+      binaryFilesSkipped,
+      largeFilesSkipped,
+      aggregateBudgetFilesSkipped,
+      longLinesSkipped,
+      unreadableFiles,
+      unreadableDirectories: walked.unreadableDirectories,
+      unreadableEntries: walked.unreadableEntries,
+    };
+  },
+);
 
-const handleRun = Effect.fnUntraced(function* (params: {
+const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
   readonly command: string;
   readonly cwd?: string;
   readonly timeoutMs?: number;
 }) {
   const driver = yield* WorkspaceDriver.Service;
   const policy = yield* CommandPolicy;
-  const { absolute } = yield* resolvePath(params.cwd ?? '.');
+  const { absolute, display } = yield* resolvePath(params.cwd ?? '.');
   const requestedTimeoutMs = params.timeoutMs ?? policy.defaultTimeoutMs;
   const timeoutMs = Math.min(
     policy.maxTimeoutMs,
@@ -1115,9 +1128,9 @@ const handleRun = Effect.fnUntraced(function* (params: {
     .exec(params.command, { cwd: absolute, timeoutMs })
     .pipe(
       Effect.mapError((error): CommandTimedOut | PathFailure =>
-        error._tag === '@sunfall/vesper-workspace/CommandTimeout'
+        error._tag === 'CommandTimeout'
           ? new CommandTimedOut({ command: params.command, timeoutMs })
-          : fromFileError('run', absolute)(error),
+          : fromFileError('run', display)(error),
       ),
     );
 

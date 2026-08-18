@@ -138,7 +138,7 @@ const deltas = <Tools extends Record<string, Tool.Any>, E, R>(
 /** One sentence, rewritten by the judge. The trailing space rejoins them. */
 const sanitize = (
   sentence: string,
-): Stream.Stream<string, AiError.AiError, Agent.Requires<typeof judge>> =>
+): Stream.Stream<string, Agent.RunFailure, Agent.Requires<typeof judge>> =>
   judge.stream(sentence).pipe(deltas, Stream.concat(Stream.make(' ')));
 
 /** Whitespace-insensitive, since the two paths segment text differently. */

@@ -58,8 +58,8 @@ export const FileStat = Schema.Struct({
   isFile: Schema.Boolean,
   isDirectory: Schema.Boolean,
   isSymbolicLink: Schema.optionalKey(Schema.Boolean),
-  size: Schema.optionalKey(Schema.Number),
-  mtime: Schema.optionalKey(Schema.Number),
+  size: Schema.optionalKey(Schema.Natural),
+  mtime: Schema.optionalKey(Schema.Finite),
 });
 export interface FileStat extends Schema.Struct.Type<typeof FileStat.fields> {}
 
@@ -89,39 +89,36 @@ export const ShellResult = Schema.Struct({
   stderr: Schema.String,
   stdoutTruncated: Schema.Boolean,
   stderrTruncated: Schema.Boolean,
-  exitCode: Schema.Number,
+  exitCode: Schema.Int,
 });
 export interface ShellResult extends Schema.Struct.Type<
   typeof ShellResult.fields
 > {}
 
 /** The path does not exist. */
-export class PathNotFound extends Schema.TaggedError<PathNotFound>()(
+export class PathNotFound extends Schema.TaggedError<PathNotFound>(
   '@sunfall/vesper-workspace/PathNotFound',
-  {
-    path: Schema.String,
-    operation: Operation,
-  },
-) {}
+)('PathNotFound', {
+  path: Schema.String,
+  operation: Operation,
+}) {}
 
 /** The path exists but the driver is not allowed to touch it that way. */
-export class PermissionDenied extends Schema.TaggedError<PermissionDenied>()(
+export class PermissionDenied extends Schema.TaggedError<PermissionDenied>(
   '@sunfall/vesper-workspace/PermissionDenied',
-  {
-    path: Schema.String,
-    operation: Operation,
-  },
-) {}
+)('PermissionDenied', {
+  path: Schema.String,
+  operation: Operation,
+}) {}
 
 /** A bounded read found more bytes than the caller allowed it to retain. */
-export class FileReadLimitExceeded extends Schema.TaggedError<FileReadLimitExceeded>()(
+export class FileReadLimitExceeded extends Schema.TaggedError<FileReadLimitExceeded>(
   '@sunfall/vesper-workspace/FileReadLimitExceeded',
-  {
-    path: Schema.String,
-    operation: Schema.Literals(['readFile', 'readFileBuffer']),
-    maxBytes: Schema.Number,
-  },
-) {}
+)('FileReadLimitExceeded', {
+  path: Schema.String,
+  operation: Schema.Literals(['readFile', 'readFileBuffer']),
+  maxBytes: Schema.Natural,
+}) {}
 
 /**
  * A command did not finish within `timeoutMs` and was terminated.
@@ -131,13 +128,12 @@ export class FileReadLimitExceeded extends Schema.TaggedError<FileReadLimitExcee
  * output is however far it happened to get. That is not something a caller
  * can read as data the way a non-zero exit is.
  */
-export class CommandTimeout extends Schema.TaggedError<CommandTimeout>()(
+export class CommandTimeout extends Schema.TaggedError<CommandTimeout>(
   '@sunfall/vesper-workspace/CommandTimeout',
-  {
-    command: Schema.String,
-    timeoutMs: Schema.Number,
-  },
-) {}
+)('CommandTimeout', {
+  command: Schema.String,
+  timeoutMs: Schema.Natural,
+}) {}
 
 /**
  * Anything else the substrate refused.
@@ -148,15 +144,14 @@ export class CommandTimeout extends Schema.TaggedError<CommandTimeout>()(
  * driver — so an unmodelled failure is still diagnosable without reading the
  * defect.
  */
-export class WorkspaceFailure extends Schema.TaggedError<WorkspaceFailure>()(
+export class WorkspaceFailure extends Schema.TaggedError<WorkspaceFailure>(
   '@sunfall/vesper-workspace/WorkspaceFailure',
-  {
-    operation: Operation,
-    path: Schema.optionalKey(Schema.String),
-    code: Schema.String,
-    cause: Schema.Defect(),
-  },
-) {}
+)('WorkspaceFailure', {
+  operation: Operation,
+  path: Schema.optionalKey(Schema.String),
+  code: Schema.String,
+  cause: Schema.Defect(),
+}) {}
 
 /** Everything a filesystem operation can fail with. */
 export type FileError =

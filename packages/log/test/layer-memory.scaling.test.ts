@@ -1,12 +1,17 @@
 import { performance } from 'node:perf_hooks';
 
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Effect } from 'effect';
+import { Effect, Layer } from 'effect';
 
 import { LogStoreMemory } from '../src/layer-memory.js';
 import { LogStore } from '../src/log-store.js';
 import { LogOffset } from '../src/offset.js';
 import { LogVocabulary } from '../src/vocabulary.js';
+
+const memoryLayer = LogStoreMemory.layer.pipe(
+  Layer.provide(NodeServices.layer),
+);
 
 const describeScaling =
   process.env['RUN_LOG_SCALING'] === '1' ? describe : describe.skip;
@@ -55,7 +60,7 @@ describeScaling('LogStore memory pagination scaling', () => {
           console.info(
             `memory ${size.toLocaleString()}-record tail reads: 10,000 in ${elapsedMs.toFixed(1)}ms`,
           );
-        }).pipe(Effect.provide(LogStoreMemory.layer)),
+        }).pipe(Effect.provide(memoryLayer)),
       { timeout: 30_000 },
     );
   }

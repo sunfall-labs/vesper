@@ -13,7 +13,26 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Interception } from './interception.js';
 import type { AgentLog } from './log.js';
+import * as ToolExecution from './internal/tool-execution.js';
+import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
+
+type RunError = AiError.AiError | RunPolicy.RunPolicyExhausted;
+
+const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
+
+const preserveRunPolicy = <E, R>(
+  stream: Stream.Stream<Tool.HandlerResult<Tool.Any>, E, R>,
+): Stream.Stream<
+  Tool.HandlerResult<Tool.Any>,
+  E | RunPolicy.RunPolicyExhausted,
+  R
+> =>
+  Stream.mapEffect(stream, (result) =>
+    result.isFailure && isRunPolicyExhausted(result.result)
+      ? Effect.fail(result.result)
+      : Effect.succeed(result),
+  );
 
 // The tool-dispatch seam: consult the log before running a tool.
 //
@@ -113,23 +132,26 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
     readonly session: AgentLog.Session;
     readonly arbitration: TurnArbitration;
   },
-): Effect.Effect<void, AiError.AiError, Tool.HandlersFor<Tools>> =>
+): Effect.Effect<void, RunError, Tool.HandlersFor<Tools>> =>
   Effect.gen(function* () {
     if (options.session.recoveryCorruption !== undefined) {
       return yield* Effect.fail(
         recoveryCorruptionError(options.session.recoveryCorruption),
       );
     }
-    const pending = options.session.indeterminateToolCalls.filter((call) => {
+    const pending = options.session.pendingToolCalls.filter((call) => {
       const recovery = options.session.recovery(call.name, call.toolCallId);
-      return Option.isSome(recovery) && recovery.value._tag === 'Indeterminate';
+      return Option.isSome(recovery) && recovery.value._tag !== 'Settled';
     });
     if (pending.length === 0) return;
     const resolve = options.interceptor?.onIndeterminateToolCall;
-    if (resolve === undefined) {
-      const first = pending[0]!;
+    const unresolved = pending.find((call) => {
+      const recovery = options.session.recovery(call.name, call.toolCallId);
+      return Option.isSome(recovery) && recovery.value._tag === 'Indeterminate';
+    });
+    if (unresolved !== undefined && resolve === undefined) {
       return yield* Effect.fail(
-        indeterminateError(first.name, first.toolCallId),
+        indeterminateError(unresolved.name, unresolved.toolCallId),
       );
     }
 
@@ -137,13 +159,29 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
     const underlying = resolved.handle as unknown as Dispatch;
     const services = yield* Effect.context<never>();
     for (const call of pending) {
-      const decision = yield* resolve({
-        agent: options.agent,
-        conversationId: options.session.conversationId,
-        name: call.name,
-        toolCallId: call.toolCallId,
-        params: call.params,
-      }).pipe(Effect.provide(services));
+      const recovery = options.session.recovery(call.name, call.toolCallId);
+      if (Option.isNone(recovery) || recovery.value._tag === 'Settled')
+        continue;
+      const replayable =
+        recovery.value._tag === 'Suspended' ||
+        recovery.value._tag === 'Restarting';
+      let decision: Interception.IndeterminateToolDecision;
+      if (replayable) {
+        decision = { _tag: 'Retry' };
+      } else {
+        if (resolve === undefined) {
+          return yield* Effect.fail(
+            indeterminateError(call.name, call.toolCallId),
+          );
+        }
+        decision = yield* resolve({
+          agent: options.agent,
+          conversationId: options.session.conversationId,
+          name: call.name,
+          toolCallId: call.toolCallId,
+          params: call.params,
+        }).pipe(Effect.provide(services));
+      }
 
       if (decision._tag === 'Answer') {
         yield* decodeResult(
@@ -172,28 +210,63 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
         call.name,
         call.params,
       );
-      if (!(yield* options.arbitration.dispatchCommits)) return;
+      const permit = yield* options.arbitration.commit;
+      if (Option.isNone(permit)) return;
 
       yield* Effect.gen(function* () {
-        yield* options.session.append([
-          {
-            _tag: 'ToolStarted',
-            id: call.toolCallId,
-            name: call.name,
-          },
-        ]);
+        if (recovery.value._tag === 'Suspended') {
+          yield* options.session.append([
+            {
+              _tag: 'ToolResumed',
+              id: call.toolCallId,
+              name: call.name,
+              token: recovery.value.token,
+            },
+          ]);
+        } else {
+          yield* options.session.append([
+            {
+              _tag: 'ToolStarted',
+              id: call.toolCallId,
+              name: call.name,
+            },
+          ]);
+        }
+        const execution: ToolExecution.Execution = {
+          session: options.session,
+          name: call.name,
+          toolCallId: call.toolCallId,
+        };
+        const invoke = underlying(call.name, params, call.toolCallId).pipe(
+          Effect.provideService(ToolExecution.Current, execution),
+          Effect.map((stream) =>
+            stream.pipe(
+              Stream.provideService(ToolExecution.Current, execution),
+            ),
+          ),
+        );
         const metered =
           options.runtime === undefined ||
           options.unmeteredToolNames?.has(call.name) === true
-            ? yield* underlying(call.name, params, call.toolCallId)
-            : options.runtime.toolStream(
-                Stream.unwrap(underlying(call.name, params, call.toolCallId)),
-              );
+            ? yield* invoke
+            : options.runtime.toolStream(Stream.unwrap(invoke));
+        const guarded = preserveRunPolicy(metered).pipe(
+          // `Toolkit.handle` exposes a per-tool `HandlerError` on the
+          // returned stream. The erased Dispatch type cannot carry that
+          // relationship, so normalize it at this boundary before the
+          // retry joins the agent's public RunError channel. Preserve the
+          // errors that are already part of that channel.
+          Stream.mapError((error) =>
+            isRunPolicyExhausted(error) || AiError.isAiError(error)
+              ? error
+              : indeterminateHandlerError(call.name, error),
+          ),
+        );
         const result = yield* options.runtime === undefined
-          ? Stream.runLast(metered)
+          ? Stream.runLast(guarded)
           : Effect.gen(function* () {
               const remaining = yield* options.runtime!.remainingMillis;
-              return yield* Stream.runLast(metered).pipe(
+              return yield* Stream.runLast(guarded).pipe(
                 Effect.timeoutOrElse({
                   duration: remaining,
                   orElse: () =>
@@ -220,9 +293,22 @@ export const resolveIndeterminate = <Tools extends Record<string, Tool.Any>>(
             result: result.value.encodedResult,
           },
         ]);
-      }).pipe(Effect.ensuring(options.arbitration.settled));
+      }).pipe(Effect.ensuring(permit.value.settle));
     }
-  }) as Effect.Effect<void, AiError.AiError, Tool.HandlersFor<Tools>>;
+  }) as Effect.Effect<void, RunError, Tool.HandlersFor<Tools>>;
+
+const decodeUnknownToolValue = (
+  schema: Schema.Constraint | undefined,
+  value: unknown,
+  services: Context.Context<never>,
+  onError: (detail: string) => AiError.AiError,
+): Effect.Effect<unknown, AiError.AiError> =>
+  schema === undefined
+    ? Effect.fail(onError('tool is not defined'))
+    : (Schema.decodeUnknownEffect(schema)(value).pipe(
+        Effect.provide(services),
+        Effect.mapError((error) => onError(String(error))),
+      ) as Effect.Effect<unknown, AiError.AiError>);
 
 const decodeResult = (
   toolkit: { readonly tools: Record<string, Tool.Any> },
@@ -240,12 +326,9 @@ const decodeResult = (
       : isFailure
         ? Schema.Union([tool.failureSchema, AiError.AiError])
         : tool.successSchema;
-  return schema === undefined
-    ? Effect.fail(toolResultDecodeError(name, 'tool is not defined'))
-    : (Schema.decodeUnknownEffect(schema)(result).pipe(
-        Effect.provide(services),
-        Effect.mapError((error) => toolResultDecodeError(name, String(error))),
-      ) as Effect.Effect<unknown, AiError.AiError>);
+  return decodeUnknownToolValue(schema, result, services, (detail) =>
+    toolResultDecodeError(name, detail),
+  );
 };
 
 const decodeParameters = (
@@ -257,14 +340,12 @@ const decodeParameters = (
   const tool = Object.hasOwn(toolkit.tools, name)
     ? toolkit.tools[name]
     : undefined;
-  return tool === undefined
-    ? Effect.fail(toolParameterDecodeError(name, 'tool is not defined'))
-    : (Schema.decodeUnknownEffect(tool.parametersSchema)(params).pipe(
-        Effect.provide(services),
-        Effect.mapError((error) =>
-          toolParameterDecodeError(name, String(error)),
-        ),
-      ) as Effect.Effect<unknown, AiError.AiError>);
+  return decodeUnknownToolValue(
+    tool?.parametersSchema,
+    params,
+    services,
+    (detail) => toolParameterDecodeError(name, detail),
+  );
 };
 
 interface ArbitrationState {
@@ -275,8 +356,13 @@ interface ArbitrationState {
 export interface TurnArbitration {
   /** Wait until every dispatch commit is durably settled, then cancel. */
   readonly cancel: Effect.Effect<void>;
-  readonly dispatchCommits: Effect.Effect<boolean>;
-  readonly settled: Effect.Effect<void>;
+  /** Atomically commit one dispatch, or return none after cancellation wins. */
+  readonly commit: Effect.Effect<Option.Option<DispatchPermit>>;
+}
+
+/** One committed dispatch, released exactly once regardless of exit path. */
+export interface DispatchPermit {
+  readonly settle: Effect.Effect<void>;
 }
 
 /** One turn's atomic cancellation/dispatch race. */
@@ -294,7 +380,7 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
         // between the check and the wait.
         const subscription = yield* PubSub.subscribe(changes);
         while ((yield* Ref.get(state)).dispatches > 0) {
-          yield* Stream.fromSubscription(subscription).pipe(Stream.runHead);
+          yield* PubSub.take(subscription);
         }
       }),
     );
@@ -311,18 +397,30 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
           yield* awaitIdle;
         }
       }),
-      dispatchCommits: Ref.modify(state, (current) =>
-        current.cancelled
-          ? [false, current]
-          : [true, { ...current, dispatches: current.dispatches + 1 }],
+      commit: Effect.uninterruptible(
+        Effect.gen(function* () {
+          const released = yield* Ref.make(false);
+          const committed = yield* Ref.modify(state, (current) =>
+            current.cancelled
+              ? [false, current]
+              : [true, { ...current, dispatches: current.dispatches + 1 }],
+          );
+          if (!committed) return Option.none<DispatchPermit>();
+
+          const settle = Effect.gen(function* () {
+            const first = yield* Ref.modify(released, (current) =>
+              current ? [false, true] : [true, true],
+            );
+            if (!first) return;
+            yield* Ref.update(state, (current) => ({
+              ...current,
+              dispatches: current.dispatches - 1,
+            }));
+            yield* PubSub.publish(changes, undefined);
+          });
+          return Option.some({ settle });
+        }),
       ),
-      settled: Effect.gen(function* () {
-        yield* Ref.update(state, (current) => ({
-          ...current,
-          dispatches: Math.max(0, current.dispatches - 1),
-        }));
-        yield* PubSub.publish(changes, undefined);
-      }),
     };
   },
 );
@@ -376,25 +474,17 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
               ])
             : tool.successSchema;
 
-      const decode: Decode =
-        schema === undefined
-          ? () =>
-              Effect.fail(toolResultDecodeError(name, 'tool is not defined'))
-          : (stored: unknown) =>
-              // The requirement channel is erased rather than declared. A
-              // tool's decoding services are already in the agent's
-              // `WithOwnHandlers`, so the caller has provided them and they
-              // are in `services` — but `handle`'s signature fixes what its
-              // effect may require, and declaring them here would put a
-              // requirement on a value `LanguageModel` resolves internally.
-              // Capturing and providing them is the same move
-              // `Subagent.delegateTo` makes for a child's services.
-              Schema.decodeUnknownEffect(schema)(stored).pipe(
-                Effect.provide(services),
-                Effect.mapError((error) =>
-                  toolResultDecodeError(name, String(error)),
-                ),
-              ) as Effect.Effect<unknown, AiError.AiError>;
+      const decode: Decode = (stored: unknown) =>
+        // The requirement channel is erased rather than declared. A tool's
+        // decoding services are already in the agent's `WithOwnHandlers`, so
+        // the caller has provided them and they are in `services` — but
+        // `handle`'s signature fixes what its effect may require, and
+        // declaring them here would put a requirement on a value
+        // `LanguageModel` resolves internally. Capturing and providing them is
+        // the same move `Subagent.delegateTo` makes for a child's services.
+        decodeUnknownToolValue(schema, stored, services, (detail) =>
+          toolResultDecodeError(name, detail),
+        );
 
       decoders.set(name, decode);
       return decode;
@@ -430,7 +520,9 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
         requireDecoded
           ? decoderFor(name)(encoded)
           : decoderFor(name)(encoded).pipe(
-              Effect.catchCause(() => Effect.succeed(encoded)),
+              // Only a typed schema failure gets the encoded fallback. Defects
+              // and interruption are control-flow signals and must survive.
+              Effect.catch(() => Effect.succeed(encoded)),
             ),
         (decoded) =>
           Stream.make({
@@ -505,48 +597,85 @@ export const gate = <Tools extends Record<string, Tool.Any>>(
         }
 
         // Step 4. The tool. Dispatch commits before its start becomes durable.
-        if (
-          options.arbitration !== undefined &&
-          !(yield* options.arbitration.dispatchCommits)
-        ) {
+        const arbitration = options.arbitration;
+        const permit =
+          arbitration === undefined
+            ? Option.none<DispatchPermit>()
+            : yield* arbitration.commit;
+        if (arbitration !== undefined && Option.isNone(permit)) {
           // Cancellation owns the turn. The provider stream is being stopped
           // concurrently; parking here prevents a handler from crossing the
           // gate in the small interval before that interruption reaches it.
           return yield* Effect.never;
         }
-        if (session !== undefined) {
-          if (normalizedToolCallId === undefined) {
-            return yield* Effect.fail(missingToolCallIdError(name));
+        const settle = Option.isSome(permit) ? permit.value.settle : undefined;
+        const setup = Effect.gen(function* () {
+          if (session !== undefined) {
+            if (normalizedToolCallId === undefined) {
+              return yield* Effect.fail(missingToolCallIdError(name));
+            }
+            yield* session.append([
+              {
+                _tag: 'ToolStarted',
+                id: normalizedToolCallId,
+                name,
+              },
+            ]);
+            // Register only after ToolStarted is durable. The handler cannot
+            // begin before this effect returns, so no ToolOutcome can race the
+            // registration; a failed append leaves no stale callback behind.
+            if (settle !== undefined) {
+              session.onToolSettled(name, normalizedToolCallId, settle);
+            }
           }
-          if (options.arbitration !== undefined) {
-            session.onToolSettled(
-              name,
-              normalizedToolCallId,
-              options.arbitration.settled,
+          const execution: ToolExecution.Execution | undefined =
+            session === undefined || normalizedToolCallId === undefined
+              ? undefined
+              : {
+                  session,
+                  name,
+                  toolCallId: normalizedToolCallId,
+                };
+          const invoked = underlying(name, params, toolCallId);
+          const invoke =
+            execution === undefined
+              ? invoked
+              : invoked.pipe(
+                  Effect.provideService(ToolExecution.Current, execution),
+                  Effect.map((stream) =>
+                    stream.pipe(
+                      Stream.provideService(ToolExecution.Current, execution),
+                    ),
+                  ),
+                );
+          const stream =
+            options.runtime === undefined ||
+            options.unmeteredToolNames?.has(name) === true
+              ? yield* invoke
+              : options.runtime.toolStream(Stream.unwrap(invoke));
+          return preserveRunPolicy(stream).pipe(
+            // Toolkit.handle returns a stream whose handler work is pull
+            // driven. Keep this span around the returned stream, not merely
+            // around the effect that constructs it.
+            Stream.withSpan('Agent.tool', {
+              attributes: { 'vesper.tool.name': name },
+            }),
+          );
+        });
+        const guarded = yield* settle === undefined
+          ? setup
+          : setup.pipe(
+              Effect.catchCause((cause) =>
+                Effect.uninterruptible(settle).pipe(
+                  Effect.andThen(Effect.failCause(cause)),
+                ),
+              ),
             );
-          }
-          yield* session.append([
-            {
-              _tag: 'ToolStarted',
-              id: normalizedToolCallId,
-              name,
-            },
-          ]);
-        }
-        const guarded =
-          options.runtime === undefined ||
-          options.unmeteredToolNames?.has(name) === true
-            ? yield* underlying(name, params, toolCallId)
-            : options.runtime.toolStream(
-                Stream.unwrap(underlying(name, params, toolCallId)),
-              );
-        return options.arbitration === undefined
+        return settle === undefined
           ? guarded
           : guarded.pipe(
               Stream.onExit((exit) =>
-                Exit.isFailure(exit)
-                  ? options.arbitration!.settled
-                  : Effect.void,
+                Exit.isFailure(exit) ? settle : Effect.void,
               ),
             );
       });
@@ -606,6 +735,19 @@ const emptyToolResultError = (name: string): AiError.AiError =>
     method: 'resolveIndeterminateToolCall',
     reason: new AiError.UnknownError({
       description: `Retried tool ${name} completed without a final result`,
+      metadata: { name },
+    }),
+  });
+
+const indeterminateHandlerError = (
+  name: string,
+  error: unknown,
+): AiError.AiError =>
+  new AiError.AiError({
+    module: 'Agent',
+    method: 'resolveIndeterminateToolCall',
+    reason: new AiError.UnknownError({
+      description: `Tool ${name} failed during retry: ${String(error)}`,
       metadata: { name },
     }),
   });

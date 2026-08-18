@@ -1,33 +1,12 @@
 import { Clock, Effect, Ref, Semaphore, Stream } from 'effect';
-import { AiError } from 'effect/unstable/ai';
 
 import { RunPolicy } from './run-policy.js';
 import type { Stop } from './stop.js';
 
-export type Limit =
-  | 'turns'
-  | 'model_calls'
-  | 'delegated_tasks'
-  | 'deadline'
-  | 'input_tokens'
-  | 'output_tokens'
-  | 'signal_bytes'
-  | 'signals_per_boundary'
-  | 'steered_bytes';
-
 export interface Exhaustion {
-  readonly limit: Limit;
+  readonly limit: RunPolicy.Limit;
   readonly used: number;
   readonly maximum: number;
-}
-
-export interface Snapshot {
-  readonly turns: number;
-  readonly modelCalls: number;
-  readonly delegatedTasks: number;
-  readonly usage: Stop.Usage;
-  readonly steeredBytes: number;
-  readonly limits: RunPolicy.Limits;
 }
 
 interface Counters {
@@ -48,18 +27,21 @@ const emptyCounters: Counters = {
   steeredBytes: 0,
 };
 
-export interface SignalDecision {
-  readonly accepted: boolean;
-  readonly bytes: number;
-  readonly exhaustion?:
-    | (Exhaustion & {
-        readonly limit:
-          | 'signal_bytes'
-          | 'signals_per_boundary'
-          | 'steered_bytes';
-      })
-    | undefined;
-}
+type SignalExhaustion = Exhaustion & {
+  readonly limit: 'signal_bytes' | 'signals_per_boundary' | 'steered_bytes';
+};
+
+/** The result of applying one signal to a run's hard budgets. */
+export type SignalDecision =
+  | {
+      readonly accepted: true;
+      readonly bytes: number;
+    }
+  | {
+      readonly accepted: false;
+      readonly bytes: number;
+      readonly exhaustion: SignalExhaustion;
+    };
 
 /** Non-mutating eligibility check used by responsive cancel detection. */
 export const acceptsCancel = (
@@ -73,18 +55,14 @@ export const acceptsCancel = (
 /** One root run's shared, lexical budget state. */
 export interface Runtime {
   readonly limits: RunPolicy.Limits;
-  readonly deadline: number;
-  readonly turn: Effect.Effect<void, AiError.AiError>;
-  readonly modelCall: Effect.Effect<void, AiError.AiError>;
+  readonly turn: Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
+  readonly modelCall: Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly addUsage: (
     usage: Stop.Usage,
-  ) => Effect.Effect<void, AiError.AiError>;
+  ) => Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly delegation: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E | AiError.AiError, R>;
-  readonly tool: <A, E, R>(
-    effect: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, R>;
+  ) => Effect.Effect<A, E | RunPolicy.RunPolicyExhausted, R>;
   readonly toolStream: <A, E, R>(
     stream: Stream.Stream<A, E, R>,
   ) => Stream.Stream<A, E, R>;
@@ -93,20 +71,11 @@ export interface Runtime {
     text: string,
     index: number,
   ) => Effect.Effect<SignalDecision>;
-  readonly remainingMillis: Effect.Effect<number, AiError.AiError>;
-  readonly snapshot: Effect.Effect<Snapshot>;
+  readonly remainingMillis: Effect.Effect<number, RunPolicy.RunPolicyExhausted>;
 }
 
-export const error = (exhaustion: Exhaustion): AiError.AiError =>
-  new AiError.AiError({
-    module: 'AgentRunPolicy',
-    method: exhaustion.limit,
-    reason: new AiError.ContentPolicyError({
-      description:
-        `Hard run budget ${exhaustion.limit} exhausted ` +
-        `(${exhaustion.used}/${exhaustion.maximum})`,
-    }),
-  });
+export const error = (exhaustion: Exhaustion): RunPolicy.RunPolicyExhausted =>
+  new RunPolicy.RunPolicyExhausted(exhaustion);
 
 export const create = Effect.fn('RunPolicy.create')(function* (
   configured: RunPolicy.Limits,
@@ -134,9 +103,9 @@ export const create = Effect.fn('RunPolicy.create')(function* (
 
   const increment = (
     field: 'turns' | 'modelCalls' | 'delegatedTasks',
-    limit: Limit,
+    limit: RunPolicy.Limit,
     maximum: number,
-  ): Effect.Effect<void, AiError.AiError> =>
+  ): Effect.Effect<void, RunPolicy.RunPolicyExhausted> =>
     Effect.gen(function* () {
       yield* checkDeadline;
       const next = yield* Ref.modify(counters, (current) => {
@@ -232,12 +201,10 @@ export const create = Effect.fn('RunPolicy.create')(function* (
 
   return {
     limits,
-    deadline: started + limits.wallClockMillis,
     turn: increment('turns', 'turns', limits.maxTurns),
     modelCall: increment('modelCalls', 'model_calls', limits.maxModelCalls),
     addUsage,
     delegation,
-    tool: (effect) => tools.withPermit(effect),
     toolStream: (stream) =>
       Stream.scoped(
         Stream.unwrap(
@@ -248,25 +215,7 @@ export const create = Effect.fn('RunPolicy.create')(function* (
       ),
     signal,
     remainingMillis: checkDeadline,
-    snapshot: Effect.map(Ref.get(counters), (current) => ({
-      turns: current.turns,
-      modelCalls: current.modelCalls,
-      delegatedTasks: current.delegatedTasks,
-      usage: { input: current.inputTokens, output: current.outputTokens },
-      steeredBytes: current.steeredBytes,
-      limits,
-    })),
   } satisfies Runtime;
 });
-
-export const clampConcurrency = (
-  requested: number | 'unbounded' | undefined,
-  maximum: number,
-): number =>
-  requested === undefined || requested === 'unbounded'
-    ? maximum
-    : !Number.isFinite(requested)
-      ? maximum
-      : Math.max(1, Math.min(Math.floor(requested), maximum));
 
 export * as RunPolicyRuntime from './run-policy-runtime.js';

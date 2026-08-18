@@ -1,9 +1,10 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Clock, Effect } from 'effect';
+import { Clock, Crypto, Effect } from 'effect';
 
 import type { Signal } from '../conversation.js';
+import * as AgentIds from './ids.js';
 
 // Out-of-band input to a running conversation: steering, and cancel.
 //
@@ -71,25 +72,21 @@ export const pathFor = (conversationId: LogVocabulary.ConversationId): string =>
  */
 /** @internal */
 export const append = Effect.fn('AgentSignals.append')(function* (
-  conversationId: string,
+  conversationId: LogVocabulary.ConversationId,
   signal: Signal,
 ) {
   const store = yield* LogStore.Service;
-  yield* appendRecord(
-    store,
-    LogVocabulary.ConversationId.make(conversationId),
-    {
-      _tag: 'Signal',
-      ...signal,
-    },
-  );
+  yield* appendRecord(store, conversationId, {
+    _tag: 'Signal',
+    ...signal,
+  });
 });
 
 const appendRecord = (
   store: LogStore.Interface,
   conversationId: LogVocabulary.ConversationId,
   record: ConversationRecord.RecordOf<'Signal'>,
-): Effect.Effect<void, LogStore.LogStoreError> => {
+): Effect.Effect<void, LogStore.LogStoreError, Crypto.Crypto> => {
   const path = pathFor(conversationId);
 
   return Effect.gen(function* () {
@@ -101,10 +98,7 @@ const appendRecord = (
       ),
     );
 
-    const claim = yield* store.acquire(
-      path,
-      LogVocabulary.ProducerId.make(crypto.randomUUID()),
-    );
+    const claim = yield* store.acquire(path, yield* AgentIds.producerId);
     const timestamp = yield* Clock.currentTimeMillis;
 
     yield* store.append({

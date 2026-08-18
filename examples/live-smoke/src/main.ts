@@ -7,26 +7,29 @@ import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
 // Subpath imports, not the barrel: the package root re-exports `NodeRedis`,
 // which imports `ioredis` at module load and is not installed here.
 import * as NodeRuntime from '@effect/platform-node/NodeRuntime';
+import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
-import { AgentLog } from '@sunfall/vesper-agent/log';
 import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
+import { LogStorePg } from '@sunfall/vesper-log/layer-pg';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
+import { VesperPgClient } from '@sunfall/vesper-log/pg-client';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Config,
   Console,
   Context,
+  Crypto,
   Effect,
   Layer,
+  Redacted,
   Schema,
   Stream,
 } from 'effect';
@@ -61,22 +64,21 @@ import { WorkspaceTools } from '@sunfall/vesper-workspace/tools';
 // It costs real money and needs a real API key:
 //
 //   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase all
+//   OPENROUTER_API_KEY=... nub run example:live-smoke --provider openrouter --phase log
 //   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase compaction-reactive
 //
 /** Output cap on every call. Plumbing is what is under test, not prose. */
 const MAX_OUTPUT_TOKENS = 300;
 
-const PROVIDERS = ['anthropic', 'openai'] as const;
+const PROVIDERS = ['anthropic', 'openai', 'openrouter'] as const;
 type Provider = (typeof PROVIDERS)[number];
 
 const DEFAULT_PROVIDER: Provider = 'anthropic';
 const DEFAULT_MODELS = {
   anthropic: 'claude-sonnet-4-6',
   openai: 'gpt-5.6-luna',
+  openrouter: 'openrouter/free',
 } satisfies Record<Provider, string>;
-
-const isProvider = (value: string): value is Provider =>
-  PROVIDERS.some((provider) => provider === value);
 
 const modelFor = (provider: Provider, model: string) =>
   provider === 'anthropic'
@@ -93,9 +95,14 @@ const modelFor = (provider: Provider, model: string) =>
         max_output_tokens: MAX_OUTPUT_TOKENS,
       }).pipe(
         Layer.provide(
-          OpenAiClient.layerConfig({
-            apiKey: Config.redacted('OPENAI_API_KEY'),
-          }),
+          OpenAiClient.layerConfig(
+            provider === 'openrouter'
+              ? {
+                  apiKey: Config.redacted('OPENROUTER_API_KEY'),
+                  apiUrl: Config.succeed('https://openrouter.ai/api/v1'),
+                }
+              : { apiKey: Config.redacted('OPENAI_API_KEY') },
+          ),
         ),
       );
 
@@ -120,6 +127,10 @@ const heading = (title: string): Effect.Effect<void> =>
  */
 const checks: Array<{ readonly ok: boolean; readonly claim: string }> = [];
 
+const memoryLogLayer = LogStoreMemory.layer.pipe(
+  Layer.provide(NodeServices.layer),
+);
+
 const check = (ok: boolean, claim: string): Effect.Effect<void> => {
   checks.push({ ok, claim });
   return Console.log(`  ${ok ? green('PASS') : red('FAIL')}  ${claim}`);
@@ -132,7 +143,7 @@ const check = (ok: boolean, claim: string): Effect.Effect<void> => {
  *
  * Two sources, because the two entry-point shapes report differently. A
  * streamed run's turns arrive as `finish` parts and are added as they go. A
- * `conversation.resume` returns only a `Result`, whose `usage` is cumulative
+ * `conversation.run` returns only a `Result`, whose `usage` is cumulative
  * **for the whole conversation** rather than for that run — so it is added as
  * a delta against the last figure seen for that conversation id. That stops
  * five resumptions of one conversation from counting the first turn five times.
@@ -213,11 +224,9 @@ const emptyTrace = (): Trace => ({
 /**
  * Fold an agent's event stream into something assertable.
  *
- * Reads parts through `Response.StreamPartEncoded`, which is what `agent.ts`'s
- * own `observe` and `log.ts`'s `partRecords` both do: the decoded and encoded
- * shapes agree on every field read here except a tool result's payload, and
- * this deliberately reads the *encoded* one, because that is what the log
- * stores and what a resuming run serves back.
+ * Reads the provider-facing sibling of each decoded part. Keeping both forms
+ * makes transformed tool schemas observable without unsafe casts and matches
+ * what the log stores and a resuming run serves back.
  */
 const absorb = <Tools extends Record<string, Tool.Any>>(
   trace: Trace,
@@ -247,7 +256,7 @@ const absorb = <Tools extends Record<string, Tool.Any>>(
     return;
   }
 
-  const part = event.part as Response.StreamPartEncoded;
+  const part = event.encodedPart;
   if (!trace.partTypes.includes(part.type)) trace.partTypes.push(part.type);
 
   switch (part.type) {
@@ -263,9 +272,7 @@ const absorb = <Tools extends Record<string, Tool.Any>>(
         id: part.id,
         name: part.name,
         isFailure: part.isFailure === true,
-        result: (
-          event.part as Response.ToolResultPart<string, unknown, unknown>
-        ).encodedResult,
+        result: part.result,
       });
       return;
     case 'finish':
@@ -317,29 +324,20 @@ const report = (trace: Trace): Effect.Effect<void> =>
 
 // ------------------------------------------------------------------ the log
 
-const readAll = (
+const readAll = <A extends Agent.Any>(
+  agent: A,
   conversationId: string,
 ): Effect.Effect<
   ReadonlyArray<ConversationRecord.Envelope>,
   LogStore.LogStoreError,
   LogStore.Service
 > =>
-  Effect.gen(function* () {
-    const store = yield* LogStore.Service;
-    const path = AgentLog.pathFor(
-      LogVocabulary.ConversationId.make(conversationId),
+  Conversation.make(agent, conversationId)
+    .records()
+    .pipe(
+      Stream.runCollect,
+      Effect.map((records) => Array.from(records)),
     );
-    const all: Array<ConversationRecord.Envelope> = [];
-    let cursor = LogOffset.START;
-    let done = false;
-    while (!done) {
-      const page = yield* store.read(path, { after: cursor });
-      all.push(...page.records);
-      cursor = page.cursor;
-      done = page.upToDate;
-    }
-    return all;
-  });
 
 const tagsOf = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
@@ -510,7 +508,9 @@ const delegatePhase = Effect.gen(function* () {
 
   yield* report(trace);
 
-  const parentRecords = yield* readAll(conversationId).pipe(Effect.orDie);
+  const parentRecords = yield* readAll(curator, conversationId).pipe(
+    Effect.orDie,
+  );
   const childReference = parentRecords.find(
     (envelope) => envelope.record._tag === 'ChildSession',
   );
@@ -547,6 +547,7 @@ const delegatePhase = Effect.gen(function* () {
 
   if (childReference?.record._tag === 'ChildSession') {
     const childRecords = yield* readAll(
+      archivist,
       childReference.record.childConversationId,
     ).pipe(Effect.orDie);
 
@@ -662,7 +663,9 @@ const seedConversation = (conversationId: string) =>
       dim(`  run 1: ${first.text.replace(/\s+/g, ' ').slice(0, 120)}`),
     );
 
-    const records = yield* readAll(conversationId).pipe(Effect.orDie);
+    const records = yield* readAll(notetaker, conversationId).pipe(
+      Effect.orDie,
+    );
     const afterFirstRun = records[records.length - 1]!.offset;
 
     const second = yield* conversation.run(
@@ -691,13 +694,29 @@ const logPhase = Effect.gen(function* () {
   const conversationId = `smoke-log-${Date.now()}`;
   const seeded = yield* seedConversation(conversationId);
 
-  const records = yield* readAll(conversationId).pipe(Effect.orDie);
+  const records = yield* readAll(notetaker, conversationId).pipe(Effect.orDie);
   yield* Console.log(dim(`  records: ${tagsOf(records).join(', ')}`));
+
+  const snapshot = yield* Conversation.make(notetaker, conversationId)
+    .records()
+    .pipe(Stream.runCollect);
+  yield* check(
+    snapshot.length === records.length,
+    'records() returned the current finite snapshot and completed',
+  );
+
+  const followed = yield* Conversation.make(notetaker, conversationId)
+    .follow(records[records.length - 2]!.offset)
+    .pipe(Stream.take(1), Stream.runCollect);
+  yield* check(
+    followed[0]?.offset === records[records.length - 1]?.offset,
+    'follow() replayed records after its exclusive cursor',
+  );
 
   // A different agent value, and therefore a `Chat` this process has never
   // held. Everything it knows has to come out of the store.
   const conversation = Conversation.make(notetaker, conversationId);
-  const resumed = yield* conversation.resume(
+  const resumed = yield* conversation.run(
     'What is the container id? Answer with just the id.',
   );
   spentByConversation(conversationId, resumed.usage);
@@ -734,7 +753,9 @@ const logPhase = Effect.gen(function* () {
 
   yield* Console.log(`  ${dim('branched answer:')} ${branched.text.trim()}`);
 
-  const afterBranch = yield* readAll(conversationId).pipe(Effect.orDie);
+  const afterBranch = yield* readAll(notetaker, conversationId).pipe(
+    Effect.orDie,
+  );
 
   yield* check(
     afterBranch.some((envelope) => envelope.record._tag === 'BranchedFrom'),
@@ -776,8 +797,8 @@ const logPhase = Effect.gen(function* () {
       `\n  ${dim('right:')} ${rightResult.text.trim().slice(0, 120)}`,
   );
 
-  const leftRecords = yield* readAll(left).pipe(Effect.orDie);
-  const rightRecords = yield* readAll(right).pipe(Effect.orDie);
+  const leftRecords = yield* readAll(notetaker, left).pipe(Effect.orDie);
+  const rightRecords = yield* readAll(notetaker, right).pipe(Effect.orDie);
 
   yield* check(
     /LEFT/.test(leftResult.text) && /RIGHT/.test(rightResult.text),
@@ -796,6 +817,130 @@ const logPhase = Effect.gen(function* () {
   yield* check(
     !leftRecords.some((envelope) => envelope.record._tag === 'BranchedFrom'),
     'a fork copies the prefix without inheriting the ancestor’s branch marker',
+  );
+
+  const leftConversation = Conversation.make(notetaker, left);
+  const leftContinued = yield* leftConversation.run(
+    'Remember the word LEFTWARD. Reply with just that word.',
+  );
+  spentByConversation(left, leftContinued.usage);
+  const rightContinued = yield* Conversation.make(notetaker, right).run(
+    'What directional word did I ask the sibling conversation to remember? ' +
+      'If you were not told one, say NOT TOLD.',
+  );
+  spentByConversation(right, rightContinued.usage);
+  yield* check(
+    /LEFTWARD/i.test(leftContinued.text) &&
+      !/LEFTWARD/i.test(rightContinued.text),
+    'forks continued independently after sharing the same prefix',
+  );
+
+  yield* heading('signals — queued steering and cancellation');
+
+  const signalId = `${conversationId}-signals`;
+  const signalled = Conversation.make(notetaker, signalId);
+  yield* signalled.send({
+    kind: 'steer',
+    text: 'Include the exact token STEERED in your answer.',
+    source: 'live-smoke',
+  });
+  const steered = yield* signalled.run(
+    'The shipment is delayed. Acknowledge briefly.',
+  );
+  spent(steered.usage);
+  cumulative.set(signalId, steered.usage);
+  yield* check(
+    /STEERED/.test(steered.text),
+    'a steer queued before the run changed the next provider prompt',
+  );
+
+  yield* signalled.send({
+    kind: 'cancel',
+    text: 'operator cancelled the next turn',
+    source: 'live-smoke',
+  });
+  const cancelled = yield* signalled.run('Answer with SHOULD_NOT_APPEAR.');
+  spentByConversation(signalId, cancelled.usage);
+  const signalRecords = yield* signalled.records().pipe(Stream.runCollect);
+  yield* check(
+    cancelled.outcome === 'cancelled' &&
+      !/SHOULD_NOT_APPEAR/.test(cancelled.text),
+    'a queued cancel stopped the next turn before model output',
+  );
+  yield* check(
+    Array.from(signalRecords).filter(
+      ({ record }) => record._tag === 'SignalReceived',
+    ).length === 2,
+    'both delivered signals were acknowledged in conversation records',
+  );
+});
+
+// --------------------------------------- phase: PostgreSQL runtime replacement
+
+const durabilityPhase = Effect.gen(function* () {
+  yield* heading('durability — resume through a fresh Postgres pool');
+
+  const databaseUrl = yield* Config.redacted('VESPER_DATABASE_URL');
+  const conversationId = `smoke-durable-${Date.now()}`;
+  const storeLayer = () =>
+    LogStorePg.layer().pipe(
+      Layer.provide(
+        VesperPgClient.layer({
+          url: Redacted.make(Redacted.value(databaseUrl)),
+        }),
+      ),
+      Layer.provide(NodeCrypto.layer),
+    );
+
+  yield* Effect.gen(function* () {
+    const conversation = Conversation.make(notetaker, conversationId);
+    const result = yield* conversation.run(
+      'The durable shipment code is DURABLE-ORCHID. Reply with just the code.',
+    );
+    spent(result.usage);
+    cumulative.set(conversationId, result.usage);
+    yield* conversation.send({
+      kind: 'steer',
+      text: 'Include the exact token AFTER-RESTART in the next answer.',
+      source: 'live-smoke',
+    });
+  }).pipe(Effect.provide(storeLayer()), Effect.scoped);
+
+  yield* Console.log(dim('  first Postgres pool closed; opening a fresh one'));
+
+  const { recordsBefore, recordsAfter, resumed } = yield* Effect.gen(
+    function* () {
+      const conversation = Conversation.make(notetaker, conversationId);
+      const recordsBefore = yield* conversation
+        .records()
+        .pipe(Stream.runCollect);
+      const resumed = yield* conversation.run(
+        'What is the durable shipment code? Answer briefly.',
+      );
+      spentByConversation(conversationId, resumed.usage);
+      const recordsAfter = yield* conversation
+        .records()
+        .pipe(Stream.runCollect);
+      return { recordsBefore, recordsAfter, resumed };
+    },
+  ).pipe(Effect.provide(storeLayer()), Effect.scoped);
+
+  yield* Console.log(`  ${dim('resumed answer:')} ${resumed.text.trim()}`);
+  yield* check(
+    Array.from(recordsBefore).some(
+      ({ record }) => record._tag === 'RunSettled',
+    ),
+    'a fresh Postgres pool read the run written by the disposed pool',
+  );
+  yield* check(
+    /DURABLE-ORCHID/i.test(resumed.text) && /AFTER-RESTART/.test(resumed.text),
+    'resume rebuilt history and delivered the signal persisted by the first pool',
+  );
+  yield* check(
+    Array.from(recordsAfter).some(
+      ({ record }) => record._tag === 'SignalReceived',
+    ),
+    'the resumed run durably acknowledged the queued signal',
   );
 });
 
@@ -935,9 +1080,11 @@ const usagePhase = Effect.gen(function* () {
   cumulative.set(conversationId, first.usage);
 
   // The second call rebuilds the first from records, preserving the long prefix.
-  const second = yield* conversation.resume('Say TWO.');
+  const second = yield* conversation.run('Say TWO.');
   spentByConversation(conversationId, second.usage);
-  const secondRecords = yield* readAll(conversationId).pipe(Effect.orDie);
+  const secondRecords = yield* readAll(parrot, conversationId).pipe(
+    Effect.orDie,
+  );
 
   const raw = first.turnUsage[0];
   yield* Console.log(
@@ -998,15 +1145,11 @@ const compactionProactivePhase = Effect.gen(function* () {
 
   const conversationId = `smoke-compact-${Date.now()}`;
 
-  // `conversation.resume`, not `conversation.run` in a loop.
+  // repeated `conversation.run` calls, which continue durable history.
   //
-  // This is a real difference the faux provider cannot show. A recording
-  // agent's `run` opens a fresh `Chat` seeded with instructions alone, so
-  // calling it repeatedly against one conversation appends several runs to
-  // one log and gives the model no memory of any of them — the history only
-  // ever comes back through `conversation.resume`, which rebuilds it from the
-  // records. A first `conversation.resume` on a new conversation starts it, so
-  // this needs no special case for the opening turn.
+  // A first `conversation.run` starts an empty conversation; every later call
+  // rebuilds its active history from records before continuing, so this needs
+  // no special case for the opening turn.
   const prompts = [
     'My name is Wren and I collect antique barometers. Tell me about the ' +
       'history of the aneroid barometer.',
@@ -1020,10 +1163,10 @@ const compactionProactivePhase = Effect.gen(function* () {
   const conversation = Conversation.make(rambler, conversationId);
   const compactionsAfter: Array<number> = [];
   for (const prompt of prompts) {
-    const result = yield* conversation.resume(prompt);
+    const result = yield* conversation.run(prompt);
     spentByConversation(conversationId, result.usage);
     last = result.text;
-    const soFar = yield* readAll(conversationId).pipe(Effect.orDie);
+    const soFar = yield* readAll(rambler, conversationId).pipe(Effect.orDie);
     const count = soFar.filter(
       (envelope) => envelope.record._tag === 'Compacted',
     ).length;
@@ -1036,7 +1179,7 @@ const compactionProactivePhase = Effect.gen(function* () {
     );
   }
 
-  const records = yield* readAll(conversationId).pipe(Effect.orDie);
+  const records = yield* readAll(rambler, conversationId).pipe(Effect.orDie);
   const compactedRecords = records.filter(
     (envelope) => envelope.record._tag === 'Compacted',
   );
@@ -1073,12 +1216,12 @@ const compactionProactivePhase = Effect.gen(function* () {
     );
   }
 
-  const resumed = yield* conversation.resume(
+  const resumed = yield* conversation.run(
     'One more time: what do I collect? Two words.',
   );
   spentByConversation(conversationId, resumed.usage);
   compactionsAfter.push(
-    (yield* readAll(conversationId).pipe(Effect.orDie)).filter(
+    (yield* readAll(rambler, conversationId).pipe(Effect.orDie)).filter(
       (envelope) => envelope.record._tag === 'Compacted',
     ).length,
   );
@@ -1159,12 +1302,12 @@ const compactionReactivePhase = Effect.gen(function* () {
 
   const conversationId = `smoke-overflow-${Date.now()}`;
 
-  // `conversation.resume` for both turns, so the second turn's prompt is the
+  // `conversation.run` for both turns, so the second turn's prompt is the
   // first turn rebuilt from records *plus* the new half — which puts it over the
-  // window. Two `conversation.run` calls would each start from an empty
-  // `Chat` and neither would overflow.
+  // window. An unrecorded Agent run would start from an empty `Chat` each time
+  // and neither call would overflow.
   const conversation = Conversation.make(archivistOfLogs, conversationId);
-  const one = yield* conversation.resume(
+  const one = yield* conversation.run(
     `Here is the first half of the log.\n\n${first}\n\nHow many entries did I just give you, roughly?`,
   );
   spentByConversation(conversationId, one.usage);
@@ -1173,7 +1316,7 @@ const compactionReactivePhase = Effect.gen(function* () {
   );
 
   const two = yield* conversation
-    .resume(
+    .run(
       `Here is the second half.\n\n${second}\n\nSay the word OVERFLOWED and nothing else.`,
     )
     .pipe(
@@ -1188,7 +1331,9 @@ const compactionReactivePhase = Effect.gen(function* () {
       ),
     );
 
-  const records = yield* readAll(conversationId).pipe(Effect.orDie);
+  const records = yield* readAll(archivistOfLogs, conversationId).pipe(
+    Effect.orDie,
+  );
   const compacted = records.filter(
     (envelope) => envelope.record._tag === 'Compacted',
   );
@@ -1213,8 +1358,11 @@ const phases: Record<
   string,
   Effect.Effect<
     void,
-    AiError.AiError | AgentLog.CompatibilityError,
-    LanguageModel.LanguageModel | LogStore.Service
+    | Agent.RunFailure
+    | Conversation.CompatibilityError
+    | Conversation.SuspendedConversationError
+    | LogStore.LogStoreError,
+    Crypto.Crypto | LanguageModel.LanguageModel | LogStore.Service
   >
 > = {
   tools: toolsPhase,
@@ -1226,6 +1374,17 @@ const phases: Record<
   'compaction-proactive': compactionProactivePhase,
   'compaction-reactive': compactionReactivePhase,
 };
+
+const PHASES = [...Object.keys(phases), 'durability'] as const;
+
+const phaseFor = (name: string) =>
+  name === 'durability'
+    ? durabilityPhase.pipe(Effect.provide(NodeServices.layer))
+    : phases[name] === undefined
+      ? undefined
+      : phases[name]!.pipe(Effect.provide(memoryLogLayer)).pipe(
+          Effect.provide(NodeServices.layer),
+        );
 
 /** Everything except the one that sends a quarter of a million tokens. */
 const DEFAULT_PHASES = [
@@ -1267,10 +1426,10 @@ const summarize = (
 const command = Command.make(
   'live-smoke',
   {
-    phase: Flag.string('phase').pipe(
+    phase: Flag.choice('phase', ['all', ...PHASES]).pipe(
       Flag.withDescription(
-        `One of ${Object.keys(phases).join(', ')}, or "all" for everything ` +
-          'except compaction-reactive.',
+        'Run one phase, or "all" for everything except durability and ' +
+          'compaction-reactive.',
       ),
       Flag.withDefault('all'),
     ),
@@ -1280,8 +1439,8 @@ const command = Command.make(
       ),
       Flag.withDefault('default'),
     ),
-    provider: Flag.string('provider').pipe(
-      Flag.withDescription(`Effect AI provider: ${PROVIDERS.join(' | ')}.`),
+    provider: Flag.choice('provider', PROVIDERS).pipe(
+      Flag.withDescription('Effect AI provider.'),
       Flag.withDefault(DEFAULT_PROVIDER),
     ),
     inputUsd: Flag.string('input-usd').pipe(
@@ -1297,22 +1456,12 @@ const command = Command.make(
   },
   ({ inputUsd, model, outputUsd, phase, provider }) =>
     Effect.gen(function* () {
-      if (!isProvider(provider)) {
-        return yield* Effect.die(
-          new Error(
-            `Unknown provider "${provider}"; known: ${PROVIDERS.join(', ')}`,
-          ),
-        );
-      }
-
-      // Comma-separated, so a budgeted run can name the subset it can afford
-      // and still get one cumulative spend line at the end.
       const selected: ReadonlyArray<string> =
-        phase === 'all' ? DEFAULT_PHASES : phase.split(',');
+        phase === 'all' ? DEFAULT_PHASES : [phase];
 
       const chain = Effect.gen(function* () {
         for (const name of selected) {
-          const effect = phases[name];
+          const effect = phaseFor(name);
           if (effect === undefined) {
             return yield* Effect.die(new Error(`Unknown phase: ${name}`));
           }
@@ -1321,7 +1470,6 @@ const command = Command.make(
       });
 
       yield* chain.pipe(
-        Effect.provide(LogStoreMemory.layer),
         Effect.provide(
           modelFor(
             provider,
@@ -1348,7 +1496,9 @@ const command = Command.make(
 ).pipe(
   Command.withDescription(
     'Drive a real model through tools, delegation, skills, the conversation ' +
-      'log, branching, forking, the workspace toolkit, and both compaction ' +
+      'log, Postgres runtime replacement, branching, forking, the workspace ' +
+      'toolkit, ' +
+      'and both compaction ' +
       'triggers.',
   ),
 );

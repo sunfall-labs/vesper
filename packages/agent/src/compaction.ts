@@ -226,6 +226,11 @@ export const compact = Effect.fn('Agent.compact')(function* (
 ) {
   const history = yield* Ref.get(chat.history);
   const split = splitAt(history, policy.keepRecentTokens);
+  yield* Effect.annotateCurrentSpan({
+    'vesper.compaction.applied': split.older.length > 0,
+    'vesper.compaction.summarizedMessages': split.older.length,
+    'vesper.compaction.keptMessages': split.recent.length,
+  });
 
   if (split.older.length === 0) {
     // Nothing old enough to summarize. Compacting anyway would spend a model

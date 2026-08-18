@@ -1,9 +1,10 @@
-import { Context, Effect, Layer, Schema } from 'effect';
+import { Context, Crypto, Effect, Layer, Schema } from 'effect';
 import { Tool, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { handler } from '../src/subagent-runtime.js';
+import { Subagent } from '../src/subagent.js';
 
 // Proof that capture actually propagates a subagent's services.
 //
@@ -32,13 +33,7 @@ const scribe = Agent.make({
   toolkit: Toolkit.make(write),
 });
 
-const delegation = Tool.make('task_scribe', {
-  description: 'delegate to the scribe',
-  parameters: Schema.Struct({ prompt: Schema.String }),
-  success: Schema.Struct({ result: Schema.String, steps: Schema.Number }),
-  failure: Schema.Struct({ refused: Schema.String }),
-  failureMode: 'return',
-});
+const delegation = Subagent.tool(scribe);
 
 const kit = Toolkit.make(delegation);
 
@@ -47,10 +42,9 @@ const layer = kit.toLayer(
     // The capture. Remove it and the handler keeps `Notebook` in its own
     // requirement channel, which `HandlersFrom` rejects — this stops
     // compiling rather than silently degrading.
-    const context =
-      yield* Effect.context<
-        Agent.WithOwnHandlers<{ readonly write: typeof write }>
-      >();
+    const context = yield* Effect.context<
+      Agent.WithOwnHandlers<{ readonly write: typeof write }> | Crypto.Crypto
+    >();
 
     return {
       task_scribe: (input: { readonly prompt: string }) =>

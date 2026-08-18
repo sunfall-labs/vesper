@@ -24,7 +24,10 @@ inert. The revision is application-owned durable compatibility identity.
 
 **State** — one typed document attached to an agent definition. Each run opens
 an isolated handle for it; a recorded run restores the document from its
-conversation and persists every successful mutation before returning it.
+conversation and persists every successful mutation before returning it. The
+agent owns the handle lifetime; callers do not select an ambient ephemeral or
+recorded layer. Codec decoding/encoding services remain in the agent's
+`Requires` while the state handle itself is discharged by the run layer.
 
 **State checkpoint** — a complete encoded State value in the conversation log.
 The latest checkpoint on the active path wins. A settled run carries the latest

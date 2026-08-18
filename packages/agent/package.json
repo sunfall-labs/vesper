@@ -50,6 +50,10 @@
       "types": "./dist/event.d.ts",
       "default": "./dist/event.js"
     },
+    "./eval": {
+      "types": "./dist/eval.d.ts",
+      "default": "./dist/eval.js"
+    },
     "./history": {
       "types": "./dist/history.d.ts",
       "default": "./dist/history.js"
@@ -58,9 +62,9 @@
       "types": "./dist/interception.d.ts",
       "default": "./dist/interception.js"
     },
-    "./log": {
-      "types": "./dist/log.d.ts",
-      "default": "./dist/log.js"
+    "./unstable/log": {
+      "types": "./dist/unstable/log.d.ts",
+      "default": "./dist/unstable/log.js"
     },
     "./recording-policy": {
       "types": "./dist/recording-policy.d.ts",

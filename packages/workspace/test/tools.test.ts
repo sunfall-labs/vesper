@@ -12,13 +12,18 @@ import { join } from 'node:path';
 
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Stream } from 'effect';
+import { Effect, Layer, Schema, Stream } from 'effect';
 import { Tool as ToolNamespace } from 'effect/unstable/ai';
 import type { Tool, Toolkit } from 'effect/unstable/ai';
 
 import { WorkspaceDriver } from '../src/driver.js';
 import { layer as localLayer } from '../src/layer-local.js';
-import { WorkspaceTools } from '../src/tools.js';
+import {
+  CommandTimedOut,
+  EditTargetAmbiguous,
+  FileTooLarge,
+  WorkspaceTools,
+} from '../src/tools.js';
 
 // The toolkit against a real local workspace. Nothing is faked: the failures
 // worth pinning here — `EISDIR`, `ENOTDIR`, a killed command, a file that is
@@ -306,7 +311,7 @@ describe('read_file', () => {
 
       expectFailure(
         yield* call(directory, 'read_file', { path: 'huge.txt' }),
-        '@sunfall/vesper-workspace/FileTooLarge',
+        'FileTooLarge',
       );
     }),
   );
@@ -339,9 +344,10 @@ describe('read_file', () => {
       const directory = workspace();
       const error = expectFailure(
         yield* call(directory, 'read_file', { path: 'absent.txt' }),
-        '@sunfall/vesper-workspace/FileNotFound',
+        'FileNotFound',
       );
-      expect(String(error['path'])).toContain('absent.txt');
+      expect(error['path']).toBe('absent.txt');
+      expect(JSON.stringify(error)).not.toContain(directory);
     }),
   );
 
@@ -351,7 +357,7 @@ describe('read_file', () => {
       mkdirSync(join(directory, 'sub'));
       expectFailure(
         yield* call(directory, 'read_file', { path: 'sub' }),
-        '@sunfall/vesper-workspace/NotAFile',
+        'NotAFile',
       );
     }),
   );
@@ -363,9 +369,11 @@ describe('read_file', () => {
 
       const error = expectFailure(
         yield* call(directory, 'read_file', { path: '../outside.txt' }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
       expect(error['reason']).toBe('escapes-root');
+      expect(error['root']).toBe('.');
+      expect(JSON.stringify(error)).not.toContain(directory);
     }),
   );
 
@@ -374,7 +382,7 @@ describe('read_file', () => {
       const directory = workspace();
       expectFailure(
         yield* call(directory, 'read_file', { path: '/etc/hosts' }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
     }),
   );
@@ -384,7 +392,7 @@ describe('read_file', () => {
       const directory = workspace();
       const error = expectFailure(
         yield* call(directory, 'read_file', { path: 'a\u0000b' }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
       expect(error['reason']).toBe('nul-byte');
     }),
@@ -400,7 +408,7 @@ describe('read_file', () => {
 
       const error = expectFailure(
         yield* call(directory, 'read_file', { path: 'image.png' }),
-        '@sunfall/vesper-workspace/BinaryContent',
+        'BinaryContent',
       );
       expect(error['reason']).toBe('nul-byte');
     }),
@@ -418,7 +426,7 @@ describe('read_file', () => {
 
       const error = expectFailure(
         yield* call(directory, 'read_file', { path: 'latin1.txt' }),
-        '@sunfall/vesper-workspace/BinaryContent',
+        'BinaryContent',
       );
       expect(error['reason']).toBe('invalid-utf8');
     }),
@@ -487,7 +495,7 @@ describe('write_file', () => {
 
       expectFailure(
         yield* call(directory, 'write_file', { path: 'sub', content: 'x' }),
-        '@sunfall/vesper-workspace/NotAFile',
+        'NotAFile',
       );
     }),
   );
@@ -500,7 +508,7 @@ describe('write_file', () => {
           path: '../escaped.txt',
           content: 'x',
         }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
     }),
   );
@@ -540,10 +548,12 @@ describe('edit_file', () => {
           oldText: 'not here',
           newText: 'x',
         }),
-        '@sunfall/vesper-workspace/EditTargetMissing',
+        'EditTargetMissing',
       );
 
       expect(error['target']).toBe('not here');
+      expect(error['path']).toBe('f.txt');
+      expect(JSON.stringify(error)).not.toContain(directory);
       // The whole point: a model told the edit landed reasons from a file that
       // never changed.
       expect(readFileSync(join(directory, 'f.txt'), 'utf8')).toBe('unchanged');
@@ -561,7 +571,7 @@ describe('edit_file', () => {
           oldText: '= 1',
           newText: '= 2',
         }),
-        '@sunfall/vesper-workspace/EditTargetAmbiguous',
+        'EditTargetAmbiguous',
       );
 
       expect(error['occurrences']).toBe(3);
@@ -640,7 +650,7 @@ describe('edit_file', () => {
           oldText: 'a',
           newText: 'b',
         }),
-        '@sunfall/vesper-workspace/FileNotFound',
+        'FileNotFound',
       );
     }),
   );
@@ -656,7 +666,7 @@ describe('edit_file', () => {
           oldText: 'anything',
           newText: 'x',
         }),
-        '@sunfall/vesper-workspace/BinaryContent',
+        'BinaryContent',
       );
     }),
   );
@@ -670,7 +680,7 @@ describe('edit_file', () => {
           oldText: 'secret',
           newText: 'x',
         }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
     }),
   );
@@ -759,7 +769,7 @@ describe('list_files', () => {
 
       expectFailure(
         yield* call(directory, 'list_files', { pattern: '[z-a]' }),
-        '@sunfall/vesper-workspace/InvalidPattern',
+        'InvalidPattern',
       );
     }),
   );
@@ -825,7 +835,7 @@ describe('list_files', () => {
       const directory = workspace();
       expectFailure(
         yield* call(directory, 'list_files', { path: 'absent' }),
-        '@sunfall/vesper-workspace/FileNotFound',
+        'FileNotFound',
       );
     }),
   );
@@ -836,7 +846,7 @@ describe('list_files', () => {
       writeFileSync(join(directory, 'f.txt'), '');
       expectFailure(
         yield* call(directory, 'list_files', { path: 'f.txt' }),
-        '@sunfall/vesper-workspace/NotADirectory',
+        'NotADirectory',
       );
     }),
   );
@@ -846,7 +856,7 @@ describe('list_files', () => {
       const directory = workspace();
       expectFailure(
         yield* call(directory, 'list_files', { path: '..' }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
     }),
   );
@@ -983,7 +993,7 @@ describe('search_files', () => {
       const directory = workspace();
       const error = expectFailure(
         yield* call(directory, 'search_files', { pattern: '([' }),
-        '@sunfall/vesper-workspace/InvalidPattern',
+        'InvalidPattern',
       );
       expect(error['pattern']).toBe('([');
       expect(String(error['reason']).length).toBeGreaterThan(0);
@@ -1002,7 +1012,7 @@ describe('search_files', () => {
 
         expectFailure(
           yield* call(directory, 'search_files', { pattern }),
-          '@sunfall/vesper-workspace/InvalidPattern',
+          'InvalidPattern',
         );
       }),
   );
@@ -1017,7 +1027,7 @@ describe('search_files', () => {
           pattern: 'needle',
           glob: '[z-a]',
         }),
-        '@sunfall/vesper-workspace/InvalidPattern',
+        'InvalidPattern',
       );
     }),
   );
@@ -1060,7 +1070,7 @@ describe('search_files', () => {
       const directory = workspace();
       expectFailure(
         yield* call(directory, 'search_files', { pattern: 'x', path: '../..' }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
     }),
   );
@@ -1127,7 +1137,7 @@ describe('run_shell', () => {
             command: 'sleep 5',
             timeoutMs: 200,
           }),
-          '@sunfall/vesper-workspace/CommandTimedOut',
+          'CommandTimedOut',
         );
 
         expect(error['timeoutMs']).toBe(200);
@@ -1151,7 +1161,7 @@ describe('run_shell', () => {
             maxTimeoutMs: 100,
           }),
         ),
-        '@sunfall/vesper-workspace/CommandTimedOut',
+        'CommandTimedOut',
       );
 
       expect(error['timeoutMs']).toBe(100);
@@ -1183,7 +1193,7 @@ describe('run_shell', () => {
       const directory = workspace();
       expectFailure(
         yield* call(directory, 'run_shell', { command: 'ls', cwd: '/etc' }),
-        '@sunfall/vesper-workspace/PathOutsideWorkspace',
+        'PathOutsideWorkspace',
       );
     }),
   );
@@ -1195,7 +1205,7 @@ describe('run_shell', () => {
         const directory = workspace();
         expectFailure(
           yield* call(directory, 'run_shell', { command: 'ls', cwd: 'absent' }),
-          '@sunfall/vesper-workspace/FileNotFound',
+          'FileNotFound',
         );
       }),
   );
@@ -1251,4 +1261,45 @@ describe('the JSON schema these tools advertise', () => {
       expect(JSON.stringify(schemaFor(name))).not.toContain('Infinity');
     }
   });
+});
+
+describe('public numeric failure schemas', () => {
+  it.effect('reject non-finite, negative, and fractional values', () =>
+    Effect.gen(function* () {
+      const cases = [
+        {
+          schema: FileTooLarge,
+          value: {
+            _tag: 'FileTooLarge',
+            path: 'large.txt',
+            maxBytes: Number.NaN,
+          },
+        },
+        {
+          schema: EditTargetAmbiguous,
+          value: {
+            _tag: 'EditTargetAmbiguous',
+            path: 'note.txt',
+            target: 'needle',
+            occurrences: 1.5,
+          },
+        },
+        {
+          schema: CommandTimedOut,
+          value: {
+            _tag: 'CommandTimedOut',
+            command: 'sleep 1',
+            timeoutMs: -1,
+          },
+        },
+      ];
+
+      for (const { schema, value } of cases) {
+        const result = yield* Schema.decodeUnknownEffect(schema)(value).pipe(
+          Effect.result,
+        );
+        expect(result._tag).toBe('Failure');
+      }
+    }),
+  );
 });

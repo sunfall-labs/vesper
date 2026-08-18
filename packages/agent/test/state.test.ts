@@ -2,9 +2,11 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import {
   Deferred,
+  Context,
   Effect,
   Exit,
   Fiber,
@@ -12,6 +14,8 @@ import {
   Option,
   Ref,
   Schema,
+  SchemaIssue,
+  SchemaTransformation,
   Stream,
 } from 'effect';
 import {
@@ -23,7 +27,6 @@ import {
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import { Session } from '../src/internal/protocol.js';
 import { AgentLog } from '../src/log.js';
 import { AgentState } from '../src/state.js';
 
@@ -38,6 +41,65 @@ const Count = AgentState.make({
   schema: Schema.Struct({ count: Schema.Number }),
   initial: { count: 0 },
 });
+const SameIdCount = AgentState.make({
+  id: 'count',
+  version: '1',
+  schema: Schema.Struct({ count: Schema.Number }),
+  initial: { count: 10 },
+});
+class StateCodecService extends Context.Service<
+  StateCodecService,
+  { readonly offset: number }
+>()('state-test/StateCodecService') {}
+const OffsetState = AgentState.make({
+  id: 'offset-state',
+  version: '1',
+  schema: Schema.String.pipe(
+    Schema.decodeTo(
+      Schema.Number,
+      SchemaTransformation.transformOrFail<
+        number,
+        string,
+        StateCodecService,
+        StateCodecService
+      >({
+        decode: (value) =>
+          Effect.map(StateCodecService, ({ offset }) => Number(value) + offset),
+        encode: (value) =>
+          Effect.map(StateCodecService, ({ offset }) => String(value - offset)),
+      }),
+    ),
+  ),
+  initial: 0,
+});
+const EncodeFailureState = AgentState.make({
+  id: 'encode-failure',
+  version: '1',
+  schema: Schema.String.pipe(
+    Schema.decodeTo(
+      Schema.Number,
+      SchemaTransformation.transformOrFail<number, string>({
+        decode: (value) => Effect.succeed(Number(value)),
+        encode: () =>
+          Effect.fail(
+            new SchemaIssue.InvalidValue({ message: 'encode failed' }),
+          ),
+      }),
+    ),
+  ),
+  initial: 0,
+});
+const DecodeFailureState = AgentState.make({
+  id: 'decode-failure',
+  version: '1',
+  schema: Schema.Number,
+  initial: 0,
+});
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 const open = Effect.fnUntraced(function* () {
   const session = yield* AgentLog.open(conversation, { compatibility });
@@ -105,8 +167,7 @@ describe('recorded agent state', () => {
       }),
     ).toThrow(
       expect.objectContaining({
-        _tag: '@sunfall/vesper-agent/AgentStateError',
-        reason: 'invalid-definition',
+        _tag: 'StateDefinitionError',
       }),
     );
   });
@@ -126,6 +187,7 @@ describe('recorded agent state', () => {
         revision: '1',
         instructions: 'Use the tool once.',
         toolkit: Toolkit.make(increment),
+        state: Count,
       }).withHandlers({
         increment: () =>
           Effect.gen(function* () {
@@ -137,7 +199,7 @@ describe('recorded agent state', () => {
       return Effect.gen(function* () {
         const conversation = Conversation.make(agent, 'agent-state');
         yield* conversation.run('first');
-        yield* conversation.resume('second');
+        yield* conversation.run('second');
         const session = yield* AgentLog.open(
           LogVocabulary.ConversationId.make('agent-state'),
           { compatibility },
@@ -146,9 +208,8 @@ describe('recorded agent state', () => {
           count: 2,
         });
       }).pipe(
-        Effect.provide(AgentState.layerRecorded(Count)),
         Effect.provide(model),
-        Effect.provide(LogStoreMemory.layer),
+        Effect.provide(testLogLayer),
         Effect.orDie,
       );
     },
@@ -170,18 +231,178 @@ describe('recorded agent state', () => {
     }).pipe(Effect.provide(AgentState.layerEphemeral(Count))),
   );
 
-  it.effect('fails recorded state outside a recorded session', () =>
+  it.effect('opens isolated ephemeral handles', () =>
     Effect.gen(function* () {
-      const state = yield* Count;
-      const exit = yield* Effect.exit(state.get);
+      const left = yield* AgentState.open(Count, undefined);
+      const right = yield* AgentState.open(Count, undefined);
+      yield* left.set({ count: 1 });
+      yield* right.set({ count: 2 });
+      expect(yield* left.get).toEqual({ count: 1 });
+      expect(yield* right.get).toEqual({ count: 2 });
+    }),
+  );
+
+  it.effect('keeps same-id definitions distinct as Context services', () =>
+    Effect.gen(function* () {
+      expect(yield* (yield* Count).get).toEqual({ count: 0 });
+      expect(yield* (yield* SameIdCount).get).toEqual({ count: 10 });
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          AgentState.layerEphemeral(Count),
+          AgentState.layerEphemeral(SameIdCount),
+        ),
+      ),
+    ),
+  );
+
+  it.effect('preserves transformed codec service requirements at runtime', () =>
+    Effect.gen(function* () {
+      const records: Array<{ readonly record: unknown }> = [];
+      const session = (stateHistory: ReadonlyArray<unknown>) =>
+        ({
+          stateHistory,
+          append: (next: ReadonlyArray<unknown>) =>
+            Effect.sync(() => {
+              records.push(...next.map((record) => ({ record })));
+            }),
+        }) as unknown as AgentLog.Session;
+      const codecService = { offset: 1 };
+      const opened = yield* AgentState.open(OffsetState, session([])).pipe(
+        Effect.provideService(StateCodecService, codecService),
+      );
+      yield* opened
+        .set(41)
+        .pipe(Effect.provideService(StateCodecService, codecService));
+      expect(records.at(-1)?.record).toMatchObject({
+        _tag: 'StateCheckpoint',
+        value: '40',
+      });
+      const restored = yield* AgentState.open(
+        OffsetState,
+        session(records as ReadonlyArray<unknown>),
+      ).pipe(Effect.provideService(StateCodecService, codecService));
+      expect(yield* restored.get).toBe(41);
+    }),
+  );
+
+  it.effect('reports checkpoint decoding failures as structured errors', () =>
+    Effect.gen(function* () {
+      const session = yield* open();
+      yield* session.append([
+        {
+          _tag: 'StateCheckpoint',
+          id: DecodeFailureState.id,
+          version: DecodeFailureState.version,
+          value: 'not-a-number',
+        },
+      ]);
+      const reopened = yield* AgentLog.open(conversation, { compatibility });
+      const exit = yield* Effect.exit(
+        AgentState.open(DecodeFailureState, reopened),
+      );
       expect(exit._tag).toBe('Failure');
       if (exit._tag === 'Failure') {
         expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
-          reason: 'no-session',
-          stateId: 'count',
+          _tag: 'StateDecodeError',
+          stateId: DecodeFailureState.id,
+          stateVersion: DecodeFailureState.version,
         });
       }
-    }).pipe(Effect.provide(AgentState.layerRecorded(Count))),
+    }).pipe(Effect.provide(testLogLayer)),
+  );
+
+  it.effect('reports checkpoint encoding failures as structured errors', () =>
+    Effect.gen(function* () {
+      const session = yield* open();
+      const state = yield* AgentState.open(EncodeFailureState, session);
+      const exit = yield* Effect.exit(state.set(1));
+      expect(exit._tag).toBe('Failure');
+      if (exit._tag === 'Failure') {
+        expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
+          _tag: 'StateEncodeError',
+          stateId: EncodeFailureState.id,
+          stateVersion: EncodeFailureState.version,
+        });
+      }
+      expect(yield* state.get).toBe(0);
+      expect(
+        (yield* session.recorded).some(
+          ({ record }) => record._tag === 'StateCheckpoint',
+        ),
+      ).toBe(false);
+    }).pipe(Effect.provide(testLogLayer)),
+  );
+
+  it.effect('isolates concurrent ordinary runs', () =>
+    Effect.gen(function* () {
+      const seen = yield* Ref.make<ReadonlyArray<number>>([]);
+      const increment = Tool.make('increment', {
+        description: 'Increment the ephemeral count.',
+        parameters: Schema.Struct({}),
+        success: Schema.Struct({ count: Schema.Number }),
+        failure: AgentState.error,
+        dependencies: AgentState.dependencies(Count),
+      });
+      const agent = Agent.make({
+        name: 'ephemeral-state-test',
+        revision: '1',
+        instructions: 'Use the tool once.',
+        toolkit: Toolkit.make(increment),
+        state: Count,
+      }).withHandlers({
+        increment: () =>
+          Effect.gen(function* () {
+            const state = yield* Count;
+            const value = yield* state.update(({ count }) => ({
+              count: count + 1,
+            }));
+            yield* Ref.update(seen, (values) => [...values, value.count]);
+            return value;
+          }),
+      });
+      const ordinaryModel = Layer.effect(
+        LanguageModel.LanguageModel,
+        Effect.gen(function* () {
+          const calls = yield* Ref.make(0);
+          return yield* LanguageModel.make({
+            generateText: () => Effect.succeed([finish]),
+            streamText: () =>
+              Stream.unwrap(
+                Effect.map(
+                  Ref.getAndUpdate(calls, (n) => n + 1),
+                  (call) =>
+                    call < 2
+                      ? Stream.fromIterable<Response.StreamPartEncoded>([
+                          {
+                            type: 'tool-call',
+                            id: `increment-${call}`,
+                            name: 'increment',
+                            params: {},
+                          },
+                          { ...finish, reason: 'tool-calls' },
+                        ])
+                      : Stream.fromIterable<Response.StreamPartEncoded>([
+                          { type: 'text-start', id: `text-${call}` },
+                          {
+                            type: 'text-delta',
+                            id: `text-${call}`,
+                            delta: 'ok',
+                          },
+                          { type: 'text-end', id: `text-${call}` },
+                          finish,
+                        ]),
+                ),
+              ),
+          });
+        }),
+      );
+
+      yield* Effect.all([agent.run('left'), agent.run('right')], {
+        concurrency: 'unbounded',
+      }).pipe(Effect.provide(ordinaryModel));
+      expect([...(yield* Ref.get(seen))].sort()).toEqual([1, 1]);
+    }).pipe(Effect.orDie),
   );
 
   it.effect(
@@ -199,6 +420,7 @@ describe('recorded agent state', () => {
         revision: '1',
         instructions: 'Set the requested count.',
         toolkit: Toolkit.make(setCount),
+        state: Count,
       }).withHandlers({
         set_count: ({ count }) =>
           Effect.gen(function* () {
@@ -207,7 +429,6 @@ describe('recorded agent state', () => {
             return yield* state.get;
           }),
       });
-      const layer = AgentState.layerRecorded(Count);
       const setCountModel = Layer.effect(
         LanguageModel.LanguageModel,
         Effect.gen(function* () {
@@ -274,34 +495,25 @@ describe('recorded agent state', () => {
           count: 2,
         });
       }).pipe(
-        Effect.provide(layer),
         Effect.provide(setCountModel),
-        Effect.provide(LogStoreMemory.layer),
+        Effect.provide(testLogLayer),
         Effect.orDie,
       );
     },
   );
 
-  it.effect(
-    'serializes concurrent first access through the recorded layer',
-    () =>
-      Effect.gen(function* () {
-        const session = yield* open();
-        const program = Effect.gen(function* () {
-          const state = yield* Count;
-          yield* Effect.all(
-            Array.from({ length: 20 }, () =>
-              state.update(({ count }) => ({ count: count + 1 })),
-            ),
-            { concurrency: 'unbounded' },
-          );
-          expect(yield* state.get).toEqual({ count: 20 });
-        }).pipe(
-          Effect.provideService(Session, session),
-          Effect.provide(AgentState.layerRecorded(Count)),
-        );
-        yield* program;
-      }).pipe(Effect.provide(LogStoreMemory.layer)),
+  it.effect('serializes concurrent first access for a recorded handle', () =>
+    Effect.gen(function* () {
+      const session = yield* open();
+      const state = yield* AgentState.open(Count, session);
+      yield* Effect.all(
+        Array.from({ length: 20 }, () =>
+          state.update(({ count }) => ({ count: count + 1 })),
+        ),
+        { concurrency: 'unbounded' },
+      );
+      expect(yield* state.get).toEqual({ count: 20 });
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('restores immediate checkpoints after reopening', () =>
@@ -319,7 +531,7 @@ describe('recorded agent state', () => {
         version: '1',
         value: { count: 3 },
       });
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('serializes concurrent updates', () =>
@@ -333,7 +545,7 @@ describe('recorded agent state', () => {
         { concurrency: 'unbounded' },
       );
       expect(yield* state.get).toEqual({ count: 20 });
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('restores a pre-compaction checkpoint after an orphaned run', () =>
@@ -367,7 +579,7 @@ describe('recorded agent state', () => {
       expect(yield* (yield* AgentState.open(Count, reopened)).get).toEqual({
         count: 7,
       });
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('snapshots earlier records from the settlement batch', () =>
@@ -410,32 +622,35 @@ describe('recorded agent state', () => {
       expect(yield* (yield* AgentState.open(Count, reopened)).get).toEqual({
         count: 9,
       });
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('serializes checkpoints with concurrent settlement snapshots', () =>
     Effect.gen(function* () {
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
-      const delayed = Layer.effect(
-        LogStore.Service,
-        Effect.gen(function* () {
-          const store = yield* LogStore.Service;
-          return {
-            ...store,
-            append: (input: LogStore.AppendInput) =>
-              input.records.some(
-                ({ record }) => record._tag === 'StateCheckpoint',
-              )
-                ? Effect.gen(function* () {
-                    yield* Deferred.succeed(entered, undefined);
-                    yield* Deferred.await(release);
-                    return yield* store.append(input);
-                  })
-                : store.append(input),
-          } satisfies LogStore.Interface;
-        }),
-      ).pipe(Layer.provide(LogStoreMemory.layer));
+      const delayed = Layer.mergeAll(
+        Layer.effect(
+          LogStore.Service,
+          Effect.gen(function* () {
+            const store = yield* LogStore.Service;
+            return {
+              ...store,
+              append: (input: LogStore.AppendInput) =>
+                input.records.some(
+                  ({ record }) => record._tag === 'StateCheckpoint',
+                )
+                  ? Effect.gen(function* () {
+                      yield* Deferred.succeed(entered, undefined);
+                      yield* Deferred.await(release);
+                      return yield* store.append(input);
+                    })
+                  : store.append(input),
+            } satisfies LogStore.Interface;
+          }),
+        ).pipe(Layer.provide(testLogLayer)),
+        NodeServices.layer,
+      );
 
       yield* Effect.gen(function* () {
         const session = yield* open();
@@ -490,13 +705,58 @@ describe('recorded agent state', () => {
       if (result._tag === 'Failure') {
         const error = Exit.findErrorOption(result);
         expect(Option.getOrThrow(error)).toMatchObject({
-          reason: 'incompatible',
+          _tag: 'StateCompatibilityError',
           stateId: 'other',
           persistedId: 'count',
         });
       }
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
+
+  it.effect('preserves state error identity at the agent boundary', () => {
+    const Other = AgentState.make({
+      id: 'other-agent-state',
+      version: '7',
+      schema: Schema.Struct({ count: Schema.Number }),
+      initial: { count: 0 },
+    });
+    const agent = Agent.make({
+      name: compatibility.agent,
+      revision: compatibility.revision,
+      instructions: 'do nothing',
+      toolkit: Toolkit.empty,
+      state: Other,
+    });
+
+    return Effect.gen(function* () {
+      const session = yield* open();
+      yield* (yield* AgentState.open(Count, session)).set({ count: 1 });
+
+      const result = yield* Effect.exit(
+        Conversation.make(agent, conversation)
+          .run('hello')
+          .pipe(Effect.provide(model)),
+      );
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(Option.getOrThrow(Exit.findErrorOption(result))).toMatchObject({
+          _tag: 'AiError',
+          reason: {
+            _tag: 'InvalidRequestError',
+            metadata: {
+              vesper: {
+                tag: 'StateCompatibilityError',
+                stateId: Other.id,
+                persistedId: Count.id,
+                stateVersion: Other.version,
+                persistedVersion: Count.version,
+              },
+            },
+          },
+        });
+      }
+    }).pipe(Effect.provide(testLogLayer));
+  });
 
   it.effect('reports mutation encoding failures without defects', () => {
     const Invalid = AgentState.make({
@@ -517,14 +777,14 @@ describe('recorded agent state', () => {
         expect(Option.isSome(error)).toBe(true);
         if (Option.isSome(error)) {
           expect(error.value).toMatchObject({
-            reason: 'not-json-safe',
+            _tag: 'StateJsonError',
             message: 'State checkpoint is not JSON-safe',
             stateId: 'invalid',
             stateVersion: '1',
           });
         }
       }
-    }).pipe(Effect.provide(LogStoreMemory.layer));
+    }).pipe(Effect.provide(testLogLayer));
   });
 
   it.effect('branches and forks from the selected state checkpoint', () =>
@@ -566,7 +826,7 @@ describe('recorded agent state', () => {
         count: 1,
       });
       expect(afterOne).not.toBe(LogOffset.START);
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('restores state when branching behind a settled aggregate', () =>
@@ -591,6 +851,6 @@ describe('recorded agent state', () => {
       expect(yield* (yield* AgentState.open(Count, branched)).get).toEqual({
         count: 13,
       });
-    }).pipe(Effect.provide(LogStoreMemory.layer)),
+    }).pipe(Effect.provide(testLogLayer)),
   );
 });

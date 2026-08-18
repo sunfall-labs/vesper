@@ -2,13 +2,19 @@ import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Context, Effect } from 'effect';
+import { Cause, Context, Effect, Exit, Layer, Option } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentHistory } from '../src/history.js';
 import { AgentLog } from '../src/log.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
+
+const testLogLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
 
 const filePrompt = (data: string | Uint8Array | URL): Prompt.RawInput => [
   {
@@ -60,7 +66,7 @@ const persist = (input: Prompt.RawInput) =>
     const started = (yield* session.recorded)[0]!.record;
     if (started._tag !== 'RunStarted') throw new Error('missing RunStarted');
     return started.prompt;
-  }).pipe(Effect.provide(LogStoreMemory.layer));
+  }).pipe(Effect.provide(testLogLayer));
 
 describe('prompt transport', () => {
   it.effect('persists and rebuilds Uint8Array file data', () =>
@@ -147,7 +153,7 @@ describe('prompt transport', () => {
           if (started._tag !== 'RunStarted')
             throw new Error('missing RunStarted');
           return started.prompt;
-        }).pipe(Effect.provide(LogStoreMemory.layer));
+        }).pipe(Effect.provide(testLogLayer));
 
         expect(seen).toBe(bytes);
         expect(fileData(persisted)).toMatchObject({ encoding: 'base64' });
@@ -177,6 +183,67 @@ describe('prompt transport', () => {
       'Malformed Vesper prompt file-data envelope',
     );
   });
+
+  it.effect.each([
+    [
+      'transport envelope',
+      [
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'file',
+              mediaType: 'application/octet-stream',
+              data: {
+                _tag: '@sunfall/vesper-agent/PromptFileData',
+                version: 2,
+                encoding: 'base64',
+                value: 'AQID',
+              },
+            },
+          ],
+        },
+      ],
+    ],
+    [
+      'message shape',
+      [{ role: 'user', content: [{ type: 'not-a-prompt-part' }] }],
+    ],
+  ] as const)(
+    'reports a malformed %s as a typed open failure',
+    ([kind, prompt]) =>
+      Effect.gen(function* () {
+        const conversationId = LogVocabulary.ConversationId.make(
+          `typed-${kind.replaceAll(' ', '-')}-error`,
+        );
+        const compatibility = {
+          agent: 'test',
+          revision: LogVocabulary.AgentRevision.make('1'),
+        };
+        const session = yield* AgentLog.open(conversationId, { compatibility });
+        yield* session.append([
+          {
+            _tag: 'RunStarted',
+            agent: 'test',
+            formatVersion: 1,
+            agentRevision: LogVocabulary.AgentRevision.make('1'),
+            prompt,
+          },
+        ]);
+
+        const result = yield* Effect.exit(
+          AgentLog.open(conversationId, { compatibility }),
+        );
+        expect(Exit.isFailure(result)).toBe(true);
+        if (Exit.isFailure(result)) {
+          const error = Cause.findErrorOption(result.cause);
+          expect(Option.isSome(error)).toBe(true);
+          if (Option.isSome(error)) {
+            expect(error.value._tag).toBe('CompatibilityError');
+          }
+        }
+      }).pipe(Effect.provide(testLogLayer)),
+  );
 
   it('continues to rebuild legacy unwrapped prompts', () => {
     const legacy = Prompt.make('legacy prompt').content;

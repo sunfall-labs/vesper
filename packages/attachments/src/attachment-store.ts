@@ -28,12 +28,11 @@ import { AttachmentRef } from './ref.js';
  * somewhere else. An integrity failure is a statement about this store, and
  * retrying it against the same backend is pointless.
  */
-export class AttachmentNotFound extends Schema.TaggedError<AttachmentNotFound>()(
+export class AttachmentNotFound extends Schema.TaggedError<AttachmentNotFound>(
   '@sunfall/vesper-attachments/AttachmentNotFound',
-  {
-    ref: AttachmentRef.Ref,
-  },
-) {}
+)('AttachmentNotFound', {
+  ref: AttachmentRef.Ref,
+}) {}
 
 /**
  * The stored bytes are not the bytes the reference addresses.
@@ -47,14 +46,13 @@ export class AttachmentNotFound extends Schema.TaggedError<AttachmentNotFound>()
  * different digest is bit rot or a key collision, while a different length is
  * a truncated or partial read and is the one worth retrying at a lower layer.
  */
-export class AttachmentIntegrityError extends Schema.TaggedError<AttachmentIntegrityError>()(
+export class AttachmentIntegrityError extends Schema.TaggedError<AttachmentIntegrityError>(
   '@sunfall/vesper-attachments/AttachmentIntegrityError',
-  {
-    ref: AttachmentRef.Ref,
-    actualDigest: AttachmentRef.Digest,
-    actualByteLength: Schema.Number,
-  },
-) {}
+)('AttachmentIntegrityError', {
+  ref: AttachmentRef.Ref,
+  actualDigest: AttachmentRef.Digest,
+  actualByteLength: Schema.Natural,
+}) {}
 
 /**
  * The backend itself failed.
@@ -64,13 +62,12 @@ export class AttachmentIntegrityError extends Schema.TaggedError<AttachmentInteg
  * after callers exist is a breaking change for every one of them; declaring it
  * now costs a `_tag` nobody matches yet.
  */
-export class AttachmentStoreError extends Schema.TaggedError<AttachmentStoreError>()(
+export class AttachmentStoreError extends Schema.TaggedError<AttachmentStoreError>(
   '@sunfall/vesper-attachments/AttachmentStoreError',
-  {
-    operation: Schema.Literals(['put', 'get', 'has']),
-    cause: Schema.Defect(),
-  },
-) {}
+)('AttachmentStoreError', {
+  operation: Schema.Literals(['put', 'get', 'has']),
+  cause: Schema.Defect(),
+}) {}
 
 /** Everything `get` can fail with. */
 export type GetError =
@@ -130,18 +127,19 @@ export class Service extends Context.Service<Service, Interface>()(
  * so it reads as a checkpoint in a pipeline rather than as an assertion whose
  * result can be ignored.
  */
-export const verified = Effect.fn('AiAttachments.AttachmentStore.verified')(
-  function* (ref: AttachmentRef.Ref, bytes: Uint8Array) {
-    const actualDigest = yield* AttachmentRef.digestOf(bytes);
-    if (actualDigest !== ref.digest || bytes.byteLength !== ref.byteLength) {
-      return yield* new AttachmentIntegrityError({
-        ref,
-        actualDigest,
-        actualByteLength: bytes.byteLength,
-      });
-    }
-    return bytes;
-  },
-);
+export const verified = Effect.fnUntraced(function* (
+  ref: AttachmentRef.Ref,
+  bytes: Uint8Array,
+) {
+  const actualDigest = yield* AttachmentRef.digestOf(bytes);
+  if (actualDigest !== ref.digest || bytes.byteLength !== ref.byteLength) {
+    return yield* new AttachmentIntegrityError({
+      ref,
+      actualDigest,
+      actualByteLength: bytes.byteLength,
+    });
+  }
+  return bytes;
+});
 
 export * as AttachmentStore from './attachment-store.js';
