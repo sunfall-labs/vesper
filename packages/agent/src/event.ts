@@ -100,7 +100,7 @@ export const Lifecycle = Schema.TaggedUnion({
   Compacted: {
     /** The turn that overflowed and is about to be retried. */
     step: Schema.Natural,
-    /** The model's summary, unframed. `Compaction.summaryMessage` frames it. */
+    /** The model's summary, stored without presentation framing. */
     summary: Schema.String,
     /**
      * Messages replaced, and messages kept verbatim after the summary.
@@ -164,63 +164,6 @@ export type ObservedEvent<Tools extends Record<string, Tool.Any>> =
       readonly part: StreamPart<Tools>;
       readonly encodedPart: Response.StreamPartEncoded;
     };
-
-export const turnStarted = (step: number): Lifecycle =>
-  Lifecycle.cases.TurnStarted.make({ step });
-
-export const turnFinished = (step: number, usage: Stop.Usage): Lifecycle =>
-  Lifecycle.cases.TurnFinished.make({ step, usage });
-
-export const completed = (
-  text: string,
-  steps: number,
-  usage: Stop.Usage,
-  outcome: 'success' | 'cancelled',
-): Lifecycle => Lifecycle.cases.Completed.make({ outcome, text, steps, usage });
-
-export const signalled = (
-  step: number,
-  signal: {
-    readonly kind: 'steer' | 'cancel';
-    readonly text: string;
-    readonly source: string;
-    readonly at: string;
-  },
-): Lifecycle => Lifecycle.cases.Signalled.make({ step, ...signal });
-
-export const signalRejected = (
-  step: number,
-  signal: {
-    readonly kind: 'steer' | 'cancel';
-    readonly text: string;
-    readonly source: string;
-    readonly at: string;
-  },
-  exhaustion: {
-    readonly limit: 'signal_bytes' | 'signals_per_boundary' | 'steered_bytes';
-    readonly used: number;
-    readonly maximum: number;
-  },
-): Lifecycle =>
-  Lifecycle.cases.SignalRejected.make({
-    step,
-    ...signal,
-    reason: exhaustion.limit,
-    used: exhaustion.used,
-    maximum: exhaustion.maximum,
-  });
-
-export const signalBacklog = (step: number, maximum: number): Lifecycle =>
-  Lifecycle.cases.SignalBacklog.make({ step, maximum });
-
-export const compacted = (
-  step: number,
-  summarized: {
-    readonly summary: string;
-    readonly summarizedMessages: number;
-    readonly keptMessages: number;
-  },
-): Lifecycle => Lifecycle.cases.Compacted.make({ step, ...summarized });
 
 export const isPart = <Tools extends Record<string, Tool.Any>>(
   event: Event<Tools>,

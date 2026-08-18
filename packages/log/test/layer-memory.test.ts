@@ -3,6 +3,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Option, Stream } from 'effect';
 
 import { LogStoreMemory } from '../src/layer-memory.js';
+import { build } from '../src/internal/memory-store.js';
 import { LogStore } from '../src/log-store.js';
 import { LogVocabulary } from '../src/vocabulary.js';
 import { logStoreContract } from './log-store-contract.js';
@@ -17,9 +18,7 @@ const memoryLayer = LogStoreMemory.layer.pipe(
 logStoreContract('memory', {
   layer: memoryLayer,
   layerWithFailingChanges: (path) =>
-    LogStoreMemory.layerFailingChanges(path).pipe(
-      Layer.provide(NodeServices.layer),
-    ),
+    build(path).pipe(Layer.provide(NodeServices.layer)),
 });
 
 describe('LogStore memory linearizability', () => {

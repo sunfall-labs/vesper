@@ -3,6 +3,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 
 import { AttachmentStore } from '../src/attachment-store.js';
+import { make } from '../src/internal/memory-store.js';
 import { AttachmentStoreMemory } from '../src/layer-memory.js';
 import {
   attachmentStoreContract,
@@ -13,7 +14,7 @@ import {
 // including the two integrity cases. `Crypto` comes from the Node platform
 // layer; the package itself depends on `effect` alone and leaves the choice of
 // implementation to whoever wires the runtime.
-const memory = AttachmentStoreMemory.make();
+const memory = make();
 
 attachmentStoreContract('memory', {
   layer: memory.layer.pipe(Layer.provide(NodeServices.layer)),

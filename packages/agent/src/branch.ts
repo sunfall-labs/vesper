@@ -41,7 +41,7 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 // | fold                     | where                | scope       | why |
 // | ------------------------ | -------------------- | ----------- | --- |
 // | `messagesFrom`           | `history.ts`         | active path | it is the prompt; the abandoned branch is what the user edited away |
-// | `boundaryFor`            | `history.ts`         | active path | it must resolve against the same messages `messagesFrom` builds, or a compaction points `firstKept` at a record the reader cannot see |
+// | `compactionBoundary`     | `history.ts`         | active path | it must resolve against the same messages `messagesFrom` builds, or a compaction points `firstKept` at a record the reader cannot see |
 // | `rebuild` / `lastCompaction` / `keptFrom` / `fold` | `history.ts` | active path | private to the two above; they receive an already-filtered array and never filter themselves |
 // | `usageFrom`              | `history.ts`         | **full log**| tokens spent on a branch that was abandoned were still spent. Scoping this to the path makes a branched conversation under-report its own cost, and the number never comes back |
 // | `Recovery.fold`          | `recovery.ts`        | active path | crash recovery serves a dead run's tool state back to its successor. If the user branched *away* from the crashed run, those recoveries answer tool calls that are no longer in the prompt — the successor would be handed results or indeterminate calls for questions it never asked |

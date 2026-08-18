@@ -1,15 +1,10 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
-import { Crypto, Effect, Layer, Match, Predicate, Schema } from 'effect';
-import { AiError, McpServer, Tool, Toolkit } from 'effect/unstable/ai';
+import { Crypto, Effect, Layer, Schema } from 'effect';
+import { McpServer, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '@sunfall/vesper-agent/agent';
-import {
-  CompatibilityError,
-  Conversation,
-  DurabilityError,
-  SuspendedConversationError,
-} from '@sunfall/vesper-agent/conversation';
-import { RunPolicy } from '@sunfall/vesper-agent/run-policy';
+import { Conversation } from '@sunfall/vesper-agent/conversation';
+import { classify } from './internal/failure.js';
 
 /** Input accepted by the MCP tool exposed for one agent definition. */
 export const RunInput = Schema.Struct({
@@ -26,6 +21,7 @@ export const FailureClassification = Schema.Literals([
   'run-policy',
   'application',
 ]);
+export type FailureClassification = typeof FailureClassification.Type;
 
 /** A Vesper run failed after the MCP request was accepted. */
 export class RunError extends Schema.TaggedError<RunError>(
@@ -83,125 +79,7 @@ export interface Composition<A extends Agent.Any> {
   >;
 }
 
-const messageOf = (error: unknown): string =>
-  error instanceof Error
-    ? error.message
-    : Predicate.hasProperty(error, 'message') &&
-        typeof error.message === 'string'
-      ? error.message
-      : String(error);
-
-const isDurabilityError = Schema.is(DurabilityError);
-const isLogStoreError = Schema.is(LogStore.LogStoreError);
-const isCompatibilityError = Schema.is(CompatibilityError);
-const isSuspendedConversationError = Schema.is(SuspendedConversationError);
-const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
-
-const applicationCode = (error: unknown): string =>
-  Predicate.hasProperty(error, '_tag') && typeof error._tag === 'string'
-    ? error._tag
-    : 'unknown';
-
-/** Reduce every internal failure to a stable, serialization-safe MCP shape. */
-export const failure = (error: unknown): RunError =>
-  Match.value(error).pipe(
-    Match.when(
-      isDurabilityError,
-      (error) =>
-        new RunError({
-          classification: 'durability',
-          code: `${error.source}.${error.reason}`,
-          message: error.detail,
-          retryable: error.source === 'timeout' || error.reason === 'storage',
-          details: {
-            source: error.source,
-            operation: error.operation,
-            reason: error.reason,
-          },
-        }),
-    ),
-    Match.when(
-      isLogStoreError,
-      (error) =>
-        new RunError({
-          classification: 'durability',
-          code: `log.${error.reason}`,
-          message: error.detail,
-          retryable: error.reason === 'storage',
-          details: {
-            source: 'log',
-            operation: error.operation,
-            reason: error.reason,
-          },
-        }),
-    ),
-    Match.when(
-      isCompatibilityError,
-      (error) =>
-        new RunError({
-          classification: 'compatibility',
-          code: 'conversation.incompatible',
-          message: error.message,
-          retryable: false,
-          details: {
-            expectedAgent: error.expectedAgent,
-            expectedRevision: error.expectedRevision,
-          },
-        }),
-    ),
-    Match.when(
-      isSuspendedConversationError,
-      (error) =>
-        new RunError({
-          classification: 'suspended',
-          code: 'conversation.suspended',
-          message: error.message,
-          retryable: false,
-          details: { wait: error.wait },
-        }),
-    ),
-    Match.when(
-      isRunPolicyExhausted,
-      (error) =>
-        new RunError({
-          classification: 'run-policy',
-          code: `run-policy.${error.limit}`,
-          message: error.message,
-          retryable: false,
-          details: {
-            limit: error.limit,
-            used: String(error.used),
-            maximum: String(error.maximum),
-          },
-        }),
-    ),
-    Match.when(
-      AiError.isAiError,
-      (error) =>
-        new RunError({
-          classification:
-            error.module === 'AgentLog' ? 'durability' : 'provider',
-          code: `ai.${error.reason._tag}`,
-          message: error.message,
-          retryable: error.isRetryable,
-          details: {
-            module: error.module,
-            method: error.method,
-            reason: error.reason._tag,
-          },
-        }),
-    ),
-    Match.orElse(
-      (error) =>
-        new RunError({
-          classification: 'application',
-          code: applicationCode(error),
-          message: messageOf(error),
-          retryable: false,
-          details: {},
-        }),
-    ),
-  );
+const failure = (error: unknown): RunError => new RunError(classify(error));
 
 /** Expose one durable Vesper agent through Effect's native MCP server. */
 export const make = <A extends Agent.Any>(agent: A): Composition<A> => {

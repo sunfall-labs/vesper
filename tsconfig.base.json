@@ -15,7 +15,6 @@
     "types": ["node"],
     "paths": {
       "@sunfall/vesper-agent/agent": ["./packages/agent/src/agent.ts"],
-      "@sunfall/vesper-agent/branch": ["./packages/agent/src/branch.ts"],
       "@sunfall/vesper-agent/context-window": [
         "./packages/agent/src/context-window.ts"
       ],
@@ -36,7 +35,6 @@
       ],
       "@sunfall/vesper-agent/stop": ["./packages/agent/src/stop.ts"],
       "@sunfall/vesper-agent/state": ["./packages/agent/src/state.ts"],
-      "@sunfall/vesper-agent/subagent": ["./packages/agent/src/subagent.ts"],
       "@sunfall/vesper-agent/testing": ["./packages/agent/src/testing.ts"],
       "@sunfall/vesper-agent/skill": ["./packages/agent/src/skill.ts"],
       "@sunfall/vesper-agent/compaction": [
@@ -76,6 +74,9 @@
       ],
       "@sunfall/vesper-attachments/layer-memory": [
         "./packages/attachments/src/layer-memory.ts"
+      ],
+      "@sunfall/vesper-attachments/layer-filesystem": [
+        "./packages/attachments/src/layer-filesystem.ts"
       ],
       "@sunfall/vesper-mcp/agent": ["./packages/mcp/src/agent.ts"]
     }

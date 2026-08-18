@@ -44,3 +44,14 @@ export class CompatibilityError extends Schema.TaggedError<CompatibilityError>(
 export class SuspendedConversationError extends Schema.TaggedError<SuspendedConversationError>(
   '@sunfall/vesper-agent/SuspendedConversationError',
 )('SuspendedConversationError', SuspendedConversationErrorFields) {}
+
+/** A conversation checkpoint could not be made durable. */
+export class DurabilityError extends Schema.TaggedError<DurabilityError>(
+  '@sunfall/vesper-agent/DurabilityError',
+)('DurabilityError', {
+  source: Schema.Literals(['log', 'attachment', 'timeout']),
+  operation: Schema.String,
+  reason: Schema.String,
+  detail: Schema.String,
+  cause: Schema.Defect(),
+}) {}

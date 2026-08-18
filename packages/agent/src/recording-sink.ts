@@ -5,8 +5,9 @@ import { Cause, Effect, Exit, Option, Stream } from 'effect';
 import type { Response, Tool } from 'effect/unstable/ai';
 
 import { AgentEvents } from './event.js';
-import { AgentHistory } from './history.js';
-import type { DurabilityError, Session } from './log.js';
+import { AgentHistory } from './internal/history.js';
+import { DurabilityError } from './conversation-error.js';
+import type { Session } from './log.js';
 import type { Stop } from './stop.js';
 
 // The sink turns the loop's events into durable records while emitting the
@@ -49,6 +50,21 @@ const compaction = (
     yield* session.append(flush(pending));
 
     const recorded = yield* session.recorded;
+    const firstKept = yield* AgentHistory.compactionBoundary(recorded, {
+      summarizedMessages: event.summarizedMessages,
+      keptMessages: event.keptMessages,
+    }).pipe(
+      Effect.mapError(
+        (error) =>
+          new DurabilityError({
+            source: 'log',
+            operation: 'compact',
+            reason: 'history_mismatch',
+            detail: error.message,
+            cause: error,
+          }),
+      ),
+    );
 
     yield* session.append([
       {
@@ -58,7 +74,7 @@ const compaction = (
         agentRevision: session.compatibility.revision,
         step: event.step,
         summary: event.summary,
-        firstKept: AgentHistory.boundaryFor(recorded, event.keptMessages),
+        firstKept,
         summarizedMessages: event.summarizedMessages,
         keptMessages: event.keptMessages,
       },

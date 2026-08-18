@@ -26,6 +26,8 @@ import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
+import { CompactionRuntime } from './internal/compaction.js';
+import { AgentEventRuntime } from './internal/event.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import {
   hasProtocol,
@@ -1016,14 +1018,14 @@ export const make = <
       lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
       input: Prompt.RawInput,
     ): Effect.Effect<
-      Compaction.Summarized | undefined,
+      CompactionRuntime.Summarized | undefined,
       RunFailure,
       LanguageModel.LanguageModel
     > =>
       Effect.gen(function* () {
         if (compaction?.contextWindow === undefined) return undefined;
 
-        const over = yield* Compaction.shouldCompact(
+        const over = yield* CompactionRuntime.shouldCompact(
           Prompt.concat(yield* Ref.get(chat.history), Prompt.make(input)),
           compaction.contextWindow,
           compaction,
@@ -1042,29 +1044,32 @@ export const make = <
       chat: Chat.Service,
       policy: Compaction.Policy,
     ): Effect.Effect<
-      Compaction.Summarized | undefined,
+      CompactionRuntime.Summarized | undefined,
       RunFailure,
       LanguageModel.LanguageModel
     > =>
       Effect.gen(function* () {
         if (runtime === undefined) {
           yield* Observability.modelCall;
-          return yield* Compaction.compact(chat, policy);
+          return yield* CompactionRuntime.compact(chat, policy);
         }
         yield* runtime.modelCall;
         yield* Observability.modelCall;
         const remaining = yield* runtime.remainingMillis;
-        return yield* Effect.timeoutOrElse(Compaction.compact(chat, policy), {
-          duration: remaining,
-          orElse: () =>
-            Effect.fail(
-              RunPolicyRuntime.error({
-                limit: 'deadline',
-                used: runPolicy.wallClockMillis,
-                maximum: runPolicy.wallClockMillis,
-              }),
-            ),
-        });
+        return yield* Effect.timeoutOrElse(
+          CompactionRuntime.compact(chat, policy),
+          {
+            duration: remaining,
+            orElse: () =>
+              Effect.fail(
+                RunPolicyRuntime.error({
+                  limit: 'deadline',
+                  used: runPolicy.wallClockMillis,
+                  maximum: runPolicy.wallClockMillis,
+                }),
+              ),
+          },
+        );
       });
 
     const turn = (
@@ -1214,7 +1219,7 @@ export const make = <
                           );
                           return Stream.concat(
                             Stream.make(
-                              AgentEvents.compacted(step, summarized),
+                              AgentEventRuntime.compacted(step, summarized),
                             ),
                             retried,
                           );
@@ -1238,7 +1243,7 @@ export const make = <
                 );
                 if (Exit.isFailure(accounted)) {
                   return Stream.concat(
-                    Stream.make(AgentEvents.turnFinished(step, totals)),
+                    Stream.make(AgentEventRuntime.turnFinished(step, totals)),
                     Stream.failCause(accounted.cause),
                   );
                 }
@@ -1301,8 +1306,8 @@ export const make = <
                   decisions
                     .map((decision) =>
                       decision.accepted
-                        ? AgentEvents.signalled(step, decision.signal)
-                        : AgentEvents.signalRejected(
+                        ? AgentEventRuntime.signalled(step, decision.signal)
+                        : AgentEventRuntime.signalRejected(
                             step,
                             decision.signal,
                             decision.exhaustion,
@@ -1311,7 +1316,7 @@ export const make = <
                     .concat(
                       drained.backlog
                         ? [
-                            AgentEvents.signalBacklog(
+                            AgentEventRuntime.signalBacklog(
                               step,
                               runtime?.limits.maxSignalsPerBoundary ??
                                 runPolicy.maxSignalsPerBoundary,
@@ -1320,7 +1325,7 @@ export const make = <
                         : [],
                     ),
                 ),
-                Stream.make(AgentEvents.turnFinished(step, totals)),
+                Stream.make(AgentEventRuntime.turnFinished(step, totals)),
               );
 
               const wanted = yield* stopWhen({
@@ -1343,7 +1348,7 @@ export const make = <
                 ? Stream.concat(
                     announced,
                     Stream.make(
-                      AgentEvents.completed(
+                      AgentEventRuntime.completed(
                         seen.text,
                         completedSteps,
                         totals,
@@ -1413,10 +1418,10 @@ export const make = <
 
           const opened =
             ahead === undefined
-              ? Stream.make(AgentEvents.turnStarted(step))
+              ? Stream.make(AgentEventRuntime.turnStarted(step))
               : Stream.make(
-                  AgentEvents.turnStarted(step),
-                  AgentEvents.compacted(step, ahead),
+                  AgentEventRuntime.turnStarted(step),
+                  AgentEventRuntime.compacted(step, ahead),
                 );
 
           return opened.pipe(
@@ -1481,8 +1486,8 @@ export const make = <
               decisions
                 .map((decision) =>
                   decision.accepted
-                    ? AgentEvents.signalled(0, decision.signal)
-                    : AgentEvents.signalRejected(
+                    ? AgentEventRuntime.signalled(0, decision.signal)
+                    : AgentEventRuntime.signalRejected(
                         0,
                         decision.signal,
                         decision.exhaustion,
@@ -1491,7 +1496,7 @@ export const make = <
                 .concat(
                   drained.backlog
                     ? [
-                        AgentEvents.signalBacklog(
+                        AgentEventRuntime.signalBacklog(
                           0,
                           runtime.limits.maxSignalsPerBoundary,
                         ),
@@ -1505,7 +1510,7 @@ export const make = <
               return Stream.concat(
                 announced,
                 Stream.make(
-                  AgentEvents.completed(
+                  AgentEventRuntime.completed(
                     '',
                     0,
                     wiring.initialUsage ?? { input: 0, output: 0 },
@@ -1611,8 +1616,8 @@ export const make = <
                       Stream.fromIterable(
                         afterDecisions.map((decision) =>
                           decision.accepted
-                            ? AgentEvents.signalled(0, decision.signal)
-                            : AgentEvents.signalRejected(
+                            ? AgentEventRuntime.signalled(0, decision.signal)
+                            : AgentEventRuntime.signalRejected(
                                 0,
                                 decision.signal,
                                 decision.exhaustion,
@@ -1620,7 +1625,7 @@ export const make = <
                         ),
                       ),
                       Stream.make(
-                        AgentEvents.completed(
+                        AgentEventRuntime.completed(
                           '',
                           0,
                           wiring.initialUsage ?? { input: 0, output: 0 },
@@ -2093,7 +2098,7 @@ const fromParts = <
         return AgentLog.record(session, entry.streamIn(chat, input)).pipe(
           Stream.map((event) =>
             event._tag === 'Completed'
-              ? AgentEvents.completed(
+              ? AgentEventRuntime.completed(
                   event.text,
                   event.steps,
                   {

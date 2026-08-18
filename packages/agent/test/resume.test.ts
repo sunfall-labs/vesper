@@ -20,6 +20,7 @@ import { Conversation } from '../src/conversation.js';
 import { ContextWindow } from '../src/context-window.js';
 import { AgentEvents } from '../src/event.js';
 import { AgentHistory } from '../src/history.js';
+import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
 import * as AgentLog from '../src/log.js';
 
 const testLogLayer = Layer.mergeAll(
@@ -705,7 +706,7 @@ describe('rebuilding a prompt from records', () => {
   });
 
   it('sums usage across runs rather than reporting the last one', () => {
-    const usage = AgentHistory.usageFrom(
+    const usage = AgentHistoryRuntime.usageFrom(
       envelopes([
         {
           _tag: 'RunStarted',
@@ -744,7 +745,7 @@ describe('rebuilding a prompt from records', () => {
   });
 
   it('restores only the latest turn own usage from cumulative records', () => {
-    const usage = AgentHistory.latestTurnUsageFrom(
+    const usage = AgentHistoryRuntime.latestTurnUsageFrom(
       envelopes([
         {
           _tag: 'RunStarted',

@@ -8,6 +8,7 @@ import {
 } from 'effect/unstable/ai';
 
 import { Compaction } from '../src/compaction.js';
+import { ContextWindow } from '../src/context-window.js';
 
 // Fakes shared by the two compaction test files.
 //
@@ -120,7 +121,7 @@ export const fakeProvider = (options: ProviderOptions = {}) => {
 
               if (
                 options.limit !== undefined &&
-                Compaction.estimateTokens(opts.prompt) > options.limit
+                ContextWindow.estimateTokens(opts.prompt) > options.limit
               ) {
                 return Stream.fail(overflow);
               }

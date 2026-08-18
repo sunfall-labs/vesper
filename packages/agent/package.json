@@ -34,10 +34,6 @@
       "types": "./dist/agent.d.ts",
       "default": "./dist/agent.js"
     },
-    "./branch": {
-      "types": "./dist/branch.d.ts",
-      "default": "./dist/branch.js"
-    },
     "./context-window": {
       "types": "./dist/context-window.d.ts",
       "default": "./dist/context-window.js"
@@ -77,10 +73,6 @@
     "./state": {
       "types": "./dist/state.d.ts",
       "default": "./dist/state.js"
-    },
-    "./subagent": {
-      "types": "./dist/subagent.d.ts",
-      "default": "./dist/subagent.js"
     },
     "./testing": {
       "types": "./dist/testing.d.ts",

@@ -134,9 +134,7 @@ describe('prompt transport', () => {
       Effect.provide(
         Layer.merge(
           testLogLayer,
-          AttachmentStoreMemory.make().layer.pipe(
-            Layer.provide(NodeServices.layer),
-          ),
+          AttachmentStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
         ),
       ),
     ),

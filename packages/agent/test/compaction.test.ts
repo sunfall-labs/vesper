@@ -16,16 +16,15 @@ import {
   overflow,
   turnOf,
 } from './compaction-fixtures.js';
+import { defaultSystem, isContextOverflow } from '../src/compaction.js';
+import { ContextWindow } from '../src/context-window.js';
 import {
   compact,
-  defaultSystem,
   estimateTokens,
-  isContextOverflow,
   shouldCompact,
   summaryMessage,
   withCompaction,
-} from '../src/compaction.js';
-import { ContextWindow } from '../src/context-window.js';
+} from '../src/internal/compaction.js';
 
 // When compaction fires, and what one compaction does.
 //
@@ -767,7 +766,7 @@ describe('the loop’s reactive compaction', () => {
 // The proactive trigger: compaction that fires from an estimate, before the
 // provider has refused anything.
 //
-// This is the path that had no wiring at all. `Compaction.shouldCompact`
+// This is the path that had no wiring at all. The proactive compaction check
 // existed, was exported, was tested — and nothing in the loop called it, so
 // every compaction this family had ever performed was reactive: a request
 // rejected, a summary written, the turn re-run. That is one wasted round trip

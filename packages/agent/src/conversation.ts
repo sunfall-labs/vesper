@@ -237,6 +237,6 @@ export function make<A extends ConcreteAgent, const P extends object>(
 }
 
 export { CompatibilityError, SuspendedConversationError };
-export { DurabilityError } from './log.js';
+export { DurabilityError } from './conversation-error.js';
 
 export * as Conversation from './conversation.js';

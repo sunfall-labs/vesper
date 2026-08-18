@@ -21,9 +21,11 @@ import { Prompt } from 'effect/unstable/ai';
 import { AgentBranch } from './branch.js';
 import {
   CompatibilityError,
+  DurabilityError,
   SuspendedConversationError,
 } from './conversation-error.js';
 import { AgentHistory } from './history.js';
+import { AgentHistory as AgentHistoryRuntime } from './internal/history.js';
 import * as AgentIds from './internal/ids.js';
 import * as Observability from './internal/observability.js';
 import { PromptTransport } from './prompt-transport.js';
@@ -32,6 +34,7 @@ import { ResumeProjection } from './resume-projection.js';
 
 export {
   CompatibilityError,
+  DurabilityError,
   SuspendedConversationError,
 } from './conversation-error.js';
 import * as AgentSignals from './internal/signal-store.js';
@@ -135,17 +138,6 @@ export interface SignalDrain {
   /** More signals remain after this bounded page. */
   readonly backlog: boolean;
 }
-
-/** A conversation checkpoint could not be made durable. */
-export class DurabilityError extends Schema.TaggedError<DurabilityError>(
-  '@sunfall/vesper-agent/DurabilityError',
-)('DurabilityError', {
-  source: Schema.Literals(['log', 'attachment', 'timeout']),
-  operation: Schema.String,
-  reason: Schema.String,
-  detail: Schema.String,
-  cause: Schema.Defect(),
-}) {}
 
 /** Where a run picks a conversation up, when not at its end. */
 export interface OpenOptions {
@@ -260,7 +252,7 @@ export interface Session {
   readonly latestTurnUsage: Stop.Usage | undefined;
 
   /** Latest completed result on the active path, including anchored history. */
-  readonly completed: ReturnType<typeof AgentHistory.completedFrom>;
+  readonly completed: ReturnType<typeof AgentHistoryRuntime.completedFrom>;
 
   /** How long teardown waits for this session's settlement append. */
   readonly settlementTimeoutMillis: number;
@@ -471,7 +463,7 @@ const ACQUIRE_ATTEMPTS = 4;
  * cheaper and needs no pointer rewriting at all. It is rejected because of
  * what it does to the fork's *later* life, not to its first turn. `fold`
  * attributes every message from a `RunStarted` to that one record's offset,
- * so a seeded prefix collapses to a single position; `boundaryFor` would then
+ * so a seeded prefix collapses to a single position; `compactionBoundary` would then
  * resolve any compaction boundary that fell inside it back to that one offset
  * and `keptFrom` would keep the entire ancestor history verbatim beside the
  * summary. The fork would be unable to compact its own inheritance, and would
@@ -546,7 +538,7 @@ export const fork: (
       sourceConversationId: conversationId,
       at,
       records: prefix.length,
-      inheritedUsage: AgentHistory.usageFrom(prefix),
+      inheritedUsage: AgentHistoryRuntime.usageFrom(prefix),
     });
 
     return yield* openWith(store, forkConversationId, {
@@ -1151,7 +1143,7 @@ const loadOpenState = (
     return {
       history: yield* readResumeHistory(store, path),
       aggregateSuffix,
-      usage: AgentHistory.usageFrom(aggregateSuffix),
+      usage: AgentHistoryRuntime.usageFrom(aggregateSuffix),
       signalCursor: deliveredThrough(aggregateSuffix),
     };
   });
@@ -1443,7 +1435,7 @@ const resumeState = (
   compatibility: Compatibility,
   usage: Stop.Usage,
   signalCursor: LogOffset.Offset,
-  completed: ReturnType<typeof AgentHistory.completedFrom>,
+  completed: ReturnType<typeof AgentHistoryRuntime.completedFrom>,
   latestTurnUsage: Stop.Usage | undefined,
   state: ConversationRecord.RecordOf<'StateCheckpoint'> | undefined,
 ) => ({
