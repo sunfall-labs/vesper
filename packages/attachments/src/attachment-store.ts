@@ -15,8 +15,8 @@ import { AttachmentRef } from './ref.js';
 // will ever notice. Verification is not a debug aid; it is the reason this
 // interface is not a `Map`.
 //
-// The contract suite in `./attachment-store-contract.ts` holds every backend
-// to that. Per `docs/contributing.md` it lives here, in the package that owns
+// The contract suite in `../test/attachment-store-contract.ts` holds every
+// backend to that. Per `docs/contributing.md` it lives in the package that owns
 // the interface, rather than in a testkit package that would cycle.
 
 /**
@@ -57,10 +57,9 @@ export class AttachmentIntegrityError extends Schema.TaggedError<AttachmentInteg
 /**
  * The backend itself failed.
  *
- * Not producible by the in-memory backend, and declared anyway. A filesystem
- * or object-store backend cannot avoid it, and widening `get`'s error channel
- * after callers exist is a breaking change for every one of them; declaring it
- * now costs a `_tag` nobody matches yet.
+ * Not producible by the in-memory backend. The filesystem adapter maps
+ * Effect's normalized platform failures here, preserving one storage failure
+ * channel for callers and future remote adapters.
  */
 export class AttachmentStoreError extends Schema.TaggedError<AttachmentStoreError>(
   '@sunfall/vesper-attachments/AttachmentStoreError',

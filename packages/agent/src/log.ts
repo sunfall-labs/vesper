@@ -21,6 +21,7 @@ import { Prompt } from 'effect/unstable/ai';
 import { AgentBranch } from './branch.js';
 import {
   CompatibilityError,
+  DurabilityError,
   SuspendedConversationError,
 } from './conversation-error.js';
 import { AgentHistory } from './history.js';
@@ -32,6 +33,7 @@ import { ResumeProjection } from './resume-projection.js';
 
 export {
   CompatibilityError,
+  DurabilityError,
   SuspendedConversationError,
 } from './conversation-error.js';
 import * as AgentSignals from './internal/signal-store.js';
@@ -135,17 +137,6 @@ export interface SignalDrain {
   /** More signals remain after this bounded page. */
   readonly backlog: boolean;
 }
-
-/** A conversation checkpoint could not be made durable. */
-export class DurabilityError extends Schema.TaggedError<DurabilityError>(
-  '@sunfall/vesper-agent/DurabilityError',
-)('DurabilityError', {
-  source: Schema.Literals(['log', 'attachment', 'timeout']),
-  operation: Schema.String,
-  reason: Schema.String,
-  detail: Schema.String,
-  cause: Schema.Defect(),
-}) {}
 
 /** Where a run picks a conversation up, when not at its end. */
 export interface OpenOptions {
@@ -471,7 +462,7 @@ const ACQUIRE_ATTEMPTS = 4;
  * cheaper and needs no pointer rewriting at all. It is rejected because of
  * what it does to the fork's *later* life, not to its first turn. `fold`
  * attributes every message from a `RunStarted` to that one record's offset,
- * so a seeded prefix collapses to a single position; `boundaryFor` would then
+ * so a seeded prefix collapses to a single position; `compactionBoundary` would then
  * resolve any compaction boundary that fell inside it back to that one offset
  * and `keptFrom` would keep the entire ancestor history verbatim beside the
  * summary. The fork would be unable to compact its own inheritance, and would

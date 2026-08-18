@@ -41,6 +41,10 @@
     "./layer-memory": {
       "types": "./dist/layer-memory.d.ts",
       "default": "./dist/layer-memory.js"
+    },
+    "./layer-filesystem": {
+      "types": "./dist/layer-filesystem.d.ts",
+      "default": "./dist/layer-filesystem.js"
     }
   },
   "publishConfig": {
@@ -53,6 +57,8 @@
     "effect": "4.0.0-rc.109"
   },
   "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
     "effect": "catalog:",
     "vitest": "^4.1.9"
   }

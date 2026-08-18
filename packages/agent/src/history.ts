@@ -1,6 +1,6 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Schema } from 'effect';
+import { Effect, Schema } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
@@ -77,7 +77,7 @@ import type { Stop } from './stop.js';
 // functions here are the reason it exists: what a model is shown is the path,
 // never the log. It is applied *inside* each of them rather than by their
 // callers, so that no caller can be handed a `Session.history` and forget —
-// and so that {@link boundaryFor} and {@link messagesFrom} cannot be given
+// and so that {@link compactionBoundary} and {@link messagesFrom} cannot be given
 // different views of the same conversation, which would put a compaction
 // boundary on a record the reader cannot see.
 //
@@ -112,6 +112,22 @@ export const messagesFrom = (
   );
 
 /**
+ * Persisted history and the live Chat disagreed about a compaction split.
+ *
+ * Continuing would turn an in-memory message count into the wrong durable
+ * offset, so this is a typed durability failure rather than a clamped guess.
+ */
+export class CompactionAlignmentError extends Schema.TaggedError<CompactionAlignmentError>(
+  '@sunfall/vesper-agent/CompactionAlignmentError',
+)('CompactionAlignmentError', {
+  expectedMessages: Schema.Natural,
+  recordedMessages: Schema.Natural,
+  summarizedMessages: Schema.Natural,
+  keptMessages: Schema.Natural,
+  message: Schema.String,
+}) {}
+
+/**
  * Where in the log to point a new compaction's `firstKept`.
  *
  * The other half of the reconstruction rule, and it lives here because it has
@@ -128,23 +144,41 @@ export const messagesFrom = (
  * because it is what makes a rebuilt history a continuation rather than a
  * different conversation.
  *
- * Returns {@link LogOffset.START} when nothing survives — a kept tail of zero,
- * or an empty log.
+ * Both counts are required so the reconstructed history must match the live
+ * compaction split exactly. A mismatch fails instead of silently clamping an
+ * offset onto a different message.
  */
-export const boundaryFor = (
+export const compactionBoundary = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
-  keptMessages: number,
-): LogOffset.Offset => {
-  if (keptMessages <= 0) return LogOffset.START;
+  split: {
+    readonly summarizedMessages: number;
+    readonly keptMessages: number;
+  },
+): Effect.Effect<LogOffset.Offset, CompactionAlignmentError> => {
   // The same view {@link messagesFrom} rebuilds, for the reason stated above:
   // a boundary resolved against the whole log could name a record on an
   // abandoned branch, which the reader would then fail to find and fall back
   // from — silently keeping nothing where the compaction meant to keep a tail.
   const built = rebuild(AgentBranch.activePath(records));
-  if (built.length === 0) return LogOffset.START;
-  // Clamped rather than failed: a tail longer than the rebuilt history means
-  // keep all of it, which is what the caller asked for.
-  return built[Math.max(0, built.length - keptMessages)]!.offset;
+  const expectedMessages = split.summarizedMessages + split.keptMessages;
+  if (built.length !== expectedMessages) {
+    return Effect.fail(
+      new CompactionAlignmentError({
+        expectedMessages,
+        recordedMessages: built.length,
+        summarizedMessages: split.summarizedMessages,
+        keptMessages: split.keptMessages,
+        message:
+          `Live compaction split ${expectedMessages} messages, but durable ` +
+          `history rebuilt ${built.length}`,
+      }),
+    );
+  }
+  return Effect.succeed(
+    split.keptMessages === 0
+      ? LogOffset.START
+      : built[built.length - split.keptMessages]!.offset,
+  );
 };
 
 /** A rebuilt message, and the record that started it. */

@@ -401,34 +401,39 @@ describe('rebuilding a branched conversation', () => {
   });
 
   // A compaction boundary has to name a record the reader can still find.
-  // `boundaryFor` counts back from the end of the rebuilt history, so a count
+  // `compactionBoundary` counts back from the end of the rebuilt history, so a count
   // resolved against the whole log lands a `firstKept` on the abandoned
   // branch — an offset `messagesFrom` will never return, which it then falls
   // back from by keeping nothing.
   //
-  // Mutation-checked: dropping `activePath` from `boundaryFor` returns the
+  // Mutation-checked: dropping `activePath` from `compactionBoundary` returns the
   // abandoned `Text`'s offset and fails both assertions.
-  it('resolves a compaction boundary onto the active path', () => {
-    const records = envelopes([
-      started('one'), // 0
-      said('a'), // 1
-      turn, // 2
-      started('two'), // 3
-      said('abandoned'), // 4
-      turn, // 5
-      { _tag: 'BranchedFrom', at: at(3) }, // 6
-      said('redone'), // 7
-      turn, // 8
-    ]);
+  it.effect('resolves a compaction boundary onto the active path', () =>
+    Effect.gen(function* () {
+      const records = envelopes([
+        started('one'), // 0
+        said('a'), // 1
+        turn, // 2
+        started('two'), // 3
+        said('abandoned'), // 4
+        turn, // 5
+        { _tag: 'BranchedFrom', at: at(3) }, // 6
+        said('redone'), // 7
+        turn, // 8
+      ]);
 
-    // The path rebuilds as [user 'one', assistant 'a', user 'two', assistant
-    // 'redone']; the last two of those start at the second `RunStarted`.
-    const boundary = AgentHistory.boundaryFor(records, 2);
-    expect(boundary).toBe(at(3));
-    expect(
-      AgentBranch.activePath(records).map((envelope) => envelope.offset),
-    ).toContain(boundary);
-  });
+      // The path rebuilds as [user 'one', assistant 'a', user 'two', assistant
+      // 'redone']; the last two of those start at the second `RunStarted`.
+      const boundary = yield* AgentHistory.compactionBoundary(records, {
+        summarizedMessages: 2,
+        keptMessages: 2,
+      });
+      expect(boundary).toBe(at(3));
+      expect(
+        AgentBranch.activePath(records).map((envelope) => envelope.offset),
+      ).toContain(boundary);
+    }),
+  );
 
   // Money spent on a branch that was abandoned was still spent. Filtering here
   // would make a conversation's reported cost fall when its user changed their

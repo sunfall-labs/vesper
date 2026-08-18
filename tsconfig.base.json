@@ -77,6 +77,9 @@
       "@sunfall/vesper-attachments/layer-memory": [
         "./packages/attachments/src/layer-memory.ts"
       ],
+      "@sunfall/vesper-attachments/layer-filesystem": [
+        "./packages/attachments/src/layer-filesystem.ts"
+      ],
       "@sunfall/vesper-mcp/agent": ["./packages/mcp/src/agent.ts"]
     }
   }

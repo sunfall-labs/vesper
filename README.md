@@ -18,8 +18,8 @@ does not wrap provider SDKs or maintain a second provider registry.
 [`Design.md`](Design.md) explains the boundary.
 
 **Status: pre-1.0, preparing its first `alpha` publish.** It was extracted from
-the system it was built for, and the [known gaps](#known-gaps) below are not a
-formality — read them before picking this up.
+the system it was built for. Read [maturity and deliberate
+constraints](#maturity-and-deliberate-constraints) before picking it up.
 
 ## Packages
 
@@ -31,7 +31,7 @@ Vesper publishes six packages:
 | [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, memory adapter   |
 | [`@sunfall/vesper-log-pg`](packages/log-pg)           | Opt-in PostgreSQL adapter and migration                         |
 | [`@sunfall/vesper-workspace`](packages/workspace)     | Files plus a shell behind one swappable driver                  |
-| [`@sunfall/vesper-attachments`](packages/attachments) | Content-addressed blobs, verified on read                       |
+| [`@sunfall/vesper-attachments`](packages/attachments) | Verified blobs with memory and filesystem adapters              |
 | [`@sunfall/vesper-mcp`](packages/mcp)                 | Effect-native MCP exposure for durable agents                   |
 
 `workspace` is standalone and never composed implicitly. Attachments remain a
@@ -763,75 +763,46 @@ See [`docs/contributing.md`](docs/contributing.md) for the layering rules
 between packages, which are the one thing worth reading before changing
 anything.
 
-## Known gaps
+## Maturity and deliberate constraints
 
-- **This has not run in production in its extracted form.** It came out of a
-  working system, but the packaging, the pruning to one persistence mechanism,
-  and this repository are all newer than that. The last three things that
-  genuinely improved this library came from running it rather than planning it.
-- **No branch summarization.** Switching away from a branch records no summary
-  of what it contained.
+There are no known untracked correctness gaps in the implemented interfaces.
+The remaining caveats are either operational evidence that only adoption can
+provide or explicit design constraints:
 
-  The concurrency half of this gap is closed.
-  `conversation.branchFrom(at, input)` re-runs a conversation from an earlier
-  record in the same stream — a
-  `ConversationRecord.BranchedFrom` marker names the point and
-  `AgentBranch.activePath` folds the tree back out — and because a stream has
-  one writer, two branches are sequential. `conversation.forkFrom(at, forkId,
-input)` is the other trade: it seeds a **new** conversation from the same
-  prefix, so two forks are two streams and run side by side. A fork copies the
-  prefix rather than costing one record, its offsets are its own — `log.ts`'s
-  `reseat` is where `Compacted.firstKept` is rewritten onto them and
-  `SignalReceived.at` is reset, because the fork's signal stream is a different
-  one — and it leaves the ancestor untouched, so the relationship is not
-  navigable from the ancestor's side.
+- **Extracted-form production use is still unproven.** The original system ran
+  the loop, but this package layout and the consolidation onto one conversation
+  log are newer. Real-provider composition lives in `examples/live-smoke` and
+  `examples/compliance-relay`; deterministic tests use the same Effect
+  `LanguageModel` seam.
+- **Branches are preserved, not automatically summarized.** Branching and
+  concurrent forks are complete, including suspended workflow-wait restart
+  rules. Automatically spending a model call to summarize an abandoned path is
+  application policy, not part of changing the active path.
+- **Workspace tools and prompt templates are explicit composition.** Use
+  `WorkspaceAgent.standard` or `WorkspaceAgent.compose`; the agent package never
+  silently grants filesystem or shell authority.
+- **Context-window estimates remain provider-independent heuristics.**
+  `ContextWindow.usageAnchored` incorporates real reported usage and the live
+  smoke suite exercises proactive compaction. Provider overflow still triggers
+  the reactive path. Applications needing tokenizer-specific estimates can
+  provide another `ContextWindow.Service` implementation.
+- **Persisted schemas may evolve before 1.0.** Conversation format identity,
+  agent revision checks, and typed compatibility failures prevent silent
+  misreads. Migration is explicit rather than guessed.
+- **Signals address durable conversations.** Steers apply at turn boundaries;
+  cancels may preempt provider streaming but never leapfrog backlog or interrupt
+  a tool after its side effect has begun.
+- **Indeterminate external side effects require application reconciliation.**
+  A `ToolStarted` without an outcome cannot prove whether another system
+  committed. The dedicated interceptor must explicitly Answer or Retry.
+- **Legacy, manual, and orphaned histories may require a proportional scan.**
+  Successful current runs write the bounded `RunSettled.resume` aggregate, and
+  compacted prompts read only their live suffix. Benchmarks keep the remaining
+  full-scan case measurable rather than adding a second source of truth.
 
-  A boundary containing a suspended workflow wait must opt into
-  `{ pendingWait: 'restart' }`; Vesper records `ToolWaitRestarted`, re-enters
-  the original provider call under the new path's workflow execution, and
-  issues a fresh token. `AgentWorkflow.Binding.branchFrom` and `.forkFrom`
-  provide the durable high-level form. Omitting the option fails with a typed
-  `SuspendedConversationError` rather than copying a token owned elsewhere.
-
-- **No implicit harness toolkit or prompt templates.** Nothing installs shell,
-  read, or edit tools on every agent by default. Applications explicitly opt in
-  through `WorkspaceAgent.standard` or `WorkspaceAgent.compose` from
-  `@sunfall/vesper-workspace/agent`.
-- **The proactive compaction path is exercised only by tests.**
-  `Compaction.Policy.contextWindow` is opt-in and nothing in this repository
-  sets it, so in practice only the reactive overflow path runs.
-- **Estimation accuracy against a real tokenizer is untested.** The fixture in
-  `packages/agent/test/context-window.test.ts` stipulates its truth figure; what it
-  demonstrates is that anchoring on reported usage beats a character count, not
-  how close either lands to a tokenizer.
-- **The `Compacted` schema is not stable yet.** The record used to carry counts
-  alone and now carries `summary` and `firstKept`. Nothing is deployed against
-  it, so this costs nothing today and will not stay free.
-- **The compaction boundary is a message count resolved against the log.**
-  Compaction runs against `Chat`'s in-memory history, which carries no record
-  identity, so it reports how many messages it kept and the sink turns that
-  into `firstKept` via `AgentHistory.boundaryFor`. That rests on the record
-  rebuild and the live history being the same sequence of messages. Drift moves
-  the boundary by a message or two rather than corrupting anything.
-- **Signals only reach a run that is recording.** Steers apply only at turn
-  boundaries. Cancels can preempt provider streaming, but not after a real tool
-  or delegation handler has begun; backlog and rejected cancels never leapfrog
-  the boundary drain.
-- **Indeterminate recovery needs application knowledge.** `ToolStarted` closes
-  the dangerous ambiguity but cannot determine whether an external system
-  committed. Vesper deliberately has no default: applications must query or
-  reconcile that system and explicitly Answer, or knowingly Retry.
-- **History without a resume aggregate requires a full compatibility scan.**
-  `RunSettled.resume` is the only bounded cumulative aggregate. Opening a
-  compatible history without one writes no intermediate checkpoint, so later
-  opens remain unbounded until a new run settles. Compacted prompts still page
-  only their live suffix; orphaned and uncompacted prompt state remains
-  proportional to the records it genuinely needs.
-- **Performance is reasoned about more than it is measured.** `benchmarks/`
-  covers turn cost, conversation growth, scaling, startup, and memory, with and
-  without recording. One real problem was found and fixed before it existed:
-  the streaming queue was unbounded, so a slow consumer buffered a whole
-  response with no backpressure.
+The benchmark suite measures turn cost, conversation growth, concurrency,
+history opening, backpressure, startup, and retained memory. CI additionally
+executes the PostgreSQL store and workflow integration suites.
 
 ## License
 

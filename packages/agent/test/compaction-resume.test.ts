@@ -39,7 +39,7 @@ const testLogLayer = Layer.mergeAll(
 //
 // Mutation-checked: making `AgentHistory.messagesFrom` ignore the `Compacted`
 // record — `Prompt.fromMessages(fold(records)…)` instead of `rebuild` — fails
-// seven of the ten cases here. The three that survive are `boundaryFor`'s,
+// seven of the ten cases here. The three that survive are `compactionBoundary`'s,
 // which is the writing half and does not read the record back. The end-to-end
 // three fail exactly as the defect described: two `Compacted` records instead
 // of one, two summarization calls instead of one, and a final prompt that has
@@ -327,7 +327,7 @@ describe('rebuilding a compacted conversation', () => {
     expect(body).not.toContain('older answer');
   });
 
-  describe('boundaryFor', () => {
+  describe('compactionBoundary', () => {
     const records = envelopes([
       started('one'),
       said(1, 'answer'),
@@ -336,19 +336,64 @@ describe('rebuilding a compacted conversation', () => {
     ]);
 
     // Three messages: user(one), assistant(answer), user(two).
-    it('points at the record that opened the last kept message', () => {
-      expect(AgentHistory.boundaryFor(records, 1)).toBe(LogOffset.fromSeq(3n));
-      expect(AgentHistory.boundaryFor(records, 2)).toBe(LogOffset.fromSeq(1n));
-      expect(AgentHistory.boundaryFor(records, 3)).toBe(LogOffset.fromSeq(0n));
-    });
+    it.effect('points at the record that opened the last kept message', () =>
+      Effect.gen(function* () {
+        expect(
+          yield* AgentHistory.compactionBoundary(records, {
+            summarizedMessages: 2,
+            keptMessages: 1,
+          }),
+        ).toBe(LogOffset.fromSeq(3n));
+        expect(
+          yield* AgentHistory.compactionBoundary(records, {
+            summarizedMessages: 1,
+            keptMessages: 2,
+          }),
+        ).toBe(LogOffset.fromSeq(1n));
+        expect(
+          yield* AgentHistory.compactionBoundary(records, {
+            summarizedMessages: 0,
+            keptMessages: 3,
+          }),
+        ).toBe(LogOffset.fromSeq(0n));
+      }),
+    );
 
-    it('clamps a tail longer than the conversation', () => {
-      expect(AgentHistory.boundaryFor(records, 99)).toBe(LogOffset.fromSeq(0n));
-    });
+    it.effect('is START when nothing was kept', () =>
+      Effect.gen(function* () {
+        expect(
+          yield* AgentHistory.compactionBoundary(records, {
+            summarizedMessages: 3,
+            keptMessages: 0,
+          }),
+        ).toBe(LogOffset.START);
+        expect(
+          yield* AgentHistory.compactionBoundary([], {
+            summarizedMessages: 0,
+            keptMessages: 0,
+          }),
+        ).toBe(LogOffset.START);
+      }),
+    );
 
-    it('is START when nothing was kept', () => {
-      expect(AgentHistory.boundaryFor(records, 0)).toBe(LogOffset.START);
-      expect(AgentHistory.boundaryFor([], 4)).toBe(LogOffset.START);
-    });
+    it.effect(
+      'fails instead of clamping when live and durable history drift',
+      () =>
+        Effect.gen(function* () {
+          const outcome = yield* AgentHistory.compactionBoundary(records, {
+            summarizedMessages: 3,
+            keptMessages: 1,
+          }).pipe(Effect.result);
+
+          expect(outcome).toMatchObject({
+            _tag: 'Failure',
+            failure: {
+              _tag: 'CompactionAlignmentError',
+              expectedMessages: 4,
+              recordedMessages: 3,
+            },
+          });
+        }),
+    );
   });
 });

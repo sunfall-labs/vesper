@@ -294,7 +294,7 @@ A compatible history with no `RunSettled.resume` aggregate is scanned in full.
 Opening it does not write an intermediate checkpoint, so repeated opens remain
 unbounded until a later run reaches settlement and writes the sole aggregate.
 
-## Where this is honestly unproven
+## Where evidence still comes from adoption
 
 `ToolStarted` narrows crash recovery to the honest distributed-systems limit;
 it does not make an external side effect atomic with the conversation log. A
@@ -304,8 +304,8 @@ or accept duplicate-side-effect risk by explicitly Retry. There is no broad
 workflow engine or implicit retry policy here.
 
 This is pre-1.0. It was extracted from the system it was built for, and that
-system did not come with it, so the open questions below are real rather than
-rhetorical.
+system did not come with it. The remaining uncertainty is product and
+operational evidence, not an untracked implementation promise.
 
 - **Nothing outside this repository consumes it.** The dependents are
   `examples/` and `benchmarks/`, which exercise the library rather than rely on
@@ -318,12 +318,10 @@ rhetorical.
   every test runs against a scripted `LanguageModel`. Provider translation is
   covered upstream by Effect AI; the examples cover this repository's real
   composition with those packages.
-- **Encode `RunStarted.prompt` through `Prompt`'s own codec.** It is stored as
-  decoded messages in a `Schema.Unknown` field, so a `FilePart` holding raw
-  bytes does not survive a round trip.
-- **Wire attachments to the log and to prompts.** `AttachmentRef` exists so
-  that is a lookup rather than a redesign, and nothing writes one into a record
-  or resolves one into a provider part.
-- **Add a filesystem or object-store attachment backend.**
-  `AttachmentStoreError` is declared for one and is unreachable from the memory
-  backend.
+
+Prompt file bytes already survive the durable transport, either inline through
+Vesper's versioned base64/URL envelope or as verified `AttachmentRef` values
+when an `AttachmentStore` is provided. The attachment seam has two Adapters:
+memory for isolated runs and an Effect `FileSystem`/`Path` implementation for
+process-independent local storage. Both run the same corruption and aliasing
+contract.
