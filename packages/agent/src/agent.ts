@@ -38,6 +38,7 @@ import type { Interception } from './interception.js';
 import { DynamicToolkit } from './dynamic-toolkit.js';
 import * as AgentLog from './log.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
+import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
 import * as AgentSkill from './skill.js';
@@ -106,6 +107,7 @@ export interface Definition<
   StopR = never,
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
+  OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
 > {
   readonly name: Name;
   /** Stable application-defined compatibility revision for durable history. */
@@ -123,7 +125,7 @@ export interface Definition<
   readonly dynamicTools?: DynamicSources;
   readonly stopWhen?: Stop.StopCondition<
     VisibleTools<
-      CompiledTools<Tools, Children, Skills>,
+      CompiledTools<Tools, Children, Skills, OverflowPolicy>,
       DynamicToolkit.Tools<DynamicSources>
     >,
     StopR
@@ -162,6 +164,18 @@ export interface Definition<
   readonly runPolicy?: Partial<RunPolicy.Limits>;
   /** One optional state document, opened separately for every run. */
   readonly state?: StateDefinition;
+
+  /**
+   * Spill a tool result over this many UTF-8 bytes into the attachments
+   * service and replace it with a pointer, instead of handing the whole
+   * thing to the model. Adds a `read_attachment` tool the model uses to read
+   * the spilled content back in ranges.
+   *
+   * Unset — the default — is exactly today's behaviour: every result reaches
+   * the model and the log as the tool returned it, and no extra tool or
+   * service requirement appears.
+   */
+  readonly resultOverflow?: OverflowPolicy;
 }
 
 /**
@@ -604,7 +618,11 @@ export type CompiledTools<
   Own extends Record<string, Tool.Any>,
   Children extends ReadonlyArray<Child>,
   Skills extends ReadonlyArray<AgentSkill.Skill>,
-> = Own & Subagent.Tools<Children> & AgentSkill.Tools<Skills>;
+  OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
+> = Own &
+  Subagent.Tools<Children> &
+  AgentSkill.Tools<Skills> &
+  ResultOverflow.Tools<OverflowPolicy>;
 
 /** Every statically-defined and runtime-discovered tool visible to a run. */
 export type VisibleTools<
@@ -614,32 +632,39 @@ export type VisibleTools<
 
 /**
  * Preserve the declarative capability types while assembling their runtime
- * toolkits. The overload is the construction contract: generated subagent and
- * skill toolkits are derived from the same `Children` and `Skills` values, and
- * `validateGeneratedToolNames` rejects collisions before this is called.
+ * toolkits. The overload is the construction contract: generated subagent,
+ * skill, and overflow-reader toolkits are derived from the same `Children`,
+ * `Skills`, and `resultOverflow` values, and `validateGeneratedToolNames`
+ * rejects collisions before this is called.
  */
 function mergeCompiledToolkit<
   Tools extends Record<string, Tool.Any>,
   const Children extends ReadonlyArray<Child>,
   const Skills extends ReadonlyArray<AgentSkill.Skill>,
+  const OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
 >(
   own: Toolkit.Toolkit<Tools>,
   children: Children | undefined,
   skills: Skills | undefined,
+  resultOverflow: OverflowPolicy | undefined,
   delegation: Toolkit.Any | undefined,
   loader: Toolkit.Any | undefined,
-): Toolkit.Toolkit<CompiledTools<Tools, Children, Skills>>;
+  reader: Toolkit.Any | undefined,
+): Toolkit.Toolkit<CompiledTools<Tools, Children, Skills, OverflowPolicy>>;
 function mergeCompiledToolkit(
   own: Toolkit.Any,
   _children: ReadonlyArray<Child> | undefined,
   _skills: ReadonlyArray<AgentSkill.Skill> | undefined,
+  _resultOverflow: ResultOverflow.Policy | undefined,
   delegation: Toolkit.Any | undefined,
   loader: Toolkit.Any | undefined,
+  reader: Toolkit.Any | undefined,
 ): Toolkit.Any {
   return Toolkit.merge(
     own,
     ...(delegation === undefined ? [] : [delegation]),
     ...(loader === undefined ? [] : [loader]),
+    ...(reader === undefined ? [] : [reader]),
   );
 }
 
@@ -713,6 +738,7 @@ export const make = <
   const StateDefinition extends AgentState.AnyDefinition | undefined =
     undefined,
   const DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
+  const OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
 >(
   definition: Definition<
     Name,
@@ -721,7 +747,8 @@ export const make = <
     Skills,
     StopR,
     StateDefinition,
-    DynamicSources
+    DynamicSources,
+    OverflowPolicy
   > &
     CollisionFreeDefinition<Tools, Children, Skills> &
     DynamicDefinition<DynamicSources>,
@@ -730,15 +757,17 @@ export const make = <
   Tools,
   | WithOwnHandlersForState<Tools, StateDefinition>
   | Subagent.Services<Children>
+  | ResultOverflow.Services<OverflowPolicy>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
-  CompiledTools<Tools, Children, Skills>,
+  CompiledTools<Tools, Children, Skills, OverflowPolicy>,
   DynamicToolkit.Tools<DynamicSources>,
   | WithOwnHandlersForState<Tools, StateDefinition>
   | Subagent.Services<Children>
+  | ResultOverflow.Services<OverflowPolicy>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
   | (StateDefinition extends AgentState.AnyDefinition
@@ -748,12 +777,13 @@ export const make = <
   RunFailure,
   StateDefinition
 > => {
-  type RuntimeTools = CompiledTools<Tools, Children, Skills>;
+  type RuntimeTools = CompiledTools<Tools, Children, Skills, OverflowPolicy>;
   type DynamicTools = DynamicToolkit.Tools<DynamicSources>;
   type RunTools = VisibleTools<RuntimeTools, DynamicTools>;
   type BaseRequires =
     | WithOwnHandlersForState<Tools, StateDefinition>
     | Subagent.Services<Children>
+    | ResultOverflow.Services<OverflowPolicy>
     | StopR
     | DynamicToolkit.Services<DynamicSources>
     | (StateDefinition extends AgentState.AnyDefinition
@@ -783,7 +813,12 @@ export const make = <
       );
     }
   }
-  validateGeneratedToolNames(definition.toolkit, children, skills);
+  validateGeneratedToolNames(
+    definition.toolkit,
+    children,
+    skills,
+    definition.resultOverflow !== undefined,
+  );
   for (const child of children) {
     if (child.revision.trim() === '') {
       throw new Error(`Agent "${child.name}" revision must be non-empty`);
@@ -796,13 +831,19 @@ export const make = <
     children.map((child) => Subagent.toolName(child.name)),
   );
   const loader = skills.length > 0 ? AgentSkill.loader(skills) : undefined;
+  const overflow =
+    definition.resultOverflow === undefined
+      ? undefined
+      : ResultOverflow.reader(definition.resultOverflow);
 
   const toolkit = mergeCompiledToolkit(
     definition.toolkit,
     definition.subagents,
     definition.skills,
+    definition.resultOverflow,
     delegation?.toolkit,
     loader?.toolkit,
+    overflow?.toolkit,
   );
 
   // The skill catalog joins the system prompt: a model cannot ask for a
@@ -841,8 +882,16 @@ export const make = <
       instructions,
       wiring.dynamicToolkit,
     );
-    const runToolkit = Effect.map(toolkit, (staticallyDefined) =>
-      withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
+    // Oversized results are spilled before the log or the interceptor ever
+    // see them, so `gate`'s recording and `resolveIndeterminate`'s recovery
+    // — both consumers of this same `runToolkit` — see only the pointer, not
+    // the payload it stands in for. See `result-overflow.ts` for why a
+    // storage failure here is a defect rather than a typed tool failure.
+    const runToolkit = ResultOverflow.wrap(
+      definition.resultOverflow,
+      Effect.map(toolkit, (staticallyDefined) =>
+        withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
+      ),
     );
 
     // A `Toolkit` already *is* an `Effect` producing a resolved toolkit, and
@@ -857,7 +906,9 @@ export const make = <
     ): Effect.Effect<
       Toolkit.WithHandler<RunTools>,
       never,
-      Tool.HandlersFor<RuntimeTools> | InterceptorR
+      | Tool.HandlersFor<RuntimeTools>
+      | ResultOverflow.Services<OverflowPolicy>
+      | InterceptorR
     > =>
       ToolDispatch.gate(runToolkit, {
         agent: definition.name,
@@ -876,6 +927,7 @@ export const make = <
         ? Layer.empty
         : delegation.layer(session, runtime),
       loader === undefined ? Layer.empty : loader.layer,
+      overflow === undefined ? Layer.empty : overflow.layer,
     );
     const layer =
       definition.state === undefined
@@ -1818,6 +1870,7 @@ const validateGeneratedToolNames = (
   own: Toolkit.Any,
   children: ReadonlyArray<Child>,
   skills: ReadonlyArray<AgentSkill.Skill>,
+  resultOverflow: boolean,
 ): void => {
   const ownNames = new Set(Object.keys(own.tools));
   const generated = new Set<string>();
@@ -1840,6 +1893,7 @@ const validateGeneratedToolNames = (
     reserve(Subagent.toolName(child.name), `subagent "${child.name}"`);
   }
   if (skills.length > 0) reserve(AgentSkill.TOOL_NAME, 'skills');
+  if (resultOverflow) reserve(ResultOverflow.TOOL_NAME, 'resultOverflow');
 };
 
 const stateErrorMetadata = (error: AgentState.Error) => {

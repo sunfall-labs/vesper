@@ -15,6 +15,7 @@ import type { Interception } from './interception.js';
 import type * as AgentLog from './log.js';
 import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
+import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
 
@@ -503,16 +504,26 @@ export const gate = <
             : tool.successSchema;
 
       const decode: Decode = (stored: unknown) =>
-        // The requirement channel is erased rather than declared. A tool's
-        // decoding services are already in the agent's `WithOwnHandlers`, so
-        // the caller has provided them and they are in `services` — but
-        // `handle`'s signature fixes what its effect may require, and
-        // declaring them here would put a requirement on a value
-        // `LanguageModel` resolves internally. Capturing and providing them is
-        // the same move `Subagent.delegateTo` makes for a child's services.
-        decodeUnknownToolValue(schema, stored, services, (detail) =>
-          toolResultDecodeError(name, detail),
-        );
+        // A spilled result decodes against its own pointer shape rather than
+        // the tool's declared schema, independent of which tool produced it.
+        // `ResultOverflow.wrap` replaced both `result` and `encodedResult`
+        // with the pointer at dispatch time, before the tool's own schema
+        // ever saw the real value — recovery has to make the same
+        // substitution, or resuming a conversation containing a spilled
+        // result would fail to decode against a schema that was never asked
+        // to describe a pointer.
+        ResultOverflow.isPointer(stored)
+          ? Effect.succeed(stored)
+          : // The requirement channel is erased rather than declared. A tool's
+            // decoding services are already in the agent's `WithOwnHandlers`, so
+            // the caller has provided them and they are in `services` — but
+            // `handle`'s signature fixes what its effect may require, and
+            // declaring them here would put a requirement on a value
+            // `LanguageModel` resolves internally. Capturing and providing them is
+            // the same move `Subagent.delegateTo` makes for a child's services.
+            decodeUnknownToolValue(schema, stored, services, (detail) =>
+              toolResultDecodeError(name, detail),
+            );
 
       decoders.set(name, decode);
       return decode;
