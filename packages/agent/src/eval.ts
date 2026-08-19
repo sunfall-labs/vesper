@@ -438,6 +438,13 @@ export const suite = <
   if (!normalized(threshold)) {
     throw new RangeError('Eval passThreshold must be between 0 and 1');
   }
+  // An empty suite would report zero failures and a vacuous mean — a green
+  // CI run measuring nothing, which is exactly the silent outcome a suite
+  // exists to prevent. A case list that ends up empty (a filter that matched
+  // nothing, a loader that found nothing) is a defect in the suite itself.
+  if (definition.cases.length === 0) {
+    throw new RangeError(`Eval suite "${definition.name}" has no cases`);
+  }
   const scorers = definition.scorers ?? [];
   return Effect.gen(function* () {
     const startedAt = yield* Clock.currentTimeMillis;
@@ -455,7 +462,7 @@ export const suite = <
       cases,
       passed,
       failed: cases.length - passed,
-      meanScore: cases.length === 0 ? 1 : total / cases.length,
+      meanScore: total / cases.length,
       startedAt,
       durationMillis: Number(finished - started) / 1_000_000,
     };

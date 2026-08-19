@@ -255,6 +255,12 @@ const scripted = (
 };
 
 describe('AgentEval.suite', () => {
+  it('rejects an empty case list instead of vacuously passing', () => {
+    expect(() =>
+      AgentEval.suite(textAgent, { name: 'empty-suite', cases: [] }),
+    ).toThrow('Eval suite "empty-suite" has no cases');
+  });
+
   it.effect('scores every case and aggregates pass/fail', () =>
     Effect.gen(function* () {
       const saidYes = AgentEval.check(

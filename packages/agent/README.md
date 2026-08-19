@@ -240,6 +240,29 @@ against whatever model or rubric the application already trusts), does not
 persist reports or baselines, and has no watch mode. A suite is data plus a
 runner; scheduling, storage, and judging are the application's.
 
+The same division covers nondeterminism. A live model needs repeated trials
+before a score means anything, and a `SuiteReport` is plain data, so repeats
+are a fold in application code rather than a framework feature:
+
+```ts
+const reports =
+  yield *
+  Effect.forEach(
+    Array.from({ length: 5 }, (_, index) => index),
+    () => AgentEval.suite(agent, definition),
+  );
+const meanOf = (caseName: string) => {
+  const scores = reports.map(
+    (report) => report.cases.find((one) => one.name === caseName)?.score ?? 0,
+  );
+  return scores.reduce((sum, score) => sum + score, 0) / scores.length;
+};
+```
+
+Aggregate however the application judges best — mean, worst-of-N, variance
+gates — and feed whichever aggregate matters back through
+`AgentEval.compare` by folding the runs into one representative report.
+
 ## Scripted model
 
 `ScriptedModel` is a deterministic adapter for Effect's existing

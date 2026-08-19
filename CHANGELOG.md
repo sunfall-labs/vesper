@@ -5,6 +5,12 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- `AgentEval.suite` now rejects an empty case list at construction with a
+  `RangeError` instead of returning a vacuously passing report (zero
+  failures, `meanScore: 1`). A suite that measures nothing should fail
+  loudly, not green-light CI. Documented the user-space repeat-N pattern for
+  live-model trials in the agent guide.
+
 - Code mode now presents a generated TypeScript SDK with typed tool parameters
   and results, and the bundled isolated executor accepts erasable TypeScript
   rather than describing its source as JavaScript. Syntax requiring
