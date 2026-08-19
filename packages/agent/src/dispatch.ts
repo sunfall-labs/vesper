@@ -120,6 +120,8 @@ const preserveRunPolicy = <T extends Tool.Any, E, R>(
 export interface GateOptions<InterceptorRequires = never> {
   /** The run's log claim, when it is recording. */
   readonly session?: AgentLog.Session | undefined;
+  /** Conversation identity for non-durable nested dispatch. */
+  readonly conversationId?: LogVocabulary.ConversationId | undefined;
   /** The agent's interceptor, when it has one. */
   readonly interceptor?:
     | Interception.Interceptor<InterceptorRequires>
@@ -613,7 +615,7 @@ export const gate = <
           const decision = yield* interceptor
             .beforeToolCall({
               agent: options.agent,
-              conversationId: session?.conversationId,
+              conversationId: options.conversationId ?? session?.conversationId,
               name: toolName,
               toolCallId: normalizedToolCallId,
               params,

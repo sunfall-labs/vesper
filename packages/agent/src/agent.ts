@@ -21,6 +21,7 @@ import {
 } from 'effect/unstable/ai';
 
 import { Compaction } from './compaction.js';
+import { CodeMode } from './code-mode.js';
 import { CompatibilityError } from './conversation-error.js';
 import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
@@ -106,6 +107,7 @@ export interface Definition<
   StopR = never,
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
+  CodeModeEnabled extends boolean = false,
 > {
   readonly name: Name;
   /** Stable application-defined compatibility revision for durable history. */
@@ -122,9 +124,12 @@ export interface Definition<
    */
   readonly dynamicTools?: DynamicSources;
   readonly stopWhen?: Stop.StopCondition<
-    VisibleTools<
-      CompiledTools<Tools, Children, Skills>,
-      DynamicToolkit.Tools<DynamicSources>
+    CodeMode.ModelTools<
+      VisibleTools<
+        CompiledTools<Tools, Children, Skills>,
+        DynamicToolkit.Tools<DynamicSources>
+      >,
+      CodeModeEnabled
     >,
     StopR
   >;
@@ -162,6 +167,8 @@ export interface Definition<
   readonly runPolicy?: Partial<RunPolicy.Limits>;
   /** One optional state document, opened separately for every run. */
   readonly state?: StateDefinition;
+  /** Replace direct tool advertisement with the isolated `exec` tool. */
+  readonly codeMode?: CodeModeEnabled;
 }
 
 /**
@@ -297,6 +304,10 @@ export interface Instance<
   out InterceptorRequires = never,
   out RunError extends RunFailure | CompatibilityError = RunFailure,
   out StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
+  in out ModelTools extends Record<string, Tool.Any> = VisibleTools<
+    RuntimeTools,
+    DynamicTools
+  >,
 > {
   readonly [TypeId]: TypeId;
   readonly [ChildTypeId]: typeof ChildTypeId;
@@ -319,11 +330,7 @@ export interface Instance<
    */
   readonly stream: (
     input: Prompt.RawInput,
-  ) => Stream.Stream<
-    AgentEvents.ObservedEvent<VisibleTools<RuntimeTools, DynamicTools>>,
-    RunError,
-    Requires
-  >;
+  ) => Stream.Stream<AgentEvents.ObservedEvent<ModelTools>, RunError, Requires>;
 
   /** Run to completion. A fold of `stream`, not a second implementation. */
   readonly run: (
@@ -341,11 +348,7 @@ export interface Instance<
   readonly streamIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Stream.Stream<
-    AgentEvents.ObservedEvent<VisibleTools<RuntimeTools, DynamicTools>>,
-    RunError,
-    Requires
-  >;
+  ) => Stream.Stream<AgentEvents.ObservedEvent<ModelTools>, RunError, Requires>;
 
   readonly runIn: (
     chat: Chat.Service,
@@ -397,7 +400,8 @@ export interface Instance<
     WithoutOwnHandlers<BaseRequires, OwnTools>,
     InterceptorRequires,
     RunError,
-    StateDefinition
+    StateDefinition,
+    ModelTools
   >;
 
   /**
@@ -435,7 +439,8 @@ export interface Instance<
     BaseRequires,
     Interception.Services<I>,
     RunError,
-    StateDefinition
+    StateDefinition,
+    ModelTools
   >;
 }
 
@@ -510,7 +515,8 @@ export type Name<A> =
     infer _Base,
     infer _Interceptor,
     infer _Error,
-    infer _State
+    infer _State,
+    infer _Model
   >
     ? _Name
     : never;
@@ -531,9 +537,10 @@ export type Tools<A> =
     infer _Base,
     infer _Interceptor,
     infer _Error,
-    infer _State
+    infer _State,
+    infer _Model
   >
-    ? VisibleTools<_Runtime, _Dynamic>
+    ? _Model
     : never;
 
 /** Extract only the tools supplied by the agent definition's toolkit. */
@@ -547,7 +554,8 @@ export type OwnTools<A> =
     infer _Base,
     infer _Interceptor,
     infer _Error,
-    infer _State
+    infer _State,
+    infer _Model
   >
     ? _Own
     : never;
@@ -568,7 +576,8 @@ export type Requires<A> =
     infer _Base,
     infer _Interceptor,
     infer _Error,
-    infer _State
+    infer _State,
+    infer _Model
   >
     ? _R
     : never;
@@ -584,7 +593,8 @@ export type Error<A> =
     infer _Base,
     infer _Interceptor,
     infer RunError,
-    infer _State
+    infer _State,
+    infer _Model
   >
     ? RunError
     : never;
@@ -713,6 +723,7 @@ export const make = <
   const StateDefinition extends AgentState.AnyDefinition | undefined =
     undefined,
   const DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
+  const CodeModeEnabled extends boolean = false,
 >(
   definition: Definition<
     Name,
@@ -721,7 +732,8 @@ export const make = <
     Skills,
     StopR,
     StateDefinition,
-    DynamicSources
+    DynamicSources,
+    CodeModeEnabled
   > &
     CollisionFreeDefinition<Tools, Children, Skills> &
     DynamicDefinition<DynamicSources>,
@@ -732,6 +744,7 @@ export const make = <
   | Subagent.Services<Children>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
+  | CodeMode.Requires<CodeModeEnabled>
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
@@ -741,21 +754,31 @@ export const make = <
   | Subagent.Services<Children>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
+  | CodeMode.Requires<CodeModeEnabled>
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
   never,
   RunFailure,
-  StateDefinition
+  StateDefinition,
+  CodeMode.ModelTools<
+    VisibleTools<
+      CompiledTools<Tools, Children, Skills>,
+      DynamicToolkit.Tools<DynamicSources>
+    >,
+    CodeModeEnabled
+  >
 > => {
   type RuntimeTools = CompiledTools<Tools, Children, Skills>;
   type DynamicTools = DynamicToolkit.Tools<DynamicSources>;
   type RunTools = VisibleTools<RuntimeTools, DynamicTools>;
+  type ModelTools = CodeMode.ModelTools<RunTools, CodeModeEnabled>;
   type BaseRequires =
     | WithOwnHandlersForState<Tools, StateDefinition>
     | Subagent.Services<Children>
     | StopR
     | DynamicToolkit.Services<DynamicSources>
+    | CodeMode.Requires<CodeModeEnabled>
     | (StateDefinition extends AgentState.AnyDefinition
         ? AgentState.Services<StateDefinition>
         : never);
@@ -765,7 +788,7 @@ export const make = <
   }
   const revision = LogVocabulary.AgentRevision.make(definition.revision);
 
-  const stopWhen = definition.stopWhen ?? Stop.defaultCondition<RunTools>();
+  const stopWhen = definition.stopWhen ?? Stop.defaultCondition<ModelTools>();
   const runPolicy = RunPolicy.make(definition.runPolicy);
 
   // Subagents and skills are compiled into the toolkit here rather than by
@@ -833,7 +856,7 @@ export const make = <
   // what happens to be in the context.
   const entryFor = <InterceptorR>(
     wiring: Wiring<InterceptorR, DynamicTools>,
-  ): Entry<RunTools, BaseRequires | InterceptorR, RunFailure> => {
+  ): Entry<ModelTools, BaseRequires | InterceptorR, RunFailure> => {
     const session = wiring.session;
     const interceptor = wiring.interceptor;
     const runtime = wiring.runtime;
@@ -852,21 +875,39 @@ export const make = <
     //
     // An agent with no dispatch seams takes the first branch. A root runtime
     // is also a seam because its tool semaphore is shared by descendants.
-    const dispatching = (
-      arbitration: ToolDispatch.TurnArbitration,
-    ): Effect.Effect<
-      Toolkit.WithHandler<RunTools>,
-      never,
-      Tool.HandlersFor<RuntimeTools> | InterceptorR
-    > =>
-      ToolDispatch.gate(runToolkit, {
-        agent: definition.name,
-        session,
-        interceptor,
-        runtime,
-        unmeteredToolNames: delegationToolNames,
-        arbitration,
-      });
+    const dispatching = (arbitration: ToolDispatch.TurnArbitration) =>
+      CodeMode.selectToolkit(
+        definition.codeMode,
+        () =>
+          ToolDispatch.gate(runToolkit, {
+            agent: definition.name,
+            session,
+            interceptor,
+            runtime,
+            unmeteredToolNames: delegationToolNames,
+            arbitration,
+          }),
+        () =>
+          Effect.gen(function* () {
+            const hidden = yield* ToolDispatch.gate(runToolkit, {
+              agent: definition.name,
+              conversationId: session?.conversationId,
+              interceptor,
+              runtime,
+              unmeteredToolNames: delegationToolNames,
+              arbitration,
+            });
+            const visible = yield* CodeMode.toolkit(
+              hidden,
+              wiring.codeState ?? CodeMode.emptyState,
+            );
+            return yield* ToolDispatch.gate(Effect.succeed(visible), {
+              agent: definition.name,
+              session,
+              arbitration,
+            });
+          }),
+      );
 
     // Fixed arity rather than spreading `...(x ? [l] : [])`: the spread form
     // widens `mergeAll`'s result, which then leaks into anything that provides
@@ -920,7 +961,7 @@ export const make = <
       attempt: Interception.Attempt,
       arbitration: ToolDispatch.TurnArbitration,
     ): Stream.Stream<
-      AgentEvents.Event<RunTools>,
+      AgentEvents.Event<ModelTools>,
       RunFailure,
       WithOwnHandlers<RuntimeTools> | InterceptorR
     > =>
@@ -959,7 +1000,7 @@ export const make = <
                       normalizeProviderError(part.error, part.metadata),
                     )
                   : encodePart(
-                      part as Response.StreamPart<RunTools>,
+                      part as Response.StreamPart<ModelTools>,
                       resolvedToolkit,
                     ).pipe(
                       Effect.map((encodedPart) => ({ part, encodedPart })),
@@ -976,13 +1017,13 @@ export const make = <
                 }),
               ),
               Stream.map(
-                ({ part, encodedPart }): AgentEvents.Event<RunTools> => ({
+                ({ part, encodedPart }): AgentEvents.Event<ModelTools> => ({
                   _tag: 'Part',
                   step,
                   // Effect's mapped tool-part union is not idempotent under
                   // this compiled intersection, although the toolkit value is
                   // exactly the one Chat used to decode the part.
-                  part: part as Response.StreamPart<RunTools>,
+                  part: part as Response.StreamPart<ModelTools>,
                   encodedPart,
                 }),
               ),
@@ -1016,7 +1057,7 @@ export const make = <
           );
         }),
       ) as Stream.Stream<
-        AgentEvents.Event<RunTools>,
+        AgentEvents.Event<ModelTools>,
         RunFailure,
         WithOwnHandlers<RuntimeTools>
       >;
@@ -1127,7 +1168,7 @@ export const make = <
       step: number,
       pending: Prompt.RawInput,
     ): Stream.Stream<
-      AgentEvents.Event<RunTools>,
+      AgentEvents.Event<ModelTools>,
       RunFailure,
       WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
     > =>
@@ -1486,7 +1527,7 @@ export const make = <
           );
         }),
       ) as Stream.Stream<
-        AgentEvents.Event<RunTools>,
+        AgentEvents.Event<ModelTools>,
         RunFailure,
         WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
       >;
@@ -1494,6 +1535,28 @@ export const make = <
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
       Stream.unwrap(
         Effect.gen(function* () {
+          if (definition.codeMode === true && wiring.codeState === undefined) {
+            const codeState = yield* CodeMode.openState(session).pipe(
+              Effect.mapError(
+                (error) =>
+                  new AiError.AiError({
+                    module: 'CodeMode',
+                    method: 'openState',
+                    reason: new AiError.InvalidRequestError({
+                      description: error.message,
+                    }),
+                  }),
+              ),
+            );
+            return entryFor({ ...wiring, codeState }).streamIn(
+              chat,
+              input,
+            ) as Stream.Stream<
+              AgentEvents.Event<ModelTools>,
+              RunFailure,
+              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+            >;
+          }
           if (
             wiring.dynamicToolkit === undefined &&
             definition.dynamicTools !== undefined &&
@@ -1508,7 +1571,7 @@ export const make = <
               dynamicContextFor(instructions, dynamicToolkit),
             );
             return entryFor(nextWiring).streamIn(chat, input) as Stream.Stream<
-              AgentEvents.Event<RunTools>,
+              AgentEvents.Event<ModelTools>,
               RunFailure,
               WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
@@ -1519,7 +1582,7 @@ export const make = <
               chat,
               input,
             ) as Stream.Stream<
-              AgentEvents.Event<RunTools>,
+              AgentEvents.Event<ModelTools>,
               RunFailure,
               WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
@@ -1729,15 +1792,18 @@ export const make = <
                     ...(wiring.lastTurn === undefined
                       ? {}
                       : { lastTurn: wiring.lastTurn }),
+                    ...(wiring.codeState === undefined
+                      ? {}
+                      : { codeState: wiring.codeState }),
                   }).streamIn(chat, effective) as Stream.Stream<
-                    AgentEvents.Event<RunTools>,
+                    AgentEvents.Event<ModelTools>,
                     RunFailure,
                     WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
                   >;
                 }),
               ),
             ) as Stream.Stream<
-              AgentEvents.Event<RunTools>,
+              AgentEvents.Event<ModelTools>,
               RunFailure,
               WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
@@ -1785,7 +1851,7 @@ export const make = <
     // name the public requirement channel. Exact type tests pin all four.
 
     return provideEntry({ stream, streamIn }, layer) as Entry<
-      RunTools,
+      ModelTools,
       BaseRequires | InterceptorR,
       RunFailure
     >;
@@ -1796,6 +1862,7 @@ export const make = <
     Tools,
     RuntimeTools,
     DynamicTools,
+    ModelTools,
     BaseRequires,
     never,
     RunFailure,
@@ -2012,6 +2079,7 @@ interface Wiring<
     | undefined;
   readonly runtime?: RunPolicyRuntime.Runtime | undefined;
   readonly dynamicToolkit?: Toolkit.WithHandler<DynamicTools> | undefined;
+  readonly codeState?: CodeMode.StateHandle | undefined;
   readonly startRun?:
     | ((
         input: Prompt.RawInput,
@@ -2044,6 +2112,7 @@ interface Parts<
   OwnTools extends Record<string, Tool.Any>,
   RuntimeTools extends Record<string, Tool.Any>,
   DynamicTools extends Record<string, Tool.Any>,
+  ModelTools extends Record<string, Tool.Any>,
   BaseRequires,
   InterceptorRequires,
   RunError,
@@ -2062,11 +2131,7 @@ interface Parts<
   readonly runPolicy: RunPolicy.Limits;
   readonly entry: <WiringRequires>(
     wiring: Wiring<WiringRequires, DynamicTools>,
-  ) => Entry<
-    VisibleTools<RuntimeTools, DynamicTools>,
-    BaseRequires | WiringRequires,
-    RunError
-  >;
+  ) => Entry<ModelTools, BaseRequires | WiringRequires, RunError>;
 }
 
 /**
@@ -2081,6 +2146,7 @@ const fromParts = <
   OwnTools extends Record<string, Tool.Any>,
   RuntimeTools extends Record<string, Tool.Any>,
   DynamicTools extends Record<string, Tool.Any>,
+  ModelTools extends Record<string, Tool.Any>,
   BaseRequires,
   InterceptorRequires,
   RunError extends RunFailure | CompatibilityError = RunFailure,
@@ -2091,6 +2157,7 @@ const fromParts = <
     OwnTools,
     RuntimeTools,
     DynamicTools,
+    ModelTools,
     BaseRequires,
     InterceptorRequires,
     RunError,
@@ -2105,7 +2172,8 @@ const fromParts = <
   BaseRequires,
   InterceptorRequires,
   RunError,
-  StateDefinition
+  StateDefinition,
+  ModelTools
 > => {
   // How every entry point below reaches the loop: the agent's interceptor,
   // and whichever session that entry point has. Read from `parts` rather than
@@ -2263,7 +2331,8 @@ const fromParts = <
     BaseRequires,
     InterceptorRequires,
     RunError,
-    StateDefinition
+    StateDefinition,
+    ModelTools
   > = {
     [TypeId]: TypeId,
     [ChildTypeId]: ChildTypeId,
@@ -2299,6 +2368,7 @@ const fromParts = <
         OwnTools,
         RuntimeTools,
         DynamicTools,
+        ModelTools,
         BaseRequires,
         Interception.Services<I>,
         RunError,
@@ -2325,6 +2395,7 @@ const fromParts = <
         OwnTools,
         RuntimeTools,
         DynamicTools,
+        ModelTools,
         WithoutOwnHandlers<BaseRequires, OwnTools>,
         InterceptorRequires,
         RunError,
@@ -2335,7 +2406,7 @@ const fromParts = <
           incoming: Wiring<WiringRequires, DynamicTools>,
         ) =>
           provideEntry(parts.entry(incoming), own) as Entry<
-            VisibleTools<RuntimeTools, DynamicTools>,
+            ModelTools,
             WithoutOwnHandlers<BaseRequires, OwnTools> | WiringRequires,
             RunError
           >,
@@ -2345,7 +2416,7 @@ const fromParts = <
   const protocol: AgentProtocol<
     BaseRequires | InterceptorRequires,
     RunError,
-    VisibleTools<RuntimeTools, DynamicTools>
+    ModelTools
   > = {
     stream: (conversationId, input, options) => {
       const compatibility = { agent: parts.name, revision: parts.revision };

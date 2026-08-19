@@ -18,6 +18,12 @@
       "@sunfall/vesper-agent/context-window": [
         "./packages/agent/src/context-window.ts"
       ],
+      "@sunfall/vesper-agent/code-executor": [
+        "./packages/agent/src/code-executor.ts"
+      ],
+      "@sunfall/vesper-agent/code-executor-node": [
+        "./packages/agent/src/code-executor-node.ts"
+      ],
       "@sunfall/vesper-agent/conversation": [
         "./packages/agent/src/conversation.ts"
       ],

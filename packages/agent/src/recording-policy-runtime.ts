@@ -124,6 +124,13 @@ const compileFilter = <R>(
     Completed: (record) => Effect.succeed<ConversationRecord.Record>(record),
     StateCheckpoint: (record) =>
       Effect.succeed<ConversationRecord.Record>(record),
+    CodeStateCheckpoint: (record) =>
+      policy.codeState === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.codeState(record.state, record),
+            (state): ConversationRecord.Record => ({ ...record, state }),
+          ),
     ChildSession: (record) => Effect.succeed<ConversationRecord.Record>(record),
   });
 
