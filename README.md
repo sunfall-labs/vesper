@@ -396,6 +396,11 @@ boundary and cannot be overridden. Its runtime is created once per root run and
 passed into every descendant, so delegation cannot reset turn, model-call,
 token, deadline, depth, breadth, or concurrent-child accounting. Requested
 tool concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
+`maxInputTokens` and `maxOutputTokens` are checked after each turn's usage is
+known, not before a request is sent — there is no way to ask a provider
+whether a turn will fit a budget before making it — so a run can overshoot
+either ceiling by up to one turn's usage before the check after it fails the
+run. The limits bound cumulative spend; they do not cap any single request.
 
 Handlers attach as a method rather than a `Definition` field, mirroring
 `toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
@@ -454,7 +459,11 @@ long, retries the turn once against the compacted history, and is the one that
 actually saves runs. The proactive one fires from a token estimate before a
 turn that would not have fit — but only when the caller sets
 `Compaction.Policy.contextWindow`, because the loop targets the `LanguageModel`
-tag and that tag does not carry a window.
+tag and that tag does not carry a window. A policy configured without
+`contextWindow` is not an error — the reactive trigger still protects the
+run — but it means proactive compaction never fires, silently, for the whole
+run. The agent logs an `Effect.logWarning` once per run when that happens, so
+the gap shows up in logs instead of only in a postmortem.
 
 The estimate comes from `ContextWindow.Service`, a `Context.Reference` whose
 default counts four characters per token. Applications can install

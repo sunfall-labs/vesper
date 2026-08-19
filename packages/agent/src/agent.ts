@@ -824,6 +824,23 @@ export const make = <
       ? undefined
       : (definition.compaction ?? Compaction.defaultPolicy);
 
+  // A policy without `contextWindow` compiles and runs; it just never
+  // proactively compacts, because `compactAhead` below has nothing to compare
+  // an estimate against. That is silent by construction — the run looks
+  // identical to one that never overflows, right up until it does — so it is
+  // logged once per run rather than left for someone to notice in a postmortem.
+  const compactionWarning =
+    compaction !== undefined && compaction.contextWindow === undefined
+      ? Effect.logWarning(
+          'Proactive compaction is inactive: Compaction.Policy.contextWindow is not set. Without it there is no context-window ceiling to estimate against, so this agent only compacts reactively, after a provider rejects a prompt as too long. Set contextWindow to enable proactive compaction.',
+        ).pipe(
+          Effect.annotateLogs({
+            'vesper.component': 'compaction',
+            'vesper.agent.name': definition.name,
+          }),
+        )
+      : Effect.void;
+
   // Everything below is built per run wiring rather than once per agent, which
   // is the shape Phases 5, 6 and 7 all needed. Four things vary with it: the
   // toolkit a turn dispatches through, whether the loop drains signals,
@@ -1742,6 +1759,13 @@ export const make = <
               WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
           }
+          // The only point every path above funnels through exactly once
+          // before a run's first turn — including dynamic-toolkit resolution,
+          // runtime creation, and signal recovery, which each re-enter this
+          // function and return before reaching here. That makes it the one
+          // place left to log the misconfiguration once per run rather than
+          // once per proactive-compaction check.
+          yield* compactionWarning;
           const usage = yield* Ref.make<Stop.Usage>(
             wiring.initialUsage ?? { input: 0, output: 0 },
           );
