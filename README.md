@@ -46,10 +46,12 @@ npm install @sunfall/vesper-agent \
             @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
 ```
 
-The following is a complete, in-memory example. It makes two real Anthropic
-requests and records the second run's durable continuation in memory; set
-`ANTHROPIC_API_KEY` before running it. For a credential-free example, run
-`nub run example:support-agent` from a checkout of this repository.
+The following is a complete, in-memory example: one typed tool, one agent,
+one unrecorded run, and the same definition bound to durable conversation
+history. It makes a handful of real Anthropic requests — the model will call
+the tool — so set `ANTHROPIC_API_KEY` before running it. For a
+credential-free example, run `nub run example:support-agent` from a checkout
+of this repository.
 
 ```ts
 import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
@@ -59,23 +61,37 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
-import { Config, Effect, Layer } from 'effect';
-import { Toolkit } from 'effect/unstable/ai';
+import { Config, Effect, Layer, Schema } from 'effect';
+import { Tool, Toolkit } from 'effect/unstable/ai';
+
+const orderStatus = Tool.make('order_status', {
+  description: 'Look up the fulfilment status of one order.',
+  parameters: Schema.Struct({ orderId: Schema.String }),
+  success: Schema.Struct({ status: Schema.String }),
+});
 
 const support = Agent.make({
   name: 'support',
   revision: '1',
   instructions: 'Resolve the customer’s request clearly and accurately.',
-  toolkit: Toolkit.make(),
+  toolkit: Toolkit.make(orderStatus),
+}).withHandlers({
+  // Handlers are ordinary Effects with schema-typed parameters. A tool that
+  // declares `dependencies: [SomeService]` puts that service into the
+  // agent's requirement channel — running without providing it is a compile
+  // error at the call site, not a runtime surprise mid-conversation.
+  order_status: ({ orderId }) =>
+    Effect.succeed({ status: `${orderId} shipped this morning` }),
 });
 
 const program = Effect.gen(function* () {
   // One unrecorded run.
-  const answer = yield* support.run('Where is my order?');
+  const answer = yield* support.run('Where is order_1042?');
 
-  // Or bind the same definition to durable conversation history.
+  // Or bind the same definition to durable conversation history — recorded,
+  // resumable, branchable, and suspendable on a human approval.
   const conversation = Conversation.make(support, 'customer-42');
-  const durableAnswer = yield* conversation.run('Where is my order?');
+  const durableAnswer = yield* conversation.run('Where is order_1042?');
 
   return { answer, durableAnswer };
 });
@@ -389,18 +405,22 @@ and a blocking one take the same path through the loop. `streamIn` and `runIn`
 are the same two against a `Chat` the caller already holds. A run stops when
 its `stopWhen` condition holds; the default is "the model asked for no tools",
 and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
-`toolCalledTimes`, `any`, `all`. `Result.outcome` is `success`, `cancelled`, or `suspended` — a tool call
-durably waiting on approval, covered in [Tool approvals](#tool-approvals); `steps` counts model turns that actually started, so a queued
-cancellation can return zero while an in-flight cancellation preserves its
-partial text, usage, and one started turn. These are soft stops: a pending
-steer, or a signal backlog a turn boundary could not fully drain, outranks a
-positive stop decision for one more turn — so `Stop.maxSteps(N)` is not a hard
-ceiling once a conversation takes signal traffic. `runPolicy` is the hard
-boundary and cannot be overridden; `runPolicy.maxTurns` is the ceiling that
-holds regardless. Its runtime is created once per root run and passed into
-every descendant, so delegation cannot reset turn, model-call, token,
-deadline, depth, breadth, or concurrent-child accounting. Requested tool
-concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
+`toolCalledTimes`, `any`, `all`. `Result.outcome` is `success`, `cancelled`,
+or `suspended` — a tool call durably waiting on approval, covered in
+[Tool approvals](#tool-approvals). `steps` counts model turns that actually
+started, so a queued cancellation can return zero while an in-flight
+cancellation preserves its partial text, usage, and one started turn.
+
+Stop conditions are soft stops: a pending steer, or a signal backlog a turn
+boundary could not fully drain, outranks a positive stop decision for one
+more turn — so `Stop.maxSteps(N)` is not a hard ceiling once a conversation
+takes signal traffic. `runPolicy` is the hard boundary and cannot be
+overridden; `runPolicy.maxTurns` is the ceiling that holds regardless. Its
+runtime is created once per root run and passed into every descendant, so
+delegation cannot reset turn, model-call, token, deadline, depth, breadth, or
+concurrent-child accounting. Requested tool concurrency, including
+`unbounded`, is clamped to `maxToolConcurrency`.
+
 `maxInputTokens` and `maxOutputTokens` are checked after each turn's usage is
 known, not before a request is sent — there is no way to ask a provider
 whether a turn will fit a budget before making it — so a run can overshoot
@@ -436,9 +456,11 @@ delegated.
 misspelled terminal tool never matches, so the run stops later than intended
 and looks like a model behaving oddly rather than a typo.
 
-Both are pinned by mutation-checked type tests in `type-tests/` and
-`packages/agent/test/assertions.test.ts`: reverting the fix in the source fails
-the build, not just the assertion.
+Both are pinned by type-level regression tests in
+`packages/agent/test/assertions.test.ts`, written so the source change that
+would break the guarantee fails the build rather than a runtime assertion.
+The separate `type-tests/` project pins the published provider-layer typings
+the same way.
 
 None of it is expressible over an agent API whose `execute` returns a
 `Promise`. That is the architectural reason this exists.
