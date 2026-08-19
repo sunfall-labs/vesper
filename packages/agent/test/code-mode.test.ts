@@ -53,6 +53,44 @@ void visibleExec;
 void hiddenIsNotVisible;
 void executorIsRequired;
 
+const exceptedForTyping = Tool.make('excepted_for_typing', {
+  parameters: Schema.Struct({}),
+  success: Schema.String,
+});
+const exceptModeForTyping = Agent.make({
+  name: 'code-mode-except-typing',
+  revision: '1',
+  instructions: 'Use code mode, except one tool.',
+  toolkit: Toolkit.make(hiddenForTyping, exceptedForTyping),
+  codeMode: { except: ['excepted_for_typing'] },
+});
+// Both halves of the split are visible in the model-facing tool record:
+// `exec` for the brokered half, the excepted tool directly.
+const exceptExecVisible: keyof Agent.Tools<typeof exceptModeForTyping> = 'exec';
+const exceptToolVisible: keyof Agent.Tools<typeof exceptModeForTyping> =
+  'excepted_for_typing';
+// @ts-expect-error brokered tools stay hidden in except mode
+const exceptHiddenStaysHidden: keyof Agent.Tools<typeof exceptModeForTyping> =
+  'hidden_for_typing';
+const exceptExecutorIsRequired: Has<
+  CodeExecutor.Service,
+  Agent.Requires<typeof exceptModeForTyping>
+> = 'yes';
+const exceptNameIsChecked = () =>
+  Agent.make({
+    name: 'code-mode-except-typo',
+    revision: '1',
+    instructions: 'Use code mode.',
+    toolkit: Toolkit.make(hiddenForTyping),
+    // @ts-expect-error an except name must be one of the toolkit's tools
+    codeMode: { except: ['not_a_tool'] },
+  });
+void exceptExecVisible;
+void exceptToolVisible;
+void exceptHiddenStaysHidden;
+void exceptExecutorIsRequired;
+void exceptNameIsChecked;
+
 const logLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
   NodeServices.layer,
@@ -624,6 +662,182 @@ describe('code mode tool broker', () => {
         expect(tags).toContain('RunSettled');
       }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
+
+  it.effect(
+    'excepted tools stay advertised beside exec and dispatch directly',
+    () =>
+      Effect.gen(function* () {
+        const lookup = Tool.make('lookup', {
+          description: 'Look up an order.',
+          parameters: Schema.Struct({ id: Schema.String }),
+          success: Schema.Struct({ status: Schema.String }),
+        });
+        const release = Tool.make('release', {
+          description: 'Release a build.',
+          parameters: Schema.Struct({ id: Schema.String }),
+          success: Schema.String,
+        });
+        const agent = Agent.make({
+          name: 'except-coder',
+          revision: '1',
+          instructions: 'Use code mode, release directly.',
+          toolkit: Toolkit.make(lookup, release),
+          codeMode: { except: ['release'] },
+        }).withHandlers({
+          lookup: ({ id }) => Effect.succeed({ status: `open:${id}` }),
+          release: ({ id }) => Effect.succeed(`released:${id}`),
+        });
+        const executor = CodeExecutor.fake([
+          {
+            _tag: 'ToolCall',
+            id: 'nested-lookup',
+            name: 'lookup',
+            input: { id: '42' },
+          },
+          { _tag: 'Output', value: 'open:42' },
+          { _tag: 'Completion', state: {} },
+        ]);
+        const model = ScriptedModel.make([
+          [
+            {
+              type: 'tool-call',
+              id: 'direct-release',
+              name: 'release',
+              params: { id: 'r1' },
+            },
+            finish('tool-calls'),
+          ],
+          [
+            {
+              type: 'tool-call',
+              id: 'exec-lookup',
+              name: 'exec',
+              params: { source: 'nested lookup' },
+            },
+            finish('tool-calls'),
+          ],
+          answeringTurn,
+        ]);
+
+        const result = yield* agent
+          .run('go')
+          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        const requests = yield* model.requests;
+        const executions = yield* executor.requests;
+
+        expect(result.text).toBe('done');
+        // Both halves advertised on every request, nothing else.
+        expect([...(requests[0]?.tools ?? [])].sort()).toEqual([
+          'exec',
+          'release',
+        ]);
+        // The broker catalogs only the brokered half.
+        expect(executions[0]?.tools.map((tool) => tool.name)).toEqual([
+          'lookup',
+        ]);
+        // The direct call's result reached the model without the executor.
+        expect(JSON.stringify(requests[1]?.prompt)).toContain('released:r1');
+      }),
+  );
+
+  it.effect(
+    'an excepted approval tool suspends durably and resolves in code mode',
+    () =>
+      Effect.gen(function* () {
+        let released = 0;
+        const release = Tool.make('release', {
+          parameters: Schema.Struct({ id: Schema.String }),
+          success: Schema.String,
+          needsApproval: true,
+        });
+        const agent = Agent.make({
+          name: 'except-approval',
+          revision: '1',
+          instructions: 'Use code mode, release with approval.',
+          toolkit: Toolkit.make(release),
+          codeMode: { except: ['release'] },
+        }).withHandlers({
+          release: ({ id }) =>
+            Effect.sync(() => {
+              released += 1;
+              return `released:${id}`;
+            }),
+        });
+        const conversation = Conversation.make(
+          agent,
+          LogVocabulary.ConversationId.make('except-approval-conversation'),
+        );
+        const executor = CodeExecutor.fake([]);
+        const model = ScriptedModel.make([
+          [
+            {
+              type: 'tool-call',
+              id: 'release-call',
+              name: 'release',
+              params: { id: 'r1' },
+            },
+            finish('tool-calls'),
+          ],
+          answeringTurn,
+        ]);
+
+        const suspended = yield* conversation
+          .run('release r1')
+          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        expect(suspended.outcome).toBe('suspended');
+        expect(suspended.pendingApprovals).toEqual([
+          {
+            toolCallId: 'release-call',
+            toolName: 'release',
+            input: { id: 'r1' },
+          },
+        ]);
+        expect(released).toBe(0);
+
+        yield* conversation.resolveApproval('release-call', 'approve');
+        const resolved = yield* conversation
+          .run()
+          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+
+        expect(resolved.outcome).toBe('success');
+        expect(released).toBe(1);
+      }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  it('rejects an except name the toolkit does not define at construction', () => {
+    const lookup = Tool.make('lookup', {
+      parameters: Schema.Struct({}),
+      success: Schema.String,
+    });
+    expect(() =>
+      Agent.make({
+        name: 'except-typo-runtime',
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(lookup),
+        // The compile-time key check only covers literal arrays; a
+        // dynamically built list degrades to this runtime rejection. The
+        // lying literal stands in for a value TypeScript cannot see through.
+        codeMode: { except: ['nope' as 'lookup'] },
+      }),
+    ).toThrow('codeMode excepts tool "nope"');
+  });
+
+  it('reserves the exec name whenever code mode is enabled', () => {
+    const exec = Tool.make('exec', {
+      parameters: Schema.Struct({}),
+      success: Schema.String,
+    });
+    expect(() =>
+      Agent.make({
+        name: 'exec-collision',
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(exec),
+        codeMode: true,
+      }),
+    ).toThrow('generated tool "exec"');
+  });
 });
 
 describe('code mode scratch state', () => {

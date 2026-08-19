@@ -55,71 +55,134 @@ export type ExecTools = {
   readonly exec: ReturnType<typeof execTool>;
 };
 
-/** Tools exposed at the provider seam for the selected execution mode. */
+/**
+ * How an agent's own toolkit is exposed to the model.
+ *
+ * `true` brokers every tool behind the one `exec` tool; `false` (or omitting
+ * the option) advertises them all directly. `{ except: [...] }` brokers
+ * everything *but* the named tools, which stay directly advertised — with
+ * ordinary session gating, interception, metering, and provider-mediated
+ * approval, exactly as if code mode were off for them. Naming a tool the
+ * toolkit does not define is a compile error, the same way `Stop.toolCalled`
+ * checks its name.
+ *
+ * Only the agent's own toolkit names can be excepted. Generated tools —
+ * delegation, skills, `read_attachment` — are brokered like everything else.
+ */
+export type Option<Tools extends Record<string, Tool.Any>> =
+  | boolean
+  | { readonly except: ReadonlyArray<keyof Tools & string> };
+
+/** The excepted tool names carried by a mode, `never` outside except-mode. */
+export type Except<Mode> = Mode extends {
+  readonly except: ReadonlyArray<infer Names extends string>;
+}
+  ? Names
+  : never;
+
+/**
+ * Tools exposed at the provider seam for the selected execution mode.
+ *
+ * Distributive on purpose: a mode only known as `boolean` yields
+ * `ExecTools | Hidden`, the honest "could be either" a non-literal flag
+ * deserves, rather than silently claiming one side.
+ */
 export type ModelTools<
   Hidden extends Record<string, Tool.Any>,
-  Enabled extends boolean,
-> = Enabled extends true ? ExecTools : Hidden;
+  Mode,
+> = Mode extends true
+  ? ExecTools
+  : Mode extends { readonly except: ReadonlyArray<string> }
+    ? ExecTools & Pick<Hidden, Except<Mode> & keyof Hidden>
+    : Hidden;
 
 /** Executor service required only by agents that enable code mode. */
-export type Requires<Enabled extends boolean> = Enabled extends true
-  ? CodeExecutor.Service
-  : never;
+export type Requires<Mode> = Mode extends false | undefined
+  ? never
+  : CodeExecutor.Service;
+
+/** Whether a mode value brokers anything at all. */
+export const isEnabled = (
+  mode: boolean | { readonly except: ReadonlyArray<string> } | undefined,
+): mode is true | { readonly except: ReadonlyArray<string> } =>
+  mode !== undefined && mode !== false;
+
+const exceptNames = (
+  mode: true | { readonly except: ReadonlyArray<string> },
+): ReadonlyArray<string> => (mode === true ? [] : mode.except);
 
 /**
  * Select the provider toolkit in lockstep with {@link ModelTools}.
  *
- * This is the single conditional boundary: the runtime boolean and the
- * conditional result type are the same `Enabled` value.
+ * This is the single conditional boundary in code mode's typing: TypeScript
+ * cannot relate a runtime branch on `mode` to the conditional
+ * `ModelTools<Hidden, Mode>`, so each branch is named for what the
+ * conditional resolves to on that branch — once, here, and nowhere
+ * downstream. The `code` builder receives the excepted names — empty for
+ * `codeMode: true` — and returns the whole visible toolkit, `exec` plus
+ * whatever stayed advertised.
  */
 export function selectToolkit<
   Hidden extends Record<string, Tool.Any>,
-  Enabled extends boolean,
+  Mode extends boolean | { readonly except: ReadonlyArray<string> },
   DirectError,
   DirectRequires,
   CodeError,
   CodeRequires,
 >(
-  enabled: Enabled | undefined,
+  mode: Mode | undefined,
   direct: () => Effect.Effect<
     Toolkit.WithHandler<Hidden>,
     DirectError,
     DirectRequires
   >,
-  code: () => Effect.Effect<
-    Toolkit.WithHandler<ExecTools>,
+  code: (
+    except: ReadonlyArray<Except<Mode> & keyof Hidden & string>,
+  ) => Effect.Effect<
+    Toolkit.WithHandler<ExecTools & Pick<Hidden, Except<Mode> & keyof Hidden>>,
     CodeError,
     CodeRequires
   >,
 ): Effect.Effect<
-  Toolkit.WithHandler<ModelTools<Hidden, Enabled>>,
+  Toolkit.WithHandler<ModelTools<Hidden, Mode>>,
   DirectError | CodeError,
   DirectRequires | CodeRequires
 >;
 export function selectToolkit<
   Hidden extends Record<string, Tool.Any>,
+  Mode extends boolean | { readonly except: ReadonlyArray<string> },
   DirectError,
   DirectRequires,
   CodeError,
   CodeRequires,
 >(
-  enabled: boolean | undefined,
+  mode: Mode | undefined,
   direct: () => Effect.Effect<
     Toolkit.WithHandler<Hidden>,
     DirectError,
     DirectRequires
   >,
-  code: () => Effect.Effect<
-    Toolkit.WithHandler<ExecTools>,
+  code: (
+    except: ReadonlyArray<Except<Mode> & keyof Hidden & string>,
+  ) => Effect.Effect<
+    Toolkit.WithHandler<ExecTools & Pick<Hidden, Except<Mode> & keyof Hidden>>,
     CodeError,
     CodeRequires
   >,
 ): Effect.Effect<
-  Toolkit.WithHandler<Hidden> | Toolkit.WithHandler<ExecTools>,
+  | Toolkit.WithHandler<Hidden>
+  | Toolkit.WithHandler<ExecTools & Pick<Hidden, Except<Mode> & keyof Hidden>>,
   DirectError | CodeError,
   DirectRequires | CodeRequires
 > {
-  return enabled === true ? code() : direct();
+  if (!isEnabled(mode)) return direct();
+  // Runtime names are plain strings; that they were drawn from the toolkit's
+  // keys is what `Option<Tools>` proved at the definition site, so the one
+  // assertion in code mode's typing names that fact here.
+  const names = exceptNames(mode) as ReadonlyArray<
+    Except<Mode> & keyof Hidden & string
+  >;
+  return code(names);
 }
 
 const jsonValue = (value: unknown, path = '$'): CodeExecutor.JsonValue => {
@@ -295,6 +358,91 @@ const catalogDescription = <Tools extends Record<string, Tool.Any>>(
     'Only values passed to text(...) are returned.',
     catalog,
   ].join('\n');
+};
+
+/**
+ * Split one resolved toolkit into the brokered half and the half that stays
+ * directly advertised.
+ *
+ * Both halves keep the original `handle`: a handle routes by name, so
+ * restricting `tools` — what the broker catalogs, what the provider seam
+ * advertises — is the whole split. A name in `except` that the toolkit does
+ * not define was already rejected by `Agent.make`, so it is ignored here
+ * rather than re-validated.
+ */
+export const split = <
+  Tools extends Record<string, Tool.Any>,
+  Names extends keyof Tools & string,
+>(
+  resolved: Toolkit.WithHandler<Tools>,
+  except: ReadonlyArray<Names>,
+): {
+  /**
+   * The brokered half, deliberately name-erased: it exists only to be
+   * wrapped into `exec`, whose catalog is a runtime rendering — precise
+   * keys here would be carried nowhere.
+   */
+  readonly hidden: Toolkit.WithHandler<Record<string, Tool.Any>>;
+  /** The advertised half, precise: these names reach the provider seam. */
+  readonly excepted: Toolkit.WithHandler<Pick<Tools, Names>>;
+} => {
+  const names = new Set<string>(except);
+  const hidden: Record<string, Tool.Any> = {};
+  const excepted: Record<string, Tool.Any> = {};
+  for (const [name, tool] of Object.entries<Tool.Any>(resolved.tools)) {
+    (names.has(name) ? excepted : hidden)[name] = tool;
+  }
+  // The excepted record was built by keeping exactly the `Names` membership
+  // its type describes; TypeScript cannot see through the loop, so it is
+  // named once here. The shared `handle` narrows the same way — a handle
+  // routes by name, and each half only advertises names the original handle
+  // serves.
+  return {
+    hidden: {
+      tools: hidden,
+      handle: resolved.handle as Toolkit.WithHandler<
+        Record<string, Tool.Any>
+      >['handle'],
+    },
+    excepted: {
+      tools: excepted as Pick<Tools, Names>,
+      handle: resolved.handle as Toolkit.WithHandler<
+        Pick<Tools, Names>
+      >['handle'],
+    },
+  };
+};
+
+/**
+ * One visible toolkit from the generated `exec` and the excepted tools.
+ *
+ * `exec` wins a name collision by construction, but there is none to win:
+ * `Agent.make` reserves the `exec` name whenever code mode is enabled.
+ */
+export const merge = <
+  Tools extends Record<string, Tool.Any>,
+  Names extends keyof Tools & string,
+>(
+  visible: Toolkit.WithHandler<ExecTools>,
+  excepted: Toolkit.WithHandler<Pick<Tools, Names>>,
+): Toolkit.WithHandler<ExecTools & Pick<Tools, Names>> => {
+  type Merged = ExecTools & Pick<Tools, Names>;
+  type AnyHandle = Toolkit.WithHandler<Record<string, Tool.Any>>['handle'];
+  const tools = {
+    ...excepted.tools,
+    ...visible.tools,
+  } as Merged;
+  // Each handle is widened once to the name-erased shape so the router can
+  // dispatch on advertised-name membership, then the router is named as the
+  // merged handle — the same membership the `tools` spread above encodes,
+  // which is what makes the final assertion true.
+  const exceptedHandle = excepted.handle as AnyHandle;
+  const visibleHandle = visible.handle as AnyHandle;
+  const route: AnyHandle = (name, params, toolCallId) =>
+    Object.hasOwn(excepted.tools, name)
+      ? exceptedHandle(name, params, toolCallId)
+      : visibleHandle(name, params, toolCallId);
+  return { tools, handle: route as Toolkit.WithHandler<Merged>['handle'] };
 };
 
 /** Build the one model-visible tool around an already gated hidden toolkit. */

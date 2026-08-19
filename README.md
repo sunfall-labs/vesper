@@ -458,6 +458,26 @@ validation rather than returning an empty string the model may not notice.
 
 Skills here are values passed to `Agent.make`; there is no discovery from disk.
 
+### Code mode
+
+`codeMode: true` replaces direct tool advertisement with one isolated `exec`
+tool: the model writes JavaScript that composes the toolkit's tools, the
+script runs in a `CodeExecutor`, and each nested call dispatches through the
+same gated toolkit an advertised call would — intercepted and metered, with
+only the script's `text(...)` output returning to the model. Enabling it puts
+`CodeExecutor.Service` on the agent's requirement channel, so a missing
+executor is a compile error like any other missing service.
+
+`codeMode: { except: ['release'] }` brokers everything _but_ the named tools,
+which stay directly advertised — gated, intercepted, metered, and, when
+marked `Tool.setNeedsApproval`, durably approvable exactly as if code mode
+were off for them. That is the intended pairing: a broad toolkit behind
+`exec` for composition, with the one or two consequential tools kept on the
+provider seam where the approval machinery lives. A brokered tool that
+requires approval is refused inside `exec` with a typed failure rather than
+silently executed, and the excepted names are checked against the toolkit at
+compile time — a misspelling is a type error, not a tool that never matches.
+
 ### Compaction and the context window
 
 Compaction replaces old history with a model-written summary. There are two

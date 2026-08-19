@@ -109,7 +109,7 @@ export interface Definition<
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
   OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
-  CodeModeEnabled extends boolean = false,
+  CodeModeOption extends CodeMode.Option<Tools> = false,
 > {
   readonly name: Name;
   /** Stable application-defined compatibility revision for durable history. */
@@ -131,7 +131,7 @@ export interface Definition<
         CompiledTools<Tools, Children, Skills, OverflowPolicy>,
         DynamicToolkit.Tools<DynamicSources>
       >,
-      CodeModeEnabled
+      CodeModeOption
     >,
     StopR
   >;
@@ -181,8 +181,15 @@ export interface Definition<
    * service requirement appears.
    */
   readonly resultOverflow?: OverflowPolicy;
-  /** Replace direct tool advertisement with the isolated `exec` tool. */
-  readonly codeMode?: CodeModeEnabled;
+  /**
+   * Broker tools behind the isolated `exec` tool. `true` brokers the whole
+   * toolkit; `{ except: [...] }` keeps the named tools directly advertised —
+   * gated, interceptable, meterable, and approvable exactly as if code mode
+   * were off for them — and brokers the rest. Names are checked against the
+   * toolkit at compile time for literal arrays, and at construction
+   * otherwise.
+   */
+  readonly codeMode?: CodeModeOption;
 }
 
 /**
@@ -758,7 +765,7 @@ export const make = <
     undefined,
   const DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
   const OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
-  const CodeModeEnabled extends boolean = false,
+  const CodeModeOption extends CodeMode.Option<Tools> = false,
 >(
   definition: Definition<
     Name,
@@ -769,7 +776,7 @@ export const make = <
     StateDefinition,
     DynamicSources,
     OverflowPolicy,
-    CodeModeEnabled
+    CodeModeOption
   > &
     CollisionFreeDefinition<Tools, Children, Skills> &
     DynamicDefinition<DynamicSources>,
@@ -781,7 +788,7 @@ export const make = <
   | ResultOverflow.Services<OverflowPolicy>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
-  | CodeMode.Requires<CodeModeEnabled>
+  | CodeMode.Requires<CodeModeOption>
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
@@ -792,7 +799,7 @@ export const make = <
   | ResultOverflow.Services<OverflowPolicy>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
-  | CodeMode.Requires<CodeModeEnabled>
+  | CodeMode.Requires<CodeModeOption>
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
@@ -804,20 +811,20 @@ export const make = <
       CompiledTools<Tools, Children, Skills, OverflowPolicy>,
       DynamicToolkit.Tools<DynamicSources>
     >,
-    CodeModeEnabled
+    CodeModeOption
   >
 > => {
   type RuntimeTools = CompiledTools<Tools, Children, Skills, OverflowPolicy>;
   type DynamicTools = DynamicToolkit.Tools<DynamicSources>;
   type RunTools = VisibleTools<RuntimeTools, DynamicTools>;
-  type ModelTools = CodeMode.ModelTools<RunTools, CodeModeEnabled>;
+  type ModelTools = CodeMode.ModelTools<RunTools, CodeModeOption>;
   type BaseRequires =
     | WithOwnHandlersForState<Tools, StateDefinition>
     | Subagent.Services<Children>
     | ResultOverflow.Services<OverflowPolicy>
     | StopR
     | DynamicToolkit.Services<DynamicSources>
-    | CodeMode.Requires<CodeModeEnabled>
+    | CodeMode.Requires<CodeModeOption>
     | (StateDefinition extends AgentState.AnyDefinition
         ? AgentState.Services<StateDefinition>
         : never);
@@ -850,6 +857,7 @@ export const make = <
     children,
     skills,
     definition.resultOverflow !== undefined,
+    definition.codeMode,
   );
   for (const child of children) {
     if (child.revision.trim() === '') {
@@ -962,25 +970,57 @@ export const make = <
             unmeteredToolNames: delegationToolNames,
             arbitration,
           }),
-        () =>
+        (except) =>
           Effect.gen(function* () {
-            const hidden = yield* ToolDispatch.gate(runToolkit, {
-              agent: definition.name,
-              conversationId: session?.conversationId,
-              interceptor,
-              runtime,
-              unmeteredToolNames: delegationToolNames,
-              arbitration,
-            });
+            const { hidden, excepted } = CodeMode.split(
+              yield* runToolkit,
+              except,
+            );
+            const hiddenGated = yield* ToolDispatch.gate(
+              Effect.succeed(hidden),
+              {
+                agent: definition.name,
+                conversationId: session?.conversationId,
+                interceptor,
+                runtime,
+                unmeteredToolNames: delegationToolNames,
+                arbitration,
+              },
+            );
             const visible = yield* CodeMode.toolkit(
-              hidden,
+              hiddenGated,
               wiring.codeState ?? CodeMode.emptyState,
             );
-            return yield* ToolDispatch.gate(Effect.succeed(visible), {
-              agent: definition.name,
-              session,
-              arbitration,
-            });
+            const visibleGated = yield* ToolDispatch.gate(
+              Effect.succeed(visible),
+              {
+                agent: definition.name,
+                session,
+                arbitration,
+              },
+            );
+            // An excepted tool is an ordinary advertised tool: it takes the
+            // same full gate the direct branch applies — durable session
+            // recording, interception, run-policy metering — while `exec`
+            // keeps its narrower session-only gate, because its nested calls
+            // were already intercepted and metered at the hidden layer. With
+            // nothing excepted the merge is with an empty half, which is
+            // today's pure-exec toolkit.
+            const exceptedGated = yield* ToolDispatch.gate(
+              Effect.succeed(excepted),
+              {
+                agent: definition.name,
+                session,
+                interceptor,
+                runtime,
+                unmeteredToolNames: delegationToolNames,
+                arbitration,
+              },
+            );
+            return CodeMode.merge<
+              RunTools,
+              CodeMode.Except<CodeModeOption> & keyof RunTools & string
+            >(visibleGated, exceptedGated);
           }),
       );
 
@@ -1671,7 +1711,10 @@ export const make = <
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
       Stream.unwrap(
         Effect.gen(function* () {
-          if (definition.codeMode === true && wiring.codeState === undefined) {
+          if (
+            CodeMode.isEnabled(definition.codeMode) &&
+            wiring.codeState === undefined
+          ) {
             const codeState = yield* CodeMode.openState(session).pipe(
               Effect.mapError(
                 (error) =>
@@ -2108,6 +2151,7 @@ const validateGeneratedToolNames = (
   children: ReadonlyArray<Child>,
   skills: ReadonlyArray<AgentSkill.Skill>,
   resultOverflow: boolean,
+  codeMode: boolean | { readonly except: ReadonlyArray<string> } | undefined,
 ): void => {
   const ownNames = new Set(Object.keys(own.tools));
   const generated = new Set<string>();
@@ -2131,6 +2175,21 @@ const validateGeneratedToolNames = (
   }
   if (skills.length > 0) reserve(AgentSkill.TOOL_NAME, 'skills');
   if (resultOverflow) reserve(ResultOverflow.TOOL_NAME, 'resultOverflow');
+  if (CodeMode.isEnabled(codeMode)) {
+    reserve(CodeMode.TOOL_NAME, 'codeMode');
+    if (codeMode !== true) {
+      // The compile-time `keyof Tools & string` check on `except` degrades
+      // to this when the array is built dynamically, the same trade
+      // `subagents`/`skills` collision checking makes.
+      for (const name of codeMode.except) {
+        if (!ownNames.has(name)) {
+          throw new Error(
+            `Agent codeMode excepts tool "${name}", but the toolkit does not define it`,
+          );
+        }
+      }
+    }
+  }
 };
 
 const stateErrorMetadata = (error: AgentState.Error) => {
