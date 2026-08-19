@@ -5,6 +5,7 @@ import { Cause, Effect, Exit, Option, Stream } from 'effect';
 import type { Response, Tool } from 'effect/unstable/ai';
 
 import { AgentEvents } from './event.js';
+import { ToolDispatch } from './dispatch.js';
 import { AgentHistory } from './internal/history.js';
 import { DurabilityError } from './conversation-error.js';
 import type { Session } from './log.js';
@@ -30,6 +31,7 @@ export const record = <Tools extends Record<string, Tool.Any>, E, R>(
         usage: { input: 0, output: 0 },
         completed: false,
         cancelled: false,
+        toolCalls: new Map(),
       };
 
       return Stream.tap(events, (event) =>
@@ -182,6 +184,17 @@ interface Pending {
   usage: Stop.Usage;
   completed: boolean;
   cancelled: boolean;
+  /**
+   * Tool calls seen this run, by provider call id.
+   *
+   * A `tool-approval-request` part names only the call it gates, not its
+   * name or parameters — those are the co-occurring `tool-call` part's,
+   * tracked here so the `ToolSuspended` record below can carry them.
+   */
+  readonly toolCalls: Map<
+    string,
+    { readonly name: string; readonly params: unknown }
+  >;
 }
 
 const flush = (pending: Pending): ReadonlyArray<ConversationRecord.Record> => {
@@ -267,6 +280,11 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
       ];
     },
     Compacted: () => [],
+    // The `ToolSuspended` record was already written per-part above, at the
+    // `tool-approval-request` that caused this. `Suspended` itself is a
+    // live-only terminal marker — see its doc in `event.ts` for why it is
+    // not a durable `Completed` record.
+    Suspended: () => [],
   });
 };
 
@@ -281,6 +299,10 @@ const partRecords = (
       pending.text += encoded.delta;
       return [];
     case 'tool-call':
+      pending.toolCalls.set(encoded.id, {
+        name: encoded.name,
+        params: encoded.params,
+      });
       return [
         ...flush(pending),
         {
@@ -309,6 +331,20 @@ const partRecords = (
           result: encoded.result,
         },
       ];
+    case 'tool-approval-request': {
+      const call = pending.toolCalls.get(encoded.toolCallId);
+      return [
+        ...flush(pending),
+        {
+          _tag: 'ToolSuspended',
+          id: LogVocabulary.ToolCallId.make(encoded.toolCallId),
+          name: call?.name ?? '',
+          wait: ToolDispatch.APPROVAL_WAIT,
+          token: encoded.approvalId,
+          request: call?.params,
+        },
+      ];
+    }
     case 'text-start':
     case 'text-end':
     case 'reasoning-start':
@@ -317,7 +353,6 @@ const partRecords = (
     case 'tool-params-start':
     case 'tool-params-delta':
     case 'tool-params-end':
-    case 'tool-approval-request':
     case 'file':
     case 'source':
     case 'response-metadata':

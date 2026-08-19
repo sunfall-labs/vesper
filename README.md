@@ -387,20 +387,32 @@ for the multiplayer composition and serialization pattern.
 and a blocking one take the same path through the loop. `streamIn` and `runIn`
 are the same two against a `Chat` the caller already holds. A run stops when
 its `stopWhen` condition holds; the default is "the model asked for no tools",
-and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`, `any`, `all`.
-`Result.outcome` distinguishes `success` from `cancelled`; `steps` counts model
-turns that actually started, so a queued cancellation can return zero while an
-in-flight cancellation preserves its partial text, usage, and one started turn.
-These are soft stops: a steer may request another turn. `runPolicy` is the hard
-boundary and cannot be overridden. Its runtime is created once per root run and
-passed into every descendant, so delegation cannot reset turn, model-call,
-token, deadline, depth, breadth, or concurrent-child accounting. Requested
-tool concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
+and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
+`toolCalledTimes`, `any`, `all`. `Result.outcome` distinguishes `success` from
+`cancelled`; `steps` counts model turns that actually started, so a queued
+cancellation can return zero while an in-flight cancellation preserves its
+partial text, usage, and one started turn. These are soft stops: a pending
+steer, or a signal backlog a turn boundary could not fully drain, outranks a
+positive stop decision for one more turn — so `Stop.maxSteps(N)` is not a hard
+ceiling once a conversation takes signal traffic. `runPolicy` is the hard
+boundary and cannot be overridden; `runPolicy.maxTurns` is the ceiling that
+holds regardless. Its runtime is created once per root run and passed into
+every descendant, so delegation cannot reset turn, model-call, token,
+deadline, depth, breadth, or concurrent-child accounting. Requested tool
+concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
+`maxInputTokens` and `maxOutputTokens` are checked after each turn's usage is
+known, not before a request is sent — there is no way to ask a provider
+whether a turn will fit a budget before making it — so a run can overshoot
+either ceiling by up to one turn's usage before the check after it fails the
+run. The limits bound cumulative spend; they do not cap any single request.
 
 Handlers attach as a method rather than a `Definition` field, mirroring
 `toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
 twice replaces the handlers rather than stacking a second set beneath them,
-which is also how `intercepting` behaves.
+which is also how `intercepting` behaves. Two interceptors that should both
+run are joined first with `Interception.compose`, which fixes their order
+explicitly — per-seam rules are on its doc comment — and hands `intercepting`
+one combined value, so attachment is still a single replace.
 
 ## Core concepts
 
@@ -454,7 +466,11 @@ long, retries the turn once against the compacted history, and is the one that
 actually saves runs. The proactive one fires from a token estimate before a
 turn that would not have fit — but only when the caller sets
 `Compaction.Policy.contextWindow`, because the loop targets the `LanguageModel`
-tag and that tag does not carry a window.
+tag and that tag does not carry a window. A policy configured without
+`contextWindow` is not an error — the reactive trigger still protects the
+run — but it means proactive compaction never fires, silently, for the whole
+run. The agent logs an `Effect.logWarning` once per run when that happens, so
+the gap shows up in logs instead of only in a postmortem.
 
 The estimate comes from `ContextWindow.Service`, a `Context.Reference` whose
 default counts four characters per token. Applications can install
@@ -674,7 +690,12 @@ consumed an instruction and stopped anyway has silently ignored it.
 It never outranks a hard run budget.
 
 Signal reads are bounded by `maxSignalsPerBoundary`; a backlog emits
-`SignalBacklog` and remains after the durable cursor for a later boundary.
+`SignalBacklog` and remains after the durable cursor for a later boundary. A
+boundary that could not fully drain its backlog **also outranks the stop
+condition** for that turn, the same way a steer does — otherwise stopping now
+would drop the undrained signals rather than let the next boundary see them.
+Between the two, `Stop.maxSteps(N)` is a soft ceiling once a conversation
+takes signal traffic; `runPolicy.maxTurns` is the one that still holds.
 Ingress rejects individual payloads over 256 KiB, but Vesper does not impose a
 conversation-wide signal count or storage quota. Authenticate and rate-limit
 public senders, and enforce retention or storage quotas at the application and
@@ -721,6 +742,50 @@ result. A match is tool name plus the provider-assigned call id, and nothing
 else. Ids are random per call in practice, so this is sound in practice and
 unfalsifiable from here; matching parameters would not help, because the log
 records decoded parameters and dispatch is handed encoded ones.
+
+### Tool approvals
+
+A tool marked with `effect/unstable/ai`'s own `Tool.setNeedsApproval` is
+suspended by `LanguageModel` before its handler is ever entered — that
+primitive is upstream, not Vesper's. Vesper's half is making the suspension
+durable: in a recorded conversation the run ends with `outcome: 'suspended'`
+and surfaces `pendingApprovals` (tool name, call id, decoded input), the
+suspension is recorded with the same `ToolSuspended`/`ToolWaitCompleted`
+family every durable wait uses, and `resolveApproval` records the decision —
+from this process or any other holding the same log.
+
+```ts
+const release = Tool.make('release', {
+  description: 'release a build to an environment',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ released: Schema.Boolean }),
+}).setNeedsApproval(true);
+
+const first = yield * conversation.run('release r1');
+if (first.outcome === 'suspended') {
+  for (const approval of first.pendingApprovals ?? []) {
+    yield * conversation.resolveApproval(approval.toolCallId, 'approve');
+  }
+}
+// No input: the decision, not a new user message, is what there is to act
+// on, so the continuation runs from durable state alone.
+const result = yield * conversation.run();
+```
+
+An approved call dispatches its handler for the first time on the next run; a
+denied call settles a refusal-style tool result without the handler ever
+running, and the model reacts to that the way it reacts to any returned tool
+failure. An undecided approval can never dispatch: a later `run` re-surfaces
+the same `suspended` result until a decision lands, a crash before the
+decision leaves exactly the recovery-index orphan described above, and
+resolving the same call twice is a typed `ApprovalResolutionError`. Unrecorded
+`agent.run` fails outright for a `needsApproval` tool — there is nowhere
+durable to record the decision such a run would wait on.
+
+This is the whole approval surface. `AgentWorkflow.wait` remains the tool for
+what it was built for — a handler that must durably wait for an arbitrary
+external event, with `WorkflowEngine` replay around it — not the entry fee
+for a yes-or-no on one tool call.
 
 ## Interception
 

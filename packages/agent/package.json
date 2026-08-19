@@ -87,6 +87,10 @@
       "types": "./dist/skill.d.ts",
       "default": "./dist/skill.js"
     },
+    "./result-overflow": {
+      "types": "./dist/result-overflow.d.ts",
+      "default": "./dist/result-overflow.js"
+    },
     "./compaction": {
       "types": "./dist/compaction.d.ts",
       "default": "./dist/compaction.js"

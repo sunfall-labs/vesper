@@ -97,6 +97,51 @@ failure is surfaced as a typed `DurabilityError` with its tagged cause,
 while resume-time missing or corrupt references remain typed compatibility
 failures.
 
+## Tool-result overflow
+
+`resultOverflow` spills a tool result over a byte threshold into an
+`AttachmentStore` instead of handing the whole thing to the model. The model
+sees a small pointer — an attachment id, byte size, content type, and a head
+preview — and a `read_attachment` tool the definition adds automatically to
+read the rest back in ranges:
+
+```ts
+import { Effect } from 'effect';
+import { AttachmentStoreMemory } from '@sunfall/vesper-attachments/layer-memory';
+
+const agent = Agent.make({
+  // ...
+  resultOverflow: { threshold: 4_096, preview: 500 },
+});
+
+const result = agent
+  .run('Summarize the build log.')
+  .pipe(Effect.provide(AttachmentStoreMemory.layer));
+```
+
+Unset — the default — is exactly today's behavior: no extra tool, no extra
+service requirement, every result reaches the model as the handler returned
+it. Set, `AttachmentStore.Service` joins `Agent.Requires` the same way a
+declared tool dependency does, so the application wires a store the same way
+it wires `LanguageModel`.
+
+Only the encoded result crosses the threshold check, so this composes with
+recording exactly as durable state does: `ToolOutcome.result` stores the
+pointer, not the payload, and a resumed conversation is rebuilt from that
+pointer. Recovering a call an earlier crashed run had already settled
+decodes a spilled result by its pointer shape rather than the tool's own
+schema — the one deliberate exception to "recovered `ToolOutcome` values
+must decode through the current tool result schema" above.
+
+The attachment itself outlives nothing on its own: `AttachmentStore` has no
+delete API, so retention and garbage collection of spilled content are the
+application's responsibility, on whatever schedule fits its store.
+
+An MCP server's result still crosses the transport as one buffered message
+before `Mcp.make`'s own `maxResultBytes` or this seam ever sees it —
+`resultOverflow` keeps an oversized result out of the model's context and the
+log, not out of the MCP client's peak memory.
+
 ## Evals
 
 `AgentEval.run` executes a real agent and captures its typed public evidence:

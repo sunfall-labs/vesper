@@ -39,6 +39,7 @@ import type { Interception } from './interception.js';
 import { DynamicToolkit } from './dynamic-toolkit.js';
 import * as AgentLog from './log.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
+import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
 import * as AgentSkill from './skill.js';
@@ -107,6 +108,7 @@ export interface Definition<
   StopR = never,
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
+  OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
   CodeModeEnabled extends boolean = false,
 > {
   readonly name: Name;
@@ -126,7 +128,7 @@ export interface Definition<
   readonly stopWhen?: Stop.StopCondition<
     CodeMode.ModelTools<
       VisibleTools<
-        CompiledTools<Tools, Children, Skills>,
+        CompiledTools<Tools, Children, Skills, OverflowPolicy>,
         DynamicToolkit.Tools<DynamicSources>
       >,
       CodeModeEnabled
@@ -167,6 +169,18 @@ export interface Definition<
   readonly runPolicy?: Partial<RunPolicy.Limits>;
   /** One optional state document, opened separately for every run. */
   readonly state?: StateDefinition;
+
+  /**
+   * Spill a tool result over this many UTF-8 bytes into the attachments
+   * service and replace it with a pointer, instead of handing the whole
+   * thing to the model. Adds a `read_attachment` tool the model uses to read
+   * the spilled content back in ranges.
+   *
+   * Unset — the default — is exactly today's behaviour: every result reaches
+   * the model and the log as the tool returned it, and no extra tool or
+   * service requirement appears.
+   */
+  readonly resultOverflow?: OverflowPolicy;
   /** Replace direct tool advertisement with the isolated `exec` tool. */
   readonly codeMode?: CodeModeEnabled;
 }
@@ -179,11 +193,20 @@ export interface Definition<
  * codec rather than a bare interface.
  */
 export const Result = Schema.Struct({
-  outcome: Schema.Literals(['success', 'cancelled']),
-  /** Concatenated text of the final turn. */
+  outcome: Schema.Literals(['success', 'cancelled', 'suspended']),
+  /** Concatenated text of the final turn. Empty when `outcome` is `suspended`. */
   text: Schema.String,
   steps: Schema.Natural,
   usage: Stop.Usage,
+  /**
+   * Tool calls durably parked on a `needsApproval` gate.
+   *
+   * Present only when `outcome` is `suspended`. Resolve each one through
+   * `Conversation.resolveApproval` and call `run` again to continue.
+   */
+  pendingApprovals: Schema.optionalKey(
+    Schema.Array(AgentEvents.PendingApproval),
+  ),
 });
 export interface Result extends Schema.Struct.Type<typeof Result.fields> {}
 
@@ -614,7 +637,11 @@ export type CompiledTools<
   Own extends Record<string, Tool.Any>,
   Children extends ReadonlyArray<Child>,
   Skills extends ReadonlyArray<AgentSkill.Skill>,
-> = Own & Subagent.Tools<Children> & AgentSkill.Tools<Skills>;
+  OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
+> = Own &
+  Subagent.Tools<Children> &
+  AgentSkill.Tools<Skills> &
+  ResultOverflow.Tools<OverflowPolicy>;
 
 /** Every statically-defined and runtime-discovered tool visible to a run. */
 export type VisibleTools<
@@ -624,32 +651,39 @@ export type VisibleTools<
 
 /**
  * Preserve the declarative capability types while assembling their runtime
- * toolkits. The overload is the construction contract: generated subagent and
- * skill toolkits are derived from the same `Children` and `Skills` values, and
- * `validateGeneratedToolNames` rejects collisions before this is called.
+ * toolkits. The overload is the construction contract: generated subagent,
+ * skill, and overflow-reader toolkits are derived from the same `Children`,
+ * `Skills`, and `resultOverflow` values, and `validateGeneratedToolNames`
+ * rejects collisions before this is called.
  */
 function mergeCompiledToolkit<
   Tools extends Record<string, Tool.Any>,
   const Children extends ReadonlyArray<Child>,
   const Skills extends ReadonlyArray<AgentSkill.Skill>,
+  const OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
 >(
   own: Toolkit.Toolkit<Tools>,
   children: Children | undefined,
   skills: Skills | undefined,
+  resultOverflow: OverflowPolicy | undefined,
   delegation: Toolkit.Any | undefined,
   loader: Toolkit.Any | undefined,
-): Toolkit.Toolkit<CompiledTools<Tools, Children, Skills>>;
+  reader: Toolkit.Any | undefined,
+): Toolkit.Toolkit<CompiledTools<Tools, Children, Skills, OverflowPolicy>>;
 function mergeCompiledToolkit(
   own: Toolkit.Any,
   _children: ReadonlyArray<Child> | undefined,
   _skills: ReadonlyArray<AgentSkill.Skill> | undefined,
+  _resultOverflow: ResultOverflow.Policy | undefined,
   delegation: Toolkit.Any | undefined,
   loader: Toolkit.Any | undefined,
+  reader: Toolkit.Any | undefined,
 ): Toolkit.Any {
   return Toolkit.merge(
     own,
     ...(delegation === undefined ? [] : [delegation]),
     ...(loader === undefined ? [] : [loader]),
+    ...(reader === undefined ? [] : [reader]),
   );
 }
 
@@ -723,6 +757,7 @@ export const make = <
   const StateDefinition extends AgentState.AnyDefinition | undefined =
     undefined,
   const DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
+  const OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
   const CodeModeEnabled extends boolean = false,
 >(
   definition: Definition<
@@ -733,6 +768,7 @@ export const make = <
     StopR,
     StateDefinition,
     DynamicSources,
+    OverflowPolicy,
     CodeModeEnabled
   > &
     CollisionFreeDefinition<Tools, Children, Skills> &
@@ -742,16 +778,18 @@ export const make = <
   Tools,
   | WithOwnHandlersForState<Tools, StateDefinition>
   | Subagent.Services<Children>
+  | ResultOverflow.Services<OverflowPolicy>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
   | CodeMode.Requires<CodeModeEnabled>
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
-  CompiledTools<Tools, Children, Skills>,
+  CompiledTools<Tools, Children, Skills, OverflowPolicy>,
   DynamicToolkit.Tools<DynamicSources>,
   | WithOwnHandlersForState<Tools, StateDefinition>
   | Subagent.Services<Children>
+  | ResultOverflow.Services<OverflowPolicy>
   | StopR
   | DynamicToolkit.Services<DynamicSources>
   | CodeMode.Requires<CodeModeEnabled>
@@ -763,19 +801,20 @@ export const make = <
   StateDefinition,
   CodeMode.ModelTools<
     VisibleTools<
-      CompiledTools<Tools, Children, Skills>,
+      CompiledTools<Tools, Children, Skills, OverflowPolicy>,
       DynamicToolkit.Tools<DynamicSources>
     >,
     CodeModeEnabled
   >
 > => {
-  type RuntimeTools = CompiledTools<Tools, Children, Skills>;
+  type RuntimeTools = CompiledTools<Tools, Children, Skills, OverflowPolicy>;
   type DynamicTools = DynamicToolkit.Tools<DynamicSources>;
   type RunTools = VisibleTools<RuntimeTools, DynamicTools>;
   type ModelTools = CodeMode.ModelTools<RunTools, CodeModeEnabled>;
   type BaseRequires =
     | WithOwnHandlersForState<Tools, StateDefinition>
     | Subagent.Services<Children>
+    | ResultOverflow.Services<OverflowPolicy>
     | StopR
     | DynamicToolkit.Services<DynamicSources>
     | CodeMode.Requires<CodeModeEnabled>
@@ -806,7 +845,12 @@ export const make = <
       );
     }
   }
-  validateGeneratedToolNames(definition.toolkit, children, skills);
+  validateGeneratedToolNames(
+    definition.toolkit,
+    children,
+    skills,
+    definition.resultOverflow !== undefined,
+  );
   for (const child of children) {
     if (child.revision.trim() === '') {
       throw new Error(`Agent "${child.name}" revision must be non-empty`);
@@ -819,13 +863,19 @@ export const make = <
     children.map((child) => Subagent.toolName(child.name)),
   );
   const loader = skills.length > 0 ? AgentSkill.loader(skills) : undefined;
+  const overflow =
+    definition.resultOverflow === undefined
+      ? undefined
+      : ResultOverflow.reader(definition.resultOverflow);
 
   const toolkit = mergeCompiledToolkit(
     definition.toolkit,
     definition.subagents,
     definition.skills,
+    definition.resultOverflow,
     delegation?.toolkit,
     loader?.toolkit,
+    overflow?.toolkit,
   );
 
   // The skill catalog joins the system prompt: a model cannot ask for a
@@ -847,6 +897,23 @@ export const make = <
       ? undefined
       : (definition.compaction ?? Compaction.defaultPolicy);
 
+  // A policy without `contextWindow` compiles and runs; it just never
+  // proactively compacts, because `compactAhead` below has nothing to compare
+  // an estimate against. That is silent by construction — the run looks
+  // identical to one that never overflows, right up until it does — so it is
+  // logged once per run rather than left for someone to notice in a postmortem.
+  const compactionWarning =
+    compaction !== undefined && compaction.contextWindow === undefined
+      ? Effect.logWarning(
+          'Proactive compaction is inactive: Compaction.Policy.contextWindow is not set. Without it there is no context-window ceiling to estimate against, so this agent only compacts reactively, after a provider rejects a prompt as too long. Set contextWindow to enable proactive compaction.',
+        ).pipe(
+          Effect.annotateLogs({
+            'vesper.component': 'compaction',
+            'vesper.agent.name': definition.name,
+          }),
+        )
+      : Effect.void;
+
   // Everything below is built per run wiring rather than once per agent, which
   // is the shape Phases 5, 6 and 7 all needed. Four things vary with it: the
   // toolkit a turn dispatches through, whether the loop drains signals,
@@ -864,8 +931,16 @@ export const make = <
       instructions,
       wiring.dynamicToolkit,
     );
-    const runToolkit = Effect.map(toolkit, (staticallyDefined) =>
-      withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
+    // Oversized results are spilled before the log or the interceptor ever
+    // see them, so `gate`'s recording and `resolveIndeterminate`'s recovery
+    // — both consumers of this same `runToolkit` — see only the pointer, not
+    // the payload it stands in for. See `result-overflow.ts` for why a
+    // storage failure here is a defect rather than a typed tool failure.
+    const runToolkit = ResultOverflow.wrap(
+      definition.resultOverflow,
+      Effect.map(toolkit, (staticallyDefined) =>
+        withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
+      ),
     );
 
     // A `Toolkit` already *is* an `Effect` producing a resolved toolkit, and
@@ -917,6 +992,7 @@ export const make = <
         ? Layer.empty
         : delegation.layer(session, runtime),
       loader === undefined ? Layer.empty : loader.layer,
+      overflow === undefined ? Layer.empty : overflow.layer,
     );
     const layer =
       definition.state === undefined
@@ -1006,10 +1082,14 @@ export const make = <
                       Effect.map((encodedPart) => ({ part, encodedPart })),
                     ),
               ),
-              Stream.tap(({ encodedPart }) =>
+              Stream.tap(({ part, encodedPart }) =>
                 Effect.gen(function* () {
                   seen.started = true;
-                  observe(seen, encodedPart);
+                  observe(
+                    seen,
+                    part as Response.StreamPart<RunTools>,
+                    encodedPart,
+                  );
                   if (encodedPart.type === 'finish') {
                     yield* Observability.usage(encodedPart.usage);
                   }
@@ -1164,6 +1244,7 @@ export const make = <
     const turn = (
       chat: Chat.Service,
       usage: Ref.Ref<Stop.Usage>,
+      toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
       lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
       step: number,
       pending: Prompt.RawInput,
@@ -1323,6 +1404,10 @@ export const make = <
               const totals = yield* Ref.updateAndGet(usage, (current) =>
                 addUsage(current, seen.usage),
               );
+              const toolCallTotals = yield* Ref.updateAndGet(
+                toolCallCounts,
+                (current) => addToolCallCounts(current, seen.toolCalls),
+              );
               if (runtime !== undefined && seen.usage !== undefined) {
                 const accounted = yield* Effect.exit(
                   runtime.addUsage({
@@ -1421,15 +1506,38 @@ export const make = <
                 step,
                 toolCalls: seen.toolCalls,
                 usage: totals,
+                toolCallCounts: toolCallTotals,
               });
 
-              // A steer outranks the stop condition for one more turn,
-              // including a step ceiling. The ceiling is a runaway-loop guard
-              // and a steer is a person asking for more work; stopping anyway
-              // would consume the instruction and ignore it, which is the one
-              // outcome nobody can debug. A cancel outranks everything.
+              // A tool this turn called requires approval that is not yet
+              // durably decided. Nothing productive can follow: the model
+              // cannot be asked again with an unanswered tool call in its own
+              // last turn, so this outranks a steer exactly like a cancel
+              // does. Unlike a cancel, it needs somewhere durable to resolve
+              // from — an unrecorded run has nowhere to record the decision
+              // this would wait on, so it fails outright instead of
+              // returning a `Result` nothing can ever act on.
+              const pendingApprovals = seen.pendingApprovals;
+              if (pendingApprovals.length > 0 && session === undefined) {
+                return Stream.fail(
+                  approvalRequiresConversationError(pendingApprovals),
+                );
+              }
+
+              // A steer, or a signal backlog this boundary could not fully
+              // drain, outranks the stop condition for one more turn,
+              // including a step ceiling — `Stop.maxSteps` is not a hard
+              // ceiling once a run takes signal traffic; `runPolicy.maxTurns`
+              // is. The ceiling is a runaway-loop guard and a steer is a
+              // person asking for more work; stopping anyway would consume
+              // the instruction and ignore it, which is the one outcome
+              // nobody can debug. A backlog is the same shape: it means more
+              // signals are already waiting, so stopping now would drop them
+              // on the floor rather than let the next boundary see them. A
+              // cancel outranks everything.
               const stop =
                 cancelled ||
+                pendingApprovals.length > 0 ||
                 (wanted && steers.length === 0 && !drained.backlog);
               const completedSteps = seen.started ? step : step - 1;
 
@@ -1437,12 +1545,25 @@ export const make = <
                 ? Stream.concat(
                     announced,
                     Stream.make(
-                      AgentEventRuntime.completed(
-                        seen.text,
-                        completedSteps,
-                        totals,
-                        cancelled ? 'cancelled' : 'success',
-                      ),
+                      cancelled
+                        ? AgentEventRuntime.completed(
+                            seen.text,
+                            completedSteps,
+                            totals,
+                            'cancelled',
+                          )
+                        : pendingApprovals.length > 0
+                          ? AgentEventRuntime.suspended(
+                              completedSteps,
+                              totals,
+                              pendingApprovals,
+                            )
+                          : AgentEventRuntime.completed(
+                              seen.text,
+                              completedSteps,
+                              totals,
+                              'success',
+                            ),
                     ),
                   )
                 : Stream.concat(
@@ -1453,6 +1574,7 @@ export const make = <
                     turn(
                       chat,
                       usage,
+                      toolCallCounts,
                       lastTurn,
                       step + 1,
                       steeringInput(steers),
@@ -1767,6 +1889,51 @@ export const make = <
                       ),
                     );
                   }
+
+                  // `resolveIndeterminate` settles every durable approval this
+                  // session already has a decision for, but it does not — and
+                  // must not — invent one for a call still waiting on
+                  // `Conversation.resolveApproval`. Re-check by identity
+                  // rather than trusting `suspendedToolCalls`, which is the
+                  // snapshot from when this session opened: the recovery
+                  // index it is read through here is the same one
+                  // `resolveIndeterminate` just updated.
+                  //
+                  // `input` here is `ToolSuspended.request` — the toolkit's
+                  // encoded form, the only one durable at this point — rather
+                  // than the freshly decoded value the first suspension
+                  // surfaced. They agree for any parameter schema without a
+                  // custom transform, which is the ordinary case; a caller
+                  // that needs the exact decoded value can always decode
+                  // `request` again against the tool's own schema.
+                  const stillPendingApprovals: AgentEvents.PendingApproval[] =
+                    session.suspendedToolCalls.flatMap((call) => {
+                      if (call.wait !== ToolDispatch.APPROVAL_WAIT) return [];
+                      const current = session.recovery(
+                        call.name,
+                        call.toolCallId,
+                      );
+                      return Option.isSome(current) &&
+                        current.value._tag === 'Suspended'
+                        ? [
+                            {
+                              toolCallId: call.toolCallId,
+                              toolName: call.name,
+                              input: call.request,
+                            },
+                          ]
+                        : [];
+                    });
+                  if (stillPendingApprovals.length > 0) {
+                    return Stream.make(
+                      AgentEventRuntime.suspended(
+                        0,
+                        wiring.initialUsage ?? { input: 0, output: 0 },
+                        stillPendingApprovals,
+                      ),
+                    );
+                  }
+
                   yield* Ref.set(
                     chat.history,
                     Prompt.concat(
@@ -1808,14 +1975,24 @@ export const make = <
               WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
             >;
           }
+          // The only point every path above funnels through exactly once
+          // before a run's first turn — including dynamic-toolkit resolution,
+          // runtime creation, and signal recovery, which each re-enter this
+          // function and return before reaching here. That makes it the one
+          // place left to log the misconfiguration once per run rather than
+          // once per proactive-compaction check.
+          yield* compactionWarning;
           const usage = yield* Ref.make<Stop.Usage>(
             wiring.initialUsage ?? { input: 0, output: 0 },
           );
+          const toolCallCounts = yield* Ref.make<
+            Readonly<Record<string, number>>
+          >({});
           const lastTurn = yield* Ref.make<ContextWindow.TurnUsage | undefined>(
             wiring.lastTurn,
           );
           const remaining = yield* runtime.remainingMillis;
-          return turn(chat, usage, lastTurn, 1, input).pipe(
+          return turn(chat, usage, toolCallCounts, lastTurn, 1, input).pipe(
             Stream.interruptWhen(
               Effect.sleep(remaining).pipe(
                 Effect.andThen(
@@ -1885,6 +2062,7 @@ const validateGeneratedToolNames = (
   own: Toolkit.Any,
   children: ReadonlyArray<Child>,
   skills: ReadonlyArray<AgentSkill.Skill>,
+  resultOverflow: boolean,
 ): void => {
   const ownNames = new Set(Object.keys(own.tools));
   const generated = new Set<string>();
@@ -1907,6 +2085,7 @@ const validateGeneratedToolNames = (
     reserve(Subagent.toolName(child.name), `subagent "${child.name}"`);
   }
   if (skills.length > 0) reserve(AgentSkill.TOOL_NAME, 'skills');
+  if (resultOverflow) reserve(ResultOverflow.TOOL_NAME, 'resultOverflow');
 };
 
 const stateErrorMetadata = (error: AgentState.Error) => {
@@ -2480,7 +2659,7 @@ const fromParts = <
                       session,
                     ),
                   )
-                : Effect.succeed(completed);
+                : Effect.succeed<Result>(completed);
             }),
           ),
   };
@@ -2493,6 +2672,10 @@ interface TurnState {
   usage: Response.FinishPartEncoded['usage'] | undefined;
   emitted: boolean;
   started: boolean;
+  /** Decoded call params seen this turn, keyed by tool call id. */
+  callsById: Map<string, { readonly name: string; readonly input: unknown }>;
+  /** `tool-approval-request` parts observed this turn, in provider order. */
+  pendingApprovals: AgentEvents.PendingApproval[];
 }
 
 const emptyTurnState = (): TurnState => ({
@@ -2501,19 +2684,49 @@ const emptyTurnState = (): TurnState => ({
   usage: undefined,
   emitted: false,
   started: false,
+  callsById: new Map(),
+  pendingApprovals: [],
 });
 
-const observe = (state: TurnState, part: Response.StreamPartEncoded): void => {
+/**
+ * Accumulate what the stop decision and the result need from one turn.
+ *
+ * Takes both the decoded and encoded sibling of the same part: `encoded` is
+ * what every existing accumulation here reads, and a `tool-approval-request`
+ * carries no parameters of its own — the params worth showing an approver are
+ * the same tool call's decoded ones, tracked from `decoded` as calls stream
+ * by and looked up when the matching approval request arrives.
+ */
+const observe = <Tools extends Record<string, Tool.Any>>(
+  state: TurnState,
+  decoded: Response.StreamPart<Tools>,
+  encoded: Response.StreamPartEncoded,
+): void => {
   state.emitted = true;
-  switch (part.type) {
+  switch (encoded.type) {
     case 'text-delta':
-      state.text += part.delta;
+      state.text += encoded.delta;
       break;
     case 'tool-call':
-      state.toolCalls.push(part);
+      state.toolCalls.push(encoded);
+      if (decoded.type === 'tool-call') {
+        state.callsById.set(decoded.id, {
+          name: decoded.name,
+          input: decoded.params,
+        });
+      }
       break;
+    case 'tool-approval-request': {
+      const call = state.callsById.get(encoded.toolCallId);
+      state.pendingApprovals.push({
+        toolCallId: encoded.toolCallId,
+        toolName: call?.name ?? '',
+        input: call?.input,
+      });
+      break;
+    }
     case 'finish':
-      state.usage = part.usage;
+      state.usage = encoded.usage;
       break;
     default:
       break;
@@ -2665,6 +2878,28 @@ const encodePart = <Tools extends Record<string, Tool.Any>>(
   }
 };
 
+const approvalRequiresConversationError = (
+  pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
+): AiError.AiError =>
+  new AiError.AiError({
+    module: 'Agent',
+    method: 'run',
+    reason: new AiError.InvalidRequestError({
+      description:
+        `Tool call${pendingApprovals.length === 1 ? '' : 's'} ` +
+        `${pendingApprovals.map((approval) => `"${approval.toolName}" (${approval.toolCallId})`).join(', ')} ` +
+        'require approval, which can only be resolved durably. Bind this ' +
+        'agent to a Conversation and call Conversation.resolveApproval ' +
+        'instead of running it directly.',
+      metadata: {
+        pendingApprovals: pendingApprovals.map((approval) => ({
+          toolCallId: approval.toolCallId,
+          toolName: approval.toolName,
+        })),
+      },
+    }),
+  });
+
 const normalizeProviderError = (
   error: unknown,
   partMetadata?: Record<string, unknown> | undefined,
@@ -2757,5 +2992,23 @@ const addStopUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
   input: left.input + right.input,
   output: left.output + right.output,
 });
+
+const addToolCallCounts = (
+  current: Readonly<Record<string, number>>,
+  calls: ReadonlyArray<Response.ToolCallPartEncoded>,
+): Readonly<Record<string, number>> => {
+  if (calls.length === 0) return current;
+  // Tool names here come from the model's response, not the toolkit — a call
+  // to a nonexistent tool still lands in `toolCalls` — so `__proto__` is a
+  // possible key. On a default-prototype object that assignment hits the
+  // inherited accessor and silently drops the count; a null-prototype object
+  // makes it an ordinary own property.
+  const next: Record<string, number> = Object.create(null);
+  Object.assign(next, current);
+  for (const call of calls) {
+    next[call.name] = (next[call.name] ?? 0) + 1;
+  }
+  return next;
+};
 
 export * as Agent from './agent.js';

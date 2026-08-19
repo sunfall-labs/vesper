@@ -4,10 +4,32 @@ import { Effect, Option, Ref } from 'effect';
 
 import { AgentBranch } from './branch.js';
 
+/**
+ * The reserved `ToolSuspended.wait` name for a tool's own `needsApproval`
+ * gate, as opposed to an application-defined `AgentWorkflow.wait`.
+ *
+ * A durable approval never runs `AgentWorkflow.wait`'s handler-resumption
+ * replay: the call is suspended by `effect/unstable/ai`'s `LanguageModel`
+ * *before* any handler is entered, so its `ToolSuspended` has no matching
+ * `ToolStarted` — the one shape {@link fold} otherwise treats as corruption.
+ * Resuming it means either genuinely dispatching the handler for the first
+ * time (approved) or settling a refusal without ever entering it (denied);
+ * see `dispatch.ts`'s `resolveIndeterminate` for where that decision is
+ * made. Declared here, and re-exported from `dispatch.ts`, because this is
+ * the fold that has to know about it.
+ */
+export const APPROVAL_WAIT = '@sunfall/vesper-agent/approval';
+
 /** How a tool call ended, as a previous run recorded it. */
 export interface Settled {
   readonly outcome: 'success' | 'failure';
   /** The encoded result, in the form the provider was shown. */
+  readonly result: unknown;
+}
+
+/** What an external actor durably decided for one wait's token. */
+export interface CompletedWait {
+  readonly outcome: 'success' | 'failure';
   readonly result: unknown;
 }
 
@@ -42,7 +64,7 @@ export interface SuspendedToolCall extends IndeterminateToolCall {
 
 export interface Snapshot {
   readonly recoveries: Map<string, Recovery>;
-  readonly completedWaitTokens: ReadonlySet<string>;
+  readonly completedWaitOutcomes: ReadonlyMap<string, CompletedWait>;
   readonly pending: ReadonlyArray<IndeterminateToolCall>;
   readonly indeterminate: ReadonlyArray<IndeterminateToolCall>;
   readonly suspended: ReadonlyArray<SuspendedToolCall>;
@@ -69,7 +91,7 @@ export const fold = (
     { readonly name: string; readonly id: string }
   >();
   const order: string[] = [];
-  const completedWaitTokens = new Set<string>();
+  const completedWaitOutcomes = new Map<string, CompletedWait>();
   let running = false;
 
   const foldRecord = ConversationRecord.Record.match({
@@ -80,7 +102,7 @@ export const fold = (
       recoveries.clear();
       calls.clear();
       starts.clear();
-      completedWaitTokens.clear();
+      completedWaitOutcomes.clear();
       order.length = 0;
       running = false;
     },
@@ -114,7 +136,12 @@ export const fold = (
       }
     },
     ToolWaitCompleted: (record) => {
-      if (running) completedWaitTokens.add(record.token);
+      if (running) {
+        completedWaitOutcomes.set(record.token, {
+          outcome: record.outcome,
+          result: record.result,
+        });
+      }
     },
     ToolWaitRestarted: (record) => {
       if (running) {
@@ -157,12 +184,16 @@ export const fold = (
   })?.[1];
   const unmatchedSuspension = [...recoveries].flatMap(
     ([key, recovery]): ReadonlyArray<SuspendedRecovery> =>
-      recovery._tag === 'Suspended' && !starts.has(key) ? [recovery] : [],
+      recovery._tag === 'Suspended' &&
+      recovery.wait !== APPROVAL_WAIT &&
+      !starts.has(key)
+        ? [recovery]
+        : [],
   )[0];
 
   return {
     recoveries,
-    completedWaitTokens,
+    completedWaitOutcomes,
     corruption:
       unmatchedSuspension !== undefined
         ? `Cannot recover suspended wait ${unmatchedSuspension.wait}: ` +
@@ -214,6 +245,8 @@ export interface Tracker {
   readonly recoveryCorruption: string | undefined;
   /** Whether this wait result is already present in the conversation audit. */
   readonly hasCompletedWait: (token: string) => boolean;
+  /** The durable decision recorded for one wait's token, if any. */
+  readonly completedWait: (token: string) => Option.Option<CompletedWait>;
   /** Distinguish an intentional durable wait from an unsafe orphan. */
   readonly pendingToolState: Effect.Effect<PendingToolState>;
   readonly hasPendingToolCalls: Effect.Effect<boolean>;
@@ -250,7 +283,7 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       ),
     );
     const callbacks = new Map<string, Array<Effect.Effect<void>>>();
-    const completedWaitTokens = new Set(snapshot.completedWaitTokens);
+    const completedWaitOutcomes = new Map(snapshot.completedWaitOutcomes);
 
     // These matchers close over the tracker state, not an individual append,
     // so build them once per session rather than once per tracked batch.
@@ -269,7 +302,10 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
         });
       },
       ToolWaitCompleted: (record) => {
-        completedWaitTokens.add(record.token);
+        completedWaitOutcomes.set(record.token, {
+          outcome: record.outcome,
+          result: record.result,
+        });
       },
       ToolWaitRestarted: (record) => {
         recoveries.set(settledKey(record.name, record.id), {
@@ -389,7 +425,9 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       indeterminateToolCalls: snapshot.indeterminate,
       suspendedToolCalls: snapshot.suspended,
       recoveryCorruption: snapshot.corruption,
-      hasCompletedWait: (token) => completedWaitTokens.has(token),
+      hasCompletedWait: (token) => completedWaitOutcomes.has(token),
+      completedWait: (token) =>
+        Option.fromNullishOr(completedWaitOutcomes.get(token)),
       pendingToolState: Effect.map(Ref.get(pending), (current) => {
         if (current.size === 0) return 'none';
         for (const key of current) {

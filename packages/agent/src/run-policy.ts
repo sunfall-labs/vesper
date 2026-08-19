@@ -35,7 +35,21 @@ export interface Limits {
   readonly maxConcurrentChildren: number;
   readonly maxToolConcurrency: number;
   readonly wallClockMillis: number;
+  /**
+   * Cumulative input tokens a run may spend, checked after each turn's usage
+   * is known rather than before it is requested. There is no way to ask a
+   * provider "would this turn fit the budget" before sending it, so a run can
+   * overshoot this ceiling by up to one turn's input before the next check
+   * fails it — the limit bounds spend, it does not cap any single request.
+   */
   readonly maxInputTokens: number;
+  /**
+   * Cumulative output tokens a run may spend, checked after each turn's usage
+   * is known rather than before it is requested. One large response can push
+   * the total past this ceiling before the check after it fails the run, for
+   * the same reason {@link maxInputTokens} can overshoot: usage is only known
+   * once the provider reports it.
+   */
   readonly maxOutputTokens: number;
   readonly maxSignalBytes: number;
   readonly maxSignalsPerBoundary: number;

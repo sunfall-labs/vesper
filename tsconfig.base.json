@@ -46,6 +46,9 @@
       "@sunfall/vesper-agent/state": ["./packages/agent/src/state.ts"],
       "@sunfall/vesper-agent/testing": ["./packages/agent/src/testing.ts"],
       "@sunfall/vesper-agent/skill": ["./packages/agent/src/skill.ts"],
+      "@sunfall/vesper-agent/result-overflow": [
+        "./packages/agent/src/result-overflow.ts"
+      ],
       "@sunfall/vesper-agent/compaction": [
         "./packages/agent/src/compaction.ts"
       ],

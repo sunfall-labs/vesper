@@ -7,9 +7,11 @@ import type { Prompt } from 'effect/unstable/ai';
 
 import { Agent } from './agent.js';
 import {
+  ApprovalResolutionError,
   CompatibilityError,
   SuspendedConversationError,
 } from './conversation-error.js';
+import { ToolDispatch } from './dispatch.js';
 import type { AgentEvents } from './event.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
@@ -74,9 +76,16 @@ export interface Instance<
 > {
   /** Stable durable identity shared by runs, records, and signals. */
   readonly id: LogVocabulary.ConversationId;
-  /** Continue this conversation, starting it when no durable history exists. */
+  /**
+   * Continue this conversation, starting it when no durable history exists.
+   *
+   * Omitting `input` continues from durable state alone without appending a
+   * user message — the shape a run suspended on a tool approval resumes with
+   * after {@link resolveApproval}, where the decision, not a new prompt, is
+   * what there is to act on.
+   */
   readonly run: (
-    input: Prompt.RawInput,
+    input?: Prompt.RawInput,
   ) => Effect.Effect<
     Agent.Result,
     Error<A>,
@@ -84,7 +93,7 @@ export interface Instance<
   >;
   /** Stream the same durable continuation that {@link run} folds. */
   readonly stream: (
-    input: Prompt.RawInput,
+    input?: Prompt.RawInput,
   ) => Stream.Stream<
     AgentEvents.ObservedEvent<Agent.Tools<A>>,
     Error<A>,
@@ -159,6 +168,30 @@ export interface Instance<
     LogStore.LogStoreError,
     LogStore.Service | Crypto.Crypto
   >;
+  /**
+   * Durably decide one tool call this conversation suspended on a
+   * `needsApproval` gate.
+   *
+   * Records the decision and returns; it does not itself dispatch the tool
+   * or resolve the run. The next `run` (or `stream`) picks it up: approved
+   * dispatches the handler for the first time, denied settles a
+   * refusal-style tool result without ever entering it. Call it again for
+   * the same `toolCallId` and it fails with {@link ApprovalResolutionError}
+   * rather than silently applying — or discarding — a second decision.
+   */
+  readonly resolveApproval: (
+    toolCallId: string,
+    decision: 'approve' | 'deny',
+    reason?: string,
+  ) => Effect.Effect<
+    void,
+    | ApprovalResolutionError
+    | CompatibilityError
+    | SuspendedConversationError
+    | AgentLog.DurabilityError
+    | LogStore.LogStoreError,
+    LogStore.Service | Crypto.Crypto
+  >;
 }
 
 const bind = <A extends ConcreteAgent, PolicyRequires = never>(
@@ -190,8 +223,8 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
     );
   return {
     id,
-    run: (input) => foldToResult(streamFrom(input)),
-    stream: (input) => streamFrom(input),
+    run: (input) => foldToResult(streamFrom(input ?? [])),
+    stream: (input) => streamFrom(input ?? []),
     branchFrom: (at, input, options) =>
       foldToResult(
         streamFrom(input, {
@@ -219,6 +252,54 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
     followWaits: (after) =>
       AgentLog.follow(id, after).pipe(Stream.filter(isWaitEnvelope)),
     send: (signal) => appendSignal(id, signal),
+    resolveApproval: (toolCallId, decision, reason) =>
+      Effect.gen(function* () {
+        const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
+        const session = yield* AgentLog.open(id, {
+          compatibility: { agent: agent.name, revision: agent.revision },
+        });
+        const suspended = session.suspendedToolCalls.find(
+          (call) =>
+            call.toolCallId === normalizedId &&
+            call.wait === ToolDispatch.APPROVAL_WAIT,
+        );
+        if (suspended === undefined) {
+          return yield* new ApprovalResolutionError({
+            message: `No tool call ${normalizedId} is durably waiting for approval in conversation ${id}`,
+            conversationId: id,
+            toolCallId: normalizedId,
+            reason: 'not_found',
+          });
+        }
+        if (session.hasCompletedWait(suspended.token)) {
+          return yield* new ApprovalResolutionError({
+            message: `Tool call ${normalizedId} in conversation ${id} was already resolved`,
+            conversationId: id,
+            toolCallId: normalizedId,
+            reason: 'already_resolved',
+          });
+        }
+        yield* session.append([
+          {
+            _tag: 'ToolWaitCompleted',
+            id: normalizedId,
+            name: suspended.name,
+            wait: ToolDispatch.APPROVAL_WAIT,
+            token: suspended.token,
+            outcome: decision === 'approve' ? 'success' : 'failure',
+            // Mirrors `Response`'s own `{type:'execution-denied', reason}`
+            // shape for a denied approval — see `dispatch.ts`'s
+            // `resolveIndeterminate`, which copies this straight into the
+            // refusal `ToolOutcome` the model is shown. Unused on approval;
+            // what runs the tool for real is the handler dispatch that
+            // follows, not this record.
+            result:
+              decision === 'approve'
+                ? null
+                : { type: 'approval-denied', reason },
+          },
+        ]);
+      }),
   };
 };
 
