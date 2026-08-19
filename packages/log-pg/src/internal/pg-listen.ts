@@ -42,7 +42,6 @@ const clientConfig = (config: PgClient.PgPoolConfig): ClientConfig => ({
       ? Duration.toMillis(Duration.fromInputUnsafe(config.connectTimeout))
       : undefined,
   application_name: config.applicationName ?? '@sunfall/vesper-log-pg-listener',
-  types: config.types,
 });
 
 /** The listener lifecycle surface used here, kept small enough to fake fully. */

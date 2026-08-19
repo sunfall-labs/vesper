@@ -356,9 +356,6 @@
     "effecttsgo/redundant-or-die": {
       "count": 1
     },
-    "typescript/no-unnecessary-condition": {
-      "count": 1
-    },
     "typescript/no-unsafe-argument": {
       "count": 1
     },
@@ -538,9 +535,6 @@
   "packages/log-pg/src/internal/pg-listen.ts": {
     "effecttsgo/async-function": {
       "count": 2
-    },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
     }
   },
   "packages/log-pg/src/layer.ts": {

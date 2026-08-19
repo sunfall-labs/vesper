@@ -475,7 +475,7 @@ describe('Conversation.records', () => {
           yield* conversation.run('hi').pipe(Effect.orDie);
           const written = yield* readAll();
 
-          const offset = written[3]?.offset;
+          const offset = written.at(3)?.offset;
           if (offset === undefined) {
             throw new Error('missing resume offset');
           }
