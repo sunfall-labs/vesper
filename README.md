@@ -388,8 +388,8 @@ and a blocking one take the same path through the loop. `streamIn` and `runIn`
 are the same two against a `Chat` the caller already holds. A run stops when
 its `stopWhen` condition holds; the default is "the model asked for no tools",
 and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
-`toolCalledTimes`, `any`, `all`. `Result.outcome` distinguishes `success` from
-`cancelled`; `steps` counts model turns that actually started, so a queued
+`toolCalledTimes`, `any`, `all`. `Result.outcome` is `success`, `cancelled`, or `suspended` — a tool call
+durably waiting on approval, covered in [Tool approvals](#tool-approvals); `steps` counts model turns that actually started, so a queued
 cancellation can return zero while an in-flight cancellation preserves its
 partial text, usage, and one started turn. These are soft stops: a pending
 steer, or a signal backlog a turn boundary could not fully drain, outranks a
@@ -785,7 +785,10 @@ durable to record the decision such a run would wait on.
 This is the whole approval surface. `AgentWorkflow.wait` remains the tool for
 what it was built for — a handler that must durably wait for an arbitrary
 external event, with `WorkflowEngine` replay around it — not the entry fee
-for a yes-or-no on one tool call.
+for a yes-or-no on one tool call. The
+[agent guide](packages/agent/README.md#tool-approval) covers the record-level
+mechanism, and [Durable approval locally](#durable-approval-locally) below
+demonstrates the `AgentWorkflow`-backed alternative.
 
 ## Interception
 
@@ -870,10 +873,16 @@ nub run example:approval-cli
 ```
 
 `examples/approval-cli` needs no API key. A scripted agent asks its release
-tool to change production; the handler yields one keyed durable approval, the
-CLI lets you approve or deny it, and the same handler resumes before the agent
-reacts to the result. For a non-interactive run, use
-`nub run example:approval-cli --decision approve` or `--decision deny`.
+tool to change production; the handler yields one keyed durable approval
+through `AgentWorkflow.wait`, the CLI lets you approve or deny it, and the
+same handler resumes before the agent reacts to the result. For a
+non-interactive run, use `nub run example:approval-cli --decision approve` or
+`--decision deny`.
+
+This is the `Effect Workflow`-backed form, for an external step with its own
+request/result shape. For a plain approve/deny gate on one tool, with no
+workflow engine at all, see [Tool
+approval](packages/agent/README.md#tool-approval).
 
 ### Real providers
 

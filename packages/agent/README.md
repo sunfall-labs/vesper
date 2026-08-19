@@ -13,8 +13,10 @@ Child sessions validate against the child definition, not the parent revision.
 Compatibility failures use the tagged `Conversation.CompatibilityError`
 channel, included by `Conversation.Error<A>` alongside the agent and store
 failures for that bound definition.
-`Agent.Result.outcome` is `success` or `cancelled`, and `steps` counts model
-turns that actually started rather than planned turn boundaries.
+`Agent.Result.outcome` is `success`, `cancelled`, or `suspended` (a durable
+tool approval is still waiting on a decision; see [Tool
+approval](#tool-approval)), and `steps` counts model turns that actually
+started rather than planned turn boundaries.
 
 ```bash
 npm install @sunfall/vesper-agent effect@4.0.0-rc.109
@@ -270,6 +272,57 @@ schema-tagged `AgentState.Error` union: `StateDefinitionError`,
 Direct state operations expose this error. Declare `failure: AgentState.Error`
 when a tool handler lets mutation failures escape; state failures are never
 converted to defects.
+
+## Tool approval
+
+Mark a tool with `effect/unstable/ai`'s own option — not a Vesper one:
+
+```ts
+const release = Tool.make('release', {
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ released: Schema.Boolean }),
+}).setNeedsApproval(true); // or a function of (params, context)
+```
+
+When the model calls it, `LanguageModel` suspends before the handler is ever
+entered and emits a `tool-approval-request` part instead of dispatching. A
+recorded run turns that into a durable `ToolSuspended` — the same record
+family `AgentWorkflow.wait` uses below — and ends with `Result.outcome ===
+'suspended'` and `pendingApprovals: { toolCallId, toolName, input }[]`. No
+Effect Workflow, no `AgentWorkflow.durable`, and the handler has not run.
+
+```ts
+const result = yield * conversation.run('release r1');
+// result.outcome === 'suspended'
+// result.pendingApprovals === [{ toolCallId, toolName: 'release', input: { id: 'r1' } }]
+
+yield * conversation.resolveApproval(toolCallId, 'approve');
+// or: conversation.resolveApproval(toolCallId, 'deny', 'not this week')
+
+const after = yield * conversation.run('release r1');
+// after.outcome === 'success'
+```
+
+`resolveApproval` only records the decision; it does not itself dispatch.
+The next `run` (or `stream`) picks it up: approved genuinely dispatches the
+handler for the first time, denied settles a refusal `ToolOutcome` — an
+encoded `AiError`, the same shape `failureMode: 'return'` already uses for a
+framework-level failure — without ever entering the handler. Calling it
+again for the same `toolCallId` fails with typed
+`Conversation.ApprovalResolutionError` instead of silently applying, or
+discarding, a second decision. Asking again before it is resolved (another
+`run` call) re-surfaces the same `pendingApprovals` rather than calling the
+model with an unanswered tool call.
+
+An unrecorded `agent.run(...)` fails outright with a typed `AiError` instead
+of returning a suspension nothing can ever resolve — approval requires a
+`Conversation`.
+
+Reach for `AgentWorkflow.wait` instead when the external step is not a plain
+human approve/deny — a webhook, a job, anything with its own typed request
+and result — or when the handler needs to do other durable work around the
+wait. Tool approval is the special case that needed no workflow engine at
+all.
 
 ## Effect Workflow
 

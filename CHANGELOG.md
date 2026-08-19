@@ -13,8 +13,11 @@ entry should state compatibility impact and migration guidance when applicable.
   refusal-style result without entering the handler (denied). An undecided
   approval can never dispatch, and resolving the same call twice is a typed
   `ApprovalResolutionError`. Unrecorded `agent.run` fails outright for a
-  `needsApproval` tool. Additive; `AgentWorkflow.wait` is unchanged and
-  remains the path for arbitrary durable waits inside handlers.
+  `needsApproval` tool. Additive: `Result.outcome` is a strictly wider
+  union, and no existing record, method, or export changed shape.
+  `AgentWorkflow.wait` is unchanged and remains the path for arbitrary
+  durable waits inside handlers. See
+  [Tool approval](packages/agent/README.md#tool-approval).
 - `Conversation.run` and `Conversation.stream` now accept no input, meaning
   "continue from durable state without appending a user message" — the shape
   a suspended run resumes with after `resolveApproval`. Additive.
