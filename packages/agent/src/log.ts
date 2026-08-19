@@ -981,6 +981,9 @@ const openWith = (
     const state = yield* Ref.make(
       ResumeProjection.stateFrom(projectionHistory),
     );
+    const codeState = yield* Ref.make(
+      ResumeProjection.codeStateFrom(projectionHistory),
+    );
     const projectionLock = yield* Semaphore.make(1);
 
     const trackedAppend: Session['append'] = (records, timeoutMillis) =>
@@ -989,6 +992,7 @@ const openWith = (
           let persisted = records;
           const currentResume = yield* Ref.get(resume);
           const currentState = yield* Ref.get(state);
+          const currentCodeState = yield* Ref.get(codeState);
           const currentSignalCursor = yield* Ref.get(signalCursor);
           const nextSignalCursor = records.reduce(
             (cursor, record) =>
@@ -1012,6 +1016,10 @@ const openWith = (
               ResumeProjection.updateState,
               currentState,
             );
+            const settlementCodeState = beforeSettlement.reduce(
+              ResumeProjection.updateCodeState,
+              currentCodeState,
+            );
             const resumeSnapshot = resumeState(
               options.compatibility,
               addUsage(opened.usage, settlement.usage),
@@ -1019,6 +1027,7 @@ const openWith = (
               settlementResume.completed,
               settlementResume.latestTurnUsage,
               settlementState,
+              settlementCodeState,
             );
             persisted = records.map((record, index) =>
               index === settlementIndex
@@ -1048,6 +1057,10 @@ const openWith = (
           yield* Ref.set(
             state,
             records.reduce(ResumeProjection.updateState, currentState),
+          );
+          yield* Ref.set(
+            codeState,
+            records.reduce(ResumeProjection.updateCodeState, currentCodeState),
           );
           yield* Ref.set(
             resume,
@@ -1438,6 +1451,7 @@ const resumeState = (
   completed: ReturnType<typeof AgentHistoryRuntime.completedFrom>,
   latestTurnUsage: Stop.Usage | undefined,
   state: ConversationRecord.RecordOf<'StateCheckpoint'> | undefined,
+  codeState: ConversationRecord.RecordOf<'CodeStateCheckpoint'> | undefined,
 ) => ({
   formatVersion: FORMAT_VERSION,
   agent: compatibility.agent,
@@ -1449,6 +1463,7 @@ const resumeState = (
   ...(state === undefined
     ? {}
     : { state: { id: state.id, version: state.version, value: state.value } }),
+  ...(codeState === undefined ? {} : { codeState: codeState.state }),
 });
 
 const addUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
@@ -1656,6 +1671,7 @@ const reseat = (
     case 'ToolWaitRestarted':
     case 'ToolOutcome':
     case 'StateCheckpoint':
+    case 'CodeStateCheckpoint':
     case 'TurnFinished':
     case 'BranchedFrom':
     case 'Completed':

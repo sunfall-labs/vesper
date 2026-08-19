@@ -139,6 +139,7 @@ export const fold = (
     BranchedFrom: () => {},
     Completed: () => {},
     StateCheckpoint: () => {},
+    CodeStateCheckpoint: () => {},
     ChildSession: () => {},
     Signal: () => {},
     SignalReceived: () => {},
@@ -291,6 +292,7 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       BranchedFrom: () => {},
       Completed: () => {},
       StateCheckpoint: () => {},
+      CodeStateCheckpoint: () => {},
       ChildSession: () => {},
       Signal: () => {},
       SignalReceived: () => {},
@@ -320,6 +322,7 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
         case 'BranchedFrom':
         case 'Completed':
         case 'StateCheckpoint':
+        case 'CodeStateCheckpoint':
         case 'ChildSession':
         case 'Signal':
         case 'SignalReceived':
@@ -354,6 +357,7 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       BranchedFrom: () => Effect.void,
       Completed: () => Effect.void,
       StateCheckpoint: () => Effect.void,
+      CodeStateCheckpoint: () => Effect.void,
       ChildSession: () => Effect.void,
       Signal: () => Effect.void,
       SignalReceived: () => Effect.void,

@@ -14,6 +14,10 @@ export interface Policy<R = never> {
     value: unknown,
     record: ConversationRecord.RecordOf<'ToolOutcome'>,
   ) => Effect.Effect<unknown, never, R>;
+  readonly codeState?: (
+    value: Readonly<Record<string, unknown>>,
+    record: ConversationRecord.RecordOf<'CodeStateCheckpoint'>,
+  ) => Effect.Effect<Readonly<Record<string, unknown>>, never, R>;
   readonly externalRequest?: (
     value: unknown,
     record: ConversationRecord.RecordOf<'ToolSuspended'>,
@@ -56,6 +60,7 @@ export type Services<P> =
   | FunctionServices<P extends { readonly prompt: infer F } ? F : never>
   | FunctionServices<P extends { readonly toolParameters: infer F } ? F : never>
   | FunctionServices<P extends { readonly toolResult: infer F } ? F : never>
+  | FunctionServices<P extends { readonly codeState: infer F } ? F : never>
   | FunctionServices<
       P extends { readonly externalRequest: infer F } ? F : never
     >

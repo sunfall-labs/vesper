@@ -259,6 +259,10 @@ export const logStoreContract = <E>(
           version: '1',
           value: { count: 1 },
         },
+        CodeStateCheckpoint: {
+          _tag: 'CodeStateCheckpoint',
+          state: { remembered: '42' },
+        },
       } satisfies {
         [Tag in ConversationRecord.Record['_tag']]: ConversationRecord.RecordOf<Tag>;
       };
