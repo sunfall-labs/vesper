@@ -15,6 +15,17 @@ import { Stop } from './stop.js';
 // exhaustively match, and so the whole event stream can be serialized —
 // which is what a transport (SSE, a Slack bridge, a durable stream) needs.
 
+/** One tool call parked on a durable, unresolved `needsApproval` gate. */
+export const PendingApproval = Schema.Struct({
+  toolCallId: Schema.String,
+  toolName: Schema.String,
+  /** The tool's decoded call parameters, for display to an approver. */
+  input: Schema.Unknown,
+});
+export interface PendingApproval extends Schema.Struct.Type<
+  typeof PendingApproval.fields
+> {}
+
 export const Lifecycle = Schema.TaggedUnion({
   TurnStarted: {
     step: Schema.Natural,
@@ -28,6 +39,32 @@ export const Lifecycle = Schema.TaggedUnion({
     text: Schema.String,
     steps: Schema.Natural,
     usage: Stop.Usage,
+  },
+  /**
+   * The run ended durably parked on one or more `needsApproval` gates
+   * instead of reaching {@link Completed}.
+   *
+   * Terminal like `Completed`, but deliberately a different case rather
+   * than a third `outcome` literal on it: nothing here is a finished
+   * answer, and a recording sink that wrote a `Completed` record for this
+   * would claim a run had an answer it does not have. A resolved approval
+   * is not replayed as a second `Suspended` — see `ToolSuspended` and
+   * `ToolWaitCompleted` in `@sunfall/vesper-log/record`, which are what a
+   * resumed conversation actually recovers from.
+   *
+   * Only reachable from a recorded `Conversation`; an unrecorded run fails
+   * instead, since there is nowhere to durably resolve the approval from.
+   */
+  Suspended: {
+    step: Schema.Natural,
+    /**
+     * Whatever the model said before its approval-gated tool call. Often the
+     * stated intent behind the request — worth showing to the approver, and
+     * gone if not carried here: the suspended run's turn never completes.
+     */
+    text: Schema.String,
+    usage: Stop.Usage,
+    pendingApprovals: Schema.Array(PendingApproval),
   },
   /**
    * An out-of-band instruction reached the run and was acted on.

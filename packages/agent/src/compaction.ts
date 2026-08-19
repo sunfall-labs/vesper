@@ -10,7 +10,18 @@ export interface Policy {
   readonly instructions: string;
   /** Optional summarizer system prompt. */
   readonly system?: string | undefined;
-  /** Optional provider context-window size for proactive compaction. */
+  /**
+   * The provider's context-window size, used only by proactive compaction.
+   *
+   * Proactive compaction is inactive without it: the loop targets the
+   * `LanguageModel` tag, and that tag carries no window, so there is nothing
+   * to compare a token estimate against. Leaving this unset does not disable
+   * compaction — the reactive trigger still fires when a provider rejects an
+   * oversized prompt — but it does mean every compaction costs a rejected
+   * request and a re-run of the turn instead of the estimate catching it
+   * first. The agent logs a one-time warning per run when a policy is
+   * configured without this field.
+   */
   readonly contextWindow?: number | undefined;
 }
 

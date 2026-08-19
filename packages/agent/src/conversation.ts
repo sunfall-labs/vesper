@@ -2,14 +2,16 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Crypto, Effect, Stream } from 'effect';
-import type { Prompt } from 'effect/unstable/ai';
+import { Crypto, Effect, Schema, Stream } from 'effect';
+import { AiError, type Prompt } from 'effect/unstable/ai';
 
 import { Agent } from './agent.js';
 import {
+  ApprovalResolutionError,
   CompatibilityError,
   SuspendedConversationError,
 } from './conversation-error.js';
+import { ToolDispatch } from './dispatch.js';
 import type { AgentEvents } from './event.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
@@ -74,9 +76,16 @@ export interface Instance<
 > {
   /** Stable durable identity shared by runs, records, and signals. */
   readonly id: LogVocabulary.ConversationId;
-  /** Continue this conversation, starting it when no durable history exists. */
+  /**
+   * Continue this conversation, starting it when no durable history exists.
+   *
+   * Omitting `input` continues from durable state alone without appending a
+   * user message — the shape a run suspended on a tool approval resumes with
+   * after {@link resolveApproval}, where the decision, not a new prompt, is
+   * what there is to act on.
+   */
   readonly run: (
-    input: Prompt.RawInput,
+    input?: Prompt.RawInput,
   ) => Effect.Effect<
     Agent.Result,
     Error<A>,
@@ -84,7 +93,7 @@ export interface Instance<
   >;
   /** Stream the same durable continuation that {@link run} folds. */
   readonly stream: (
-    input: Prompt.RawInput,
+    input?: Prompt.RawInput,
   ) => Stream.Stream<
     AgentEvents.ObservedEvent<Agent.Tools<A>>,
     Error<A>,
@@ -159,6 +168,30 @@ export interface Instance<
     LogStore.LogStoreError,
     LogStore.Service | Crypto.Crypto
   >;
+  /**
+   * Durably decide one tool call this conversation suspended on a
+   * `needsApproval` gate.
+   *
+   * Records the decision and returns; it does not itself dispatch the tool
+   * or resolve the run. The next `run` (or `stream`) picks it up: approved
+   * dispatches the handler for the first time, denied settles a
+   * refusal-style tool result without ever entering it. Call it again for
+   * the same `toolCallId` and it fails with {@link ApprovalResolutionError}
+   * rather than silently applying — or discarding — a second decision.
+   */
+  readonly resolveApproval: (
+    toolCallId: string,
+    decision: 'approve' | 'deny',
+    reason?: string,
+  ) => Effect.Effect<
+    void,
+    | ApprovalResolutionError
+    | CompatibilityError
+    | SuspendedConversationError
+    | AgentLog.DurabilityError
+    | LogStore.LogStoreError,
+    LogStore.Service | Crypto.Crypto
+  >;
 }
 
 const bind = <A extends ConcreteAgent, PolicyRequires = never>(
@@ -190,8 +223,8 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
     );
   return {
     id,
-    run: (input) => foldToResult(streamFrom(input)),
-    stream: (input) => streamFrom(input),
+    run: (input) => foldToResult(streamFrom(input ?? [])),
+    stream: (input) => streamFrom(input ?? []),
     branchFrom: (at, input, options) =>
       foldToResult(
         streamFrom(input, {
@@ -219,6 +252,97 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
     followWaits: (after) =>
       AgentLog.follow(id, after).pipe(Stream.filter(isWaitEnvelope)),
     send: (signal) => appendSignal(id, signal),
+    resolveApproval: (toolCallId, decision, reason) =>
+      Effect.gen(function* () {
+        const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
+        const session = yield* AgentLog.open(id, {
+          compatibility: { agent: agent.name, revision: agent.revision },
+        });
+        // Both lookups scan `session.history` — the resume view that spans
+        // runs back to the latest compaction boundary — rather than the
+        // recovery snapshot (`suspendedToolCalls`/`hasCompletedWait`). The
+        // snapshot indexes only what the *next run* must resolve, so it
+        // empties once the owning run settles: reading it here misreported a
+        // resolved-then-dispatched approval as `not_found`, and — worse —
+        // could let a later conflicting decision through, because the
+        // completion had fallen out of the snapshot along with the
+        // suspension. The history keeps both records for as long as the
+        // suspension itself is visible, so the two answers cannot go blind
+        // independently.
+        let suspended:
+          | { readonly name: string; readonly token: string }
+          | undefined;
+        let resolved = false;
+        for (const envelope of session.history) {
+          const record = envelope.record;
+          if (
+            record._tag === 'ToolSuspended' &&
+            record.id === normalizedId &&
+            record.wait === ToolDispatch.APPROVAL_WAIT
+          ) {
+            suspended = { name: record.name, token: record.token };
+            resolved = false;
+          } else if (
+            suspended !== undefined &&
+            record._tag === 'ToolWaitCompleted' &&
+            record.token === suspended.token
+          ) {
+            resolved = true;
+          }
+        }
+        if (suspended === undefined) {
+          return yield* new ApprovalResolutionError({
+            message: `No tool call ${normalizedId} is durably waiting for approval in conversation ${id}`,
+            conversationId: id,
+            toolCallId: normalizedId,
+            reason: 'not_found',
+          });
+        }
+        if (resolved) {
+          return yield* new ApprovalResolutionError({
+            message: `Tool call ${normalizedId} in conversation ${id} was already resolved`,
+            conversationId: id,
+            toolCallId: normalizedId,
+            reason: 'already_resolved',
+          });
+        }
+        // A denial's result is what `dispatch.ts`'s `resolveIndeterminate`
+        // copies straight into the refusal `ToolOutcome` the model is shown,
+        // without ever entering the handler — the same encoded `AiError`
+        // shape `failureMode: 'return'` already uses for a framework-level
+        // failure, so it decodes through any tool's result schema, not only
+        // one that declared its own failure type. Encoded through `Schema`
+        // rather than built by hand: `AiError`'s wire shape is not one to
+        // keep in sync by inspection. Unused on approval; what runs the tool
+        // for real is the handler dispatch that follows, not this record.
+        const result =
+          decision === 'approve'
+            ? null
+            : yield* Schema.encodeUnknownEffect(AiError.AiError)(
+                new AiError.AiError({
+                  module: 'Conversation',
+                  method: 'resolveApproval',
+                  reason: new AiError.UnknownError({
+                    description:
+                      reason === undefined
+                        ? `Tool call ${normalizedId} was denied approval`
+                        : `Tool call ${normalizedId} was denied approval: ${reason}`,
+                    metadata: { toolCallId: normalizedId },
+                  }),
+                }),
+              ).pipe(Effect.orDie);
+        yield* session.append([
+          {
+            _tag: 'ToolWaitCompleted',
+            id: normalizedId,
+            name: suspended.name,
+            wait: ToolDispatch.APPROVAL_WAIT,
+            token: suspended.token,
+            outcome: decision === 'approve' ? 'success' : 'failure',
+            result,
+          },
+        ]);
+      }),
   };
 };
 
@@ -241,7 +365,11 @@ export function make<A extends ConcreteAgent, const P extends object>(
   return bind(agent, conversationId, policy);
 }
 
-export { CompatibilityError, SuspendedConversationError };
+export {
+  ApprovalResolutionError,
+  CompatibilityError,
+  SuspendedConversationError,
+};
 export { DurabilityError } from './conversation-error.js';
 
 export * as Conversation from './conversation.js';

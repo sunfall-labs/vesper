@@ -5,7 +5,48 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
-No changes yet.
+- Added durable tool approvals without `WorkflowEngine`. A tool marked with
+  Effect's own `Tool.setNeedsApproval` now suspends durably in a recorded
+  conversation: the run ends with `Result.outcome: 'suspended'` and
+  `pendingApprovals`, `Conversation.resolveApproval(callId, decision)`
+  records the decision, and the next run dispatches (approved) or settles a
+  refusal-style result without entering the handler (denied). An undecided
+  approval can never dispatch, and resolving the same call twice is a typed
+  `ApprovalResolutionError`. Unrecorded `agent.run` fails outright for a
+  `needsApproval` tool. Additive: `Result.outcome` is a strictly wider
+  union, and no existing record, method, or export changed shape.
+  `AgentWorkflow.wait` is unchanged and remains the path for arbitrary
+  durable waits inside handlers. See
+  [Tool approval](packages/agent/README.md#tool-approval).
+- `Conversation.run` and `Conversation.stream` now accept no input, meaning
+  "continue from durable state without appending a user message" — the shape
+  a suspended run resumes with after `resolveApproval`. Additive.
+- Added opt-in tool-result overflow: `Agent.Definition.resultOverflow`
+  spills an oversized tool result into the `AttachmentStore` and hands the
+  model a small pointer plus a ranged `read_attachment` tool. Unset, nothing
+  changes; `@sunfall/vesper-agent` now depends on
+  `@sunfall/vesper-attachments`.
+- Added MCP tool-drift detection: `toolDrift: { fingerprints, onDrift }` on
+  an MCP source pins SHA-256 fingerprints of each tool's rendered
+  name/description/schema; a drifted tool is excluded (`'reject'`, the
+  default) or kept with a logged `ToolDriftError` (`'warn'`). Obtain pins
+  with `Mcp.fingerprints`. Vesper does not persist pins itself.
+- Added `Interception.compose(first, second)`: joins two interceptors into
+  one with documented per-seam ordering; `intercepting` still replaces
+  rather than stacks.
+- Added `Stop.toolCalledTimes(name, times)`: stop once a named tool has been
+  called `times` times in total across the whole run, rather than once per
+  turn. Additive; existing stop conditions are unchanged. The name is checked
+  against the toolkit at compile time, the same as `Stop.toolCalled`.
+- A compaction policy configured without `contextWindow` now logs a one-time
+  warning per run that proactive compaction is inactive (reactive compaction
+  still fires). No behavior changed beyond the log line.
+- Documented that a pending steer, or a signal backlog a turn boundary could
+  not fully drain, outranks a positive stop decision for one more turn — so
+  `Stop.maxSteps(N)` is not a hard ceiling once a conversation takes signal
+  traffic; `RunPolicy.maxTurns` is. Also documented that `maxInputTokens`/
+  `maxOutputTokens` bound cumulative spend after each turn rather than
+  capping any single request. No behavior changed.
 
 ## 0.1.0-alpha.1 - 2026-08-18
 

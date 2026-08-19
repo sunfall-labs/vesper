@@ -15,10 +15,19 @@ import type { Interception } from './interception.js';
 import type * as AgentLog from './log.js';
 import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
+import { APPROVAL_WAIT } from './recovery.js';
+import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
 
 type RunError = AiError.AiError | RunPolicy.RunPolicyExhausted;
+
+/**
+ * The reserved `ToolSuspended.wait` name for a tool's own `needsApproval`
+ * gate. Declared in `recovery.ts` — see its doc for why — and re-exported
+ * here because this is where `resolveIndeterminate` uses it.
+ */
+export { APPROVAL_WAIT };
 
 const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
 
@@ -176,6 +185,42 @@ export const resolveIndeterminate = <
       const recovery = options.session.recovery(call.name, call.toolCallId);
       if (Option.isNone(recovery) || recovery.value._tag === 'Settled')
         continue;
+
+      // A durable approval never falls into the ordinary replay-or-ask
+      // branch below: an undecided one must not dispatch (this function's
+      // caller has already refused to reach here for one still undecided —
+      // this is only a defensive no-op), a denied one settles as a
+      // refusal without ever entering the handler, and an approved one
+      // falls through to the same "Suspended -> Retry" path a durable
+      // wait's resumption already uses, which genuinely dispatches the
+      // handler for the first time.
+      if (
+        recovery.value._tag === 'Suspended' &&
+        recovery.value.wait === APPROVAL_WAIT
+      ) {
+        const decided = options.session.completedWait(recovery.value.token);
+        if (Option.isNone(decided)) continue;
+        if (decided.value.outcome === 'failure') {
+          yield* options.session.append([
+            {
+              _tag: 'ToolResumed',
+              id: call.toolCallId,
+              name: call.name,
+              token: recovery.value.token,
+            },
+            {
+              _tag: 'ToolOutcome',
+              step: call.step,
+              id: call.toolCallId,
+              name: call.name,
+              outcome: 'failure',
+              result: decided.value.result,
+            },
+          ]);
+          continue;
+        }
+      }
+
       const replayable =
         recovery.value._tag === 'Suspended' ||
         recovery.value._tag === 'Restarting';
@@ -318,6 +363,43 @@ export const resolveIndeterminate = <
       Effect.fail(durabilityAiError(error)),
     ),
   );
+
+/**
+ * Decode a durably suspended call's stored request back into the tool's
+ * typed parameters, for display to whatever resurfaces it.
+ *
+ * `ToolSuspended.request` is the toolkit's encoding — the only form durable
+ * across a resume — so re-surfacing it verbatim would show a caller the
+ * provider-facing value instead of the decoded one the model itself sees,
+ * which for a parameter schema with a transform (`Schema.DateFromString`, an
+ * `Object` id) is not the same value. Falls back to the encoded request
+ * rather than failing: this is a display value, not dispatch, and a schema
+ * that no longer matches the stored request (the agent's tool definition
+ * changed since suspension) should not make an already-suspended run
+ * unrenderable.
+ */
+export const decodeSuspendedRequest = <
+  Tools extends Record<string, Tool.Any>,
+  ToolkitRequires,
+>(
+  toolkit: Effect.Effect<Toolkit.WithHandler<Tools>, never, ToolkitRequires>,
+  name: string,
+  request: unknown,
+): Effect.Effect<unknown, never, ToolkitRequires> =>
+  Effect.gen(function* () {
+    const resolved = yield* toolkit;
+    const tool = Object.hasOwn(resolved.tools, name)
+      ? resolved.tools[name]
+      : undefined;
+    if (tool === undefined) return request;
+    const services = yield* capturedContext;
+    return yield* Schema.decodeUnknownEffect(tool.parametersSchema)(
+      request,
+    ).pipe(
+      Effect.provide(services),
+      Effect.catch(() => Effect.succeed(request)),
+    );
+  });
 
 const hasTool = <Tools extends Record<string, Tool.Any>>(
   tools: Tools,
@@ -493,6 +575,16 @@ export const gate = <
       // Mirrors `Toolkit`'s own `resultSchema`: with `failureMode: 'return'`
       // a failure comes back as a value, so the recorded result may be a
       // success, a declared failure, or an `AiError`.
+      //
+      // A tool without `failureMode: 'return'` still accepts `AiError` as a
+      // fallback, because its own handler is not the only source of a
+      // recorded failure: `resolveIndeterminate`'s `Answer` decision and a
+      // durably denied `needsApproval` gate can both settle a call with
+      // `outcome: 'failure'` regardless of the tool's own failure mode, and
+      // both settle it as an `AiError`, mirroring how `failureMode: 'return'`
+      // already surfaces framework-level failures. Widening here is what lets
+      // a served-from-log answer decode a result substituted by either of
+      // them, not only one the handler itself produced.
       const schema =
         tool === undefined
           ? undefined
@@ -502,19 +594,29 @@ export const gate = <
                 tool.failureSchema,
                 AiError.AiError,
               ])
-            : tool.successSchema;
+            : Schema.Union([tool.successSchema, AiError.AiError]);
 
       const decode: Decode = (stored: unknown) =>
-        // The requirement channel is erased rather than declared. A tool's
-        // decoding services are already in the agent's `WithOwnHandlers`, so
-        // the caller has provided them and they are in `services` — but
-        // `handle`'s signature fixes what its effect may require, and
-        // declaring them here would put a requirement on a value
-        // `LanguageModel` resolves internally. Capturing and providing them is
-        // the same move `Subagent.delegateTo` makes for a child's services.
-        decodeUnknownToolValue(schema, stored, services, (detail) =>
-          toolResultDecodeError(name, detail),
-        );
+        // A spilled result decodes against its own pointer shape rather than
+        // the tool's declared schema, independent of which tool produced it.
+        // `ResultOverflow.wrap` replaced both `result` and `encodedResult`
+        // with the pointer at dispatch time, before the tool's own schema
+        // ever saw the real value — recovery has to make the same
+        // substitution, or resuming a conversation containing a spilled
+        // result would fail to decode against a schema that was never asked
+        // to describe a pointer.
+        ResultOverflow.isPointer(stored)
+          ? Effect.succeed(stored)
+          : // The requirement channel is erased rather than declared. A tool's
+            // decoding services are already in the agent's `WithOwnHandlers`, so
+            // the caller has provided them and they are in `services` — but
+            // `handle`'s signature fixes what its effect may require, and
+            // declaring them here would put a requirement on a value
+            // `LanguageModel` resolves internally. Capturing and providing them is
+            // the same move `Subagent.delegateTo` makes for a child's services.
+            decodeUnknownToolValue(schema, stored, services, (detail) =>
+              toolResultDecodeError(name, detail),
+            );
 
       decoders.set(name, decode);
       return decode;

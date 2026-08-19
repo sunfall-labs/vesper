@@ -13,8 +13,10 @@ Child sessions validate against the child definition, not the parent revision.
 Compatibility failures use the tagged `Conversation.CompatibilityError`
 channel, included by `Conversation.Error<A>` alongside the agent and store
 failures for that bound definition.
-`Agent.Result.outcome` is `success` or `cancelled`, and `steps` counts model
-turns that actually started rather than planned turn boundaries.
+`Agent.Result.outcome` is `success`, `cancelled`, or `suspended` (a durable
+tool approval is still waiting on a decision; see [Tool
+approval](#tool-approval)), and `steps` counts model turns that actually
+started rather than planned turn boundaries.
 
 ```bash
 npm install @sunfall/vesper-agent effect@4.0.0-rc.109
@@ -96,6 +98,51 @@ of the same append durability boundary as the conversation log: a store write
 failure is surfaced as a typed `DurabilityError` with its tagged cause,
 while resume-time missing or corrupt references remain typed compatibility
 failures.
+
+## Tool-result overflow
+
+`resultOverflow` spills a tool result over a byte threshold into an
+`AttachmentStore` instead of handing the whole thing to the model. The model
+sees a small pointer — an attachment id, byte size, content type, and a head
+preview — and a `read_attachment` tool the definition adds automatically to
+read the rest back in ranges:
+
+```ts
+import { Effect } from 'effect';
+import { AttachmentStoreMemory } from '@sunfall/vesper-attachments/layer-memory';
+
+const agent = Agent.make({
+  // ...
+  resultOverflow: { threshold: 4_096, preview: 500 },
+});
+
+const result = agent
+  .run('Summarize the build log.')
+  .pipe(Effect.provide(AttachmentStoreMemory.layer));
+```
+
+Unset — the default — is exactly today's behavior: no extra tool, no extra
+service requirement, every result reaches the model as the handler returned
+it. Set, `AttachmentStore.Service` joins `Agent.Requires` the same way a
+declared tool dependency does, so the application wires a store the same way
+it wires `LanguageModel`.
+
+Only the encoded result crosses the threshold check, so this composes with
+recording exactly as durable state does: `ToolOutcome.result` stores the
+pointer, not the payload, and a resumed conversation is rebuilt from that
+pointer. Recovering a call an earlier crashed run had already settled
+decodes a spilled result by its pointer shape rather than the tool's own
+schema — the one deliberate exception to "recovered `ToolOutcome` values
+must decode through the current tool result schema" above.
+
+The attachment itself outlives nothing on its own: `AttachmentStore` has no
+delete API, so retention and garbage collection of spilled content are the
+application's responsibility, on whatever schedule fits its store.
+
+An MCP server's result still crosses the transport as one buffered message
+before `Mcp.make`'s own `maxResultBytes` or this seam ever sees it —
+`resultOverflow` keeps an oversized result out of the model's context and the
+log, not out of the MCP client's peak memory.
 
 ## Evals
 
@@ -225,6 +272,57 @@ schema-tagged `AgentState.Error` union: `StateDefinitionError`,
 Direct state operations expose this error. Declare `failure: AgentState.Error`
 when a tool handler lets mutation failures escape; state failures are never
 converted to defects.
+
+## Tool approval
+
+Mark a tool with `effect/unstable/ai`'s own option — not a Vesper one:
+
+```ts
+const release = Tool.make('release', {
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ released: Schema.Boolean }),
+}).setNeedsApproval(true); // or a function of (params, context)
+```
+
+When the model calls it, `LanguageModel` suspends before the handler is ever
+entered and emits a `tool-approval-request` part instead of dispatching. A
+recorded run turns that into a durable `ToolSuspended` — the same record
+family `AgentWorkflow.wait` uses below — and ends with `Result.outcome ===
+'suspended'` and `pendingApprovals: { toolCallId, toolName, input }[]`. No
+Effect Workflow, no `AgentWorkflow.durable`, and the handler has not run.
+
+```ts
+const result = yield * conversation.run('release r1');
+// result.outcome === 'suspended'
+// result.pendingApprovals === [{ toolCallId, toolName: 'release', input: { id: 'r1' } }]
+
+yield * conversation.resolveApproval(toolCallId, 'approve');
+// or: conversation.resolveApproval(toolCallId, 'deny', 'not this week')
+
+const after = yield * conversation.run('release r1');
+// after.outcome === 'success'
+```
+
+`resolveApproval` only records the decision; it does not itself dispatch.
+The next `run` (or `stream`) picks it up: approved genuinely dispatches the
+handler for the first time, denied settles a refusal `ToolOutcome` — an
+encoded `AiError`, the same shape `failureMode: 'return'` already uses for a
+framework-level failure — without ever entering the handler. Calling it
+again for the same `toolCallId` fails with typed
+`Conversation.ApprovalResolutionError` instead of silently applying, or
+discarding, a second decision. Asking again before it is resolved (another
+`run` call) re-surfaces the same `pendingApprovals` rather than calling the
+model with an unanswered tool call.
+
+An unrecorded `agent.run(...)` fails outright with a typed `AiError` instead
+of returning a suspension nothing can ever resolve — approval requires a
+`Conversation`.
+
+Reach for `AgentWorkflow.wait` instead when the external step is not a plain
+human approve/deny — a webhook, a job, anything with its own typed request
+and result — or when the handler needs to do other durable work around the
+wait. Tool approval is the special case that needed no workflow engine at
+all.
 
 ## Effect Workflow
 

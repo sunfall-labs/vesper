@@ -1,4 +1,4 @@
-import { Effect, Layer, Ref, Stream } from 'effect';
+import { Effect, Layer, Logger, Ref, Stream } from 'effect';
 import {
   AiError,
   Chat,
@@ -923,6 +923,102 @@ describe('compaction from an estimate', () => {
         undefined,
         { inputTokens: 7_777, outputTokens: 20 },
       ]);
+    }),
+  );
+});
+
+// The footgun this whole trigger has: a policy without `contextWindow`
+// compiles, runs, and never proactively compacts, and nothing about a run
+// that never overflows looks different from one that silently skipped its
+// only early warning. `entryFor` logs it once per run instead of leaving it
+// for someone to notice only after a run dies on a context-window error.
+describe('the proactive-compaction misconfiguration warning', () => {
+  /** Collects every `Warn`-level message logged while `layer` is provided. */
+  const captureWarnings = () => {
+    const messages: unknown[] = [];
+    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
+      if (logLevel === 'Warn') messages.push(message);
+    });
+    return { messages, layer: Logger.layer([logger]) };
+  };
+
+  it.effect('warns exactly once per run when contextWindow is unset', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider();
+      const { messages, layer } = captureWarnings();
+      const agent = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: POLICY,
+        // Two turns, so a per-turn check would double-count the warning.
+        stopWhen: ({ step }) => Effect.succeed(step >= 2),
+      });
+
+      yield* Effect.gen(function* () {
+        const chat = yield* Chat.fromPrompt(seeded);
+        yield* agent.runIn(chat, 'next');
+      }).pipe(
+        Effect.provide(models.layer),
+        Effect.provide(layer),
+        Effect.orDie,
+      );
+
+      expect(messages).toHaveLength(1);
+      expect(String(messages[0])).toContain('contextWindow');
+    }),
+  );
+
+  it.effect('does not warn when contextWindow is configured', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider();
+      const { messages, layer } = captureWarnings();
+      const agent = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: { ...POLICY, contextWindow: 1_000 },
+      });
+
+      yield* Effect.gen(function* () {
+        const chat = yield* Chat.fromPrompt(seeded);
+        yield* agent.runIn(chat, 'next');
+      }).pipe(
+        Effect.provide(models.layer),
+        Effect.provide(layer),
+        Effect.orDie,
+      );
+
+      expect(messages).toHaveLength(0);
+    }),
+  );
+
+  // `compaction: false` opts out of compaction entirely, so there is nothing
+  // misconfigured to warn about.
+  it.effect('does not warn when compaction is disabled', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider();
+      const { messages, layer } = captureWarnings();
+      const agent = Agent.make({
+        name: 'test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: false,
+      });
+
+      yield* Effect.gen(function* () {
+        const chat = yield* Chat.fromPrompt(seeded);
+        yield* agent.runIn(chat, 'next');
+      }).pipe(
+        Effect.provide(models.layer),
+        Effect.provide(layer),
+        Effect.orDie,
+      );
+
+      expect(messages).toHaveLength(0);
     }),
   );
 });

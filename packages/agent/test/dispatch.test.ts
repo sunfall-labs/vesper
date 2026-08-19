@@ -373,6 +373,50 @@ describe('recovering a tool call from the log', () => {
     }),
   );
 
+  it.effect(
+    'serves a spilled result on recovery by its pointer shape, not the tool schema',
+    () =>
+      Effect.gen(function* () {
+        const ran = { count: 0 };
+        // `lookup`'s own success schema is `{ status, at }` — nothing like a
+        // pointer. `ResultOverflow.wrap` is what would have produced this
+        // shape live; seeding it directly exercises recovery without
+        // depending on the overflow module being wired into this agent.
+        const pointerOutcome: ConversationRecord.Record = {
+          _tag: 'ToolOutcome',
+          step: 1,
+          id: CALL_ID,
+          name: 'lookup',
+          outcome: 'success',
+          result: {
+            _tag: 'ToolResultOverflow',
+            attachmentId: `sha256:${'a'.repeat(64)}`,
+            byteLength: 5_000,
+            mediaType: 'text/plain; charset=utf-8',
+            preview: 'the record this settled call actually produced',
+          },
+        };
+
+        const written = yield* run(
+          Effect.gen(function* () {
+            yield* seed([started, called, pointerOutcome]);
+            yield* Conversation.make(agentWith(ran), CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+            return yield* readAll();
+          }),
+        );
+
+        // Decoding the pointer against `lookup`'s schema would fail, which
+        // would make a conversation containing a spilled result unresumable.
+        expect(ran.count).toBe(0);
+        expect(outcomesOf(written).at(-1)).toMatchObject({
+          id: CALL_ID,
+          result: { _tag: 'ToolResultOverflow' },
+        });
+      }),
+  );
+
   it.effect('shows the model the recovered result, not a fresh one', () =>
     Effect.gen(function* () {
       const ran = { count: 0 };
@@ -393,6 +437,50 @@ describe('recovering a tool call from the log', () => {
       expect(prompts[1]).toContain('from-log');
       expect(prompts[1]).not.toContain('fresh:');
     }),
+  );
+
+  it.effect(
+    'serves a recovered failure as an AiError even for a tool without failureMode: return',
+    () =>
+      Effect.gen(function* () {
+        const ran = { count: 0 };
+        // `lookup` defaults to `failureMode: 'error'`, so its own declared
+        // failure schema is never part of what a served result may decode
+        // as. A recorded failure that reached the log some other way than
+        // the handler itself — here, standing in for a denied `needsApproval`
+        // gate or an interceptor's `Answer` — still has to be servable.
+        const denied = yield* Schema.encodeUnknownEffect(AiError.AiError)(
+          new AiError.AiError({
+            module: 'test',
+            method: 'deny',
+            reason: new AiError.UnknownError({ description: 'denied' }),
+          }),
+        );
+
+        const written = yield* run(
+          Effect.gen(function* () {
+            yield* seed([
+              started,
+              called,
+              { ...outcome, outcome: 'failure', result: denied },
+            ]);
+            yield* Conversation.make(agentWith(ran), CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+            return yield* readAll();
+          }),
+        );
+
+        // Not re-run, and the recovered failure round-tripped rather than
+        // failing to decode — the new run recorded the outcome it was
+        // served, not a decode error.
+        expect(ran.count).toBe(0);
+        expect(outcomesOf(written).at(-1)).toMatchObject({
+          id: CALL_ID,
+          outcome: 'failure',
+          result: denied,
+        });
+      }),
   );
 
   it.effect('re-runs the tool once the earlier run has settled', () =>
