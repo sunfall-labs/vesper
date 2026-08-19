@@ -22,15 +22,70 @@ started rather than planned turn boundaries.
 npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 ```
 
-Node.js 22 or newer is required. The snippets below assume the application has
-already provided Effect's `LanguageModel` service; see the repository
+Node.js 22.13.0 or newer is required. The snippets below assume the application
+has already provided Effect's `LanguageModel` service; see the repository
 [Quick Start](../../README.md#quick-start) for complete provider and runtime
 wiring.
 
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
-`/testing`, plus `/workflow` and `/dynamic-toolkit`.
+`/testing`, plus `/workflow`, `/dynamic-toolkit`, and `/model-plan`.
+
+## Model fallback
+
+Turn Effect's native `ExecutionPlan` into the ordinary `LanguageModel` layer an
+agent already consumes:
+
+```ts
+import { AnthropicLanguageModel } from '@effect/ai-anthropic';
+import { OpenAiLanguageModel } from '@effect/ai-openai';
+import { Effect, ExecutionPlan } from 'effect';
+import { ModelPlan } from '@sunfall/vesper-agent/model-plan';
+
+const plan = ExecutionPlan.make(
+  {
+    provide: OpenAiLanguageModel.model('gpt-5.2'),
+    attempts: 2,
+  },
+  {
+    provide: AnthropicLanguageModel.model('claude-opus-4-6'),
+  },
+);
+
+const result = agent
+  .run('Ship the release.')
+  .pipe(Effect.provide(ModelPlan.layer(plan)));
+```
+
+When a plan needs a `while` policy, `ModelPlan.when` gives the native Effect
+step an exactly typed `AiError` without an annotation:
+
+```ts
+const plan = ExecutionPlan.make(
+  {
+    provide: OpenAiLanguageModel.model('gpt-5.2'),
+    while: ModelPlan.when((error) => error.isRetryable),
+  },
+  { provide: AnthropicLanguageModel.model('claude-opus-4-6') },
+);
+```
+
+Omit `while` when a step does not need an error-specific retry policy. The
+predicate governs retries under that step; returning `false` ends those retries
+without removing later fallback steps.
+
+Provider client layers remain compile-time requirements of the resulting model
+layer. Plan predicates receive `AiError.AiError`, so provider and model failures
+can retry or fall back without widening tool-handler failures.
+
+The plan wraps each language-model operation, not the whole agent run. A stream
+may fall back before its first emitted part; after output becomes visible it
+fails instead of splicing another model's response into the stream or repeating
+tool work. A non-streaming operation that auto-resolves tools conservatively
+does not fall back after an error because the model boundary cannot prove that a
+handler has not already run. Typed tool and application failures bypass model
+fallback unchanged.
 
 ## Dynamic tools
 

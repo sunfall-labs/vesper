@@ -1,4 +1,4 @@
-import { Duration, Effect, Fiber, Layer, Schedule } from 'effect';
+import { Duration, Effect, Fiber, Layer, Predicate, Schedule } from 'effect';
 import { describe, expect, it } from 'vitest';
 
 import { WorkspaceDriver } from '../src/driver.js';
@@ -63,6 +63,26 @@ export const workspaceContract = <E>(
         duration: Duration.seconds(10),
         orElse: () => Effect.die(new Error('waitUntil never became true')),
       }),
+    );
+
+  /** Ask the kernel whether a recorded process still exists. */
+  const processIsRunning = (text: string): Effect.Effect<boolean, unknown> =>
+    Effect.try({
+      try: () => {
+        const pid = Number(text);
+        if (!Number.isSafeInteger(pid) || pid <= 0) {
+          throw new Error(`Invalid process id: ${text}`);
+        }
+        process.kill(pid, 0);
+        return true;
+      },
+      catch: (error) => error,
+    }).pipe(
+      Effect.catchIf(
+        (error) =>
+          Predicate.hasProperty(error, 'code') && error.code === 'ESRCH',
+        () => Effect.succeed(false),
+      ),
     );
 
   describe(`WorkspaceDriver contract: ${name}`, () => {
@@ -312,28 +332,27 @@ export const workspaceContract = <E>(
     });
 
     it('exec fails with CommandTimeout and terminates the command', async () => {
-      const [outcome, started, finished] = await run(
+      const { childRunning, outcome } = await run(
         Effect.gen(function* () {
           const driver = yield* WorkspaceDriver.Service;
           const dir = yield* scratch();
+          const childPidPath = `${dir}/child-pid`;
 
           const outcome = yield* driver
             .exec(
-              `(printf x > '${dir}/child-started'; sleep 2; printf x > '${dir}/child-done') & wait`,
+              `tail -f /dev/null & child=$!; printf '%s' "$child" > '${childPidPath}'; wait "$child"`,
               {
                 timeoutMs: 200,
               },
             )
             .pipe(Effect.result);
 
-          // Past when the command would have written `done` had it survived.
-          yield* Effect.sleep(Duration.seconds(3));
-
-          return [
+          return {
             outcome,
-            yield* driver.exists(`${dir}/child-started`),
-            yield* driver.exists(`${dir}/child-done`),
-          ] as const;
+            childRunning: yield* processIsRunning(
+              yield* driver.readFile(childPidPath),
+            ),
+          };
         }),
       );
 
@@ -342,34 +361,32 @@ export const workspaceContract = <E>(
         expect(outcome.failure).toBeInstanceOf(WorkspaceDriver.CommandTimeout);
         expect(outcome.failure).toMatchObject({ timeoutMs: 200 });
       }
-      expect(started).toBe(true);
-      expect(finished).toBe(false);
+      expect(childRunning).toBe(false);
     });
 
     it('exec terminates the command when the caller is interrupted', async () => {
-      const finished = await run(
+      const childRunning = await run(
         Effect.gen(function* () {
           const driver = yield* WorkspaceDriver.Service;
           const dir = yield* scratch();
+          const childPidPath = `${dir}/child-pid`;
 
           const fiber = yield* driver
             .exec(
-              `(printf x > '${dir}/child-started'; sleep 2; printf x > '${dir}/child-done') & wait`,
+              `tail -f /dev/null & child=$!; printf '%s' "$child" > '${childPidPath}'; wait "$child"`,
             )
             .pipe(Effect.forkChild);
 
-          yield* waitUntil(driver.exists(`${dir}/child-started`));
+          yield* waitUntil(driver.exists(childPidPath));
           // `Fiber.interrupt` waits for finalizers, so the kill has happened
           // by the time this returns.
           yield* Fiber.interrupt(fiber);
 
-          yield* Effect.sleep(Duration.seconds(3));
-
-          return yield* driver.exists(`${dir}/child-done`);
+          return yield* processIsRunning(yield* driver.readFile(childPidPath));
         }),
       );
 
-      expect(finished).toBe(false);
+      expect(childRunning).toBe(false);
     });
   });
 };

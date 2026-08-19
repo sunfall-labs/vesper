@@ -33,8 +33,9 @@ Official Effect AI packages provide `LanguageModel` directly.
 > before adopting it. Migrating from the former durability methods? Start with
 > [Migrating to Conversation](docs/migrating-to-conversation.md).
 
-Vesper requires Node.js 22 or newer. The Effect packages in the examples are
-release candidates and must use the same `4.0.0-rc.109` version.
+Vesper packages require Node.js 22 or newer; the bundled agent code executor
+requires Node.js 22.13.0 for native type stripping. The Effect packages in the
+examples are release candidates and must use the same `4.0.0-rc.109` version.
 
 ## Quick start
 
