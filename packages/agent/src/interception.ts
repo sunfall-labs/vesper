@@ -1,6 +1,6 @@
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Schema } from 'effect';
-import { AiError, type Prompt, type Tool } from 'effect/unstable/ai';
+import { AiError, Prompt, type Tool } from 'effect/unstable/ai';
 
 import type { Stop } from './stop.js';
 
@@ -389,5 +389,145 @@ export type Services<I> =
   | FunctionServices<
       I extends { readonly onIndeterminateToolCall: infer F } ? F : never
     >;
+
+/**
+ * The seams present on either operand of a {@link compose}, required — never
+ * optional — and carrying the union of both operands' services.
+ *
+ * `Services<I>` only extracts a seam's `R` when the seam is a *required*
+ * property of `I`, the same way a hand-written interceptor literal declares
+ * exactly the seams it uses. `Interceptor<R>` itself declares all four as
+ * optional, which is right for a value written by hand but wrong as
+ * `compose`'s return type: every field would type-check as declared, whether
+ * or not either operand actually defined it, and `Services` would over- or
+ * under-count depending on which fields happen to be spelled out. Picking the
+ * present keys off `Required<Interceptor<R>>` keeps the same "declared seams
+ * only" shape `intercepting` already relies on.
+ */
+type ComposedInterceptor<I1 extends object, I2 extends object> = Pick<
+  Required<Interceptor<Services<I1> | Services<I2>>>,
+  Extract<keyof I1 | keyof I2, keyof Interceptor>
+>;
+
+/**
+ * Combine two interceptors into one whose seams run in a fixed, documented
+ * order.
+ *
+ * `intercepting` deliberately replaces rather than stacks — two opinions at
+ * one seam need an order, and the agent has no way to guess it, so it is left
+ * to the caller. `compose` is where that order becomes an explicit, once-read
+ * choice: it builds a single interceptor from two, and the result is what
+ * `intercepting` sees, so attaching it is still one replace, not a second
+ * mechanism that stacks.
+ *
+ * The rule differs per seam, matching what each seam's type admits:
+ *
+ * - **`beforeTurn` chains.** `first` sees the turn's real input; `second`
+ *   sees `first`'s rewrite if it made one, the original input otherwise. The
+ *   combined decision keeps whichever rewrite happened last — `second`'s if
+ *   it rewrote, `first`'s if only it did, {@link proceed} if neither did.
+ * - **`beforeModelCall` observes both, in order.** The seam's whole contract
+ *   is "look, or refuse," so there is nothing to merge: `first` runs, then
+ *   `second`, and a failure from either stops the run before the other fires.
+ * - **`beforeToolCall` short-circuits.** `first` runs and, if it answers,
+ *   that answer is the result and `second` is never called for that call.
+ *   `second` only gets a turn when `first` dispatches, and its decision —
+ *   dispatch or answer — is what the loop sees.
+ * - **`onIndeterminateToolCall` has no neutral "no opinion" value** — every
+ *   call is a `Retry` or an `Answer`, never a pass-through — so composing it
+ *   means `first` decides unconditionally and `second` is not consulted for
+ *   it at all. Reach for this only when that is genuinely what is wanted;
+ *   two independent reconcilers usually is not.
+ *
+ * A seam absent from both operands stays absent on the result, so an
+ * un-composed seam still costs nothing — the loop's "skip when the property
+ * is missing" check still applies, exactly as it does for a hand-written
+ * interceptor.
+ *
+ * The composed `R` is the union of both operands' services: `intercepting`
+ * puts both on the agent's requirement channel. `compose` is associative in
+ * its observed order, so composing more than two is repeated application:
+ * `compose(compose(a, b), c)`.
+ *
+ * @category combinators
+ * @since 0.1.0
+ */
+export const compose = <const I1 extends object, const I2 extends object>(
+  first: I1 & Interceptor<Services<I1>>,
+  second: I2 & Interceptor<Services<I2>>,
+): ComposedInterceptor<I1, I2> => {
+  const beforeTurn =
+    first.beforeTurn === undefined && second.beforeTurn === undefined
+      ? undefined
+      : (context: TurnContext) =>
+          Effect.gen(function* () {
+            let rewritten: Prompt.RawInput | undefined;
+
+            if (first.beforeTurn !== undefined) {
+              const decision = yield* first.beforeTurn(context);
+              if (decision._tag === 'ProceedWith') rewritten = decision.input;
+            }
+
+            const seenBySecond =
+              rewritten === undefined
+                ? context
+                : { ...context, input: Prompt.make(rewritten) };
+
+            if (second.beforeTurn !== undefined) {
+              const decision = yield* second.beforeTurn(seenBySecond);
+              if (decision._tag === 'ProceedWith') rewritten = decision.input;
+            }
+
+            return rewritten === undefined ? proceed : proceedWith(rewritten);
+          });
+
+  const beforeModelCall =
+    first.beforeModelCall === undefined && second.beforeModelCall === undefined
+      ? undefined
+      : (context: ModelCallContext) =>
+          Effect.gen(function* () {
+            if (first.beforeModelCall !== undefined) {
+              yield* first.beforeModelCall(context);
+            }
+            if (second.beforeModelCall !== undefined) {
+              yield* second.beforeModelCall(context);
+            }
+          });
+
+  const beforeToolCall =
+    first.beforeToolCall === undefined && second.beforeToolCall === undefined
+      ? undefined
+      : (context: ToolCallContext) =>
+          Effect.gen(function* () {
+            if (first.beforeToolCall !== undefined) {
+              const decision = yield* first.beforeToolCall(context);
+              if (decision._tag === 'Answer') return decision;
+            }
+            return second.beforeToolCall === undefined
+              ? dispatch
+              : yield* second.beforeToolCall(context);
+          });
+
+  const onIndeterminateToolCall =
+    first.onIndeterminateToolCall ?? second.onIndeterminateToolCall;
+
+  // The narrowing `ComposedInterceptor` promises but the object literal below
+  // cannot show TypeScript on its own: each field is spread in from a runtime
+  // `undefined` check, so the literal's own inferred type marks every field
+  // optional, matching `Interceptor<R>` rather than the required-when-present
+  // shape `Services` needs to count correctly. The assertion only renames
+  // that inferred type to the equivalent, precise one — it does not widen or
+  // narrow which fields are actually present, which is exactly what the
+  // seam-by-seam tests in `interception.test.ts` and the `Requires`
+  // assertions in `assertions.test.ts` pin against the source.
+  return {
+    ...(beforeTurn === undefined ? {} : { beforeTurn }),
+    ...(beforeModelCall === undefined ? {} : { beforeModelCall }),
+    ...(beforeToolCall === undefined ? {} : { beforeToolCall }),
+    ...(onIndeterminateToolCall === undefined
+      ? {}
+      : { onIndeterminateToolCall }),
+  } as ComposedInterceptor<I1, I2>;
+};
 
 export * as Interception from './interception.js';
