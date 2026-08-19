@@ -18,6 +18,17 @@ export const completed = (
 ): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.Completed.make({ outcome, text, steps, usage });
 
+export const suspended = (
+  step: number,
+  usage: Stop.Usage,
+  pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
+): AgentEvents.Lifecycle =>
+  AgentEvents.Lifecycle.cases.Suspended.make({
+    step,
+    usage,
+    pendingApprovals,
+  });
+
 export const signalled = (
   step: number,
   signal: {
