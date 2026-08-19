@@ -5,6 +5,22 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added an eval suite runner and regression compare to `@sunfall/vesper-agent/eval`:
+  `AgentEval.suite({ name, cases, scorers, options })` runs a named
+  collection of cases against one agent, scoring each with the existing
+  `AgentEval.evaluate`. A case that fails to run at all — the agent dies, a
+  scorer throws, a score violates the normalized contract — is a failed
+  entry in the report rather than a failed suite; cases run sequentially by
+  default (`options.concurrency`) because a suite's model layer is
+  routinely one `ScriptedModel` with a single ordered request cursor.
+  `AgentEval.SuiteReport` is `Schema`-modelled, matching `Agent.Result`, so
+  applications encode/decode it to whatever they persist (a file, a DB, CI
+  artifact storage); Vesper does not persist it. `AgentEval.compare(baseline,
+current)` is a pure function over two reports that classifies every case
+  `new`, `removed`, `regressed`, `improved`, or `unchanged` and returns an
+  overall verdict, for a CI pipeline to diff against a committed baseline.
+  No LLM-judge is included; write one with the existing `AgentEval.makeScorer`.
+  Purely additive: no existing export changed shape.
 - `codeMode` accepts `{ except: [...] }`: broker every tool behind `exec`
   except the named ones, which stay directly advertised — gated,
   intercepted, metered, and durably approvable via `Tool.setNeedsApproval`
