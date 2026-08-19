@@ -5,7 +5,15 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
-No changes yet.
+- Durable tool approval that needs no Effect Workflow: mark a tool with
+  `effect/unstable/ai`'s own `Tool.setNeedsApproval`, and a recorded run
+  suspends durably (reusing `ToolSuspended`/`ToolResumed`/`ToolWaitCompleted`)
+  instead of dispatching it. `Agent.Result.outcome` gains a third value,
+  `'suspended'`, carrying `pendingApprovals`. `Conversation.resolveApproval`
+  is the new resolution surface; the next `run` picks up the decision.
+  Compatibility: additive — `Result.outcome` is a strictly wider union, and no
+  existing record, method, or export changed shape. See
+  [Tool approval](packages/agent/README.md#tool-approval).
 
 ## 0.1.0-alpha.1 - 2026-08-18
 
