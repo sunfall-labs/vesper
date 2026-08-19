@@ -1,3 +1,4 @@
+import { stripTypeScriptTypes } from 'node:module';
 import { createInterface } from 'node:readline';
 import vm from 'node:vm';
 
@@ -88,6 +89,15 @@ const execute = async (request) => {
         if (encoded === undefined) throw new TypeError("Value must be JSON serializable")
         return JSON.parse(encoded)
       }
+      class ToolCallError extends Error {
+        constructor(tool, failure) {
+          super(failure.message)
+          this.name = "ToolCallError"
+          this.code = failure.code
+          this.tool = tool
+          if ("value" in failure) this.value = clone(failure.value)
+        }
+      }
       const tools = new Proxy(Object.create(null), {
         get: (_target, name) => {
           if (typeof name !== "string" || !toolNames.has(name)) {
@@ -97,11 +107,13 @@ const execute = async (request) => {
             try {
               return clone(await Reflect.apply(callTool, undefined, [name, clone(input)]))
             } catch (cause) {
-              throw new Error(
-                cause !== null && typeof cause === "object" && typeof cause.message === "string"
-                  ? cause.message
-                  : String(cause),
-              )
+              if (
+                cause !== null &&
+                typeof cause === "object" &&
+                typeof cause.code === "string" &&
+                typeof cause.message === "string"
+              ) throw new ToolCallError(name, cause)
+              throw cause
             }
           }
         },
@@ -117,6 +129,7 @@ const execute = async (request) => {
       const load = (key) => clone(state.get(key) ?? null)
       Object.defineProperties(globalThis, {
         ALL_TOOLS: { value: Object.freeze(descriptors) },
+        ToolCallError: { value: ToolCallError },
         load: { value: load },
         store: { value: store },
         text: { value: text },
@@ -127,13 +140,33 @@ const execute = async (request) => {
       })
     })()
   `).runInContext(context, { timeout: request.limits.wallClockMillis });
-  const script = new vm.Script(
-    `"use strict"; (async () => {\n${request.source}\n})()`,
-  );
-  await script.runInContext(context, {
+  let source;
+  try {
+    source = stripTypeScriptTypes(
+      `"use strict"; (async () => {\n${request.source}\n})()`,
+      { mode: 'strip' },
+    );
+  } catch {
+    throw new Error('TypeScript source must use erasable syntax');
+  }
+  const script = new vm.Script(source);
+  const result = await script.runInContext(context, {
     timeout: request.limits.wallClockMillis,
   });
-  send({ _tag: 'Completion', state: JSON.parse(control.snapshot()) });
+  const structured = result === undefined ? undefined : cloneJson(result);
+  if (structured !== undefined) {
+    outputBytes += encoder.encode(JSON.stringify(structured)).byteLength;
+    if (outputBytes > request.limits.maxOutputBytes) {
+      throw new Error(
+        `Code output exceeds ${request.limits.maxOutputBytes} bytes`,
+      );
+    }
+  }
+  send({
+    _tag: 'Completion',
+    state: JSON.parse(control.snapshot()),
+    ...(structured === undefined ? {} : { result: structured }),
+  });
 };
 
 reader.on('line', (line) => {
@@ -153,7 +186,7 @@ reader.on('line', (line) => {
     pending.delete(response.id);
     if (response.outcome === 'success')
       waiter.resolve(cloneJson(response.value));
-    else waiter.reject(new Error(String(response.value)));
+    else waiter.reject(cloneJson(response.error));
     return;
   }
   if (message.type !== 'execute' || running) {

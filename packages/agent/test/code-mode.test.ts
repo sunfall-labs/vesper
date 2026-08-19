@@ -8,6 +8,7 @@ import { type Response, Tool, Toolkit } from 'effect/unstable/ai';
 import { Agent } from '../src/agent.js';
 import { CodeExecutor } from '../src/code-executor.js';
 import { Conversation } from '../src/conversation.js';
+import { DynamicToolkit } from '../src/dynamic-toolkit.js';
 import { Interception } from '../src/interception.js';
 import { ScriptedModel } from '../src/testing.js';
 
@@ -171,6 +172,80 @@ describe('code mode executor protocol', () => {
 });
 
 describe('code mode tool broker', () => {
+  it.effect('returns text output and a structured result separately', () =>
+    Effect.gen(function* () {
+      const agent = Agent.make({
+        name: 'structured-code-result',
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(),
+        codeMode: true,
+      }).withHandlers({});
+      const executor = CodeExecutor.fake([
+        { _tag: 'Output', value: 'working' },
+        { _tag: 'Completion', state: {}, result: { answer: 42 } },
+      ]);
+      const model = ScriptedModel.make([
+        [
+          {
+            type: 'tool-call',
+            id: 'exec-structured-result',
+            name: 'exec',
+            params: { source: 'return { answer: 42 }' },
+          },
+          finish('tool-calls'),
+        ],
+        answeringTurn,
+      ]);
+
+      yield* agent
+        .run('go')
+        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+      const requests = yield* model.requests;
+      const prompt = JSON.stringify(requests[1]?.prompt);
+
+      expect(prompt).toContain('"output":"working"');
+      expect(prompt).toContain('"result":{"answer":42}');
+    }),
+  );
+
+  it.effect('returns a structured outer execution failure', () =>
+    Effect.gen(function* () {
+      const agent = Agent.make({
+        name: 'structured-code-error',
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(),
+        codeMode: true,
+      });
+      const executor = CodeExecutor.fake([
+        { _tag: 'Failure', message: 'sandbox failed' },
+      ]);
+      const model = ScriptedModel.make([
+        [
+          {
+            type: 'tool-call',
+            id: 'exec-structured-error',
+            name: 'exec',
+            params: { source: 'throw new Error("no")' },
+          },
+          finish('tool-calls'),
+        ],
+        answeringTurn,
+      ]);
+
+      yield* agent
+        .run('go')
+        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+      const requests = yield* model.requests;
+      const prompt = JSON.stringify(requests[1]?.prompt);
+
+      expect(prompt).toContain('"isFailure":true');
+      expect(prompt).toContain('"result":{"code":"execution_failed"');
+      expect(prompt).toContain('sandbox failed');
+    }),
+  );
+
   it.effect('advertises only exec and composes hidden typed tools', () =>
     Effect.gen(function* () {
       const lookup = Tool.make('lookup', {
@@ -238,6 +313,25 @@ describe('code mode tool broker', () => {
         ['exec'],
         ['exec'],
       ]);
+      const execDescription = requests[0]?.toolDefinitions.find(
+        ({ name }) => name === 'exec',
+      )?.description;
+      expect(execDescription).toContain(
+        'Execute erasable TypeScript that composes the hidden tools below.',
+      );
+      expect(execDescription).toContain(
+        'readonly lookup: (input: { readonly id: string }) => Promise<{ readonly status: string }>;',
+      );
+      expect(execDescription).toContain(
+        'readonly summarize: (input: { readonly status: string }) => Promise<string>;',
+      );
+      expect(execDescription).toContain(
+        'declare function text(value: string | JsonValue): void;',
+      );
+      expect(execDescription).toContain(
+        'declare class ToolCallError extends Error',
+      );
+      expect(execDescription).not.toContain('Node');
       expect(executions[0]?.tools.map((tool) => tool.name)).toEqual([
         'lookup',
         'summarize',
@@ -252,6 +346,58 @@ describe('code mode tool broker', () => {
       ]);
       expect(JSON.stringify(requests[1]?.prompt)).toContain('OPEN:42');
       expect(JSON.stringify(requests[1]?.prompt)).not.toContain('open:42');
+    }),
+  );
+
+  it.effect('preserves a hidden tool declared failure as structured data', () =>
+    Effect.gen(function* () {
+      const reject = Tool.make('reject', {
+        parameters: Schema.Struct({}),
+        success: Schema.String,
+        failure: Schema.Struct({ code: Schema.String }),
+        failureMode: 'return',
+      });
+      const agent = Agent.make({
+        name: 'structured-code-failure',
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(reject),
+        codeMode: true,
+      }).withHandlers({
+        reject: () => Effect.fail({ code: 'denied' }),
+      });
+      const executor = CodeExecutor.fake([
+        { _tag: 'ToolCall', id: 'nested-reject', name: 'reject', input: {} },
+        { _tag: 'Completion', state: {} },
+      ]);
+      const model = ScriptedModel.make([
+        [
+          {
+            type: 'tool-call',
+            id: 'exec-reject',
+            name: 'exec',
+            params: { source: 'await tools.reject({})' },
+          },
+          finish('tool-calls'),
+        ],
+        answeringTurn,
+      ]);
+
+      yield* agent
+        .run('go')
+        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+
+      expect(yield* executor.responses).toEqual([
+        {
+          id: 'nested-reject',
+          outcome: 'failure',
+          error: {
+            code: 'tool_failure',
+            message: 'Tool "reject" failed',
+            value: { code: 'denied' },
+          },
+        },
+      ]);
     }),
   );
 
@@ -408,12 +554,19 @@ describe('code mode tool broker', () => {
         yield* agent
           .run('go')
           .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
-        const requests = yield* model.requests;
 
-        expect(JSON.stringify(requests[1]?.prompt)).toContain(
-          "Invalid parameters for tool 'lookup'",
-        );
-        expect(yield* executor.responses).toEqual([]);
+        expect(yield* executor.responses).toEqual([
+          {
+            id: 'nested-invalid',
+            outcome: 'failure',
+            error: {
+              code: 'dispatch_failed',
+              message: expect.stringContaining(
+                "Invalid parameters for tool 'lookup'",
+              ),
+            },
+          },
+        ]);
       }),
   );
 
@@ -457,12 +610,19 @@ describe('code mode tool broker', () => {
       yield* agent
         .run('go')
         .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
-      const requests = yield* model.requests;
 
-      expect(JSON.stringify(requests[1]?.prompt)).toContain(
-        "Failed to encode result for tool 'broken'",
-      );
-      expect(yield* executor.responses).toEqual([]);
+      expect(yield* executor.responses).toEqual([
+        {
+          id: 'nested-invalid-result',
+          outcome: 'failure',
+          error: {
+            code: 'dispatch_failed',
+            message: expect.stringContaining(
+              "Failed to encode result for tool 'broken'",
+            ),
+          },
+        },
+      ]);
     }),
   );
 
@@ -538,63 +698,28 @@ describe('code mode tool broker', () => {
     }),
   );
 
-  it.effect('rejects provider-mediated approval tools from code mode', () =>
-    Effect.gen(function* () {
-      let handled = 0;
-      const approve = Tool.make('approve', {
-        parameters: Schema.Struct({}),
-        success: Schema.String,
-        needsApproval: true,
-      });
-      const agent = Agent.make({
+  it('requires approval-gated tools to be excepted from code mode', () => {
+    const approve = Tool.make('approve', {
+      parameters: Schema.Struct({}),
+      success: Schema.String,
+      needsApproval: true,
+    });
+
+    expect(() =>
+      Agent.make({
         name: 'approval-code',
         revision: '1',
         instructions: 'Use code mode.',
         toolkit: Toolkit.make(approve),
         codeMode: true,
-      }).withHandlers({
-        approve: () =>
-          Effect.sync(() => {
-            handled += 1;
-            return 'approved';
-          }),
-      });
-      const executor = CodeExecutor.fake([
-        {
-          _tag: 'ToolCall',
-          id: 'nested-approval',
-          name: 'approve',
-          input: {},
-        },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-approval',
-            name: 'exec',
-            params: { source: 'approval call' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
-      const requests = yield* model.requests;
-
-      expect(JSON.stringify(requests[1]?.prompt)).toContain(
-        'provider-mediated approval',
-      );
-      expect(handled).toBe(0);
-    }),
-  );
+      }),
+    ).toThrow(
+      'Agent codeMode brokers approval-gated tool "approve"; add it to codeMode.except',
+    );
+  });
 
   it.effect(
-    'a recorded code-mode run settles on an approval tool instead of suspending',
+    'returns approval_required for a dynamically resolved approval tool',
     () =>
       Effect.gen(function* () {
         let handled = 0;
@@ -603,23 +728,28 @@ describe('code mode tool broker', () => {
           success: Schema.String,
           needsApproval: true,
         });
+        const dynamic = Toolkit.make(approve);
+        const source = DynamicToolkit.make(
+          dynamic.pipe(
+            Effect.provide(
+              dynamic.toLayer({
+                approve: () =>
+                  Effect.sync(() => {
+                    handled += 1;
+                    return 'approved';
+                  }),
+              }),
+            ),
+          ),
+        );
         const agent = Agent.make({
-          name: 'approval-code-recorded',
+          name: 'dynamic-approval-code',
           revision: '1',
           instructions: 'Use code mode.',
-          toolkit: Toolkit.make(approve),
+          toolkit: Toolkit.make(),
+          dynamicTools: [source],
           codeMode: true,
-        }).withHandlers({
-          approve: () =>
-            Effect.sync(() => {
-              handled += 1;
-              return 'approved';
-            }),
         });
-        const conversation = Conversation.make(
-          agent,
-          LogVocabulary.ConversationId.make('code-approval-conversation'),
-        );
         const executor = CodeExecutor.fake([
           {
             _tag: 'ToolCall',
@@ -633,34 +763,32 @@ describe('code mode tool broker', () => {
           [
             {
               type: 'tool-call',
-              id: 'exec-approval-recorded',
+              id: 'exec-approval',
               name: 'exec',
-              params: { source: 'approval call' },
+              params: { source: 'await tools.approve({})' },
             },
             finish('tool-calls'),
           ],
           answeringTurn,
         ]);
 
-        const result = yield* conversation
+        yield* agent
           .run('go')
           .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
 
-        // In code mode the approval-gated tool is refused with a typed
-        // failure inside `exec`, so a recorded run must settle normally —
-        // never end `'suspended'` with a pending approval nothing could
-        // resolve, and never write a `ToolSuspended` record for it.
-        expect(result.outcome).toBe('success');
-        expect(result.pendingApprovals ?? []).toEqual([]);
+        expect(yield* executor.responses).toEqual([
+          {
+            id: 'nested-approval',
+            outcome: 'failure',
+            error: {
+              code: 'approval_required',
+              message:
+                'Tool "approve" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except',
+            },
+          },
+        ]);
         expect(handled).toBe(0);
-
-        const records = yield* conversation.records().pipe(Stream.runCollect);
-        const tags = Array.from(records).map(
-          (envelope) => envelope.record._tag,
-        );
-        expect(tags).not.toContain('ToolSuspended');
-        expect(tags).toContain('RunSettled');
-      }).pipe(Effect.provide(logLayer), Effect.scoped),
+      }).pipe(Effect.scoped),
   );
 
   it.effect(

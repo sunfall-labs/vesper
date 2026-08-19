@@ -36,7 +36,8 @@ const isEvent = (value: unknown): value is CodeExecutor.Event => {
         'state' in value &&
         typeof value.state === 'object' &&
         value.state !== null &&
-        !Array.isArray(value.state)
+        !Array.isArray(value.state) &&
+        (!('result' in value) || value.result !== undefined)
       );
     case 'Failure':
       return 'message' in value && typeof value.message === 'string';
@@ -259,7 +260,7 @@ const start = (
     };
   });
 
-/** A credential-free, separate-process JavaScript executor for Node.js. */
+/** A credential-free, separate-process TypeScript executor for Node.js. */
 export const layer = (
   options: Options = {},
 ): Layer.Layer<CodeExecutor.Service> =>

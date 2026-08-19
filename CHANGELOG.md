@@ -5,6 +5,21 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Code mode now presents a generated TypeScript SDK with typed tool parameters
+  and results, and the bundled isolated executor accepts erasable TypeScript
+  rather than describing its source as JavaScript. Syntax requiring
+  transformation, imports, and undeclared runtime globals remain unavailable.
+  Compatibility: `@sunfall/vesper-agent` and the workspace now require Node.js
+  22.13.0 or newer for native type stripping. `exec` now returns
+  `{ output, result? }`: `text(...)` contributes output and top-level `return`
+  contributes a structured JSON result. Nested failures are catchable as
+  `ToolCallError`, with a stable `code`, tool name, message, and preserved
+  declared failure value; outer failures return
+  `{ code: 'execution_failed', message }`. Compatibility: custom executors
+  must accept the documented erasable-TypeScript source contract, forward the
+  optional `Completion.result`, and use the structured failure branch of
+  `ToolResponse`.
+
 - Added an eval suite runner and regression compare to `@sunfall/vesper-agent/eval`:
   `AgentEval.suite({ name, cases, scorers, options })` runs a named
   collection of cases against one agent, scoring each with the existing
@@ -26,10 +41,11 @@ current)` is a pure function over two reports that classifies every case
   intercepted, metered, and durably approvable via `Tool.setNeedsApproval`
   exactly as if code mode were off for them. Names are compile-time-checked
   against the toolkit for literal arrays and rejected at construction
-  otherwise. `codeMode: true`/`false` behavior is unchanged, with one
-  fix: a toolkit tool named `exec` is now rejected at construction whenever
-  code mode is enabled, instead of being silently shadowed by the generated
-  `exec` tool.
+  otherwise. Approval-gated toolkit tools must be excepted; `Agent.make`
+  rejects a configuration that would broker one, while dynamically resolved
+  approval tools fail closed with `approval_required`. A toolkit tool named
+  `exec` is rejected at construction whenever code mode is enabled, instead
+  of being silently shadowed by the generated `exec` tool.
 
 - Added durable tool approvals without `WorkflowEngine`. A tool marked with
   Effect's own `Tool.setNeedsApproval` now suspends durably in a recorded
