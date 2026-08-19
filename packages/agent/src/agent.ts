@@ -1568,6 +1568,7 @@ export const make = <
                         : pendingApprovals.length > 0
                           ? AgentEventRuntime.suspended(
                               completedSteps,
+                              seen.text,
                               totals,
                               pendingApprovals,
                             )
@@ -1911,6 +1912,11 @@ export const make = <
                   // snapshot from when this session opened: the recovery
                   // index it is read through here is the same one
                   // `resolveIndeterminate` just updated.
+                  // Resolved once for every pending approval below: the run
+                  // toolkit may include dynamic sources whose resolution is
+                  // real work (an MCP discovery round-trip), and each
+                  // approval only needs the one resolved snapshot.
+                  const approvalToolkit = Effect.succeed(yield* runToolkit);
                   const stillPendingApprovals: AgentEvents.PendingApproval[] =
                     yield* Effect.forEach(
                       session.suspendedToolCalls.filter(
@@ -1937,7 +1943,7 @@ export const make = <
                         // it.
                         return Effect.map(
                           ToolDispatch.decodeSuspendedRequest(
-                            runToolkit,
+                            approvalToolkit,
                             call.name,
                             call.request,
                           ),
@@ -1955,6 +1961,10 @@ export const make = <
                     return Stream.make(
                       AgentEventRuntime.suspended(
                         0,
+                        // No model call happened on this path — the run was
+                        // refused before turn 1 — so there is no partial text
+                        // to preserve.
+                        '',
                         wiring.initialUsage ?? { input: 0, output: 0 },
                         stillPendingApprovals,
                       ),

@@ -258,11 +258,38 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
         const session = yield* AgentLog.open(id, {
           compatibility: { agent: agent.name, revision: agent.revision },
         });
-        const suspended = session.suspendedToolCalls.find(
-          (call) =>
-            call.toolCallId === normalizedId &&
-            call.wait === ToolDispatch.APPROVAL_WAIT,
-        );
+        // Both lookups scan `session.history` — the resume view that spans
+        // runs back to the latest compaction boundary — rather than the
+        // recovery snapshot (`suspendedToolCalls`/`hasCompletedWait`). The
+        // snapshot indexes only what the *next run* must resolve, so it
+        // empties once the owning run settles: reading it here misreported a
+        // resolved-then-dispatched approval as `not_found`, and — worse —
+        // could let a later conflicting decision through, because the
+        // completion had fallen out of the snapshot along with the
+        // suspension. The history keeps both records for as long as the
+        // suspension itself is visible, so the two answers cannot go blind
+        // independently.
+        let suspended:
+          | { readonly name: string; readonly token: string }
+          | undefined;
+        let resolved = false;
+        for (const envelope of session.history) {
+          const record = envelope.record;
+          if (
+            record._tag === 'ToolSuspended' &&
+            record.id === normalizedId &&
+            record.wait === ToolDispatch.APPROVAL_WAIT
+          ) {
+            suspended = { name: record.name, token: record.token };
+            resolved = false;
+          } else if (
+            suspended !== undefined &&
+            record._tag === 'ToolWaitCompleted' &&
+            record.token === suspended.token
+          ) {
+            resolved = true;
+          }
+        }
         if (suspended === undefined) {
           return yield* new ApprovalResolutionError({
             message: `No tool call ${normalizedId} is durably waiting for approval in conversation ${id}`,
@@ -271,7 +298,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             reason: 'not_found',
           });
         }
-        if (session.hasCompletedWait(suspended.token)) {
+        if (resolved) {
           return yield* new ApprovalResolutionError({
             message: `Tool call ${normalizedId} in conversation ${id} was already resolved`,
             conversationId: id,

@@ -57,6 +57,12 @@ export const Lifecycle = Schema.TaggedUnion({
    */
   Suspended: {
     step: Schema.Natural,
+    /**
+     * Whatever the model said before its approval-gated tool call. Often the
+     * stated intent behind the request — worth showing to the approver, and
+     * gone if not carried here: the suspended run's turn never completes.
+     */
+    text: Schema.String,
     usage: Stop.Usage,
     pendingApprovals: Schema.Array(PendingApproval),
   },

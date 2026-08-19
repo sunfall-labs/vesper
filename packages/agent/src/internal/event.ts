@@ -20,11 +20,13 @@ export const completed = (
 
 export const suspended = (
   step: number,
+  text: string,
   usage: Stop.Usage,
   pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
 ): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.Suspended.make({
     step,
+    text,
     usage,
     pendingApprovals,
   });

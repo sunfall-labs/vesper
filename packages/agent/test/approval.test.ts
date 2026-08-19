@@ -87,6 +87,9 @@ const approvalScripted = () =>
                 // this raw tool call into a `tool-approval-request` part —
                 // this script supplies only what a real provider would.
                 return Stream.fromIterable<Response.StreamPartEncoded>([
+                  { type: 'text-start', id: 'a' },
+                  { type: 'text-delta', id: 'a', delta: 'Releasing r1.' },
+                  { type: 'text-end', id: 'a' },
                   {
                     type: 'tool-call',
                     id: CALL_ID,
@@ -207,6 +210,10 @@ describe('durable tool approval', () => {
         const result = yield* conversation.run('release r1');
 
         expect(result.outcome).toBe('suspended');
+        // The model's stated intent before the gate — preserved on the
+        // suspended result rather than discarded, since it is often exactly
+        // what an approver should be shown.
+        expect(result.text).toBe('Releasing r1.');
         expect(result.pendingApprovals).toEqual([
           { toolCallId: CALL_ID, toolName: 'release', input: { id: 'r1' } },
         ]);
@@ -346,6 +353,43 @@ describe('durable tool approval', () => {
         }
       }),
     ),
+  );
+
+  it.effect(
+    'a resolution after the owning run settles is still a typed conflict',
+    () =>
+      provide(
+        Effect.gen(function* () {
+          const ran = { count: 0 };
+          const agent = releaseAgentWith(ran);
+          const conversation = Conversation.make(agent, 'settled-resolve');
+
+          yield* conversation.run('release r1');
+          yield* conversation.resolveApproval(CALL_ID, 'approve');
+          // Dispatches the approved call and settles the run — after which
+          // the recovery snapshot no longer indexes the suspension. The
+          // resolution must still be visible: `not_found` here would
+          // misreport, and a decision slipping through would durably record
+          // a second, conflicting answer for a call that already ran.
+          const settled = yield* conversation.run();
+          expect(settled.outcome).toBe('success');
+          expect(ran.count).toBe(1);
+
+          const again = yield* Effect.flip(
+            conversation.resolveApproval(CALL_ID, 'deny', 'too late'),
+          );
+          expect(again._tag).toBe('ApprovalResolutionError');
+          if (again._tag === 'ApprovalResolutionError') {
+            expect(again.reason).toBe('already_resolved');
+          }
+
+          const records = yield* conversation.records().pipe(Stream.runCollect);
+          const completions = Array.from(records).filter(
+            (envelope) => envelope.record._tag === 'ToolWaitCompleted',
+          );
+          expect(completions).toHaveLength(1);
+        }),
+      ),
   );
 
   it.effect(

@@ -37,7 +37,7 @@ export const foldToResult = <
     if (terminal?._tag === 'Suspended') {
       return {
         outcome: 'suspended',
-        text: '',
+        text: terminal.text,
         steps: terminal.step,
         usage: terminal.usage,
         pendingApprovals: terminal.pendingApprovals,
