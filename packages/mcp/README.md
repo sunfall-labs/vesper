@@ -1,47 +1,90 @@
 # `@sunfall/vesper-mcp`
 
-Expose one Vesper agent as a durable `run_agent` tool on Effect's native MCP
-server. Vesper adapts only its own conversation semantics; Effect continues to
-own MCP schemas, registration, protocols, stdio, and HTTP transports.
+Consume MCP servers as scoped, runtime-discovered Vesper tools. Every remote
+tool is exposed to the model as `mcp__<server>__<tool>`, with unsupported name
+characters replaced by `_`, so tools from different servers remain distinct.
 
 ```bash
 npm install @sunfall/vesper-mcp @sunfall/vesper-agent effect@4.0.0-rc.109
 ```
 
 ```ts
-import { AgentMcp } from '@sunfall/vesper-mcp/agent';
-import { Layer } from 'effect';
-import { McpProtocol, McpServer } from 'effect/unstable/ai';
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { Mcp } from '@sunfall/vesper-mcp/mcp';
+import { Redacted } from 'effect';
+import { Toolkit } from 'effect/unstable/ai';
 
-const adapter = AgentMcp.make(supportAgent);
+const linear = Mcp.remote({
+  name: 'linear',
+  url: 'https://mcp.linear.app/mcp',
+  auth: () => Redacted.make(getLinearToken()),
+  tools: ['search_issues', 'create_issue'],
+  optional: true,
+  needsApproval: (tool) => tool.annotations?.destructiveHint === true,
+});
 
-const McpLive = adapter.layer.pipe(
-  Layer.provide(
-    McpServer.layerStdio({
-      name: 'support-agent',
-      version: '1.0.0',
-      protocols: [McpProtocol.v2025_06_18],
-    }),
-  ),
-);
+const agent = Agent.make({
+  name: 'support',
+  revision: '1',
+  instructions: 'Use Linear when it helps answer the request.',
+  toolkit: Toolkit.make(),
+  dynamicTools: [linear],
+});
 ```
 
-`adapter.layer` registers exactly one tool and requires the agent's ordinary
-`Agent.Requires`, `LogStore.Service`, `Crypto.Crypto`, and
-`McpServer.McpServer` services. Provide `McpLive` with those ordinary Vesper
-layers and the platform's stdio adapter. For HTTP, substitute Effect's
-`McpServer.layerHttp`. The package does not wrap or re-export either transport,
-protocol, or schema.
+`auth` accepts an Effect `Redacted<string>` or a resolver invoked for each HTTP
+request. The raw token is unwrapped only while constructing the authorization
+header, reducing accidental exposure through logs and inspection. `headers`,
+`requestInit`, a custom `fetch`, and legacy
+`transport: 'sse'` are also available. For OAuth or a custom transport, use the
+lower-level `Mcp.make({ transport: Mcp.streamableHttp(...) })`.
 
-The tool's declared failure is `RunError`. It carries a closed
-`classification`, stable `code`, `retryable` flag, human-readable `message`,
-and string-only `details`. Provider, conversation, policy, and durability
-failures are reduced to that safe envelope, so Effect's MCP server returns a
-typed tool failure without serializing internal causes. Input and successful
-output schemas remain Effect's native `Tool` schemas.
+Every submission discovers a fresh tool snapshot. That snapshot is immutable
+across all model turns in the run, and all configured dynamic sources open in
+parallel. The current server and tool availability is placed in system context:
+an unchanged snapshot stays stable for prompt caching, while a changed or
+unavailable server explicitly supersedes earlier availability. `optional: true`
+continues with no tools if connection or discovery fails; without it, the run
+fails before the first model request.
 
-This first adapter intentionally exposes no conversation-history resource. A
-history endpoint would need application-specific authorization, redaction, and
-pagination semantics; `run_agent` keeps the public MCP surface focused on the
-durable conversation operation. A resource can be added once those policies
-are part of the Vesper contract.
+The optional `tools` allowlist is fail-closed and preserves its declared order.
+Unknown, repeated, or MCP task-required tools fail discovery before the first
+model request. Without an allowlist, task-required tools are omitted because
+Vesper does not yet implement the MCP task protocol.
+
+MCP schemas use Effect's native `Tool.dynamic`, and remote calls inherit Effect
+interruption through an `AbortSignal`. MCP failures are returned through the
+ordinary tool-result channel so the model can react. `needsApproval` routes
+selected remote tools through Vesper's durable approval flow without adding a
+second approval abstraction.
+
+## Reusing connections
+
+Fresh scoped connections are the safe default. To reuse an initialized client
+while still refreshing its tools for each run, use `Mcp.cached` and provide one
+cache layer around the lifetime that should share connections:
+
+```ts
+import { Effect } from 'effect';
+
+const linear = Mcp.cached({
+  name: 'linear',
+  url: 'https://mcp.linear.app/mcp',
+  auth: () => Redacted.make(getLinearToken()),
+  optional: true,
+});
+
+const program = Effect.gen(function* () {
+  yield* agent.run('Find the issue.');
+  yield* agent.run('Check it again.');
+}).pipe(Effect.provide(Mcp.layerConnectionCache()));
+```
+
+The cache is Effect's reference-counted `RcMap`: overlapping runs share the
+same client, idle clients close after five minutes by default, and every client
+closes when the layer scope closes. Configure the idle lifetime with
+`Mcp.layerConnectionCache({ idleTimeToLive: '30 seconds' })`.
+
+For local servers, use `Mcp.make({ transport: Mcp.stdio(...) })`; legacy remote
+servers can use `Mcp.sse(...)`. Applications that already own an MCP client can
+adapt its scoped lifetime with `Mcp.fromClient(...)`.

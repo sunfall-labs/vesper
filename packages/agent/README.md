@@ -23,7 +23,35 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
-`/testing`, plus `/workflow`.
+`/testing`, plus `/workflow` and `/dynamic-toolkit`.
+
+## Dynamic tools
+
+Use `dynamicTools` for capabilities discovered when a run starts, such as MCP
+servers or tenant-specific integrations:
+
+```ts
+import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';
+
+const runtimeTools = DynamicToolkit.make(discoverTools(), {
+  resource: {
+    id: 'tenant-tools',
+    description: 'Tenant-specific tools',
+  },
+});
+
+const agent = Agent.make({
+  // ...
+  toolkit: staticTools,
+  dynamicTools: [runtimeTools],
+});
+```
+
+Sources open concurrently and are scoped to the run. Definitions and handlers
+form one stable snapshot across its model turns. Tool-name and resource-id
+collisions fail before the first model request. Wrap a nonessential source with
+`DynamicToolkit.optional(source, resource)` to continue without its tools and
+make that unavailability explicit in the current system context.
 
 ## Durable file attachments
 

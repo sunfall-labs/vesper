@@ -137,18 +137,15 @@ export interface GateOptions<InterceptorRequires = never> {
 /** Resolve every orphaned handler start before a resumed provider call. */
 export const resolveIndeterminate = <
   Tools extends Record<string, Tool.Any>,
+  ToolkitRequires,
   InterceptorRequires = never,
 >(
-  toolkit: Toolkit.Toolkit<Tools>,
+  toolkit: Effect.Effect<Toolkit.WithHandler<Tools>, never, ToolkitRequires>,
   options: GateOptions<InterceptorRequires> & {
     readonly session: AgentLog.Session;
     readonly arbitration: TurnArbitration;
   },
-): Effect.Effect<
-  void,
-  RunError,
-  Tool.HandlersFor<Tools> | InterceptorRequires
-> =>
+): Effect.Effect<void, RunError, ToolkitRequires | InterceptorRequires> =>
   Effect.gen(function* () {
     if (options.session.recoveryCorruption !== undefined) {
       return yield* Effect.fail(
@@ -460,14 +457,15 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
  */
 export const gate = <
   Tools extends Record<string, Tool.Any>,
+  ToolkitRequires,
   InterceptorRequires = never,
 >(
-  toolkit: Toolkit.Toolkit<Tools>,
+  toolkit: Effect.Effect<Toolkit.WithHandler<Tools>, never, ToolkitRequires>,
   options: GateOptions<InterceptorRequires>,
 ): Effect.Effect<
   Toolkit.WithHandler<Tools>,
   never,
-  Tool.HandlersFor<Tools> | InterceptorRequires
+  ToolkitRequires | InterceptorRequires
 > =>
   Effect.gen(function* () {
     const session = options.session;

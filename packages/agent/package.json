@@ -42,6 +42,10 @@
       "types": "./dist/conversation.d.ts",
       "default": "./dist/conversation.js"
     },
+    "./dynamic-toolkit": {
+      "types": "./dist/dynamic-toolkit.d.ts",
+      "default": "./dist/dynamic-toolkit.js"
+    },
     "./event": {
       "types": "./dist/event.d.ts",
       "default": "./dist/event.js"

@@ -21,6 +21,9 @@
       "@sunfall/vesper-agent/conversation": [
         "./packages/agent/src/conversation.ts"
       ],
+      "@sunfall/vesper-agent/dynamic-toolkit": [
+        "./packages/agent/src/dynamic-toolkit.ts"
+      ],
       "@sunfall/vesper-agent/event": ["./packages/agent/src/event.ts"],
       "@sunfall/vesper-agent/eval": ["./packages/agent/src/eval.ts"],
       "@sunfall/vesper-agent/history": ["./packages/agent/src/history.ts"],
@@ -78,7 +81,7 @@
       "@sunfall/vesper-attachments/layer-filesystem": [
         "./packages/attachments/src/layer-filesystem.ts"
       ],
-      "@sunfall/vesper-mcp/agent": ["./packages/mcp/src/agent.ts"]
+      "@sunfall/vesper-mcp/mcp": ["./packages/mcp/src/mcp.ts"]
     }
   }
 }

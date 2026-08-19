@@ -1,7 +1,7 @@
 {
   "name": "@sunfall/vesper-mcp",
   "version": "0.1.0-alpha.1",
-  "description": "Expose a Vesper agent as an Effect-native MCP server tool.",
+  "description": "Consume MCP servers as Effect-native Vesper toolkits.",
   "keywords": [
     "agent",
     "effect",
@@ -30,9 +30,9 @@
   },
   "sideEffects": false,
   "exports": {
-    "./agent": {
-      "types": "./dist/agent.d.ts",
-      "default": "./dist/agent.js"
+    "./mcp": {
+      "types": "./dist/mcp.d.ts",
+      "default": "./dist/mcp.js"
     }
   },
   "publishConfig": {
@@ -42,14 +42,13 @@
     "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
-    "@sunfall/vesper-agent": "0.1.0-alpha.1",
-    "@sunfall/vesper-log": "0.1.0-alpha.1"
+    "@modelcontextprotocol/client": "2.0.0",
+    "@sunfall/vesper-agent": "0.1.0-alpha.1"
   },
   "peerDependencies": {
     "effect": "4.0.0-rc.109"
   },
   "devDependencies": {
-    "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "effect": "catalog:"
   }

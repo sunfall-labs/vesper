@@ -1,0 +1,497 @@
+import {
+  LATEST_PROTOCOL_VERSION,
+  type CallToolResult,
+  type FetchLike,
+  type JSONRPCMessage,
+  type ListToolsResult,
+  type Tool as McpTool,
+  type Transport as ProtocolTransport,
+} from '@modelcontextprotocol/client';
+import { describe, expect, it } from '@effect/vitest';
+import { Effect, Fiber, Redacted, Stream } from 'effect';
+import { type Response as AiResponse, Toolkit } from 'effect/unstable/ai';
+
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';
+import { ScriptedModel } from '@sunfall/vesper-agent/testing';
+import { Mcp, type ClientLike } from '../src/mcp.js';
+
+const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
+  type: 'finish' as const,
+  reason,
+  usage: {
+    inputTokens: { total: 1, uncached: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1 },
+  },
+});
+
+const search: McpTool = {
+  name: 'search.issues',
+  title: 'Search issues',
+  description: 'Search issue titles and descriptions.',
+  inputSchema: {
+    type: 'object',
+    properties: { query: { type: 'string' } },
+    required: ['query'],
+  },
+};
+
+const create: McpTool = {
+  name: 'create_issue',
+  description: 'Create an issue.',
+  inputSchema: {
+    type: 'object',
+    properties: { title: { type: 'string' } },
+    required: ['title'],
+  },
+  annotations: { destructiveHint: true },
+};
+
+const listing = (tools: McpTool[]): ListToolsResult => ({ tools });
+const result = (text: string, isError = false): CallToolResult => ({
+  content: [{ type: 'text', text }],
+  isError,
+});
+
+const modelSystem = (request: {
+  readonly prompt: {
+    readonly content: ReadonlyArray<{
+      readonly role: string;
+      readonly content: unknown;
+    }>;
+  };
+}): string =>
+  request.prompt.content
+    .filter((message) => message.role === 'system')
+    .map((message) => String(message.content))
+    .join('\n');
+
+const protocolTransport = (
+  lifecycle: {
+    opened: number;
+    closed: number;
+  },
+  options?: {
+    readonly closeFailure?: Error | undefined;
+  },
+): ProtocolTransport => {
+  const instance: ProtocolTransport = {
+    start: async () => {
+      lifecycle.opened += 1;
+    },
+    send: async (message) => {
+      if (!('id' in message) || !('method' in message)) return;
+      let response: JSONRPCMessage;
+      if (message.method === 'initialize') {
+        response = {
+          jsonrpc: '2.0',
+          id: message.id,
+          result: {
+            protocolVersion: LATEST_PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: { name: 'test', version: '1.0.0' },
+          },
+        };
+      } else if (message.method === 'tools/list') {
+        response = {
+          jsonrpc: '2.0',
+          id: message.id,
+          result: listing([search]),
+        };
+      } else {
+        response = {
+          jsonrpc: '2.0',
+          id: message.id,
+          error: { code: -32601, message: 'unsupported test method' },
+        };
+      }
+      instance.onmessage?.(response);
+    },
+    close: async () => {
+      lifecycle.closed += 1;
+      if (options?.closeFailure !== undefined) throw options.closeFailure;
+      instance.onclose?.();
+    },
+  };
+  return instance;
+};
+
+const requestId = (body: BodyInit | null | undefined): string | number => {
+  if (typeof body !== 'string') throw new Error('Expected a JSON request.');
+  const parsed: unknown = JSON.parse(body);
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    !('id' in parsed) ||
+    (typeof parsed.id !== 'string' && typeof parsed.id !== 'number')
+  ) {
+    throw new Error('Expected a JSON-RPC request id.');
+  }
+  return parsed.id;
+};
+
+const jsonResponse = (value: JSONRPCMessage): Response =>
+  new Response(JSON.stringify(value), {
+    headers: { 'content-type': 'application/json' },
+  });
+
+describe('Mcp', () => {
+  it.effect(
+    'discovers namespaced tools and calls the original remote name',
+    () =>
+      Effect.gen(function* () {
+        const calls: Array<{ name: string; args: unknown }> = [];
+        const client = {
+          listTools: async () => listing([search, create]),
+          callTool: async ({ name, arguments: args }) => {
+            calls.push({ name, args });
+            return result('VES-42');
+          },
+        } satisfies ClientLike;
+        const source = Mcp.fromClient({
+          name: 'linear.prod',
+          client: Effect.succeed(client),
+          tools: ['search.issues'],
+        });
+
+        const ready = yield* source.open;
+        const handled = yield* ready
+          .handle('mcp__linear_prod__search_issues', { query: 'vesper' })
+          .pipe(Stream.unwrap, Stream.runCollect);
+
+        expect(Object.keys(ready.tools)).toEqual([
+          'mcp__linear_prod__search_issues',
+        ]);
+        expect(
+          ready.tools.mcp__linear_prod__search_issues?.description,
+        ).toContain('MCP tool "search.issues" from "linear.prod"');
+        expect(Array.from(handled).at(-1)).toMatchObject({
+          result: 'VES-42',
+          isFailure: false,
+        });
+        expect(calls).toEqual([
+          { name: 'search.issues', args: { query: 'vesper' } },
+        ]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect('mounts into Agent as one stable snapshot for the run', () =>
+    Effect.gen(function* () {
+      const lifecycle = { opened: 0, closed: 0 };
+      const client = {
+        listTools: async () => listing([search]),
+        callTool: async () => result('VES-42'),
+      } satisfies ClientLike;
+      const source = Mcp.fromClient({
+        name: 'linear',
+        client: Effect.acquireRelease(
+          Effect.sync(() => {
+            lifecycle.opened += 1;
+            return client;
+          }),
+          () =>
+            Effect.sync(() => {
+              lifecycle.closed += 1;
+            }),
+        ),
+      });
+      const agent = Agent.make({
+        name: 'mcp-consumer',
+        revision: '1',
+        instructions: 'Use Linear.',
+        toolkit: Toolkit.make(),
+        dynamicTools: [source],
+      });
+      const model = ScriptedModel.make([
+        [
+          {
+            type: 'tool-call',
+            id: 'mcp-call',
+            name: 'mcp__linear__search_issues',
+            params: { query: 'vesper' },
+          },
+          finish('tool-calls'),
+        ] satisfies ReadonlyArray<AiResponse.StreamPartEncoded>,
+        [
+          { type: 'text-start', id: 'answer' },
+          { type: 'text-delta', id: 'answer', delta: 'Found it.' },
+          { type: 'text-end', id: 'answer' },
+          finish(),
+        ] satisfies ReadonlyArray<AiResponse.StreamPartEncoded>,
+      ]);
+
+      yield* agent.run('Find the issue.').pipe(Effect.provide(model.layer));
+      const requests = yield* model.requests;
+
+      expect(lifecycle).toEqual({ opened: 1, closed: 1 });
+      expect(requests.map((request) => request.tools)).toEqual([
+        ['mcp__linear__search_issues'],
+        ['mcp__linear__search_issues'],
+      ]);
+    }),
+  );
+
+  it.effect('refreshes and announces the resource snapshot between runs', () =>
+    Effect.gen(function* () {
+      let discoveries = 0;
+      const client = {
+        listTools: async (_params, options) => {
+          expect(options?.cacheMode).toBe('refresh');
+          discoveries += 1;
+          return listing(discoveries === 1 ? [search] : []);
+        },
+        callTool: async () => result('unused'),
+      } satisfies ClientLike;
+      const source = Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(client),
+      });
+      const agent = Agent.make({
+        name: 'changing-mcp',
+        revision: '1',
+        instructions: 'Use current resources.',
+        toolkit: Toolkit.make(),
+        dynamicTools: [source],
+      });
+      const answer = [
+        { type: 'text-start', id: 'answer' },
+        { type: 'text-delta', id: 'answer', delta: 'Done.' },
+        { type: 'text-end', id: 'answer' },
+        finish(),
+      ] satisfies ReadonlyArray<AiResponse.StreamPartEncoded>;
+      const model = ScriptedModel.make([answer, answer]);
+
+      yield* agent.run('First.').pipe(Effect.provide(model.layer));
+      yield* agent.run('Second.').pipe(Effect.provide(model.layer));
+      const requests = yield* model.requests;
+
+      expect(requests.map((request) => request.tools)).toEqual([
+        ['mcp__linear__search_issues'],
+        [],
+      ]);
+      expect(modelSystem(requests[0]!)).toContain(
+        'MCP server "linear": available; mcp__linear__search_issues.',
+      );
+      expect(modelSystem(requests[1]!)).toContain(
+        'MCP server "linear": available; no tools.',
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect('continues with a model-visible unavailable optional server', () =>
+    Effect.gen(function* () {
+      const source = Mcp.fromClient({
+        name: 'linear',
+        optional: true,
+        client: Effect.succeed({
+          listTools: async () => {
+            throw new Error('offline');
+          },
+          callTool: async () => result('unused'),
+        } satisfies ClientLike),
+      });
+
+      const ready = yield* source.open;
+
+      expect(Object.keys(ready.tools)).toEqual([]);
+      expect(DynamicToolkit.resourceContext(ready)).toContain(
+        'MCP server "linear": unavailable; no tools.',
+      );
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect('reuses cached clients until the Effect cache layer closes', () =>
+    Effect.gen(function* () {
+      const lifecycle = { opened: 0, closed: 0 };
+      const definition = {
+        name: 'linear',
+        transport: Mcp.transport(() => protocolTransport(lifecycle)),
+      } satisfies Mcp.Definition<'linear'>;
+      const source = Mcp.cached(definition);
+      const agent = Agent.make({
+        name: 'cached-mcp',
+        revision: '1',
+        instructions: 'Use Linear.',
+        toolkit: Toolkit.make(),
+        dynamicTools: [source],
+      });
+      const answer = [
+        { type: 'text-start', id: 'answer' },
+        { type: 'text-delta', id: 'answer', delta: 'Done.' },
+        { type: 'text-end', id: 'answer' },
+        finish(),
+      ] satisfies ReadonlyArray<AiResponse.StreamPartEncoded>;
+      const model = ScriptedModel.make([answer, answer]);
+
+      yield* Effect.gen(function* () {
+        yield* agent.run('First.');
+        yield* agent.run('Second.');
+        expect(lifecycle).toEqual({ opened: 1, closed: 0 });
+      }).pipe(
+        Effect.provide(model.layer),
+        Effect.provide(Mcp.layerConnectionCache({ idleTimeToLive: '1 hour' })),
+      );
+
+      expect(lifecycle).toEqual({ opened: 1, closed: 1 });
+    }),
+  );
+
+  it.effect('logs and ignores a rejected client close', () =>
+    Effect.gen(function* () {
+      const lifecycle = { opened: 0, closed: 0 };
+      const source = Mcp.make({
+        name: 'linear',
+        transport: Mcp.transport(() =>
+          protocolTransport(lifecycle, {
+            closeFailure: new Error('close failed'),
+          }),
+        ),
+      });
+
+      const exit = yield* source.open.pipe(Effect.scoped, Effect.exit);
+
+      expect(exit._tag).toBe('Success');
+      expect(lifecycle).toEqual({ opened: 1, closed: 1 });
+    }),
+  );
+
+  it.effect('resolves bearer auth for every remote request', () =>
+    Effect.gen(function* () {
+      const authorization: Array<string | null> = [];
+      const customHeaders: Array<string | null> = [];
+      let token = 0;
+      const fetch: FetchLike = async (_input, init) => {
+        const headers = new Headers(init?.headers);
+        authorization.push(headers.get('authorization'));
+        customHeaders.push(headers.get('x-vesper-test'));
+        const body = typeof init?.body === 'string' ? init.body : '';
+
+        if (body.includes('"method":"initialize"')) {
+          return jsonResponse({
+            jsonrpc: '2.0',
+            id: requestId(init?.body),
+            result: {
+              protocolVersion: LATEST_PROTOCOL_VERSION,
+              capabilities: { tools: {} },
+              serverInfo: { name: 'test', version: '1.0.0' },
+            },
+          });
+        }
+        if (body.includes('"method":"tools/list"')) {
+          return jsonResponse({
+            jsonrpc: '2.0',
+            id: requestId(init?.body),
+            result: listing([search]),
+          });
+        }
+        return new Response(undefined, { status: 202 });
+      };
+      const source = Mcp.remote({
+        name: 'linear',
+        url: 'https://mcp.example.test',
+        auth: () => Redacted.make(`token-${(token += 1)}`),
+        headers: { 'x-vesper-test': 'present' },
+        fetch,
+      });
+
+      const ready = yield* source.open;
+
+      expect(Object.keys(ready.tools)).toEqual(['mcp__linear__search_issues']);
+      expect(authorization.length).toBeGreaterThanOrEqual(3);
+      expect(authorization).toEqual(
+        authorization.map((_header, index) => `Bearer token-${index + 1}`),
+      );
+      expect(customHeaders).toEqual(authorization.map(() => 'present'));
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect('fails closed for unknown or repeated allowlist names', () =>
+    Effect.gen(function* () {
+      const client = {
+        listTools: async () => listing([search]),
+        callTool: async () => result('unused'),
+      } satisfies ClientLike;
+      const unknown = Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(client),
+        tools: ['missing'],
+      });
+      const repeated = Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(client),
+        tools: ['search.issues', 'search.issues'],
+      });
+
+      const unknownResult = yield* unknown.open.pipe(Effect.result);
+      const repeatedResult = yield* repeated.open.pipe(Effect.result);
+
+      expect(unknownResult._tag).toBe('Failure');
+      expect(repeatedResult._tag).toBe('Failure');
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    'maps annotations into the ordinary Vesper approval mechanism',
+    () =>
+      Effect.gen(function* () {
+        const client = {
+          listTools: async () => listing([search, create]),
+          callTool: async () => result('unused'),
+        } satisfies ClientLike;
+        const source = Mcp.fromClient({
+          name: 'linear',
+          client: Effect.succeed(client),
+          needsApproval: (tool) => tool.annotations?.destructiveHint === true,
+        });
+
+        const ready = yield* source.open;
+
+        expect(
+          ready.tools.mcp__linear__search_issues?.needsApproval,
+        ).toBeFalsy();
+        expect(ready.tools.mcp__linear__create_issue?.needsApproval).toBe(true);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect('propagates interruption to the MCP request signal', () =>
+    Effect.gen(function* () {
+      let started = false;
+      let aborted = false;
+      const client = {
+        listTools: async () => listing([search]),
+        callTool: (_params, options) =>
+          new Promise<CallToolResult>((_resolve, reject) => {
+            started = true;
+            if (options?.signal?.aborted === true) {
+              aborted = true;
+              reject(new Error('aborted'));
+              return;
+            }
+            options?.signal?.addEventListener(
+              'abort',
+              () => {
+                aborted = true;
+                reject(new Error('aborted'));
+              },
+              { once: true },
+            );
+          }),
+      } satisfies ClientLike;
+      const source = Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(client),
+      });
+      const ready = yield* source.open;
+      const fiber = yield* ready
+        .handle('mcp__linear__search_issues', { query: 'vesper' })
+        .pipe(Stream.unwrap, Stream.runDrain, Effect.forkChild);
+
+      yield* Effect.repeat(Effect.yieldNow, {
+        until: () => started,
+      });
+      yield* Fiber.interrupt(fiber);
+
+      expect(aborted).toBe(true);
+    }).pipe(Effect.scoped),
+  );
+});
