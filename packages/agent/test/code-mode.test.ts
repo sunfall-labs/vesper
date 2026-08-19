@@ -554,6 +554,76 @@ describe('code mode tool broker', () => {
       expect(handled).toBe(0);
     }),
   );
+
+  it.effect(
+    'a recorded code-mode run settles on an approval tool instead of suspending',
+    () =>
+      Effect.gen(function* () {
+        let handled = 0;
+        const approve = Tool.make('approve', {
+          parameters: Schema.Struct({}),
+          success: Schema.String,
+          needsApproval: true,
+        });
+        const agent = Agent.make({
+          name: 'approval-code-recorded',
+          revision: '1',
+          instructions: 'Use code mode.',
+          toolkit: Toolkit.make(approve),
+          codeMode: true,
+        }).withHandlers({
+          approve: () =>
+            Effect.sync(() => {
+              handled += 1;
+              return 'approved';
+            }),
+        });
+        const conversation = Conversation.make(
+          agent,
+          LogVocabulary.ConversationId.make('code-approval-conversation'),
+        );
+        const executor = CodeExecutor.fake([
+          {
+            _tag: 'ToolCall',
+            id: 'nested-approval',
+            name: 'approve',
+            input: {},
+          },
+          { _tag: 'Completion', state: {} },
+        ]);
+        const model = ScriptedModel.make([
+          [
+            {
+              type: 'tool-call',
+              id: 'exec-approval-recorded',
+              name: 'exec',
+              params: { source: 'approval call' },
+            },
+            finish('tool-calls'),
+          ],
+          answeringTurn,
+        ]);
+
+        const result = yield* conversation
+          .run('go')
+          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+
+        // In code mode the approval-gated tool is refused with a typed
+        // failure inside `exec`, so a recorded run must settle normally —
+        // never end `'suspended'` with a pending approval nothing could
+        // resolve, and never write a `ToolSuspended` record for it.
+        expect(result.outcome).toBe('success');
+        expect(result.pendingApprovals ?? []).toEqual([]);
+        expect(handled).toBe(0);
+
+        const records = yield* conversation.records().pipe(Stream.runCollect);
+        const tags = Array.from(records).map(
+          (envelope) => envelope.record._tag,
+        );
+        expect(tags).not.toContain('ToolSuspended');
+        expect(tags).toContain('RunSettled');
+      }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
 });
 
 describe('code mode scratch state', () => {
