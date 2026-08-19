@@ -20,7 +20,6 @@ const linear = Mcp.remote({
   auth: () => Redacted.make(getLinearToken()),
   tools: ['search_issues', 'create_issue'],
   optional: true,
-  needsApproval: (tool) => tool.annotations?.destructiveHint === true,
 });
 
 const agent = Agent.make({
@@ -48,15 +47,19 @@ continues with no tools if connection or discovery fails; without it, the run
 fails before the first model request.
 
 The optional `tools` allowlist is fail-closed and preserves its declared order.
-Unknown, repeated, or MCP task-required tools fail discovery before the first
-model request. Without an allowlist, task-required tools are omitted because
-Vesper does not yet implement the MCP task protocol.
+Without one, callable tools and their JSON schemas are canonicalized so
+semantically identical discovery results do not perturb the provider tool
+prefix. Unknown, repeated, or MCP task-required allowlist entries fail discovery
+before the first model request. Without an allowlist, task-required tools are
+omitted because Vesper does not yet implement the MCP task protocol.
 
 MCP schemas use Effect's native `Tool.dynamic`, and remote calls inherit Effect
 interruption through an `AbortSignal`. MCP failures are returned through the
-ordinary tool-result channel so the model can react. `needsApproval` routes
-selected remote tools through Vesper's durable approval flow without adding a
-second approval abstraction.
+ordinary tool-result channel so the model can react. Apply policy spanning the
+remote toolkit with `beforeToolCall`. When a destructive operation needs a
+durable, independently keyed human decision, expose it through an
+application-owned typed tool handler and call `AgentWorkflow.wait` there; the
+generated MCP handler deliberately does not introduce a second approval flow.
 
 ## Reusing connections
 

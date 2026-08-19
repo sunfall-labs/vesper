@@ -105,8 +105,8 @@ separate reusable package and are only externalized when an
 `examples/support-agent` is compiled with requirement-channel assertions and
 runs entirely against a scripted model, in-memory application adapters, and the
 in-memory conversation log. The definition excerpt below introduces the core
-composition; the source also exercises State, interception, and a durable
-human approval inside the refund handler.
+composition; the source also exercises State, handler-level authorization, and
+a durable human approval inside the refund handler.
 
 ### Mocked world
 
@@ -326,9 +326,9 @@ Run the complete credential-free story with:
 nub run example:support-agent
 ```
 
-It loads a skill, delegates policy research, invokes stateful tools through an
-authorization interceptor, suspends on a typed approval, performs the refund
-as an idempotent Workflow activity, accepts a steer, resumes, prints the full
+It loads a skill, delegates policy research, invokes stateful tools whose typed
+handlers enforce authorization, suspends on a typed approval, performs the
+refund as an idempotent Workflow activity, accepts a steer, resumes, prints the full
 durable trail, and evaluates the same researcher definition used as a
 subagent. The mocked supervisor completes the approval automatically; use the
 focused `example:approval-cli` story below to choose approve or deny
@@ -669,13 +669,18 @@ Spans observe. An interceptor intervenes.
 const guarded = supportAgent.intercepting({
   beforeToolCall: (call) =>
     Effect.gen(function* () {
-      const policy = yield* Policy;
+      const policy = yield* TenantToolPolicy;
       return (yield* policy.allows(call.name))
         ? Interception.dispatch
-        : Interception.refuse(`${call.name} needs approval first`);
+        : Interception.refuse(`${call.name} is disabled for this tenant`);
     }),
 });
 ```
+
+Typed handlers are the default authority for one operation's current
+availability, authorization, and durable approval. The interceptor above is
+for policy that deliberately spans the toolkit; it is not a second per-tool
+handler API.
 
 Four seams, named rather than general, each with a type that admits exactly
 what it is for:
@@ -702,6 +707,14 @@ before and takes the same branch through the loop; an agent that does requires
 whatever its interceptor's seams require. Calling it again replaces the
 interceptor rather than stacking a second one, because two opinions at one seam
 need an order and every order is wrong for somebody.
+
+Tool advertisement and tool enforcement are deliberately separate. Static
+tool, skill, and subagent definitions stay model-visible and cache-stable while
+typed handlers read current Effect state on every call. `beforeToolCall` is the
+cross-cutting override for policy spanning multiple tools. Either decision is
+authoritative; hiding a definition is not a security mechanism. Use
+`dynamicTools` only when schemas genuinely must be discovered at the beginning
+of a run, such as an MCP catalog.
 
 ### When the log and an interceptor disagree
 

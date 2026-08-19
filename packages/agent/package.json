@@ -1,7 +1,7 @@
 {
   "name": "@sunfall/vesper-agent",
   "version": "0.1.0-alpha.1",
-  "description": "The agent loop: subagents, skills, stop conditions, tool-call interception, recording, and resumption.",
+  "description": "The agent loop: dynamic tools, subagents, skills, interception, recording, and resumption.",
   "keywords": [
     "agent",
     "effect",

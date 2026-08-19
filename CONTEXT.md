@@ -139,6 +139,19 @@ after it.
 packages provide it directly; Vesper neither wraps provider SDKs nor keeps a
 second provider registry.
 
+**Tool advertisement** — the names, descriptions, and schemas handed to the
+Provider seam before a model call. Static tools, skills, and subagents remain
+stable for an Agent; dynamic toolkit sources resolve one immutable snapshot at
+the beginning of a run. Advertisement helps the model plan, but grants no
+authority.
+
+**Tool enforcement** — the live decision to execute an advertised call. Typed
+handlers own operation-specific availability, authorization, and durable
+approval. `beforeToolCall` owns policy that genuinely spans multiple advertised
+tools, such as a tenant denylist or dry-run mode. Both may read current Effect
+state on every call. Removing a definition from Tool advertisement is not a
+security mechanism.
+
 **Scripted model** — a deterministic testing adapter at the Provider seam. It
 plays explicit streaming turns and compaction responses, records normalized
 requests, and fails on an unexpected call. It models no vendor because agent

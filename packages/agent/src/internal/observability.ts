@@ -1,6 +1,5 @@
 import { Effect, Metric } from 'effect';
-
-import type { Stop } from '../stop.js';
+import type { Response } from 'effect/unstable/ai';
 
 /**
  * Agent-level metrics deliberately have no dynamic attributes. Conversation,
@@ -24,6 +23,30 @@ export const modelOutputTokens = Metric.counter(
   'vesper_agent_model_output_tokens',
   {
     description: 'Output tokens reported by language-model calls',
+    incremental: true,
+  },
+);
+
+export const modelUncachedInputTokens = Metric.counter(
+  'vesper_agent_model_uncached_input_tokens',
+  {
+    description: 'Uncached input tokens reported by language-model calls',
+    incremental: true,
+  },
+);
+
+export const modelCacheReadTokens = Metric.counter(
+  'vesper_agent_model_cache_read_tokens',
+  {
+    description: 'Input tokens read from provider prompt caches',
+    incremental: true,
+  },
+);
+
+export const modelCacheWriteTokens = Metric.counter(
+  'vesper_agent_model_cache_write_tokens',
+  {
+    description: 'Input tokens written to provider prompt caches',
     incremental: true,
   },
 );
@@ -77,11 +100,20 @@ export const compactions = Metric.counter('vesper_agent_compactions', {
 export const one = (metric: Metric.Counter<number>): Effect.Effect<void> =>
   Metric.update(metric, 1);
 
-export const usage = (reported: Stop.Usage): Effect.Effect<void> =>
+export const usage = (reported: Response.Usage): Effect.Effect<void> =>
   Effect.all(
     [
-      Metric.update(modelInputTokens, reported.input),
-      Metric.update(modelOutputTokens, reported.output),
+      Metric.update(modelInputTokens, reported.inputTokens.total ?? 0),
+      Metric.update(modelOutputTokens, reported.outputTokens.total ?? 0),
+      Metric.update(
+        modelUncachedInputTokens,
+        reported.inputTokens.uncached ?? 0,
+      ),
+      Metric.update(modelCacheReadTokens, reported.inputTokens.cacheRead ?? 0),
+      Metric.update(
+        modelCacheWriteTokens,
+        reported.inputTokens.cacheWrite ?? 0,
+      ),
     ],
     { discard: true },
   );

@@ -4,6 +4,7 @@ import { AiError, type Response, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { DynamicToolkit } from '../src/dynamic-toolkit.js';
+import { Interception } from '../src/interception.js';
 import { ScriptedModel } from '../src/testing.js';
 
 const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
@@ -23,6 +24,8 @@ const remote = Tool.dynamic('mcp__linear__search_issues', {
     required: ['query'],
   },
   success: Schema.String,
+  failure: Schema.String,
+  failureMode: 'return',
 });
 
 const remoteToolkit = Toolkit.make(remote);
@@ -131,6 +134,88 @@ describe('Agent dynamic tools', () => {
           ['mcp__linear__search_issues'],
           ['mcp__linear__search_issues'],
         ]);
+      }),
+  );
+
+  it.effect(
+    'keeps one advertised schema while execution availability changes',
+    () =>
+      Effect.gen(function* () {
+        const enabled = yield* Ref.make(false);
+        let calls = 0;
+        const source = DynamicToolkit.make(
+          remoteToolkit.pipe(
+            Effect.provide(
+              remoteToolkit.toLayer({
+                mcp__linear__search_issues: () =>
+                  Effect.gen(function* () {
+                    if (!(yield* Ref.get(enabled))) {
+                      return yield* Effect.fail(
+                        'Linear is temporarily unavailable.',
+                      );
+                    }
+                    calls += 1;
+                    return 'VES-42';
+                  }),
+              }),
+            ),
+          ),
+        );
+        const agent = Agent.make({
+          name: 'conditionally-available',
+          revision: '1',
+          instructions: 'Use the available tools.',
+          toolkit: Toolkit.make(),
+          dynamicTools: [source],
+        }).intercepting({
+          beforeTurn: ({ step }) =>
+            step === 2
+              ? Ref.set(enabled, true).pipe(Effect.as(Interception.proceed))
+              : Effect.succeed(Interception.proceed),
+        });
+        const call = (id: string) =>
+          [
+            {
+              type: 'tool-call',
+              id,
+              name: 'mcp__linear__search_issues',
+              params: { query: 'vesper' },
+            },
+            finish('tool-calls'),
+          ] satisfies ReadonlyArray<Response.StreamPartEncoded>;
+        const model = ScriptedModel.make([
+          call('call-disabled'),
+          call('call-enabled'),
+          [
+            { type: 'text-start', id: 'answer' },
+            { type: 'text-delta', id: 'answer', delta: 'Found VES-42.' },
+            { type: 'text-end', id: 'answer' },
+            finish(),
+          ],
+        ]);
+
+        const result = yield* agent
+          .run('Find it.')
+          .pipe(Effect.provide(model.layer));
+        const requests = yield* model.requests;
+        const advertised = requests[0]?.toolDefinitions[0];
+
+        expect(result.text).toBe('Found VES-42.');
+        expect(calls).toBe(1);
+        expect(advertised).toBeDefined();
+        expect(
+          requests.every(
+            (request) => request.toolDefinitions[0] === advertised,
+          ),
+        ).toBe(true);
+        expect(requests.map((request) => request.tools)).toEqual([
+          ['mcp__linear__search_issues'],
+          ['mcp__linear__search_issues'],
+          ['mcp__linear__search_issues'],
+        ]);
+        expect(JSON.stringify(requests[1]?.prompt)).toContain(
+          'Linear is temporarily unavailable.',
+        );
       }),
   );
 
@@ -264,7 +349,9 @@ describe('Agent dynamic tools', () => {
 
         expect(request?.tools).toEqual([]);
         expect(system).toContain('MCP server "linear": unavailable; no tools.');
-        expect(system).toContain('supersedes availability in earlier messages');
+        expect(system).toContain(
+          'supersedes dynamic-resource state in earlier messages',
+        );
       }),
   );
 });

@@ -1,5 +1,4 @@
 import { Agent } from '@sunfall/vesper-agent/agent';
-import { Interception } from '@sunfall/vesper-agent/interception';
 import { Skill } from '@sunfall/vesper-agent/skill';
 import { AgentState } from '@sunfall/vesper-agent/state';
 import { Stop } from '@sunfall/vesper-agent/stop';
@@ -19,7 +18,7 @@ export class OrderRepo extends Context.Service<
   }
 >()('example/OrderRepo') {}
 
-/** An automated policy gate applied before a refund reaches its handler. */
+/** Application policy required by the typed refund handler. */
 export class RefundAuthorization extends Context.Service<
   RefundAuthorization,
   { readonly allowed: Effect.Effect<boolean> }
@@ -63,7 +62,11 @@ const issueRefund = Tool.make('issue_refund', {
   }),
   failure: AgentState.Error,
   failureMode: 'return',
-  dependencies: AgentState.dependencies(SupportState, OrderRepo),
+  dependencies: AgentState.dependencies(
+    SupportState,
+    OrderRepo,
+    RefundAuthorization,
+  ),
 });
 
 /** One independently keyed decision that may outlive the current process. */
@@ -144,56 +147,54 @@ export const supportAgent = Agent.make({
     maxOutputTokens: 32_000,
     wallClockMillis: 120_000,
   },
-})
-  .withHandlers({
-    lookup_order: ({ orderId }) =>
-      Effect.gen(function* () {
-        const orders = yield* OrderRepo;
-        const state = yield* SupportState;
-        const status = yield* orders.status(orderId);
-        yield* state.set({ orderId, status, refundIssued: false });
-        return { status };
-      }),
-    issue_refund: ({ orderId }) =>
-      Effect.gen(function* () {
-        const state = yield* SupportState;
-        const current = yield* state.get;
-        const approval = yield* refundApproval({
-          orderId,
-          orderStatus: current.status ?? 'unknown',
-          reason: 'Refunds are irreversible and require supervisor approval.',
-        });
-        if (approval.decision === 'deny') {
-          return {
-            status: 'declined',
-            detail: 'The supervisor declined the refund.',
-            actor: approval.actor,
-          } as const;
-        }
-
-        const confirmation = yield* refundOrder(orderId);
-        yield* state.update((current) => ({
-          ...current,
-          orderId,
-          refundIssued: true,
-        }));
+}).withHandlers({
+  lookup_order: ({ orderId }) =>
+    Effect.gen(function* () {
+      const orders = yield* OrderRepo;
+      const state = yield* SupportState;
+      const status = yield* orders.status(orderId);
+      yield* state.set({ orderId, status, refundIssued: false });
+      return { status };
+    }),
+  issue_refund: ({ orderId }) =>
+    Effect.gen(function* () {
+      const authorization = yield* RefundAuthorization;
+      if (!(yield* authorization.allowed)) {
         return {
-          status: 'refunded',
-          detail: confirmation,
+          status: 'declined',
+          detail: 'The refund is not allowed by policy.',
+          actor: 'automated-policy',
+        } as const;
+      }
+
+      const state = yield* SupportState;
+      const current = yield* state.get;
+      const approval = yield* refundApproval({
+        orderId,
+        orderStatus: current.status ?? 'unknown',
+        reason: 'Refunds are irreversible and require supervisor approval.',
+      });
+      if (approval.decision === 'deny') {
+        return {
+          status: 'declined',
+          detail: 'The supervisor declined the refund.',
           actor: approval.actor,
         } as const;
-      }),
-  })
-  .intercepting({
-    beforeToolCall: ({ name }) =>
-      Effect.gen(function* () {
-        if (name !== 'issue_refund') return Interception.dispatch;
-        const authorization = yield* RefundAuthorization;
-        return (yield* authorization.allowed)
-          ? Interception.dispatch
-          : Interception.refuse({ reason: 'Refund approval is required.' });
-      }),
-  });
+      }
+
+      const confirmation = yield* refundOrder(orderId);
+      yield* state.update((current) => ({
+        ...current,
+        orderId,
+        refundIssued: true,
+      }));
+      return {
+        status: 'refunded',
+        detail: confirmation,
+        actor: approval.actor,
+      } as const;
+    }),
+});
 
 class SupportWorkflowFailure extends Schema.TaggedError<SupportWorkflowFailure>(
   'example/SupportWorkflowFailure',

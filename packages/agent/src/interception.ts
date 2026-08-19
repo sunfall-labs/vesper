@@ -53,14 +53,15 @@ import type { Stop } from './stop.js';
 // `Effect<void>`, which is precisely "look, or refuse".
 //
 // **`beforeToolCall` may answer instead and may not rewrite the parameters.**
-// Answering is what an approval gate, a denylist, or a dry-run mode needs, and
-// it costs nothing to model: a substituted result travels the same path a real
-// one does. Rewriting parameters is excluded because it would make three
-// things disagree — what the model asked for, what the log records it asked
-// for, and what actually ran — and because the parameters arriving here are
-// the provider's *encoded* form, so a rewrite would have to be re-validated
-// against the tool's parameter schema, which this seam has no general way to
-// do.
+// Answering is what a toolkit-wide denylist or dry-run mode needs, and it costs
+// nothing to model: a substituted result travels the same path a real one
+// does. Operation-specific availability, authorization, and durable approval
+// belong in the tool's typed handler. Rewriting parameters is excluded because
+// it would make three things disagree — what the model asked for, what the log
+// records it asked for, and what actually ran — and because the parameters
+// arriving here are the provider's *encoded* form, so a rewrite would have to
+// be re-validated against the tool's parameter schema, which this seam has no
+// general way to do.
 //
 // ## What an interceptor is not told
 //
@@ -166,15 +167,6 @@ export interface ToolCallContext extends Run {
   readonly params: unknown;
 }
 
-/** A tool-call context decoded against one named tool's parameter schema. */
-export type TypedToolCallContext<Name extends string, Parameters> = Omit<
-  ToolCallContext,
-  'name' | 'params'
-> & {
-  readonly name: Name;
-  readonly params: Parameters;
-};
-
 /** A prior run entered this handler but recorded no outcome. */
 export interface IndeterminateToolCallContext extends ToolCallContext {}
 
@@ -252,11 +244,11 @@ export const answer = (result: unknown): ToolDecision => ({
 });
 
 /**
- * Encode a successful replacement through one tool's own result schema.
+ * Encode a cross-cutting replacement through one tool's success schema.
  *
- * Use this in tool-specific policies when the replacement should obey the
- * declared tool contract. {@link answer} remains the lower-level escape hatch
- * for provider-facing policy responses that deliberately live outside it.
+ * Operation-specific decisions still belong in the handler. This constructor
+ * keeps an exceptional toolkit-wide substitution checked against the tool it
+ * answers. {@link answer} remains the raw provider-facing escape hatch.
  */
 export const answerFor = <S extends Schema.Constraint>(
   tool: Tool.Any & { readonly successSchema: S },
@@ -267,9 +259,9 @@ export const answerFor = <S extends Schema.Constraint>(
 /**
  * Do not run the tool; this is its result, and it is a failure.
  *
- * The shape an approval gate wants. A model shown a failed tool result knows
- * the call did not happen and can say so or try something else, where a
- * success-shaped refusal reads as though the work was done.
+ * A model shown a failed tool result knows the call did not happen and can say
+ * so or try something else, where a success-shaped refusal reads as though the
+ * work was done.
  *
  * @category constructors
  * @since 0.1.0
@@ -280,7 +272,7 @@ export const refuse = (result: unknown): ToolDecision => ({
   isFailure: true,
 });
 
-/** Encode a failed replacement through one tool's declared failure schema. */
+/** Encode a cross-cutting refusal through one tool's failure schema. */
 export const refuseFor = <S extends Schema.Constraint>(
   tool: Tool.Any & { readonly failureSchema: S },
   failure: S['Type'],
@@ -357,7 +349,9 @@ export interface Interceptor<R = never> {
   ) => Effect.Effect<void, AiError.AiError, R>;
 
   /**
-   * Before a tool runs.
+   * Before a tool runs. Use this for policy that spans the toolkit; keep
+   * operation-specific availability, authorization, and approval in the
+   * tool's typed handler.
    *
    * Does **not** fire for a call the conversation log is answering from a
    * crashed earlier run — see `dispatch.ts` for why recovery outranks
@@ -378,72 +372,6 @@ export interface Interceptor<R = never> {
     context: IndeterminateToolCallContext,
   ) => Effect.Effect<IndeterminateToolDecision, AiError.AiError, R>;
 }
-
-/**
- * Decode a raw interception context against one named tool.
- *
- * This is the narrow Adapter between the provider-facing interception seam
- * and a tool-specific policy. A schema mismatch is reported in the loop's
- * ordinary `AiError` channel rather than escaping as a schema implementation
- * detail.
- */
-export const decodeParameters = <
-  const Name extends string,
-  Parameters extends Schema.Constraint,
->(
-  tool: {
-    readonly name: Name;
-    readonly parametersSchema: Parameters;
-  },
-  context: ToolCallContext,
-): Effect.Effect<
-  TypedToolCallContext<Name, Parameters['Type']>,
-  AiError.AiError,
-  Parameters['DecodingServices']
-> =>
-  Schema.decodeUnknownEffect(tool.parametersSchema)(context.params).pipe(
-    Effect.mapError(
-      (cause) =>
-        new AiError.AiError({
-          module: 'Interception',
-          method: 'decodeParameters',
-          reason: new AiError.InvalidRequestError({
-            description: `Tool "${tool.name}" parameters did not match its schema: ${String(cause)}`,
-          }),
-        }),
-    ),
-    Effect.map((params) => ({
-      ...context,
-      name: tool.name,
-      params,
-    })),
-  );
-
-/**
- * Build an interceptor for one tool with schema-decoded parameters.
- *
- * Calls for every other tool dispatch unchanged. This keeps the raw,
- * provider-facing Interface available for expert policies while making the
- * safe path the shortest path for approval gates and policy checks.
- */
-export const forTool = <
-  const Name extends string,
-  Parameters extends Schema.Constraint,
-  R,
->(
-  tool: {
-    readonly name: Name;
-    readonly parametersSchema: Parameters;
-  },
-  policy: (
-    context: TypedToolCallContext<Name, Parameters['Type']>,
-  ) => Effect.Effect<ToolDecision, AiError.AiError, R>,
-): Interceptor<R | Parameters['DecodingServices']> => ({
-  beforeToolCall: (context) =>
-    context.name === tool.name
-      ? decodeParameters(tool, context).pipe(Effect.flatMap(policy))
-      : Effect.succeed(dispatch),
-});
 
 type FunctionServices<F> = F extends (...args: infer _Args) => infer Result
   ? Result extends Effect.Effect<infer _A, infer _E, infer R>

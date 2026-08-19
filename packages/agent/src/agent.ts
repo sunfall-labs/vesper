@@ -114,7 +114,12 @@ export interface Definition<
   /** Prepended as a system message on every run. */
   readonly instructions: string;
   readonly toolkit: Toolkit.Toolkit<Tools>;
-  /** Scoped toolkits discovered once at the beginning of each run. */
+  /**
+   * Scoped toolkits discovered once at the beginning of each run.
+   * The resolved snapshot is both model advertisement and dispatch authority.
+   * Runtime authorization belongs in handlers or `beforeToolCall`; this is
+   * for definitions that genuinely are not known until the run starts.
+   */
   readonly dynamicTools?: DynamicSources;
   readonly stopWhen?: Stop.StopCondition<
     VisibleTools<
@@ -373,6 +378,10 @@ export interface Instance<
    * The handlers' own requirements are not swallowed: a handler that reads
    * `OrderRepo` still surfaces `OrderRepo` in {@link WithoutOwnHandlers},
    * because those are the application's to provide.
+   *
+   * A handler is also the typed execution authority for its operation. Check
+   * live availability, authorization, and durable approval here; keep the
+   * advertised tool definition stable unless its schema genuinely changes.
    *
    * Calling it again replaces the handlers rather than layering a second set
    * underneath, so the tools advertised always have exactly one handler each.
@@ -832,7 +841,7 @@ export const make = <
       instructions,
       wiring.dynamicToolkit,
     );
-    const availableToolkit = Effect.map(toolkit, (staticallyDefined) =>
+    const runToolkit = Effect.map(toolkit, (staticallyDefined) =>
       DynamicToolkit.append(staticallyDefined, wiring.dynamicToolkit),
     );
 
@@ -850,7 +859,7 @@ export const make = <
       never,
       Tool.HandlersFor<RuntimeTools> | InterceptorR
     > =>
-      ToolDispatch.gate(availableToolkit, {
+      ToolDispatch.gate(runToolkit, {
         agent: definition.name,
         session,
         interceptor,
@@ -961,10 +970,7 @@ export const make = <
                   seen.started = true;
                   observe(seen, encodedPart);
                   if (encodedPart.type === 'finish') {
-                    yield* Observability.usage({
-                      input: encodedPart.usage.inputTokens.total ?? 0,
-                      output: encodedPart.usage.outputTokens.total ?? 0,
-                    });
+                    yield* Observability.usage(encodedPart.usage);
                   }
                   if (runtime !== undefined) yield* runtime.remainingMillis;
                 }),
@@ -1625,7 +1631,7 @@ export const make = <
                 Effect.gen(function* () {
                   const remaining = yield* runtime.remainingMillis;
                   const recovery = ToolDispatch.resolveIndeterminate(
-                    availableToolkit,
+                    runToolkit,
                     {
                       agent: definition.name,
                       session,

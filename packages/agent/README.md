@@ -27,8 +27,8 @@ Modules are exposed as explicit subpaths, including
 
 ## Dynamic tools
 
-Use `dynamicTools` for capabilities discovered when a run starts, such as MCP
-servers or tenant-specific integrations:
+Use `dynamicTools` only for definitions genuinely discovered when a run starts,
+such as MCP servers or tenant-specific integrations:
 
 ```ts
 import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';
@@ -48,10 +48,20 @@ const agent = Agent.make({
 ```
 
 Sources open concurrently and are scoped to the run. Definitions and handlers
-form one stable snapshot across its model turns. Tool-name and resource-id
-collisions fail before the first model request. Wrap a nonessential source with
-`DynamicToolkit.optional(source, resource)` to continue without its tools and
-make that unavailability explicit in the current system context.
+form one stable snapshot across its model turns. The Provider seam and dispatch
+gate receive that same snapshot, so a name outside it cannot execute. Tool-name
+and resource-id collisions fail before the first model request. Wrap a
+nonessential source with `DynamicToolkit.optional(source, resource)` to continue
+without its tools and make that unavailability explicit in the current system
+context.
+
+Do not use dynamic discovery for permissions, approvals, feature flags, or
+temporary availability. Keep those tool definitions stable and check current
+state in the typed handler. Reserve `beforeToolCall` for policy that genuinely
+spans multiple tools, such as a tenant-wide denylist or dry-run mode. If an
+external state change should proactively reach a recorded conversation, send a
+durable `steer`; it is appended at the next turn boundary instead of rewriting
+the cacheable prefix.
 
 ## Durable file attachments
 

@@ -9,7 +9,7 @@ import {
 } from '@modelcontextprotocol/client';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Fiber, Redacted, Stream } from 'effect';
-import { type Response as AiResponse, Toolkit } from 'effect/unstable/ai';
+import { type Response as AiResponse, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';
@@ -173,6 +173,79 @@ describe('Mcp', () => {
           { name: 'search.issues', args: { query: 'vesper' } },
         ]);
       }).pipe(Effect.scoped),
+  );
+
+  it.effect('canonicalizes unfiltered tools and schemas', () =>
+    Effect.gen(function* () {
+      const searchWith = (
+        properties: McpTool['inputSchema']['properties'],
+        required: string[],
+      ): McpTool => ({
+        ...search,
+        inputSchema: { type: 'object', properties, required },
+      });
+      const firstSearch = searchWith(
+        {
+          query: { type: 'string', description: 'Search text' },
+          project: {
+            type: 'object',
+            properties: {
+              owner: { type: 'string' },
+              id: { type: 'string' },
+            },
+            required: ['owner', 'id'],
+          },
+        },
+        ['query', 'project'],
+      );
+      const secondSearch = searchWith(
+        {
+          project: {
+            required: ['id', 'owner'],
+            properties: {
+              id: { type: 'string' },
+              owner: { type: 'string' },
+            },
+            type: 'object',
+          },
+          query: { description: 'Search text', type: 'string' },
+        },
+        ['project', 'query'],
+      );
+      const source = (tools: McpTool[]) =>
+        Mcp.fromClient({
+          name: 'linear',
+          client: Effect.succeed({
+            listTools: async () => listing(tools),
+            callTool: async () => result('unused'),
+          } satisfies ClientLike),
+        });
+
+      const [first, second] = yield* Effect.all(
+        [
+          source([firstSearch, create]).open,
+          source([create, secondSearch]).open,
+        ],
+        { concurrency: 'unbounded' },
+      );
+      const definitions = (toolkit: Toolkit.WithHandler<Mcp.Tools>) =>
+        Object.values(toolkit.tools).map((tool) => ({
+          name: tool.name,
+          schema: Tool.getJsonSchema(tool),
+        }));
+
+      expect(Object.keys(first.tools)).toEqual([
+        'mcp__linear__create_issue',
+        'mcp__linear__search_issues',
+      ]);
+      expect(Object.keys(second.tools)).toEqual(Object.keys(first.tools));
+      expect(JSON.stringify(definitions(second))).toBe(
+        JSON.stringify(definitions(first)),
+      );
+      expect(DynamicToolkit.resourceContext(first)).toContain(
+        'mcp__linear__create_issue, mcp__linear__search_issues',
+      );
+    }).pipe(Effect.scoped),
   );
 
   it.effect('mounts into Agent as one stable snapshot for the run', () =>
@@ -428,29 +501,6 @@ describe('Mcp', () => {
       expect(unknownResult._tag).toBe('Failure');
       expect(repeatedResult._tag).toBe('Failure');
     }).pipe(Effect.scoped),
-  );
-
-  it.effect(
-    'maps annotations into the ordinary Vesper approval mechanism',
-    () =>
-      Effect.gen(function* () {
-        const client = {
-          listTools: async () => listing([search, create]),
-          callTool: async () => result('unused'),
-        } satisfies ClientLike;
-        const source = Mcp.fromClient({
-          name: 'linear',
-          client: Effect.succeed(client),
-          needsApproval: (tool) => tool.annotations?.destructiveHint === true,
-        });
-
-        const ready = yield* source.open;
-
-        expect(
-          ready.tools.mcp__linear__search_issues?.needsApproval,
-        ).toBeFalsy();
-        expect(ready.tools.mcp__linear__create_issue?.needsApproval).toBe(true);
-      }).pipe(Effect.scoped),
   );
 
   it.effect('propagates interruption to the MCP request signal', () =>
