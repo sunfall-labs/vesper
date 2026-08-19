@@ -387,6 +387,7 @@ const fold = (
     RunSettled: () => {},
     Signal: () => {},
     StateCheckpoint: () => {},
+    CodeStateCheckpoint: () => {},
   });
   for (const { offset, record } of records) {
     currentOffset = offset;
@@ -453,6 +454,7 @@ export const usageFrom = (
     Compacted: () => {},
     BranchedFrom: () => {},
     StateCheckpoint: () => {},
+    CodeStateCheckpoint: () => {},
     ChildSession: () => {},
     Signal: () => {},
     SignalReceived: () => {},

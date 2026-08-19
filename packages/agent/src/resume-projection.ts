@@ -79,6 +79,7 @@ export const update = (
     case 'ToolOutcome':
     case 'BranchedFrom':
     case 'StateCheckpoint':
+    case 'CodeStateCheckpoint':
     case 'ChildSession':
     case 'Signal':
     case 'SignalReceived':
@@ -129,6 +130,7 @@ export const updateState = (
     case 'ChildSession':
     case 'Signal':
     case 'SignalReceived':
+    case 'CodeStateCheckpoint':
       return current;
     default: {
       const _exhaustive: never = record;
@@ -143,6 +145,56 @@ export const stateFrom = (
 ): State =>
   AgentBranch.activePath(records).reduce<State>(
     (current, { record }) => updateState(current, record),
+    undefined,
+  );
+
+export type CodeState =
+  | ConversationRecord.RecordOf<'CodeStateCheckpoint'>
+  | undefined;
+
+/** Fold one record into the durable code scratch-state projection. */
+export const updateCodeState = (
+  current: CodeState,
+  record: ConversationRecord.Record,
+): CodeState => {
+  switch (record._tag) {
+    case 'CodeStateCheckpoint':
+      return record;
+    case 'RunSettled':
+      return record.resume?.codeState === undefined
+        ? current
+        : { _tag: 'CodeStateCheckpoint', state: record.resume.codeState };
+    case 'RunStarted':
+    case 'Text':
+    case 'ToolCall':
+    case 'ToolStarted':
+    case 'ToolSuspended':
+    case 'ToolResumed':
+    case 'ToolWaitCompleted':
+    case 'ToolWaitRestarted':
+    case 'ToolOutcome':
+    case 'TurnFinished':
+    case 'Compacted':
+    case 'BranchedFrom':
+    case 'Completed':
+    case 'StateCheckpoint':
+    case 'ChildSession':
+    case 'Signal':
+    case 'SignalReceived':
+      return current;
+    default: {
+      const _exhaustive: never = record;
+      return _exhaustive;
+    }
+  }
+};
+
+/** Select the latest durable code scratch checkpoint on the active branch. */
+export const codeStateFrom = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+): CodeState =>
+  AgentBranch.activePath(records).reduce<CodeState>(
+    (current, { record }) => updateCodeState(current, record),
     undefined,
   );
 

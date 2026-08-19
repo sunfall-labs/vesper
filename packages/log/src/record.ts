@@ -75,6 +75,7 @@ const ResumeState = Schema.Struct({
       value: Schema.Unknown,
     }),
   ),
+  codeState: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
 });
 
 /**
@@ -343,6 +344,11 @@ export const Record = Schema.TaggedUnion({
     id: Schema.String,
     version: Schema.String,
     value: Schema.Unknown,
+  },
+
+  /** Complete JSON scratch state committed by one successful code execution. */
+  CodeStateCheckpoint: {
+    state: Schema.Record(Schema.String, Schema.Unknown),
   },
 
   /**

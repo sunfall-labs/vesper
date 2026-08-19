@@ -22,6 +22,7 @@
   },
   "files": [
     "dist",
+    "host",
     "LICENSE"
   ],
   "type": "module",
@@ -93,6 +94,14 @@
     "./compaction": {
       "types": "./dist/compaction.d.ts",
       "default": "./dist/compaction.js"
+    },
+    "./code-executor": {
+      "types": "./dist/code-executor.d.ts",
+      "default": "./dist/code-executor.js"
+    },
+    "./code-executor-node": {
+      "types": "./dist/code-executor-node.d.ts",
+      "default": "./dist/code-executor-node.js"
     },
     "./workflow": {
       "types": "./dist/workflow.d.ts",
