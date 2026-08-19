@@ -221,3 +221,218 @@ describe('AgentEval', () => {
     ).toThrow('between 0 and 1');
   });
 });
+
+const textAgent = Agent.make({
+  name: 'suite-target',
+  revision: '1',
+  instructions: 'Answer directly.',
+  toolkit: Toolkit.make(),
+});
+
+const textTurn = (text: string): ReadonlyArray<Response.StreamPartEncoded> => [
+  { type: 'text-start', id: 'text' },
+  { type: 'text-delta', id: 'text', delta: text },
+  { type: 'text-end', id: 'text' },
+  finish(),
+];
+
+const scripted = (
+  turns: ReadonlyArray<ReadonlyArray<Response.StreamPartEncoded>>,
+) => {
+  let index = 0;
+  return Layer.effect(
+    LanguageModel.LanguageModel,
+    LanguageModel.make({
+      generateText: () => Effect.succeed([finish()]),
+      streamText: () => {
+        const turn = turns[index++];
+        return turn === undefined
+          ? Stream.die(new Error('script exhausted'))
+          : Stream.fromIterable(turn);
+      },
+    }),
+  );
+};
+
+describe('AgentEval.suite', () => {
+  it.effect('scores every case and aggregates pass/fail', () =>
+    Effect.gen(function* () {
+      const saidYes = AgentEval.check(
+        'said yes',
+        (capture) => capture.result.text === 'yes',
+      );
+      const report = yield* AgentEval.suite(textAgent, {
+        name: 'text-suite',
+        cases: [
+          { name: 'expects-yes', input: 'a' },
+          { name: 'expects-yes-2', input: 'b' },
+        ],
+        scorers: [saidYes],
+      }).pipe(Effect.provide(scripted([textTurn('yes'), textTurn('no')])));
+
+      expect(report.suite).toBe('text-suite');
+      expect(report.passed).toBe(1);
+      expect(report.failed).toBe(1);
+      expect(report.meanScore).toBe(0.5);
+      expect(report.durationMillis).toBeGreaterThanOrEqual(0);
+      expect(report.cases).toMatchObject([
+        { name: 'expects-yes', score: 1, passed: true },
+        { name: 'expects-yes-2', score: 0, passed: false },
+      ]);
+    }),
+  );
+
+  it.effect('combines suite scorers with a case-specific override', () =>
+    Effect.gen(function* () {
+      const nonEmpty = AgentEval.check(
+        'non-empty',
+        (capture) => capture.result.text.length > 0,
+      );
+      const saidYes = AgentEval.check(
+        'is-yes',
+        (capture) => capture.result.text === 'yes',
+        { weight: 2 },
+      );
+      const report = yield* AgentEval.suite(textAgent, {
+        name: 'override-suite',
+        cases: [
+          { name: 'checked-twice', input: 'a', scorers: [saidYes] },
+          { name: 'checked-once', input: 'b' },
+        ],
+        scorers: [nonEmpty],
+      }).pipe(Effect.provide(scripted([textTurn('yes'), textTurn('no')])));
+
+      expect(report.cases[0]?.scores.map((score) => score.name)).toEqual([
+        'non-empty',
+        'is-yes',
+      ]);
+      expect(report.cases[1]?.scores.map((score) => score.name)).toEqual([
+        'non-empty',
+      ]);
+      // 'no' still satisfies the suite-only scorer, so both cases pass.
+      expect(report.passed).toBe(2);
+    }),
+  );
+
+  it.effect(
+    'reports a case that dies as a failure without failing the suite',
+    () =>
+      Effect.gen(function* () {
+        let calls = 0;
+        const diesOnce = Layer.effect(
+          LanguageModel.LanguageModel,
+          LanguageModel.make({
+            generateText: () => Effect.succeed([finish()]),
+            streamText: () => {
+              const call = calls++;
+              return call === 0
+                ? Stream.die(new Error('boom'))
+                : Stream.fromIterable(textTurn('ok'));
+            },
+          }),
+        );
+        const always = AgentEval.check('always', () => true);
+        const report = yield* AgentEval.suite(textAgent, {
+          name: 'dies-suite',
+          cases: [
+            { name: 'dies', input: 'a' },
+            { name: 'survives', input: 'b' },
+          ],
+          scorers: [always],
+        }).pipe(Effect.provide(diesOnce));
+
+        expect(report.passed).toBe(1);
+        expect(report.failed).toBe(1);
+        expect(report.cases[0]).toMatchObject({
+          name: 'dies',
+          score: 0,
+          passed: false,
+        });
+        expect(report.cases[0]?.failure).toContain('boom');
+        expect(report.cases[1]).toMatchObject({
+          name: 'survives',
+          score: 1,
+          passed: true,
+        });
+      }),
+  );
+
+  it.effect('round-trips a suite report through its schema', () =>
+    Effect.gen(function* () {
+      const saidYes = AgentEval.check(
+        'said yes',
+        (capture) => capture.result.text === 'yes',
+      );
+      const report = yield* AgentEval.suite(textAgent, {
+        name: 'roundtrip-suite',
+        cases: [{ name: 'expects-yes', input: 'a' }],
+        scorers: [saidYes],
+      }).pipe(Effect.provide(scripted([textTurn('yes')])));
+
+      const encoded = Schema.encodeSync(AgentEval.SuiteReport)(report);
+      const decoded = Schema.decodeUnknownSync(AgentEval.SuiteReport)(encoded);
+      expect(decoded).toEqual(report);
+    }),
+  );
+});
+
+const caseReport = (
+  name: string,
+  score: number,
+  passed: boolean,
+): AgentEval.CaseReport => ({ name, score, passed, scores: [] });
+
+const suiteReport = (
+  name: string,
+  cases: ReadonlyArray<AgentEval.CaseReport>,
+): AgentEval.SuiteReport => ({
+  suite: name,
+  cases,
+  passed: cases.filter((one) => one.passed).length,
+  failed: cases.filter((one) => !one.passed).length,
+  meanScore:
+    cases.reduce((sum, one) => sum + one.score, 0) / (cases.length || 1),
+  startedAt: 0,
+  durationMillis: 0,
+});
+
+describe('AgentEval.compare', () => {
+  it('classifies every case as new, removed, regressed, improved, or unchanged', () => {
+    const baseline = suiteReport('regression-suite', [
+      caseReport('a', 1, true),
+      caseReport('b', 0.5, true),
+      caseReport('c', 0.2, false),
+      caseReport('d', 0.9, true),
+    ]);
+    const current = suiteReport('regression-suite', [
+      caseReport('a', 1, true),
+      caseReport('b', 0.2, false),
+      caseReport('c', 0.9, true),
+      caseReport('e', 0.5, true),
+    ]);
+
+    const comparison = AgentEval.compare(baseline, current);
+
+    expect(comparison.verdict).toBe('regressed');
+    expect(comparison.added).toBe(1);
+    expect(comparison.removed).toBe(1);
+    expect(comparison.regressed).toBe(1);
+    expect(comparison.improved).toBe(1);
+    expect(comparison.unchanged).toBe(1);
+    const byName = new Map(
+      comparison.cases.map((delta) => [delta.name, delta.status]),
+    );
+    expect(byName.get('a')).toBe('unchanged');
+    expect(byName.get('b')).toBe('regressed');
+    expect(byName.get('c')).toBe('improved');
+    expect(byName.get('d')).toBe('removed');
+    expect(byName.get('e')).toBe('new');
+  });
+
+  it('verdicts pass when nothing regressed', () => {
+    const baseline = suiteReport('stable-suite', [caseReport('a', 1, true)]);
+    const current = suiteReport('stable-suite', [caseReport('a', 1, true)]);
+
+    expect(AgentEval.compare(baseline, current).verdict).toBe('pass');
+  });
+});

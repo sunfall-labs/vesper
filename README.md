@@ -118,14 +118,14 @@ the application.
 
 Vesper publishes six focused packages:
 
-| Package                                               | Purpose                                                                          |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------- |
-| [`@sunfall/vesper-agent`](packages/agent)             | Agent loop, typed evals, workflows, skills, recording, resumption, and subagents |
-| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, and the memory adapter            |
-| [`@sunfall/vesper-log-pg`](packages/log-pg)           | PostgreSQL log adapter and authoritative migration                               |
-| [`@sunfall/vesper-workspace`](packages/workspace)     | Filesystem and shell tools behind a swappable driver                             |
-| [`@sunfall/vesper-attachments`](packages/attachments) | Verified content-addressed blobs with memory and filesystem adapters             |
-| [`@sunfall/vesper-mcp`](packages/mcp)                 | Scoped, Effect-native MCP tools for Vesper agents                                |
+| Package                                               | Purpose                                                                                |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| [`@sunfall/vesper-agent`](packages/agent)             | Agent loop, typed eval suites, workflows, skills, recording, resumption, and subagents |
+| [`@sunfall/vesper-log`](packages/log)                 | Event-sourced conversations, offsets, tailing, and the memory adapter                  |
+| [`@sunfall/vesper-log-pg`](packages/log-pg)           | PostgreSQL log adapter and authoritative migration                                     |
+| [`@sunfall/vesper-workspace`](packages/workspace)     | Filesystem and shell tools behind a swappable driver                                   |
+| [`@sunfall/vesper-attachments`](packages/attachments) | Verified content-addressed blobs with memory and filesystem adapters                   |
+| [`@sunfall/vesper-mcp`](packages/mcp)                 | Scoped, Effect-native MCP tools for Vesper agents                                      |
 
 Workspace authority is always composed explicitly. Attachments remain a
 separate reusable package and are only externalized when an
