@@ -9,6 +9,7 @@ import {
 } from '@modelcontextprotocol/client';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Fiber, Redacted, Stream } from 'effect';
+import { TestClock } from 'effect/testing';
 import { type Response as AiResponse, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '@sunfall/vesper-agent/agent';
@@ -246,6 +247,40 @@ describe('Mcp', () => {
         'mcp__linear__create_issue, mcp__linear__search_issues',
       );
     }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    'orders unfiltered tools by sanitized names but preserves allowlists',
+    () =>
+      Effect.gen(function* () {
+        const punctuationTools: McpTool[] = [
+          { ...search, name: '!zeta' },
+          { ...create, name: 'alpha' },
+        ];
+        const source = (allowlist?: string[]) =>
+          Mcp.fromClient({
+            name: 'linear',
+            client: Effect.succeed({
+              listTools: async () => listing(punctuationTools),
+              callTool: async () => result('unused'),
+            } satisfies ClientLike),
+            ...(allowlist === undefined ? {} : { tools: allowlist }),
+          });
+
+        const [unfiltered, allowlisted] = yield* Effect.all([
+          source().open,
+          source(['!zeta', 'alpha']).open,
+        ]);
+
+        expect(Object.keys(unfiltered.tools)).toEqual([
+          'mcp__linear__alpha',
+          'mcp__linear__zeta',
+        ]);
+        expect(Object.keys(allowlisted.tools)).toEqual([
+          'mcp__linear__zeta',
+          'mcp__linear__alpha',
+        ]);
+      }).pipe(Effect.scoped),
   );
 
   it.effect('mounts into Agent as one stable snapshot for the run', () =>
@@ -500,6 +535,139 @@ describe('Mcp', () => {
 
       expect(unknownResult._tag).toBe('Failure');
       expect(repeatedResult._tag).toBe('Failure');
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect('bounds untrusted discovery metadata before mounting tools', () =>
+    Effect.gen(function* () {
+      const tooMany = Mcp.fromClient({
+        name: 'linear',
+        limits: { maxTools: 1 },
+        client: Effect.succeed({
+          listTools: async () => listing([search, create]),
+          callTool: async () => result('unused'),
+        } satisfies ClientLike),
+      });
+      const malformedSchema = Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed({
+          // A real remote response crosses a JSON boundary before the SDK's
+          // static ClientLike contract can help us. Reparse here to exercise
+          // the same hostile-wire case without a type assertion.
+          listTools: async () =>
+            listing([
+              JSON.parse(
+                JSON.stringify({
+                  ...search,
+                  inputSchema: { type: 'string' },
+                }),
+              ),
+            ]),
+          callTool: async () => result('unused'),
+        } satisfies ClientLike),
+      });
+
+      const countResult = yield* tooMany.open.pipe(Effect.result);
+      const schemaResult = yield* malformedSchema.open.pipe(Effect.result);
+
+      expect(countResult._tag).toBe('Failure');
+      expect(schemaResult._tag).toBe('Failure');
+      if (countResult._tag === 'Failure') {
+        expect(countResult.failure.message).toContain('LimitError');
+      }
+    }).pipe(Effect.scoped),
+  );
+
+  it('validates limits before evaluating a client connection', () => {
+    let evaluated = false;
+    expect(() =>
+      Mcp.fromClient({
+        name: 'linear',
+        limits: { maxTools: 0 },
+        client: Effect.sync(() => {
+          evaluated = true;
+          return {
+            listTools: async () => listing([]),
+            callTool: async () => result('unused'),
+          } satisfies ClientLike;
+        }),
+      }),
+    ).toThrow(/maxTools/);
+    expect(evaluated).toBe(false);
+  });
+
+  it.effect(
+    'returns typed limit failures for oversized arguments and results',
+    () =>
+      Effect.gen(function* () {
+        const client = {
+          listTools: async () => listing([search]),
+          callTool: async () => result('x'.repeat(100)),
+        } satisfies ClientLike;
+        const ready = yield* Mcp.fromClient({
+          name: 'linear',
+          limits: { maxArgumentBytes: 32, maxResultBytes: 32 },
+          client: Effect.succeed(client),
+        }).open;
+
+        const argumentEvents = yield* ready
+          .handle('mcp__linear__search_issues', { query: 'x'.repeat(100) })
+          .pipe(Stream.unwrap, Stream.runCollect);
+        const resultEvents = yield* ready
+          .handle('mcp__linear__search_issues', { query: 'ok' })
+          .pipe(Stream.unwrap, Stream.runCollect);
+
+        expect(Array.from(argumentEvents).at(-1)).toMatchObject({
+          isFailure: true,
+          result: {
+            _tag: 'LimitError',
+            resource: 'tool-arguments',
+            limit: 32,
+          },
+        });
+        expect(Array.from(resultEvents).at(-1)).toMatchObject({
+          isFailure: true,
+          result: {
+            _tag: 'LimitError',
+            resource: 'tool-result',
+            limit: 32,
+          },
+        });
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect('passes configured timeouts and aborts slow MCP calls', () =>
+    Effect.gen(function* () {
+      let started = false;
+      const ready = yield* Mcp.fromClient({
+        name: 'linear',
+        timeout: 1,
+        client: Effect.succeed({
+          listTools: async () => listing([search]),
+          callTool: async (_params, options) => {
+            started = true;
+            expect(options?.timeout).toBe(1);
+            return new Promise<CallToolResult>((_resolve, reject) => {
+              options?.signal?.addEventListener(
+                'abort',
+                () => reject(new Error('aborted')),
+                { once: true },
+              );
+            });
+          },
+        } satisfies ClientLike),
+      }).open;
+
+      const fiber = yield* ready
+        .handle('mcp__linear__search_issues', { query: 'vesper' })
+        .pipe(Stream.unwrap, Stream.runCollect, Effect.forkChild);
+
+      yield* Effect.repeat(Effect.yieldNow, { until: () => started });
+      yield* TestClock.adjust('1 millis');
+      const events = yield* Fiber.join(fiber);
+
+      expect(started).toBe(true);
+      expect(Array.from(events).at(-1)).toMatchObject({ isFailure: true });
     }).pipe(Effect.scoped),
   );
 

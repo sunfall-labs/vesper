@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schema } from 'effect';
+import { Context, Effect, Layer, Schema, Semaphore } from 'effect';
 import { Tool, Toolkit } from 'effect/unstable/ai';
 
 import { WorkspaceDriver } from './driver.js';
@@ -45,12 +45,15 @@ import { WorkspacePath } from './path.js';
  * can reach the filesystem should not compile until someone has said *which*
  * filesystem and *which* directory.
  *
- * **Containment here is lexical.** Paths are resolved and checked against this
- * root before they reach the driver, which stops a model that wandered — not
- * code that meant to leave. A symlink inside the root is followed wherever it
- * points, and `run_shell` executes a command string nothing inspects. See the
- * boundary note in `driver.ts`; this narrows what the tools address, and the
- * driver's substrate is still what confines.
+ * **Containment here is lexical and preflight.** Paths are resolved and
+ * checked against this root before they reach the driver, which stops a model
+ * that wandered — not code that meant to leave. The no-symlink policy probes
+ * existing components immediately before the operation, but cannot close a
+ * filesystem TOCTOU race with another process or with an enabled shell tool.
+ * When the application explicitly permits symlinks, one inside the root is
+ * followed wherever it points; `run_shell` executes a command string nothing
+ * inspects. See the boundary note in `driver.ts`; this narrows what the tools
+ * address, and the driver's substrate is still what confines.
  */
 export class Root extends Context.Service<Root, { readonly path: string }>()(
   '@sunfall/vesper-workspace/WorkspaceRoot',
@@ -160,6 +163,9 @@ const MAX_SEARCHABLE_BYTES = 2 * 1024 * 1024;
 /** A single model-driven file read never materializes more than this. */
 const MAX_READABLE_BYTES = 2 * 1024 * 1024;
 
+/** Maximum UTF-8 bytes one model-driven write or edit may persist. */
+export const MAX_WRITABLE_BYTES = 2 * 1024 * 1024;
+
 /** Total bytes search may read across files in one call. */
 const MAX_SEARCH_BYTES = 16 * 1024 * 1024;
 
@@ -167,6 +173,12 @@ const MAX_REGEX_PATTERN_CHARS = 1000;
 const MAX_REGEX_LINE_CHARS = 10_000;
 const STAT_CONCURRENCY = 16;
 const READ_CONCURRENCY = 4;
+
+// `edit_file` is a read/transform/write operation. Serialize it process-wide
+// so concurrent toolkit calls cannot both read the same old contents and then
+// silently lose one another's update. This protects calls sharing a process;
+// an external writer can still race the filesystem between our checks.
+const EDIT_MUTEX = Semaphore.makeUnsafe(1);
 
 // --------------------------------------------------------------- the errors
 //
@@ -222,7 +234,7 @@ export class BinaryContent extends Schema.TaggedError<BinaryContent>(
   reason: Schema.Literals(['nul-byte', 'invalid-utf8']),
 }) {}
 
-/** A file exceeds the bounded read budget for model-visible content. */
+/** A file exceeds a bounded read or write budget. */
 export class FileTooLarge extends Schema.TaggedError<FileTooLarge>(
   '@sunfall/vesper-workspace/FileTooLarge',
 )('FileTooLarge', { path: Schema.String, maxBytes: Schema.Natural }) {}
@@ -357,13 +369,14 @@ const fromFileError =
 /** Resolve a model-supplied path against the root, or fail legibly. */
 const resolvePath = (
   input: string,
+  tool: typeof ToolOperation.Type,
 ): Effect.Effect<
   {
     readonly root: string;
     readonly absolute: string;
     readonly display: string;
   },
-  PathOutsideWorkspace | SymlinkDenied,
+  PathOutsideWorkspace | PathFailure,
   Root | WorkspaceDriver.Service | FilesystemPolicy
 > =>
   Effect.gen(function* () {
@@ -388,13 +401,10 @@ const resolvePath = (
       const check = (path: string) =>
         driver.stat(path).pipe(
           Effect.map((value) => value.isSymbolicLink),
-          // The real operation below remains responsible for reporting
-          // permission and other driver failures. This probe only answers the
-          // narrower question: is an existing component a symlink?
           Effect.catchTag('PathNotFound', () => Effect.succeed(false)),
-          Effect.catchTag('PermissionDenied', () => Effect.succeed(false)),
-          Effect.catchTag('FileReadLimitExceeded', () => Effect.succeed(false)),
-          Effect.catchTag('WorkspaceFailure', () => Effect.succeed(false)),
+          Effect.mapError(
+            fromFileError(tool, WorkspacePath.relative(normalizedRoot, path)),
+          ),
         );
       const paths = [normalizedRoot, ...candidates];
       for (const segment of paths) {
@@ -717,8 +727,9 @@ const readFileTool = Tool.make('read_file', {
 const writeFileTool = Tool.make('write_file', {
   description:
     'Write a UTF-8 text file in the workspace, creating it and any missing ' +
-    'parent directories, or replacing it entirely if it exists. To change ' +
-    'part of an existing file, use edit_file instead.',
+    'parent directories, or replacing it entirely if it exists. Writes are ' +
+    'limited to 2 MiB. To change part of an existing file, use edit_file ' +
+    'instead.',
   parameters: Schema.Struct({
     path: Schema.String,
     content: Schema.String,
@@ -737,7 +748,9 @@ const editFileTool = Tool.make('edit_file', {
   description:
     'Replace an exact string in a workspace file. Fails without writing if ' +
     'the string is absent, or if it occurs more than once and `replaceAll` ' +
-    'is not set. Include enough surrounding text to make it unique.',
+    'is not set. Include enough surrounding text to make it unique. Edits ' +
+    'are limited to a 2 MiB resulting file and serialized within the process; ' +
+    'external writers can still race a local filesystem operation.',
   parameters: Schema.Struct({
     path: Schema.String,
     // Non-empty by schema: an empty target matches at every position, so
@@ -905,7 +918,7 @@ const handleRead = Effect.fn('WorkspaceTools.readFile')(function* (params: {
   readonly offset?: number;
   readonly limit?: number;
 }) {
-  const { absolute, display, root } = yield* resolvePath(params.path);
+  const { absolute, display, root } = yield* resolvePath(params.path, 'read');
   const text = yield* readText('read', absolute, display);
 
   const allLines = text.split('\n');
@@ -947,7 +960,13 @@ const handleWrite = Effect.fn('WorkspaceTools.writeFile')(function* (params: {
   readonly content: string;
 }) {
   const driver = yield* WorkspaceDriver.Service;
-  const { absolute, display, root } = yield* resolvePath(params.path);
+  const bytes = WorkspaceOutput.utf8Size(params.content);
+  if (bytes > MAX_WRITABLE_BYTES) {
+    return yield* Effect.fail(
+      new FileTooLarge({ path: params.path, maxBytes: MAX_WRITABLE_BYTES }),
+    );
+  }
+  const { absolute, display, root } = yield* resolvePath(params.path, 'write');
 
   const existing = yield* driver
     .stat(absolute)
@@ -956,9 +975,14 @@ const handleWrite = Effect.fn('WorkspaceTools.writeFile')(function* (params: {
   if (existing._tag === 'Success' && !existing.success.isFile) {
     return yield* Effect.fail(new NotAFile({ path: display }));
   }
-  // A missing file is the ordinary case for a write; anything else that
-  // blocked the `stat` will block the write too, and is reported there.
-  const created = existing._tag === 'Failure';
+  // A missing file is the ordinary case for a write. A permission or I/O
+  // failure is not evidence of absence: preserve it rather than attempting a
+  // write that could have a different result from the probe.
+  if (existing._tag === 'Failure' && existing.failure._tag !== 'FileNotFound') {
+    return yield* Effect.fail(existing.failure);
+  }
+  const created =
+    existing._tag === 'Failure' && existing.failure._tag === 'FileNotFound';
 
   const parent = absolute.slice(0, absolute.lastIndexOf('/'));
   if (parent !== '' && parent !== root) {
@@ -977,7 +1001,7 @@ const handleWrite = Effect.fn('WorkspaceTools.writeFile')(function* (params: {
 
   return {
     path: WorkspacePath.relative(root, absolute),
-    bytesWritten: WorkspaceOutput.utf8Size(params.content),
+    bytesWritten: bytes,
     created,
   };
 });
@@ -988,42 +1012,59 @@ const handleEdit = Effect.fn('WorkspaceTools.editFile')(function* (params: {
   readonly newText: string;
   readonly replaceAll?: boolean;
 }) {
-  const driver = yield* WorkspaceDriver.Service;
-  const { absolute, display, root } = yield* resolvePath(params.path);
-  const text = yield* readText('write', absolute, display);
+  return yield* EDIT_MUTEX.withPermits(1)(
+    Effect.gen(function* () {
+      const driver = yield* WorkspaceDriver.Service;
+      const { absolute, display, root } = yield* resolvePath(
+        params.path,
+        'write',
+      );
+      const text = yield* readText('write', absolute, display);
 
-  const occurrences = text.split(params.oldText).length - 1;
-  if (occurrences === 0) {
-    return yield* Effect.fail(
-      new EditTargetMissing({ path: display, target: params.oldText }),
-    );
-  }
-  if (occurrences > 1 && params.replaceAll !== true) {
-    return yield* Effect.fail(
-      new EditTargetAmbiguous({
-        path: display,
-        target: params.oldText,
-        occurrences,
-      }),
-    );
-  }
+      const occurrences = text.split(params.oldText).length - 1;
+      if (occurrences === 0) {
+        return yield* Effect.fail(
+          new EditTargetMissing({ path: display, target: params.oldText }),
+        );
+      }
+      if (occurrences > 1 && params.replaceAll !== true) {
+        return yield* Effect.fail(
+          new EditTargetAmbiguous({
+            path: display,
+            target: params.oldText,
+            occurrences,
+          }),
+        );
+      }
 
-  // `split`/`join` rather than `replace`: `$&` and friends in `newText` are
-  // substitution patterns to `String.replace`, so a model editing a regular
-  // expression or a shell script would get text it did not write.
-  const updated =
-    params.replaceAll === true
-      ? text.split(params.oldText).join(params.newText)
-      : text.replace(params.oldText, () => params.newText);
+      // `split`/`join` rather than `replace`: `$&` and friends in `newText` are
+      // substitution patterns to `String.replace`, so a model editing a regular
+      // expression or a shell script would get text it did not write.
+      const replacements = params.replaceAll === true ? occurrences : 1;
+      const updatedBytes =
+        WorkspaceOutput.utf8Size(text) -
+        replacements * WorkspaceOutput.utf8Size(params.oldText) +
+        replacements * WorkspaceOutput.utf8Size(params.newText);
+      if (updatedBytes > MAX_WRITABLE_BYTES) {
+        return yield* Effect.fail(
+          new FileTooLarge({ path: display, maxBytes: MAX_WRITABLE_BYTES }),
+        );
+      }
+      const updated =
+        params.replaceAll === true
+          ? text.split(params.oldText).join(params.newText)
+          : text.replace(params.oldText, () => params.newText);
 
-  yield* driver
-    .writeFile(absolute, updated)
-    .pipe(Effect.mapError(fromFileError('write', display)));
+      yield* driver
+        .writeFile(absolute, updated)
+        .pipe(Effect.mapError(fromFileError('write', display)));
 
-  return {
-    path: WorkspacePath.relative(root, absolute),
-    replacements: params.replaceAll === true ? occurrences : 1,
-  };
+      return {
+        path: WorkspacePath.relative(root, absolute),
+        replacements,
+      };
+    }),
+  );
 });
 
 const handleList = Effect.fn('WorkspaceTools.listFiles')(function* (params: {
@@ -1031,7 +1072,7 @@ const handleList = Effect.fn('WorkspaceTools.listFiles')(function* (params: {
   readonly pattern?: string;
   readonly limit?: number;
 }) {
-  const { absolute, root } = yield* resolvePath(params.path ?? '.');
+  const { absolute, root } = yield* resolvePath(params.path ?? '.', 'list');
   const expression =
     params.pattern === undefined
       ? undefined
@@ -1062,7 +1103,7 @@ const handleSearch = Effect.fn('WorkspaceTools.searchFiles')(
     readonly limit?: number;
   }) {
     const driver = yield* WorkspaceDriver.Service;
-    const { absolute, root } = yield* resolvePath(params.path ?? '.');
+    const { absolute, root } = yield* resolvePath(params.path ?? '.', 'search');
 
     const unsafe = unsafeRegexReason(params.pattern);
     if (unsafe !== undefined) {
@@ -1208,7 +1249,7 @@ const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
   if (!policy.allowShell) {
     return yield* Effect.fail(new ShellDisabled({}));
   }
-  const { absolute, display } = yield* resolvePath(params.cwd ?? '.');
+  const { absolute, display } = yield* resolvePath(params.cwd ?? '.', 'run');
   const requestedTimeoutMs = params.timeoutMs ?? policy.defaultTimeoutMs;
   const timeoutMs = Math.min(
     policy.maxTimeoutMs,

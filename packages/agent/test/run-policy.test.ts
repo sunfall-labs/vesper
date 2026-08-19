@@ -44,6 +44,10 @@ const failedWith = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   );
 
 describe('hard run policy', () => {
+  it('keeps exported defaults immutable', () => {
+    expect(Object.isFrozen(RunPolicy.defaultLimits)).toBe(true);
+  });
+
   it.effect('does not let a steer override the shared turn ceiling', () =>
     Effect.gen(function* () {
       const runtime = yield* RunPolicyRuntime.create(

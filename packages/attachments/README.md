@@ -28,9 +28,14 @@ const attachments = AttachmentStoreFileSystem.layer(
 ).pipe(Layer.provide(NodeServices.layer));
 ```
 
-Writes are atomically published under their validated SHA-256 address. Reads
-always recompute the digest and length before returning bytes. Rebuilding the
-layer against the same directory preserves every attachment.
+Writes are atomically published under their validated SHA-256 address. The
+filesystem adapter flushes the temporary file before the rename and flushes
+the parent directory metadata when the supplied `FileSystem` supports
+directory handles. Reads always recompute the digest and length before
+returning bytes. Adapters without directory-sync support retain atomic rename
+but cannot promise crash survival of the directory entry; rebuilding the layer
+against the same directory preserves every attachment that was durably
+published by the platform.
 
 The repository keeps a shared conformance suite beside the store interface so
 every built-in backend is held to the same behaviour. It is test

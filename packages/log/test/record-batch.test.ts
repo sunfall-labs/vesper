@@ -94,4 +94,71 @@ describe('record batch', () => {
       expect(explicitUndefined._tag).toBe('Failure');
     }),
   );
+
+  it.effect('rejects oversized strings before fingerprinting', () =>
+    Effect.gen(function* () {
+      const entry = yield* RecordBatch.decodeEntry({
+        conversationId: 'conversation-1',
+        timestamp: 1_700_000_000_000,
+        record: {
+          _tag: 'Text',
+          step: 1,
+          text: 'x'.repeat(RecordBatch.MAX_STRING_CHARS + 1),
+        },
+      });
+      const result = yield* RecordBatch.prepare([entry]).pipe(Effect.result);
+
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(result.failure.detail).toContain('maximum string length');
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    'rejects deeply nested opaque values without recursing forever',
+    () =>
+      Effect.gen(function* () {
+        let value: unknown = { leaf: true };
+        for (let depth = 0; depth <= RecordBatch.MAX_JSON_DEPTH; depth += 1) {
+          value = { next: value };
+        }
+
+        const entry = yield* RecordBatch.decodeEntry({
+          conversationId: 'conversation-1',
+          timestamp: 1_700_000_000_000,
+          record: {
+            _tag: 'ToolCall',
+            step: 1,
+            id: 'call-1',
+            name: 'nested',
+            params: value,
+          },
+        });
+        const result = yield* RecordBatch.prepare([entry]).pipe(Effect.result);
+
+        expect(result._tag).toBe('Failure');
+        if (result._tag === 'Failure') {
+          expect(result.failure.detail).toContain('maximum JSON depth');
+        }
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect('rejects batches above the append bound', () =>
+    Effect.gen(function* () {
+      const entry = yield* RecordBatch.decodeEntry({
+        conversationId: 'conversation-1',
+        timestamp: 1_700_000_000_000,
+        record: { _tag: 'Text', step: 1, text: 'x' },
+      });
+      const result = yield* RecordBatch.prepare(
+        Array.from({ length: RecordBatch.MAX_RECORDS + 1 }, () => entry),
+      ).pipe(Effect.result);
+
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(result.failure.detail).toContain('maximum is');
+      }
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });

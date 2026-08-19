@@ -43,7 +43,7 @@ export interface Limits {
 }
 
 /** Explicit production-safe default used unless the application supplies one. */
-export const defaultLimits: Limits = {
+export const defaultLimits: Limits = Object.freeze({
   maxTurns: 128,
   maxModelCalls: 160,
   maxDelegatedTasks: 64,
@@ -56,7 +56,7 @@ export const defaultLimits: Limits = {
   maxSignalBytes: 64 * 1024,
   maxSignalsPerBoundary: 32,
   maxSteeredBytes: 256 * 1024,
-};
+});
 
 const safeInteger = (
   name: keyof Limits,

@@ -19,6 +19,26 @@ const storeError = (
 const isAlreadyPresent = (error: PlatformError): boolean =>
   error.reason._tag === 'AlreadyExists';
 
+const nativeErrorCode = (error: PlatformError): unknown => {
+  const cause = 'cause' in error.reason ? error.reason.cause : undefined;
+  if (typeof cause !== 'object' || cause === null || !('code' in cause)) {
+    return undefined;
+  }
+  return cause.code;
+};
+
+// POSIX permits opening and syncing a directory. Windows and a few other
+// FileSystem adapters do not, even though they still provide atomic rename.
+// Keep those adapters usable while retaining failures such as permission
+// errors from the actual file write, file sync, or rename operations.
+const isUnsupportedDirectorySync = (error: PlatformError): boolean => {
+  const code = nativeErrorCode(error);
+  return (
+    (error.reason.method === 'open' || error.reason.method === 'sync') &&
+    (code === 'EISDIR' || code === 'EINVAL' || code === 'ENOTSUP')
+  );
+};
+
 const blobPath = (
   root: string,
   path: Path.Path,
@@ -27,6 +47,28 @@ const blobPath = (
   const hex = ref.digest.slice(`${AttachmentRef.DIGEST_PREFIX}:`.length);
   return path.join(root, AttachmentRef.DIGEST_PREFIX, hex.slice(0, 2), hex);
 };
+
+const syncFile = (
+  fs: FileSystem.FileSystem,
+  filePath: string,
+): Effect.Effect<void, PlatformError> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const file = yield* fs.open(filePath, { flag: 'r+' });
+      yield* file.sync;
+    }),
+  );
+
+const syncDirectory = (
+  fs: FileSystem.FileSystem,
+  directory: string,
+): Effect.Effect<void, PlatformError> =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const file = yield* fs.open(directory, { flag: 'r' });
+      yield* file.sync;
+    }),
+  ).pipe(Effect.catchIf(isUnsupportedDirectorySync, () => Effect.void));
 
 const service = (root: string) =>
   Effect.gen(function* () {
@@ -59,11 +101,13 @@ const service = (root: string) =>
           fs
             .writeFile(temporary, bytes, { mode: 0o600 })
             .pipe(
+              Effect.andThen(syncFile(fs, temporary)),
               Effect.andThen(
                 fs
                   .rename(temporary, target)
                   .pipe(Effect.catchIf(isAlreadyPresent, () => Effect.void)),
               ),
+              Effect.andThen(syncDirectory(fs, directory)),
               Effect.ensuring(
                 fs.remove(temporary, { force: true }).pipe(Effect.ignore),
               ),

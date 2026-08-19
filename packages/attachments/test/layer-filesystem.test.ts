@@ -19,6 +19,8 @@ import {
 } from './attachment-store-contract.js';
 
 const root = `${tmpdir()}/vesper-attachments-${randomUUID()}`;
+type OpenOptions = Parameters<FileSystem.FileSystem['open']>[1];
+type RemoveOptions = Parameters<FileSystem.FileSystem['remove']>[1];
 
 const storedPath = (ref: AttachmentRef.Ref) =>
   Effect.map(Path.Path, (path) => {
@@ -38,6 +40,34 @@ const overwriteUnsafe = (
 const filesystem = AttachmentStoreFileSystem.layer(root).pipe(
   Layer.provide(NodeServices.layer),
 );
+
+const recordingFileSystem = (events: Array<string>) =>
+  Layer.effect(
+    FileSystem.FileSystem,
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      return {
+        ...fs,
+        open: (filePath: string, options?: OpenOptions) =>
+          fs.open(filePath, options).pipe(
+            Effect.map((file) => ({
+              ...file,
+              sync: file.sync.pipe(
+                Effect.tap(() => Effect.sync(() => events.push('sync'))),
+              ),
+            })),
+          ),
+        rename: (from: string, to: string) =>
+          fs
+            .rename(from, to)
+            .pipe(Effect.tap(() => Effect.sync(() => events.push('rename')))),
+        remove: (filePath: string, options?: RemoveOptions) =>
+          fs
+            .remove(filePath, options)
+            .pipe(Effect.tap(() => Effect.sync(() => events.push('remove')))),
+      };
+    }),
+  ).pipe(Layer.provide(NodeServices.layer));
 
 attachmentStoreContract('filesystem', {
   layer: filesystem,
@@ -59,6 +89,73 @@ afterAll(async () => {
 });
 
 describe('filesystem attachment persistence', () => {
+  it.effect(
+    'syncs the temporary file before rename and its parent after',
+    () => {
+      const events: Array<string> = [];
+      const observed = AttachmentStoreFileSystem.layer(root).pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            recordingFileSystem(events),
+            NodeCrypto.layer,
+            NodePath.layer,
+          ),
+        ),
+      );
+
+      return Effect.gen(function* () {
+        const store = yield* AttachmentStore.Service;
+        yield* store.put(new TextEncoder().encode('durable'), {
+          mediaType: 'text/plain',
+        });
+
+        expect(events).toEqual(['sync', 'rename', 'sync', 'remove']);
+      }).pipe(Effect.provide(observed));
+    },
+  );
+
+  it.effect(
+    'keeps atomic rename portable when directory sync is unsupported',
+    () => {
+      const unsupported = PlatformError.systemError({
+        _tag: 'PermissionDenied',
+        module: 'FileSystem',
+        method: 'open',
+        pathOrDescriptor: root,
+        cause: { code: 'EISDIR' },
+      });
+      const portableFileSystem = Layer.effect(
+        FileSystem.FileSystem,
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          return {
+            ...fs,
+            open: (filePath: string, options?: OpenOptions) =>
+              options?.flag === 'r'
+                ? Effect.fail(unsupported)
+                : fs.open(filePath, options),
+          };
+        }),
+      ).pipe(Layer.provide(NodeServices.layer));
+      const portable = AttachmentStoreFileSystem.layer(root).pipe(
+        Layer.provide(
+          Layer.mergeAll(portableFileSystem, NodeCrypto.layer, NodePath.layer),
+        ),
+      );
+
+      return Effect.gen(function* () {
+        const store = yield* AttachmentStore.Service;
+        const ref = yield* store.put(new TextEncoder().encode('portable'), {
+          mediaType: 'text/plain',
+        });
+
+        expect(Array.from(yield* store.get(ref))).toEqual(
+          Array.from(new TextEncoder().encode('portable')),
+        );
+      }).pipe(Effect.provide(portable));
+    },
+  );
+
   it.effect('survives rebuilding the layer', () =>
     Effect.gen(function* () {
       const ref = yield* Effect.gen(function* () {

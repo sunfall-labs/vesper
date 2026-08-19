@@ -34,9 +34,10 @@ tools do not write an unreadable stream to the terminal. Use
 | `nub run knip`                            | unused files, exports, and dependencies |
 | `nub run benchmark`                       | the suite in `benchmarks/`              |
 
-`nub run example:compliance-relay` and `nub run example:live-smoke` run the two
-programs under `examples/`. Both reach a real provider and need an API key in
-the environment; nothing else does, and tests use scripted `LanguageModel`s.
+`ANTHROPIC_API_KEY=... nub run example:compliance-relay "your prompt"` and
+`nub run example:live-smoke` run the two programs under `examples/`. Both reach
+a real provider and need an API key in the environment; nothing else does, and
+tests use scripted `LanguageModel`s.
 
 `nub run typecheck` checks every package and the type-level test projects
 without emitting. tsdown is the only artifact producer; a typecheck can never
@@ -73,7 +74,9 @@ rewriting them to npm ranges. For the same reason, publishable packages use an
 exact version for a sibling Vesper dependency; private examples and benchmarks
 can safely retain `workspace:*`.
 
-CI runs Node 22 and 24; publishing uses Node 24.
+Node.js 22 or newer is required locally; CI runs Node 22 and 24, and publishing
+uses Node 24. See [the release procedure](releasing.md) for versioning and
+publishing policy.
 
 ## Module organization
 

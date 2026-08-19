@@ -36,6 +36,10 @@ package and an agent definition. Nothing in `@sunfall/vesper-agent` installs
 workspace access implicitly. Use `standard` for only the six workspace tools,
 or `compose` to preserve an application's tools while adding them:
 
+The `lookupIssue` and `lookupIssueHandler` names in this example are
+application-owned placeholders. Replace them with a real Effect tool and
+handler, or use `WorkspaceAgent.standard` when no application tools are needed.
+
 ```ts
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { WorkspaceAgent } from '@sunfall/vesper-workspace/agent';
@@ -127,7 +131,7 @@ ends a turn, not a run.
 Each failure is a `Schema.TaggedError` with the fields needed to retry
 differently: `PathOutsideWorkspace`, `FileNotFound`, `NotAFile`,
 `NotADirectory`, `BinaryContent`, `EditTargetMissing`, `EditTargetAmbiguous`,
-`AccessDenied`, `SymlinkDenied`, `InvalidPattern`, `CommandTimedOut`,
+`FileTooLarge`, `AccessDenied`, `SymlinkDenied`, `InvalidPattern`, `CommandTimedOut`,
 `ShellDisabled`, `WorkspaceUnavailable`. A single `ToolFailed { message }`
 would compile and would put the whole diagnosis back into prose.
 
@@ -157,6 +161,9 @@ may be the third.
 - **Walk forever.** 20,000 entries caps a single walk and sets `truncated`.
   `.git` and `node_modules` are not descended and are named in
   `ignoredDirectories`.
+- **Write an unbounded model payload.** `write_file` and the resulting file
+  from `edit_file` are each capped at 2 MiB and fail with `FileTooLarge`
+  before persisting oversized content.
 
 `edit_file` uses `split`/`join` rather than `String.replace`, so `$&` and
 friends in the replacement text are literal — a model editing a regular
@@ -185,6 +192,15 @@ existing symlink components are denied. This stops a model that wandered — not
 code that meant to leave. `unrestrictedFilesystemPolicyLayer` restores explicit
 link-following behavior, and an enabled `run_shell` still executes a command
 string nothing here inspects.
+
+The symlink check is a preflight probe, not an atomic no-follow filesystem
+primitive. Another process (or a concurrently enabled shell tool) can replace a
+checked path component between the probe and the operation. The built-in tools
+therefore provide lexical containment and an advisory default, not hostile-code
+confinement. `edit_file` serializes edits issued through this process to prevent
+same-process lost updates, but it cannot serialize external writers. A local
+deployment that needs race-free confinement must provide a driver backed by a
+container, VM, jail, or platform-specific dirfd/no-follow implementation.
 
 If the requirement is containment of hostile code, that has to come from the
 driver's substrate: a container, a VM, a jailed remote worker. What this seam

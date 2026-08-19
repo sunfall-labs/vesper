@@ -4,7 +4,6 @@ import { AiError, type Response, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { DynamicToolkit } from '../src/dynamic-toolkit.js';
-import { Interception } from '../src/interception.js';
 import { ScriptedModel } from '../src/testing.js';
 
 const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
@@ -150,6 +149,7 @@ describe('Agent dynamic tools', () => {
                 mcp__linear__search_issues: () =>
                   Effect.gen(function* () {
                     if (!(yield* Ref.get(enabled))) {
+                      yield* Ref.set(enabled, true);
                       return yield* Effect.fail(
                         'Linear is temporarily unavailable.',
                       );
@@ -167,11 +167,6 @@ describe('Agent dynamic tools', () => {
           instructions: 'Use the available tools.',
           toolkit: Toolkit.make(),
           dynamicTools: [source],
-        }).intercepting({
-          beforeTurn: ({ step }) =>
-            step === 2
-              ? Ref.set(enabled, true).pipe(Effect.as(Interception.proceed))
-              : Effect.succeed(Interception.proceed),
         });
         const call = (id: string) =>
           [
@@ -219,6 +214,61 @@ describe('Agent dynamic tools', () => {
       }),
   );
 
+  it.effect('rejects a model-emitted tool that was not advertised', () =>
+    Effect.gen(function* () {
+      let calls = 0;
+      const source = DynamicToolkit.make(
+        remoteToolkit.pipe(
+          Effect.provide(
+            remoteToolkit.toLayer({
+              mcp__linear__search_issues: () => {
+                calls += 1;
+                return Effect.succeed('VES-42');
+              },
+            }),
+          ),
+        ),
+      );
+      const agent = Agent.make({
+        name: 'advertised-only',
+        revision: '1',
+        instructions: 'Use the available tools.',
+        toolkit: Toolkit.make(),
+        dynamicTools: [source],
+      });
+      const model = ScriptedModel.make([
+        [
+          {
+            type: 'tool-call',
+            id: 'call-unknown',
+            name: 'mcp__linear__create_issue',
+            params: { query: 'vesper' },
+          },
+          finish('tool-calls'),
+        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+      ]);
+
+      const result = yield* agent
+        .stream('Create it.')
+        .pipe(Stream.runDrain, Effect.provide(model.layer), Effect.result);
+      const requests = yield* model.requests;
+
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(result.failure).toMatchObject({
+          reason: { _tag: 'InvalidOutputError' },
+        });
+      }
+      expect(calls).toBe(0);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.tools).toEqual(['mcp__linear__search_issues']);
+      expect(requests[0]?.toolDefinitions).toHaveLength(1);
+      expect(requests[0]?.toolDefinitions[0]?.name).toBe(
+        'mcp__linear__search_issues',
+      );
+    }),
+  );
+
   it.effect('fails source resolution before making a model request', () =>
     Effect.gen(function* () {
       const source = DynamicToolkit.make(
@@ -264,6 +314,32 @@ describe('Agent dynamic tools', () => {
     expect(() => DynamicToolkit.merge(handled, handled)).toThrow(
       'Dynamic tool name collision',
     );
+  });
+
+  it('keeps prototype-like tool names as inert own properties', () => {
+    const prototypeTool = Tool.dynamic('__proto__', {
+      description: 'Exercise an unusual but valid external tool name.',
+      parameters: { type: 'object', properties: {} },
+      success: Schema.String,
+      failure: Schema.String,
+      failureMode: 'return',
+    });
+    const prototypeToolkit = Toolkit.make(prototypeTool);
+    const handled = Effect.runSync(
+      prototypeToolkit.pipe(
+        Effect.provide(
+          prototypeToolkit.toLayer({
+            ['__proto__']: () => Effect.succeed('ok'),
+          }),
+        ),
+      ),
+    );
+
+    const merged = DynamicToolkit.merge(handled);
+
+    expect(Object.keys(merged.tools)).toEqual(['__proto__']);
+    expect(Object.hasOwn(merged.tools, '__proto__')).toBe(true);
+    expect(Object.getPrototypeOf(merged.tools)).toBe(Object.prototype);
   });
 
   it.effect('reports source collisions in the typed error channel', () => {

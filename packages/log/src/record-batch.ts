@@ -24,6 +24,24 @@ export class EncodeError extends Schema.TaggedError<EncodeError>(
   detail: Schema.String,
 }) {}
 
+/** Maximum number of entries accepted by one append batch. */
+export const MAX_RECORDS = 16_384;
+/** Maximum nesting accepted while cloning JSON values. */
+export const MAX_JSON_DEPTH = 64;
+/** Maximum JSON values and properties visited while cloning. */
+export const MAX_JSON_NODES = MAX_RECORDS * 32;
+/** Maximum aggregate string characters in one cloned value or batch. */
+export const MAX_STRING_CHARS = 4 * 1024 * 1024;
+/** Maximum characters in the canonical JSON batch representation. */
+export const MAX_BATCH_JSON_CHARS = 16 * 1024 * 1024;
+
+interface JsonBudget {
+  nodes: number;
+  stringChars: number;
+}
+
+const newJsonBudget = (): JsonBudget => ({ nodes: 0, stringChars: 0 });
+
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
@@ -35,12 +53,33 @@ const jsonClone = (
   value: unknown,
   path: string,
   ancestors: ReadonlySet<object>,
+  budget: JsonBudget,
+  depth: number,
 ): JsonValue => {
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
+  if (depth > MAX_JSON_DEPTH) {
+    throw jsonFailure(path, `exceeds maximum JSON depth of ${MAX_JSON_DEPTH}`);
+  }
+  budget.nodes += 1;
+  if (budget.nodes > MAX_JSON_NODES) {
+    throw jsonFailure(path, 'contains too many JSON values');
+  }
+  if (value === null || typeof value === 'boolean') {
+    return value;
+  }
+  if (typeof value === 'string') {
+    budget.stringChars += value.length;
+    if (value.length > MAX_STRING_CHARS) {
+      throw jsonFailure(
+        path,
+        `exceeds maximum string length of ${MAX_STRING_CHARS} characters`,
+      );
+    }
+    if (budget.stringChars > MAX_STRING_CHARS) {
+      throw jsonFailure(
+        path,
+        `exceeds maximum aggregate string length of ${MAX_STRING_CHARS} characters`,
+      );
+    }
     return value;
   }
   if (typeof value === 'number') {
@@ -56,6 +95,9 @@ const jsonClone = (
   const nextAncestors = new Set(ancestors).add(value);
   if (Array.isArray(value)) {
     const ownKeys = Reflect.ownKeys(value);
+    if (budget.nodes + ownKeys.length > MAX_JSON_NODES) {
+      throw jsonFailure(path, 'contains too many JSON values or properties');
+    }
     let indexes = 0;
     for (const key of ownKeys) {
       if (key === 'length') continue;
@@ -76,7 +118,15 @@ const jsonClone = (
 
     const clone: JsonValue[] = [];
     for (let index = 0; index < value.length; index += 1) {
-      clone.push(jsonClone(value[index], `${path}[${index}]`, nextAncestors));
+      clone.push(
+        jsonClone(
+          value[index],
+          `${path}[${index}]`,
+          nextAncestors,
+          budget,
+          depth + 1,
+        ),
+      );
     }
     return clone;
   }
@@ -86,7 +136,11 @@ const jsonClone = (
     throw jsonFailure(path, 'is not a plain object');
   }
   const stringKeys: string[] = [];
-  for (const key of Reflect.ownKeys(value)) {
+  const ownKeys = Reflect.ownKeys(value);
+  if (budget.nodes + ownKeys.length > MAX_JSON_NODES) {
+    throw jsonFailure(path, 'contains too many JSON values or properties');
+  }
+  for (const key of ownKeys) {
     if (typeof key === 'symbol') {
       throw jsonFailure(path, `has symbol property ${String(key)}`);
     }
@@ -102,11 +156,24 @@ const jsonClone = (
 
   const clone: { [key: string]: JsonValue } = Object.create(null);
   for (const key of stringKeys.sort()) {
+    budget.stringChars += key.length;
+    if (budget.stringChars > MAX_STRING_CHARS) {
+      throw jsonFailure(
+        path,
+        `exceeds maximum aggregate string length of ${MAX_STRING_CHARS} characters`,
+      );
+    }
     const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
     if (!('value' in descriptor)) {
       throw jsonFailure(`${path}.${key}`, 'is an accessor property');
     }
-    clone[key] = jsonClone(descriptor.value, `${path}.${key}`, nextAncestors);
+    clone[key] = jsonClone(
+      descriptor.value,
+      `${path}.${key}`,
+      nextAncestors,
+      budget,
+      depth + 1,
+    );
   }
   return clone;
 };
@@ -116,7 +183,7 @@ export const prepareUnknown = (
   value: unknown,
 ): Effect.Effect<unknown, EncodeError> =>
   Effect.try({
-    try: () => jsonClone(value, '$', new Set()),
+    try: () => jsonClone(value, '$', new Set(), newJsonBudget(), 0),
     catch: (cause) =>
       cause instanceof EncodeError
         ? cause
@@ -157,6 +224,13 @@ export const prepare = (
   entries: ReadonlyArray<Entry>,
 ): Effect.Effect<PreparedBatch, EncodeError, Crypto.Crypto> =>
   Effect.gen(function* () {
+    if (entries.length > MAX_RECORDS) {
+      return yield* Effect.fail(
+        new EncodeError({
+          detail: `batch contains ${entries.length} records; maximum is ${MAX_RECORDS}`,
+        }),
+      );
+    }
     const encoded = yield* Effect.forEach(entries, (entry) =>
       encodeEntry(entry),
     ).pipe(
@@ -169,7 +243,7 @@ export const prepare = (
     );
 
     const canonical = yield* Effect.try({
-      try: () => jsonClone(encoded, '$', new Set()),
+      try: () => jsonClone(encoded, '$', new Set(), newJsonBudget(), 0),
       catch: (cause) =>
         cause instanceof EncodeError
           ? cause
@@ -178,6 +252,13 @@ export const prepare = (
             }),
     });
     const material = JSON.stringify(canonical);
+    if (material.length > MAX_BATCH_JSON_CHARS) {
+      return yield* Effect.fail(
+        new EncodeError({
+          detail: `encoded batch is ${material.length} characters; maximum is ${MAX_BATCH_JSON_CHARS}`,
+        }),
+      );
+    }
     const persisted = Schema.decodeUnknownSync(Schema.Array(Schema.Unknown))(
       JSON.parse(material),
     );
