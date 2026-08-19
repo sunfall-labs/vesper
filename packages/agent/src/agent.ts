@@ -1765,46 +1765,46 @@ export const make = <
                   // snapshot from when this session opened: the recovery
                   // index it is read through here is the same one
                   // `resolveIndeterminate` just updated.
-                  const stillPendingApprovals: AgentEvents.PendingApproval[] =
-                    yield* Effect.forEach(
-                      session.suspendedToolCalls.filter(
-                        (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
-                      ),
-                      (call) => {
-                        const current = session.recovery(
+                  const resolved = yield* Effect.forEach(
+                    session.suspendedToolCalls.filter(
+                      (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
+                    ),
+                    (call) => {
+                      const current = session.recovery(
+                        call.name,
+                        call.toolCallId,
+                      );
+                      if (
+                        Option.isNone(current) ||
+                        current.value._tag !== 'Suspended'
+                      ) {
+                        return Effect.succeed(
+                          Option.none<AgentEvents.PendingApproval>(),
+                        );
+                      }
+                      // Re-decoded against the tool's current parameter
+                      // schema rather than surfaced from the durable encoded
+                      // form: a caller re-reading this pending approval sees
+                      // the same typed value the first suspension did, not
+                      // the toolkit's wire encoding of it.
+                      return Effect.map(
+                        ToolDispatch.decodeSuspendedRequest(
+                          runToolkit,
                           call.name,
-                          call.toolCallId,
-                        );
-                        if (
-                          Option.isNone(current) ||
-                          current.value._tag !== 'Suspended'
-                        ) {
-                          return Effect.succeed<
-                            ReadonlyArray<AgentEvents.PendingApproval>
-                          >([]);
-                        }
-                        // Re-decoded against the tool's current parameter
-                        // schema rather than surfaced from the durable
-                        // encoded form: a caller re-reading this pending
-                        // approval sees the same typed value the first
-                        // suspension did, not the toolkit's wire encoding of
-                        // it.
-                        return Effect.map(
-                          ToolDispatch.decodeSuspendedRequest(
-                            runToolkit,
-                            call.name,
-                            call.request,
-                          ),
-                          (input) => [
-                            {
-                              toolCallId: call.toolCallId,
-                              toolName: call.name,
-                              input,
-                            },
-                          ],
-                        );
-                      },
-                    ).pipe(Effect.map((batches) => batches.flat()));
+                          call.request,
+                        ),
+                        (input) =>
+                          Option.some({
+                            toolCallId: call.toolCallId,
+                            toolName: call.name,
+                            input,
+                          }),
+                      );
+                    },
+                  );
+                  const stillPendingApprovals = resolved.flatMap((entry) =>
+                    Option.isSome(entry) ? [entry.value] : [],
+                  );
                   if (stillPendingApprovals.length > 0) {
                     return Stream.make(
                       AgentEventRuntime.suspended(
