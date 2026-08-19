@@ -1912,51 +1912,59 @@ export const make = <
                   // snapshot from when this session opened: the recovery
                   // index it is read through here is the same one
                   // `resolveIndeterminate` just updated.
-                  // Resolved once for every pending approval below: the run
-                  // toolkit may include dynamic sources whose resolution is
-                  // real work (an MCP discovery round-trip), and each
-                  // approval only needs the one resolved snapshot.
-                  const approvalToolkit = Effect.succeed(yield* runToolkit);
+                  const approvalWaits = session.suspendedToolCalls.filter(
+                    (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
+                  );
+                  // The toolkit is resolved once, and only when an approval
+                  // wait exists at all: resolution may include dynamic
+                  // sources whose work is real (an MCP discovery
+                  // round-trip), and almost every run has nothing suspended.
                   const stillPendingApprovals: AgentEvents.PendingApproval[] =
-                    yield* Effect.forEach(
-                      session.suspendedToolCalls.filter(
-                        (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
-                      ),
-                      (call) => {
-                        const current = session.recovery(
-                          call.name,
-                          call.toolCallId,
-                        );
-                        if (
-                          Option.isNone(current) ||
-                          current.value._tag !== 'Suspended'
-                        ) {
-                          return Effect.succeed<
-                            ReadonlyArray<AgentEvents.PendingApproval>
-                          >([]);
-                        }
-                        // Re-decoded against the tool's current parameter
-                        // schema rather than surfaced from the durable
-                        // encoded form: a caller re-reading this pending
-                        // approval sees the same typed value the first
-                        // suspension did, not the toolkit's wire encoding of
-                        // it.
-                        return Effect.map(
-                          ToolDispatch.decodeSuspendedRequest(
-                            approvalToolkit,
-                            call.name,
-                            call.request,
-                          ),
-                          (input) => [
-                            {
-                              toolCallId: call.toolCallId,
-                              toolName: call.name,
-                              input,
+                    approvalWaits.length === 0
+                      ? []
+                      : yield* Effect.gen(function* () {
+                          const approvalToolkit = Effect.succeed(
+                            yield* runToolkit,
+                          );
+                          const batches = yield* Effect.forEach(
+                            approvalWaits,
+                            (call) => {
+                              const current = session.recovery(
+                                call.name,
+                                call.toolCallId,
+                              );
+                              if (
+                                Option.isNone(current) ||
+                                current.value._tag !== 'Suspended'
+                              ) {
+                                return Effect.succeed<
+                                  ReadonlyArray<AgentEvents.PendingApproval>
+                                >([]);
+                              }
+                              // Re-decoded against the tool's current
+                              // parameter schema rather than surfaced from
+                              // the durable encoded form: a caller
+                              // re-reading this pending approval sees the
+                              // same typed value the first suspension did,
+                              // not the toolkit's wire encoding of it.
+                              return Effect.map(
+                                ToolDispatch.decodeSuspendedRequest(
+                                  approvalToolkit,
+                                  call.name,
+                                  call.request,
+                                ),
+                                (input) => [
+                                  {
+                                    toolCallId: call.toolCallId,
+                                    toolName: call.name,
+                                    input,
+                                  },
+                                ],
+                              );
                             },
-                          ],
-                        );
-                      },
-                    ).pipe(Effect.map((batches) => batches.flat()));
+                          );
+                          return batches.flat();
+                        });
                   if (stillPendingApprovals.length > 0) {
                     return Stream.make(
                       AgentEventRuntime.suspended(

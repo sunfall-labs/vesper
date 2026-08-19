@@ -34,6 +34,8 @@ export interface Policy {
 
 const DEFAULT_PREVIEW_CHARS = 500;
 
+const utf8 = new TextEncoder();
+
 export const TOOL_NAME = 'read_attachment';
 
 /**
@@ -257,7 +259,12 @@ const spill = <T extends Tool.Any>(
     if (isPointer(result.encodedResult)) return result;
 
     const text = encodeAsText(result.encodedResult);
-    const bytes = new TextEncoder().encode(text);
+    // One UTF-16 code unit never encodes to more than 3 UTF-8 bytes (a
+    // surrogate pair is 2 units for 4 bytes), so this bound proves the
+    // common case — a result nowhere near the threshold — without paying
+    // for a full encode of every result that passes through.
+    if (text.length * 3 <= threshold) return result;
+    const bytes = utf8.encode(text);
     if (bytes.byteLength <= threshold) return result;
 
     const mediaType =
