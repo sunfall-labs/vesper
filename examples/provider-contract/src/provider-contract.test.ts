@@ -3,8 +3,9 @@ import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
 import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Compaction } from '@sunfall/vesper-agent/compaction';
-import { Effect, Layer, Schema, Stream } from 'effect';
-import { Tool, Toolkit, type AiError } from 'effect/unstable/ai';
+import { ModelPlan } from '@sunfall/vesper-agent/model-plan';
+import { Effect, ExecutionPlan, Layer, Schema, Stream } from 'effect';
+import { AiError, Tool, Toolkit, type LanguageModel } from 'effect/unstable/ai';
 import {
   HttpClient,
   HttpClientError,
@@ -218,7 +219,36 @@ const openAiLayer = (
     Layer.provide(http),
   );
 
-const runAgent = (model: Layer.Layer<any, any, never>) =>
+const fallbackProviderLayer = (
+  onFailure: (error: AiError.AiError) => void,
+): Layer.Layer<
+  LanguageModel.LanguageModel,
+  never,
+  AnthropicClient.AnthropicClient | OpenAiClient.OpenAiClient
+> =>
+  ModelPlan.layer(
+    ExecutionPlan.make(
+      {
+        provide: AnthropicLanguageModel.model('claude-fixture', {
+          max_tokens: 64,
+        }),
+        attempts: 2,
+        while: ModelPlan.when((error) => {
+          onFailure(error);
+          return true;
+        }),
+      },
+      {
+        provide: OpenAiLanguageModel.model('gpt-fixture', {
+          max_output_tokens: 64,
+        }),
+      },
+    ),
+  );
+
+const runAgent = (
+  model: Layer.Layer<LanguageModel.LanguageModel, never, never>,
+) =>
   agent
     .stream('Find sun')
     .pipe(
@@ -228,7 +258,7 @@ const runAgent = (model: Layer.Layer<any, any, never>) =>
     );
 
 const failureOf = (
-  model: Layer.Layer<any, any, never>,
+  model: Layer.Layer<LanguageModel.LanguageModel, never, never>,
 ): Effect.Effect<AiError.AiError> =>
   Effect.gen(function* () {
     const result = yield* agent
@@ -239,6 +269,8 @@ const failureOf = (
         Effect.result,
       );
     if (result._tag === 'Success') throw new Error('expected provider failure');
+    if (!AiError.isAiError(result.failure))
+      throw new Error('expected an AiError provider failure');
     return result.failure;
   });
 
@@ -351,6 +383,53 @@ describe('official Effect provider seam', () => {
           usage: { input: 17, output: 9 },
         });
       }),
+  );
+
+  it.effect(
+    'retries then falls back between official providers without losing client requirements',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([
+          {
+            status: 500,
+            body: JSON.stringify({
+              type: 'error',
+              error: { type: 'api_error', message: 'primary unavailable' },
+            }),
+          },
+          {
+            status: 500,
+            body: JSON.stringify({
+              type: 'error',
+              error: { type: 'api_error', message: 'still unavailable' },
+            }),
+          },
+          { status: 200, body: openAiSuccess },
+        ]);
+        const failures: AiError.AiError[] = [];
+        const clients = Layer.mergeAll(
+          AnthropicClient.layer({ apiUrl: 'https://anthropic.invalid' }),
+          OpenAiClient.layer({ apiUrl: 'https://openai.invalid/v1' }),
+        ).pipe(Layer.provide(fake.layer));
+        const model = fallbackProviderLayer((error) =>
+          failures.push(error),
+        ).pipe(Layer.provide(clients));
+
+        const events = yield* runAgent(model);
+
+        expect(textAndCompleted(events).text).toBe('world');
+        expect(fake.requests.map((request) => request.url)).toEqual([
+          'https://anthropic.invalid/v1/messages',
+          'https://anthropic.invalid/v1/messages',
+          'https://openai.invalid/v1/responses',
+        ]);
+        expect(failures).toHaveLength(2);
+        expect(failures.map((error) => error.reason._tag)).toEqual([
+          'InternalProviderError',
+          'InternalProviderError',
+        ]);
+      }),
+    30_000,
   );
 
   it.effect.each([

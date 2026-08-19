@@ -5,6 +5,16 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added `@sunfall/vesper-agent/model-plan`, a typed adapter from Effect's
+  native `ExecutionPlan` to the ordinary `LanguageModel` layer consumed by an
+  agent. Plans preserve provider-layer requirements, retry and fall back only
+  for `AiError`, refuse to splice a fallback into a partially emitted stream,
+  and conservatively avoid replaying non-streaming operations after automatic
+  tool resolution. The provider-contract example pins retry-then-fallback
+  behavior across the official Anthropic and OpenAI adapters, and live smoke
+  accepts an optional fallback provider. Additive: existing model layers and
+  agent APIs are unchanged.
+
 - `AgentEval.suite` now rejects an empty case list at construction with a
   `RangeError` instead of returning a vacuously passing report (zero
   failures, `meanScore: 1`). A suite that measures nothing should fail

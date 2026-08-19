@@ -17,6 +17,7 @@ import {
 } from '@sunfall/vesper-agent/conversation';
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
+import { ModelPlan } from '@sunfall/vesper-agent/model-plan';
 import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
@@ -31,6 +32,7 @@ import {
   Context,
   Crypto,
   Effect,
+  ExecutionPlan,
   Layer,
   Redacted,
   Schema,
@@ -68,6 +70,7 @@ import { WorkspaceTools } from '@sunfall/vesper-workspace/tools';
 //
 //   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase all
 //   OPENROUTER_API_KEY=... nub run example:live-smoke --provider openrouter --phase log
+//   ANTHROPIC_API_KEY=... OPENAI_API_KEY=... nub run example:live-smoke --fallback-provider openai --phase log
 //   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase compaction-reactive
 //
 /** Output cap on every call. Plumbing is what is under test, not prose. */
@@ -75,6 +78,10 @@ const MAX_OUTPUT_TOKENS = 300;
 
 const PROVIDERS = ['anthropic', 'openai', 'openrouter'] as const;
 type Provider = (typeof PROVIDERS)[number];
+const FALLBACK_PROVIDERS: readonly ['none', ...Provider[]] = [
+  'none',
+  ...PROVIDERS,
+];
 
 const DEFAULT_PROVIDER: Provider = 'anthropic';
 const DEFAULT_MODELS = {
@@ -84,30 +91,31 @@ const DEFAULT_MODELS = {
 } satisfies Record<Provider, string>;
 
 const modelFor = (provider: Provider, model: string) =>
-  provider === 'anthropic'
-    ? AnthropicLanguageModel.model(model, {
-        max_tokens: MAX_OUTPUT_TOKENS,
-      }).pipe(
-        Layer.provide(
-          AnthropicClient.layerConfig({
-            apiKey: Config.redacted('ANTHROPIC_API_KEY'),
-          }),
-        ),
-      )
-    : OpenAiLanguageModel.model(model, {
-        max_output_tokens: MAX_OUTPUT_TOKENS,
-      }).pipe(
-        Layer.provide(
-          OpenAiClient.layerConfig(
-            provider === 'openrouter'
-              ? {
-                  apiKey: Config.redacted('OPENROUTER_API_KEY'),
-                  apiUrl: Config.succeed('https://openrouter.ai/api/v1'),
-                }
-              : { apiKey: Config.redacted('OPENAI_API_KEY') },
+  Effect.gen(function* () {
+    const apiKey = yield* Config.redacted(
+      provider === 'anthropic'
+        ? 'ANTHROPIC_API_KEY'
+        : provider === 'openrouter'
+          ? 'OPENROUTER_API_KEY'
+          : 'OPENAI_API_KEY',
+    );
+    return provider === 'anthropic'
+      ? AnthropicLanguageModel.model(model, {
+          max_tokens: MAX_OUTPUT_TOKENS,
+        }).pipe(Layer.provide(AnthropicClient.layer({ apiKey })))
+      : OpenAiLanguageModel.model(model, {
+          max_output_tokens: MAX_OUTPUT_TOKENS,
+        }).pipe(
+          Layer.provide(
+            OpenAiClient.layer({
+              apiKey,
+              ...(provider === 'openrouter'
+                ? { apiUrl: 'https://openrouter.ai/api/v1' }
+                : {}),
+            }),
           ),
-        ),
-      );
+        );
+  });
 
 // ---------------------------------------------------------------- reporting
 
@@ -1447,6 +1455,18 @@ const command = Command.make(
       ),
       Flag.withDefault('default'),
     ),
+    fallbackModel: Flag.string('fallback-model').pipe(
+      Flag.withDescription(
+        'Fallback model id; defaults within --fallback-provider.',
+      ),
+      Flag.withDefault('default'),
+    ),
+    fallbackProvider: Flag.choice('fallback-provider', FALLBACK_PROVIDERS).pipe(
+      Flag.withDescription(
+        'Optional provider used when the primary fails before output.',
+      ),
+      Flag.withDefault('none'),
+    ),
     provider: Flag.choice('provider', PROVIDERS).pipe(
       Flag.withDescription('Effect AI provider.'),
       Flag.withDefault(DEFAULT_PROVIDER),
@@ -1462,7 +1482,15 @@ const command = Command.make(
       Flag.withDefault('5'),
     ),
   },
-  ({ inputUsd, model, outputUsd, phase, provider }) =>
+  ({
+    fallbackModel,
+    fallbackProvider,
+    inputUsd,
+    model,
+    outputUsd,
+    phase,
+    provider,
+  }) =>
     Effect.gen(function* () {
       const selected: ReadonlyArray<string> =
         phase === 'all' ? DEFAULT_PHASES : [phase];
@@ -1477,13 +1505,29 @@ const command = Command.make(
         }
       });
 
+      const primary = yield* modelFor(
+        provider,
+        model === 'default' ? DEFAULT_MODELS[provider] : model,
+      );
+      const selectedModel =
+        fallbackProvider === 'none'
+          ? primary
+          : ModelPlan.layer(
+              ExecutionPlan.make(
+                { provide: primary },
+                {
+                  provide: yield* modelFor(
+                    fallbackProvider,
+                    fallbackModel === 'default'
+                      ? DEFAULT_MODELS[fallbackProvider]
+                      : fallbackModel,
+                  ),
+                },
+              ),
+            );
+
       yield* chain.pipe(
-        Effect.provide(
-          modelFor(
-            provider,
-            model === 'default' ? DEFAULT_MODELS[provider] : model,
-          ),
-        ),
+        Effect.provide(selectedModel),
         Effect.provideService(
           ContextWindow.Service,
           ContextWindow.usageAnchored,
@@ -1504,7 +1548,8 @@ const command = Command.make(
 ).pipe(
   Command.withDescription(
     'Drive a real model through tools, delegation, skills, the conversation ' +
-      'log, Postgres runtime replacement, branching, forking, the workspace ' +
+      'log, provider fallback, Postgres runtime replacement, branching, ' +
+      'forking, the workspace ' +
       'toolkit, ' +
       'and both compaction ' +
       'triggers.',
