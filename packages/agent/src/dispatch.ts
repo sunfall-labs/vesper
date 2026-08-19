@@ -364,6 +364,43 @@ export const resolveIndeterminate = <
     ),
   );
 
+/**
+ * Decode a durably suspended call's stored request back into the tool's
+ * typed parameters, for display to whatever resurfaces it.
+ *
+ * `ToolSuspended.request` is the toolkit's encoding — the only form durable
+ * across a resume — so re-surfacing it verbatim would show a caller the
+ * provider-facing value instead of the decoded one the model itself sees,
+ * which for a parameter schema with a transform (`Schema.DateFromString`, an
+ * `Object` id) is not the same value. Falls back to the encoded request
+ * rather than failing: this is a display value, not dispatch, and a schema
+ * that no longer matches the stored request (the agent's tool definition
+ * changed since suspension) should not make an already-suspended run
+ * unrenderable.
+ */
+export const decodeSuspendedRequest = <
+  Tools extends Record<string, Tool.Any>,
+  ToolkitRequires,
+>(
+  toolkit: Effect.Effect<Toolkit.WithHandler<Tools>, never, ToolkitRequires>,
+  name: string,
+  request: unknown,
+): Effect.Effect<unknown, never, ToolkitRequires> =>
+  Effect.gen(function* () {
+    const resolved = yield* toolkit;
+    const tool = Object.hasOwn(resolved.tools, name)
+      ? resolved.tools[name]
+      : undefined;
+    if (tool === undefined) return request;
+    const services = yield* capturedContext;
+    return yield* Schema.decodeUnknownEffect(tool.parametersSchema)(
+      request,
+    ).pipe(
+      Effect.provide(services),
+      Effect.catch(() => Effect.succeed(request)),
+    );
+  });
+
 const hasTool = <Tools extends Record<string, Tool.Any>>(
   tools: Tools,
   name: string,
@@ -538,6 +575,16 @@ export const gate = <
       // Mirrors `Toolkit`'s own `resultSchema`: with `failureMode: 'return'`
       // a failure comes back as a value, so the recorded result may be a
       // success, a declared failure, or an `AiError`.
+      //
+      // A tool without `failureMode: 'return'` still accepts `AiError` as a
+      // fallback, because its own handler is not the only source of a
+      // recorded failure: `resolveIndeterminate`'s `Answer` decision and a
+      // durably denied `needsApproval` gate can both settle a call with
+      // `outcome: 'failure'` regardless of the tool's own failure mode, and
+      // both settle it as an `AiError`, mirroring how `failureMode: 'return'`
+      // already surfaces framework-level failures. Widening here is what lets
+      // a served-from-log answer decode a result substituted by either of
+      // them, not only one the handler itself produced.
       const schema =
         tool === undefined
           ? undefined
@@ -547,7 +594,7 @@ export const gate = <
                 tool.failureSchema,
                 AiError.AiError,
               ])
-            : tool.successSchema;
+            : Schema.Union([tool.successSchema, AiError.AiError]);
 
       const decode: Decode = (stored: unknown) =>
         // A spilled result decodes against its own pointer shape rather than

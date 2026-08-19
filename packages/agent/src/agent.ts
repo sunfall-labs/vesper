@@ -1070,6 +1070,19 @@ export const make = <
               concurrency: definition.concurrency,
             })
             .pipe(
+              // `part` is reasserted to the same `Response.StreamPart<RunTools>`
+              // at each of the three points below that need it, rather than
+              // cast once and reused. Effect's mapped tool-part union is not
+              // idempotent under this compiled intersection: TypeScript's
+              // control-flow narrowing (excluding the `'error'` member below)
+              // produces a structural type this generic union no longer
+              // recognises as itself, so a single upstream cast stops
+              // type-checking at exactly the two downstream call sites that
+              // need the full, unnarrowed union again. Reasserting the same
+              // target type at each site is what the toolkit value passed
+              // alongside it already guarantees at runtime; nothing here
+              // asserts a *different* type than the one Chat actually decoded
+              // the part against.
               Stream.mapEffect((part) =>
                 part.type === 'error'
                   ? Effect.fail(
@@ -1898,32 +1911,46 @@ export const make = <
                   // snapshot from when this session opened: the recovery
                   // index it is read through here is the same one
                   // `resolveIndeterminate` just updated.
-                  //
-                  // `input` here is `ToolSuspended.request` — the toolkit's
-                  // encoded form, the only one durable at this point — rather
-                  // than the freshly decoded value the first suspension
-                  // surfaced. They agree for any parameter schema without a
-                  // custom transform, which is the ordinary case; a caller
-                  // that needs the exact decoded value can always decode
-                  // `request` again against the tool's own schema.
                   const stillPendingApprovals: AgentEvents.PendingApproval[] =
-                    session.suspendedToolCalls.flatMap((call) => {
-                      if (call.wait !== ToolDispatch.APPROVAL_WAIT) return [];
-                      const current = session.recovery(
-                        call.name,
-                        call.toolCallId,
-                      );
-                      return Option.isSome(current) &&
-                        current.value._tag === 'Suspended'
-                        ? [
+                    yield* Effect.forEach(
+                      session.suspendedToolCalls.filter(
+                        (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
+                      ),
+                      (call) => {
+                        const current = session.recovery(
+                          call.name,
+                          call.toolCallId,
+                        );
+                        if (
+                          Option.isNone(current) ||
+                          current.value._tag !== 'Suspended'
+                        ) {
+                          return Effect.succeed<
+                            ReadonlyArray<AgentEvents.PendingApproval>
+                          >([]);
+                        }
+                        // Re-decoded against the tool's current parameter
+                        // schema rather than surfaced from the durable
+                        // encoded form: a caller re-reading this pending
+                        // approval sees the same typed value the first
+                        // suspension did, not the toolkit's wire encoding of
+                        // it.
+                        return Effect.map(
+                          ToolDispatch.decodeSuspendedRequest(
+                            runToolkit,
+                            call.name,
+                            call.request,
+                          ),
+                          (input) => [
                             {
                               toolCallId: call.toolCallId,
                               toolName: call.name,
-                              input: call.request,
+                              input,
                             },
-                          ]
-                        : [];
-                    });
+                          ],
+                        );
+                      },
+                    ).pipe(Effect.map((batches) => batches.flat()));
                   if (stillPendingApprovals.length > 0) {
                     return Stream.make(
                       AgentEventRuntime.suspended(

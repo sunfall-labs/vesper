@@ -439,6 +439,50 @@ describe('recovering a tool call from the log', () => {
     }),
   );
 
+  it.effect(
+    'serves a recovered failure as an AiError even for a tool without failureMode: return',
+    () =>
+      Effect.gen(function* () {
+        const ran = { count: 0 };
+        // `lookup` defaults to `failureMode: 'error'`, so its own declared
+        // failure schema is never part of what a served result may decode
+        // as. A recorded failure that reached the log some other way than
+        // the handler itself — here, standing in for a denied `needsApproval`
+        // gate or an interceptor's `Answer` — still has to be servable.
+        const denied = yield* Schema.encodeUnknownEffect(AiError.AiError)(
+          new AiError.AiError({
+            module: 'test',
+            method: 'deny',
+            reason: new AiError.UnknownError({ description: 'denied' }),
+          }),
+        );
+
+        const written = yield* run(
+          Effect.gen(function* () {
+            yield* seed([
+              started,
+              called,
+              { ...outcome, outcome: 'failure', result: denied },
+            ]);
+            yield* Conversation.make(agentWith(ran), CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+            return yield* readAll();
+          }),
+        );
+
+        // Not re-run, and the recovered failure round-tripped rather than
+        // failing to decode — the new run recorded the outcome it was
+        // served, not a decode error.
+        expect(ran.count).toBe(0);
+        expect(outcomesOf(written).at(-1)).toMatchObject({
+          id: CALL_ID,
+          outcome: 'failure',
+          result: denied,
+        });
+      }),
+  );
+
   it.effect('re-runs the tool once the earlier run has settled', () =>
     Effect.gen(function* () {
       const ran = { count: 0 };
