@@ -43,7 +43,7 @@ export type Tools<
     readonly instructions: string;
   }>,
 > = Skills extends readonly []
-  ? {}
+  ? Record<never, never>
   : Record<typeof TOOL_NAME, ReturnType<typeof makeTool>>;
 
 /**

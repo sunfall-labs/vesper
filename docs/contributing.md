@@ -23,16 +23,40 @@ shorter command. `concurrently` groups and labels each lane's output so four
 tools do not write an unreadable stream to the terminal. Use
 `nub run verify:serial` when sequential output is more useful.
 
-| Command                                   | What it runs                            |
-| ----------------------------------------- | --------------------------------------- |
-| `nub run build`                           | `tsdown`, plus package/type validation  |
-| `nub run test`                            | `vitest run` over every `test/`         |
-| `nub run typecheck`                       | non-emitting package/type checks        |
-| `nub run typecheck:types`                 | tests, benchmarks, and examples         |
-| `nub run lint` / `nub run lint:fix`       | `oxlint`, warnings denied               |
-| `nub run format` / `nub run format:check` | `oxfmt`                                 |
-| `nub run knip`                            | unused files, exports, and dependencies |
-| `nub run benchmark`                       | the suite in `benchmarks/`              |
+| Command                                   | What it runs                                |
+| ----------------------------------------- | ------------------------------------------- |
+| `nub run build`                           | `tsdown`, plus package/type validation      |
+| `nub run test`                            | `vitest run` over every `test/`             |
+| `nub run typecheck`                       | non-emitting package/type checks            |
+| `nub run typecheck:types`                 | tests, benchmarks, and examples             |
+| `nub run lint` / `nub run lint:fix`       | strict type-aware `oxlint`, warnings denied |
+| `nub run format` / `nub run format:check` | `oxfmt`                                     |
+| `nub run knip`                            | unused files, exports, and dependencies     |
+| `nub run benchmark`                       | the suite in `benchmarks/`                  |
+
+Oxlint enables the stable correctness, suspicious, and performance categories,
+the upstream strict type-checked TypeScript rules, and the strict Effect preset.
+Existing findings are recorded in `oxlint-suppressions.json`; any new finding
+fails the gate. After resolving suppressed findings, run `nub run lint:prune`
+to remove obsolete baseline entries.
+
+The strict Effect rules have one narrow contextual exception: the lint config
+turns off its Promise, `process.env`, and Node built-in import recommendations
+for `scripts/**/*.mjs`, `benchmarks/**/*.ts`, the agent host shims, and the
+root tsdown/Vitest configuration. These are one-shot Node entrypoints rather
+than published package code, so an Effect rewrite would hide—not remove—their
+runtime boundary. Ordinary tests and package sources remain covered by the
+strict rules.
+
+`strict-effect-provide` is separately disabled in test bodies and example
+programs because those files are application entrypoints: they own construction
+of the complete layer. The rule stays enabled in shared test contracts and all
+published package code, where providing dependencies internally can hide
+requirements and lifecycle ownership.
+
+The shared TypeScript configuration also rejects implicit switch fallthrough,
+implicit overrides and returns, unchecked side-effect imports, index-signature
+dot access, unreachable code, and unused labels.
 
 `ANTHROPIC_API_KEY=... nub run example:compliance-relay "your prompt"` and
 `nub run example:live-smoke` run the two programs under `examples/`. Both reach

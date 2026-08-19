@@ -17,7 +17,7 @@ import {
   Stream,
 } from 'effect';
 import {
-  AiError,
+  type AiError,
   LanguageModel,
   type Prompt,
   type Response,
@@ -46,9 +46,10 @@ type Has<M, U> = [M] extends [U] ? 'yes' : 'no';
 type IsAny<T> = 0 extends 1 & T ? 'ANY' : 'not-any';
 type Exact<A, B> = [A, B] extends [B, A] ? true : false;
 
-class AgentDependency extends Context.Service<AgentDependency, {}>()(
-  'workflow-test/AgentDependency',
-) {}
+class AgentDependency extends Context.Service<
+  AgentDependency,
+  Record<string, never>
+>()('workflow-test/AgentDependency') {}
 
 const finish: Response.StreamPartEncoded = {
   type: 'finish',
@@ -154,9 +155,9 @@ const _failRequiresEngine: Has<
 > = 'yes';
 const _pendingRejectsWrongValues = (pending: ProofPending) => {
   // @ts-expect-error complete accepts only the success schema's decoded type
-  pending.complete({ approved: 'yes' });
+  void pending.complete({ approved: 'yes' });
   // @ts-expect-error fail accepts only the error schema's decoded type
-  pending.fail({ reason: 404 });
+  void pending.fail({ reason: 404 });
 };
 
 const _waitEncodingErrorsAreTyped: Has<
@@ -371,10 +372,9 @@ describe('AgentWorkflow', () => {
         mapError: (error) => {
           mapped = error;
           return new WorkflowFailure({
-            message:
-              error instanceof LogStore.LogStoreError
-                ? error.reason
-                : String(error),
+            message: Schema.is(LogStore.LogStoreError)(error)
+              ? error.reason
+              : String(error),
           });
         },
       });
@@ -427,7 +427,11 @@ describe('AgentWorkflow', () => {
               calls += 1;
               return Stream.fromIterable<Response.StreamPartEncoded>([
                 { type: 'text-start', id: 'answer' },
-                { type: 'text-delta', id: 'answer', delta: `call:${calls}` },
+                {
+                  type: 'text-delta',
+                  id: 'answer',
+                  delta: `call:${String(calls)}`,
+                },
                 { type: 'text-end', id: 'answer' },
                 finish,
               ]);
@@ -463,7 +467,7 @@ describe('AgentWorkflow', () => {
       const once = AgentWorkflow.step({
         name: 'replay-once',
         key: (amount: number) => String(amount),
-        success: Schema.Number,
+        success: Schema.Finite,
         error: WorkflowFailure,
         execute: (amount: number) =>
           Effect.sync(() => {
@@ -474,7 +478,7 @@ describe('AgentWorkflow', () => {
       const StepWorkflow = Workflow.make('StepWorkflow', {
         payload: { id: Schema.String },
         idempotencyKey: ({ id }) => id,
-        success: Schema.Tuple([Schema.Number, Schema.Number]),
+        success: Schema.Tuple([Schema.Finite, Schema.Finite]),
         error: WorkflowFailure,
       });
       const StepLive = StepWorkflow.toLayer(() =>
@@ -565,7 +569,7 @@ describe('AgentWorkflow', () => {
       Effect.gen(function* () {
         const EncodeFailure = Schema.String.pipe(
           Schema.decodeTo(
-            Schema.Number,
+            Schema.Finite,
             SchemaTransformation.transformOrFail<number, string>({
               decode: (value) => Effect.succeed(Number(value)),
               encode: () =>

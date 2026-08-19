@@ -2,10 +2,10 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Crypto, Effect, Schema, Stream } from 'effect';
+import { Effect, Schema, Stream, type Crypto } from 'effect';
 import { AiError, type Prompt } from 'effect/unstable/ai';
 
-import { Agent } from './agent.js';
+import type { Agent } from './agent.js';
 import {
   ApprovalResolutionError,
   CompatibilityError,
@@ -15,7 +15,7 @@ import { ToolDispatch } from './dispatch.js';
 import type { AgentEvents } from './event.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
-import { RecordingPolicy } from './recording-policy.js';
+import type { RecordingPolicy } from './recording-policy.js';
 import {
   append as appendSignal,
   Signal as SignalSchema,
@@ -55,6 +55,22 @@ export const isWaitEnvelope = (
     case 'ToolWaitCompleted':
     case 'ToolWaitRestarted':
       return true;
+    case 'BranchedFrom':
+    case 'ChildSession':
+    case 'CodeStateCheckpoint':
+    case 'Compacted':
+    case 'Completed':
+    case 'RunSettled':
+    case 'RunStarted':
+    case 'Signal':
+    case 'SignalReceived':
+    case 'StateCheckpoint':
+    case 'Text':
+    case 'ToolCall':
+    case 'ToolOutcome':
+    case 'ToolStarted':
+    case 'TurnFinished':
+      return false;
     default:
       return false;
   }
@@ -331,7 +347,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
                   }),
                 }),
               ).pipe(Effect.orDie);
-        yield* session.append([
+        return yield* session.append([
           {
             _tag: 'ToolWaitCompleted',
             id: normalizedId,

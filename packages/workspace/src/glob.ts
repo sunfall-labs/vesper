@@ -26,7 +26,7 @@ const REGEXP_METACHARACTERS = /[.*+?^${}()|[\]\\]/;
 const MAX_PATTERN_LENGTH = 4096;
 
 export class InvalidGlobPattern extends Error {
-  readonly name = 'InvalidGlobPattern';
+  override readonly name = 'InvalidGlobPattern';
 
   constructor(
     readonly pattern: string,
@@ -74,7 +74,7 @@ const readClass = (
   try {
     // Let the engine validate range ordering and other class grammar once,
     // during compilation rather than while walking paths.
-    new RegExp(source);
+    const _validated = new RegExp(source);
   } catch (error) {
     throw new InvalidGlobPattern(
       pattern,

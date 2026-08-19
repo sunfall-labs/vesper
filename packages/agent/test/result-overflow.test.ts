@@ -35,6 +35,13 @@ const testLogLayer = Layer.mergeAll(
   NodeServices.layer,
 );
 
+const required = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('expected a value');
+  }
+  return value;
+};
+
 const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   type: 'finish' as const,
   reason,
@@ -109,10 +116,9 @@ describe('toolkit composition', () => {
   it('adds read_attachment only when resultOverflow is set', () => {
     const agent = agentWith({ count: 0 }, { threshold: THRESHOLD });
 
-    expect(Object.keys(agent.toolkit.tools).sort()).toEqual([
-      'echo',
-      'read_attachment',
-    ]);
+    expect(
+      Object.keys(agent.toolkit.tools).sort((a, b) => a.localeCompare(b)),
+    ).toEqual(['echo', 'read_attachment']);
   });
 });
 
@@ -129,14 +135,14 @@ describe('spilling', () => {
 
       const result = yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(attachments));
+        .pipe(Effect.provide(Layer.merge(model.layer, attachments)));
       const requests = yield* model.requests;
-      const results = toolResultsOf(requests[1]!.prompt);
+      const results = toolResultsOf(required(requests[1]).prompt);
 
       expect(result.text).toBe('done');
       expect(calls.count).toBe(1);
       expect(results).toHaveLength(1);
-      expect(results[0]!.result).toBe(small);
+      expect(required(results[0]).result).toBe(small);
     }),
   );
 
@@ -155,14 +161,18 @@ describe('spilling', () => {
 
         const result = yield* agent
           .run('go')
-          .pipe(Effect.provide(model.layer), Effect.provide(attachments));
+          .pipe(Effect.provide(Layer.merge(model.layer, attachments)));
         const requests = yield* model.requests;
-        const results = toolResultsOf(requests[1]!.prompt);
+        const results = toolResultsOf(required(requests[1]).prompt);
 
         expect(result.text).toBe('done');
         expect(calls.count).toBe(1);
         expect(results).toHaveLength(1);
-        const pointer = results[0]!.result as ResultOverflow.Pointer;
+        const pointerResult = required(results[0]).result;
+        if (!ResultOverflow.isPointer(pointerResult)) {
+          throw new Error('expected an overflow pointer');
+        }
+        const pointer = pointerResult;
 
         expect(pointer._tag).toBe('ToolResultOverflow');
         expect(pointer.byteLength).toBe(size);
@@ -214,13 +224,11 @@ describe('spilling', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(attachments));
+        .pipe(Effect.provide(Layer.merge(model.layer, attachments)));
       const requests = yield* model.requests;
-      const results = toolResultsOf(requests[1]!.prompt);
+      const results = toolResultsOf(required(requests[1]).prompt);
 
-      expect((results[0]!.result as ResultOverflow.Pointer)._tag).toBe(
-        'ToolResultOverflow',
-      );
+      expect(ResultOverflow.isPointer(required(results[0]).result)).toBe(true);
     }).pipe(Effect.provide(attachments)),
   );
 });
@@ -342,16 +350,17 @@ describe('durable conversations', () => {
         .map((envelope) => envelope.record)
         .find((record) => record._tag === 'ToolOutcome');
 
-      expect(outcome).toBeDefined();
-      const stored = (outcome as { readonly result: unknown }).result;
+      if (outcome?._tag !== 'ToolOutcome') {
+        throw new Error('missing tool outcome');
+      }
+      const stored = outcome.result;
       expect(JSON.stringify(stored)).not.toContain('x'.repeat(size));
       expect(stored).toMatchObject({
         _tag: 'ToolResultOverflow',
         byteLength: size,
       });
     }).pipe(
-      Effect.provide(attachments),
-      Effect.provide(testLogLayer),
+      Effect.provide(Layer.merge(attachments, testLogLayer)),
       Effect.scoped,
     ),
   );

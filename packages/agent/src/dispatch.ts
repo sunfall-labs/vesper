@@ -1,5 +1,4 @@
 import {
-  Context,
   Effect,
   Exit,
   Option,
@@ -8,6 +7,7 @@ import {
   Stream,
   SubscriptionRef,
 } from 'effect';
+import type { Context } from 'effect';
 import { AiError, type Tool, type Toolkit } from 'effect/unstable/ai';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
@@ -159,32 +159,31 @@ export const resolveIndeterminate = <
 ): Effect.Effect<void, RunError, ToolkitRequires | InterceptorRequires> =>
   Effect.gen(function* () {
     if (options.session.recoveryCorruption !== undefined) {
-      return yield* Effect.fail(
-        recoveryCorruptionError(options.session.recoveryCorruption),
-      );
+      return yield* recoveryCorruptionError(options.session.recoveryCorruption);
     }
     const pending = options.session.pendingToolCalls.filter((call) => {
       const recovery = options.session.recovery(call.name, call.toolCallId);
       return Option.isSome(recovery) && recovery.value._tag !== 'Settled';
     });
-    if (pending.length === 0) return;
+    if (pending.length === 0) {
+      return yield* Effect.void;
+    }
     const resolve = options.interceptor?.onIndeterminateToolCall;
     const unresolved = pending.find((call) => {
       const recovery = options.session.recovery(call.name, call.toolCallId);
       return Option.isSome(recovery) && recovery.value._tag === 'Indeterminate';
     });
     if (unresolved !== undefined && resolve === undefined) {
-      return yield* Effect.fail(
-        indeterminateError(unresolved.name, unresolved.toolCallId),
-      );
+      return yield* indeterminateError(unresolved.name, unresolved.toolCallId);
     }
 
     const resolved = yield* toolkit;
     const services = yield* capturedContext;
     for (const call of pending) {
       const recovery = options.session.recovery(call.name, call.toolCallId);
-      if (Option.isNone(recovery) || recovery.value._tag === 'Settled')
+      if (Option.isNone(recovery) || recovery.value._tag === 'Settled') {
         continue;
+      }
 
       // A durable approval never falls into the ordinary replay-or-ask
       // branch below: an undecided one must not dispatch (this function's
@@ -199,7 +198,9 @@ export const resolveIndeterminate = <
         recovery.value.wait === APPROVAL_WAIT
       ) {
         const decided = options.session.completedWait(recovery.value.token);
-        if (Option.isNone(decided)) continue;
+        if (Option.isNone(decided)) {
+          continue;
+        }
         if (decided.value.outcome === 'failure') {
           yield* options.session.append([
             {
@@ -229,9 +230,7 @@ export const resolveIndeterminate = <
         decision = { _tag: 'Retry' };
       } else {
         if (resolve === undefined) {
-          return yield* Effect.fail(
-            indeterminateError(call.name, call.toolCallId),
-          );
+          return yield* indeterminateError(call.name, call.toolCallId);
         }
         decision = yield* resolve({
           agent: options.agent,
@@ -264,7 +263,7 @@ export const resolveIndeterminate = <
       }
 
       if (!hasTool(resolved.tools, call.name)) {
-        return yield* Effect.fail(unknownToolError(call.name));
+        return yield* unknownToolError(call.name);
       }
 
       const params = yield* decodeParameters(
@@ -274,7 +273,9 @@ export const resolveIndeterminate = <
         call.params,
       );
       const permit = yield* options.arbitration.commit;
-      if (Option.isNone(permit)) return;
+      if (Option.isNone(permit)) {
+        return yield* Effect.void;
+      }
 
       yield* Effect.gen(function* () {
         if (recovery.value._tag === 'Suspended') {
@@ -325,10 +326,11 @@ export const resolveIndeterminate = <
               : indeterminateHandlerError(call.name, error),
           ),
         );
-        const result = yield* options.runtime === undefined
+        const runtime = options.runtime;
+        const result = yield* runtime === undefined
           ? Stream.runLast(guarded)
           : Effect.gen(function* () {
-              const remaining = yield* options.runtime!.remainingMillis;
+              const remaining = yield* runtime.remainingMillis;
               return yield* Stream.runLast(guarded).pipe(
                 Effect.timeoutOrElse({
                   duration: remaining,
@@ -336,15 +338,15 @@ export const resolveIndeterminate = <
                     Effect.fail(
                       RunPolicyRuntime.error({
                         limit: 'deadline',
-                        used: options.runtime!.limits.wallClockMillis,
-                        maximum: options.runtime!.limits.wallClockMillis,
+                        used: runtime.limits.wallClockMillis,
+                        maximum: runtime.limits.wallClockMillis,
                       }),
                     ),
                 }),
               );
             });
         if (Option.isNone(result)) {
-          return yield* Effect.fail(emptyToolResultError(call.name));
+          return yield* emptyToolResultError(call.name);
         }
         yield* options.session.append([
           {
@@ -356,8 +358,10 @@ export const resolveIndeterminate = <
             result: result.value.encodedResult,
           },
         ]);
+        return yield* Effect.void;
       }).pipe(Effect.ensuring(permit.value.settle));
     }
+    return yield* Effect.void;
   }).pipe(
     Effect.catchTag('DurabilityError', (error) =>
       Effect.fail(durabilityAiError(error)),
@@ -391,7 +395,9 @@ export const decodeSuspendedRequest = <
     const tool = Object.hasOwn(resolved.tools, name)
       ? resolved.tools[name]
       : undefined;
-    if (tool === undefined) return request;
+    if (tool === undefined) {
+      return request;
+    }
     const services = yield* capturedContext;
     return yield* Schema.decodeUnknownEffect(tool.parametersSchema)(
       request,
@@ -498,7 +504,9 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
               ? [true, { ...current, cancelled: true }]
               : [false, current],
           );
-          if (won) return;
+          if (won) {
+            return;
+          }
           yield* awaitIdle;
         }
       }),
@@ -510,13 +518,17 @@ export const makeTurnArbitration: Effect.Effect<TurnArbitration> = Effect.gen(
               ? [false, current]
               : [true, { ...current, dispatches: current.dispatches + 1 }],
           );
-          if (!committed) return Option.none<DispatchPermit>();
+          if (!committed) {
+            return Option.none<DispatchPermit>();
+          }
 
           const settle = Effect.gen(function* () {
             const first = yield* Ref.modify(released, (current) =>
               current ? [false, true] : [true, true],
             );
-            if (!first) return;
+            if (!first) {
+              return;
+            }
             yield* SubscriptionRef.update(state, (current) => ({
               ...current,
               dispatches: current.dispatches - 1,
@@ -566,7 +578,9 @@ export const gate = <
 
     const decoderFor = (name: string): Decode => {
       const cached = decoders.get(name);
-      if (cached !== undefined) return cached;
+      if (cached !== undefined) {
+        return cached;
+      }
 
       const tool = Object.hasOwn(resolved.tools, name)
         ? resolved.tools[name]
@@ -697,11 +711,9 @@ export const gate = <
         if (Option.isSome(prior)) {
           yield* Observability.indeterminateToolCall;
           if (normalizedToolCallId === undefined) {
-            return yield* Effect.fail(missingToolCallIdError(toolName));
+            return yield* missingToolCallIdError(toolName);
           }
-          return yield* Effect.fail(
-            indeterminateError(toolName, normalizedToolCallId),
-          );
+          return yield* indeterminateError(toolName, normalizedToolCallId);
         }
 
         // Step 3. The ordinary interceptor, which may answer in the tool's place.
@@ -750,7 +762,7 @@ export const gate = <
         const setup = Effect.gen(function* () {
           if (session !== undefined) {
             if (normalizedToolCallId === undefined) {
-              return yield* Effect.fail(missingToolCallIdError(toolName));
+              return yield* missingToolCallIdError(toolName);
             }
             yield* session
               .append([

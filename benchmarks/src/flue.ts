@@ -122,8 +122,11 @@ const makeScriptedProvider = (): ScriptedProvider => {
           output.push({ type: 'error', reason: 'aborted', error: aborted });
           output.end(aborted);
         };
-        if (options?.signal?.aborted === true) abort();
-        else options?.signal?.addEventListener('abort', abort, { once: true });
+        if (options?.signal?.aborted === true) {
+          abort();
+        } else {
+          options?.signal?.addEventListener('abort', abort, { once: true });
+        }
         return;
       }
       if (step === undefined) {
@@ -162,10 +165,13 @@ const makeScriptedProvider = (): ScriptedProvider => {
           delta: `{"orderId":"${step.orderId}"}`,
           partial,
         });
+        if (toolCall === undefined) {
+          throw new Error('scripted tool response did not create a tool call');
+        }
         output.push({
           type: 'toolcall_end',
           contentIndex: 0,
-          toolCall: toolCall!,
+          toolCall,
           partial: message,
         });
       } else {
@@ -196,7 +202,7 @@ const makeScriptedProvider = (): ScriptedProvider => {
       auth: {
         apiKey: {
           name: PROVIDER_ID,
-          resolve: async () => ({ auth: {} }),
+          resolve: () => Promise.resolve({ auth: {} }),
         },
       },
       getModels: () => [model],
@@ -223,7 +229,9 @@ const lookupOrder = defineTool({
   output: v.object({ status: v.string() }),
   durable: true,
   run: async ({ data, step }) => ({
-    output: await step.do('lookup', async () => toolResult(data.orderId)),
+    output: await step.do('lookup', () =>
+      Promise.resolve(toolResult(data.orderId)),
+    ),
   }),
 });
 
@@ -233,8 +241,9 @@ function BenchmarkAgent(): string {
   return INSTRUCTIONS;
 }
 
-const loadScript = (provider: ScriptedProvider, steps: number): void =>
+const loadScript = (provider: ScriptedProvider, steps: number): void => {
   provider.setResponses(script(steps));
+};
 
 const assertEqual = (
   actual: number,
@@ -242,17 +251,27 @@ const assertEqual = (
   detail: string,
 ): void => {
   if (actual !== expected) {
-    throw new Error(`${detail}: expected ${expected}, observed ${actual}`);
+    throw new Error(
+      `${detail}: expected ${String(expected)}, observed ${String(actual)}`,
+    );
   }
 };
 
 export const run = async (
   workload: ComparisonWorkload,
 ): Promise<ComparisonResult> => {
-  if (workload === 'startup') return runStartup();
-  if (workload === 'growth') return runGrowth();
-  if (workload === 'memory') return runMemory();
-  if (workload === 'concurrency') return runConcurrency();
+  if (workload === 'startup') {
+    return runStartup();
+  }
+  if (workload === 'growth') {
+    return runGrowth();
+  }
+  if (workload === 'memory') {
+    return runMemory();
+  }
+  if (workload === 'concurrency') {
+    return runConcurrency();
+  }
 
   const steps = stepsFor(workload);
   const samples: number[] = [];
@@ -262,17 +281,17 @@ export const run = async (
     const setup = await startRuntime();
     await using _flue = setup.runtime;
     loadScript(setup.provider, steps);
-    const agent = init(BenchmarkAgent, { id: `${workload}-${i}` });
+    const agent = init(BenchmarkAgent, { id: `${workload}-${String(i)}` });
     const t0 = performance.now();
     const receipt = await agent.dispatch(USER_MESSAGE);
     const reply = await agent.read(receipt);
     const elapsed = performance.now() - t0;
     const calls = setup.provider.state.callCount;
 
-    assertEqual(calls, steps, `${workload} sample ${i} model calls`);
+    assertEqual(calls, steps, `${workload} sample ${String(i)} model calls`);
     if (reply.text !== FINAL_TEXT) {
       throw new Error(
-        `${workload} sample ${i} returned ${JSON.stringify(reply.text)}`,
+        `${workload} sample ${String(i)} returned ${JSON.stringify(reply.text)}`,
       );
     }
     if (i >= COMPARISON_WARMUP) {
@@ -323,7 +342,7 @@ const runStartup = async (): Promise<ComparisonResult> => {
   await using _flue = setup.runtime;
   loadScript(setup.provider, 1);
   await dispatchOne('startup');
-  const started = process.env.VESPER_BENCH_PROCESS_T0_NS;
+  const started = process.env['VESPER_BENCH_PROCESS_T0_NS'];
   if (started === undefined) {
     throw new Error('startup comparison needs VESPER_BENCH_PROCESS_T0_NS');
   }
@@ -356,14 +375,22 @@ const runGrowth = async (): Promise<ComparisonResult> => {
       const before = setup.provider.state.callCount;
       const t0 = performance.now();
       await dispatchOne(
-        `comparison-growth-${repeat}`,
-        `${USER_MESSAGE} (${message})`,
+        `comparison-growth-${String(repeat)}`,
+        `${USER_MESSAGE} (${String(message)})`,
       );
       const calls = setup.provider.state.callCount - before;
-      assertEqual(calls, 1, `comparison growth point ${message + 1} calls`);
+      assertEqual(
+        calls,
+        1,
+        `comparison growth point ${String(message + 1)} calls`,
+      );
       if (repeat > 0) {
-        growth[message]!.samples.push(performance.now() - t0);
-        growth[message]!.modelCalls += calls;
+        const point = growth[message];
+        if (point === undefined) {
+          throw new Error(`missing growth point ${String(message)}`);
+        }
+        point.samples.push(performance.now() - t0);
+        point.modelCalls += calls;
         modelCalls += calls;
       }
     }
@@ -382,11 +409,16 @@ const runGrowth = async (): Promise<ComparisonResult> => {
   };
 };
 
+const isGc = (value: unknown): value is () => void =>
+  typeof value === 'function';
+
 const collect = (): void => {
-  const gc = (globalThis as { gc?: () => void }).gc;
-  if (gc === undefined) throw new Error('memory comparison needs --expose-gc');
-  gc();
-  gc();
+  const maybeGc: unknown = Reflect.get(globalThis, 'gc');
+  if (!isGc(maybeGc)) {
+    throw new Error('memory comparison needs --expose-gc');
+  }
+  maybeGc();
+  maybeGc();
 };
 
 const runMemory = async (): Promise<ComparisonResult> => {
@@ -396,7 +428,10 @@ const runMemory = async (): Promise<ComparisonResult> => {
   const baseline = process.memoryUsage();
   for (let message = 0; message < COMPARISON_MEMORY_MESSAGES; message++) {
     loadScript(setup.provider, 1);
-    await dispatchOne('comparison-memory', `${USER_MESSAGE} (${message})`);
+    await dispatchOne(
+      'comparison-memory',
+      `${USER_MESSAGE} (${String(message)})`,
+    );
   }
   setup.provider.setResponses([]);
   collect();
@@ -428,12 +463,18 @@ const runConcurrency = async (): Promise<ComparisonResult> => {
     const setup = await startRuntime();
     await using _flue = setup.runtime;
     setup.provider.setResponses(
-      Array.from({ length: COMPARISON_CONCURRENCY }, () => script(1)[0]!),
+      Array.from({ length: COMPARISON_CONCURRENCY }, () => {
+        const [step] = script(1);
+        if (step === undefined) {
+          throw new Error('script did not produce a step');
+        }
+        return step;
+      }),
     );
     const t0 = performance.now();
     await Promise.all(
       Array.from({ length: COMPARISON_CONCURRENCY }, (_, index) =>
-        dispatchOne(`comparison-concurrent-${repeat}-${index}`),
+        dispatchOne(`comparison-concurrent-${String(repeat)}-${String(index)}`),
       ),
     );
     const calls = setup.provider.state.callCount;
@@ -498,8 +539,9 @@ export const runConformance = async (): Promise<ConformanceResult> => {
   } catch (error) {
     aborted = error instanceof AgentRunError && error.outcome === 'aborted';
   }
-  if (!aborted)
+  if (!aborted) {
     throw new Error('Flue in-flight abort did not settle as aborted');
+  }
   assertEqual(
     setup.provider.state.callCount,
     1,

@@ -2,7 +2,7 @@ import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, beforeAll, describe, expect, it } from '@effect/vitest';
 import { ClusterWorkflowEngine, SingleRunner } from 'effect/unstable/cluster';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { type LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { Layer, ManagedRuntime, Option, Redacted, Schema } from 'effect';
 
 import { VesperPgClient } from '@sunfall/vesper-log-pg/client';
@@ -107,8 +107,12 @@ describeIntegration('AgentWorkflow persistent cluster composition', () => {
   }, 180_000);
 
   afterAll(async () => {
-    if (database) await database.cleanup();
-    if (harness) await harness.stop();
+    if (database) {
+      await database.cleanup();
+    }
+    if (harness) {
+      await harness.stop();
+    }
   }, 120_000);
 
   it(
@@ -151,12 +155,13 @@ describeIntegration('AgentWorkflow persistent cluster composition', () => {
           binding.workflow.poll(executionId),
         );
         expect(Option.isSome(reopened)).toBe(true);
-        if (Option.isSome(reopened)) {
-          expect(reopened.value).toMatchObject({
-            _tag: 'Complete',
-            exit: { _tag: 'Success' },
-          });
+        if (Option.isNone(reopened)) {
+          throw new Error('workflow execution was not persisted');
         }
+        expect(reopened.value).toMatchObject({
+          _tag: 'Complete',
+          exit: { _tag: 'Success' },
+        });
 
         const resultB = await runtimeB.runPromise(
           binding.workflow.execute(payload),

@@ -70,7 +70,7 @@ const decide = <T extends Record<string, never>>(
 describe('stop conditions', () => {
   it.effect('rejects non-finite token usage', () =>
     Effect.gen(function* () {
-      const result = yield* Schema.decodeUnknownEffect(Stop.Usage)({
+      const result = yield* Schema.decodeEffect(Stop.Usage)({
         input: Number.NaN,
         output: Number.POSITIVE_INFINITY,
       }).pipe(Effect.result);
@@ -81,7 +81,7 @@ describe('stop conditions', () => {
 
   it.effect('rejects invalid lifecycle counters', () =>
     Effect.gen(function* () {
-      const result = yield* Schema.decodeUnknownEffect(AgentEvents.Lifecycle)({
+      const result = yield* Schema.decodeEffect(AgentEvents.Lifecycle)({
         _tag: 'SignalBacklog',
         step: -1,
         maximum: Number.POSITIVE_INFINITY,
@@ -208,10 +208,7 @@ describe('stop conditions', () => {
       const counted: Stop.StopCondition<Record<string, never>> = () =>
         Ref.update(calls, (n) => n + 1).pipe(Effect.as(false));
 
-      yield* Stop.any(
-        Stop.maxSteps(1),
-        counted,
-      )(state() as Stop.State<Record<string, never>>);
+      yield* Stop.any(Stop.maxSteps(1), counted)(state());
       const seen = yield* Ref.get(calls);
 
       // `maxSteps(1)` already said stop at step 1, so the second never ran.
@@ -225,10 +222,7 @@ describe('stop conditions', () => {
       const counted: Stop.StopCondition<Record<string, never>> = () =>
         Ref.update(calls, (n) => n + 1).pipe(Effect.as(true));
 
-      yield* Stop.all(
-        Stop.maxSteps(99),
-        counted,
-      )(state() as Stop.State<Record<string, never>>);
+      yield* Stop.all(Stop.maxSteps(99), counted)(state());
       const seen = yield* Ref.get(calls);
 
       expect(seen).toBe(0);

@@ -1,11 +1,11 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
-import { LogStore } from '@sunfall/vesper-log/log-store';
+import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
-import { Crypto, Effect, Layer, Stream } from 'effect';
-import { LanguageModel, Prompt, Toolkit } from 'effect/unstable/ai';
+import { Effect, Layer, Stream, type Crypto } from 'effect';
+import { Prompt, Toolkit, type LanguageModel } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -79,8 +79,7 @@ const run = <A, E>(
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(models),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(models, testLogLayer)),
     Effect.scoped,
   );
 
@@ -90,6 +89,41 @@ const readAll = Effect.fn('test.readAll')(function* () {
 
 const textIn = (prompt: Prompt.Prompt): string =>
   JSON.stringify(prompt.content);
+
+const compacted = (
+  summary: string,
+  firstKept: LogOffset.Offset,
+): ConversationRecord.Record => ({
+  _tag: 'Compacted',
+  step: 1,
+  summary,
+  firstKept,
+  summarizedMessages: 2,
+  keptMessages: 1,
+});
+
+const started = (prompt: string): ConversationRecord.Record => ({
+  _tag: 'RunStarted',
+  agent: 'test',
+  formatVersion: 1,
+  agentRevision: LogVocabulary.AgentRevision.make('1'),
+  prompt: Prompt.make(prompt).content,
+});
+
+const said = (step: number, text: string): ConversationRecord.Record => ({
+  _tag: 'Text',
+  step,
+  text,
+});
+
+const finished = (step: number): ConversationRecord.Record => ({
+  _tag: 'TurnFinished',
+  step,
+  usage: { input: 1, output: 1 },
+});
+
+const rolesOf = (prompt: Prompt.Prompt) =>
+  prompt.content.map((message) => message.role);
 
 /**
  * Three runs against one conversation.
@@ -132,12 +166,19 @@ describe('a conversation that compacted, resumed', () => {
         const observed = yield* run(threeRuns(models), models.layer);
 
         const compactions = observed.records.filter(
-          (envelope) => envelope.record._tag === 'Compacted',
+          (
+            envelope,
+          ): envelope is ConversationRecord.Envelope & {
+            readonly record: ConversationRecord.RecordOf<'Compacted'>;
+          } => envelope.record._tag === 'Compacted',
         );
         expect(compactions).toHaveLength(1);
 
-        const record = compactions[0]!
-          .record as ConversationRecord.RecordOf<'Compacted'>;
+        const firstCompaction = compactions.at(0);
+        if (firstCompaction === undefined) {
+          throw new Error('missing compaction record');
+        }
+        const record = firstCompaction.record;
         expect(record.summary).toBe('SUMMARY');
         expect(record.summarizedMessages).toBe(2);
         expect(record.keptMessages).toBe(1);
@@ -148,7 +189,11 @@ describe('a conversation that compacted, resumed', () => {
         const runStarts = observed.records.filter(
           (envelope) => envelope.record._tag === 'RunStarted',
         );
-        expect(record.firstKept).toBe(runStarts[1]!.offset);
+        const secondRun = runStarts.at(1);
+        if (secondRun === undefined) {
+          throw new Error('missing second run');
+        }
+        expect(record.firstKept).toBe(secondRun.offset);
         expect(record.firstKept).not.toBe(LogOffset.START);
 
         const completions = observed.records.filter(
@@ -167,7 +212,11 @@ describe('a conversation that compacted, resumed', () => {
         const models = scripted();
         const observed = yield* run(threeRuns(models), models.layer);
 
-        const last = textIn(observed.asked[observed.asked.length - 1]!);
+        const lastAsked = observed.asked.at(-1);
+        if (lastAsked === undefined) {
+          throw new Error('missing final prompt');
+        }
+        const last = textIn(lastAsked);
 
         // The summary is there, in the words the compacted `Chat` used.
         expect(last).toContain('SUMMARY');
@@ -208,41 +257,6 @@ describe('rebuilding a compacted conversation', () => {
       timestamp: 0,
       record,
     }));
-
-  const compacted = (
-    summary: string,
-    firstKept: LogOffset.Offset,
-  ): ConversationRecord.Record => ({
-    _tag: 'Compacted',
-    step: 1,
-    summary,
-    firstKept,
-    summarizedMessages: 2,
-    keptMessages: 1,
-  });
-
-  const started = (prompt: string): ConversationRecord.Record => ({
-    _tag: 'RunStarted',
-    agent: 'test',
-    formatVersion: 1,
-    agentRevision: LogVocabulary.AgentRevision.make('1'),
-    prompt: Prompt.make(prompt).content,
-  });
-
-  const said = (step: number, text: string): ConversationRecord.Record => ({
-    _tag: 'Text',
-    step,
-    text,
-  });
-
-  const finished = (step: number): ConversationRecord.Record => ({
-    _tag: 'TurnFinished',
-    step,
-    usage: { input: 1, output: 1 },
-  });
-
-  const rolesOf = (prompt: Prompt.Prompt) =>
-    prompt.content.map((message) => message.role);
 
   it('replaces everything before the pointer with the summary', () => {
     const rebuilt = AgentHistory.messagesFrom(

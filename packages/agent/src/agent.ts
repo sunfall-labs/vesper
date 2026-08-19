@@ -13,16 +13,16 @@ import {
 import {
   AiError,
   Chat,
-  LanguageModel,
   Prompt,
   Response,
-  type Tool,
   Toolkit,
+  type LanguageModel,
+  type Tool,
 } from 'effect/unstable/ai';
 
 import { Compaction } from './compaction.js';
 import { CodeMode } from './code-mode.js';
-import { CompatibilityError } from './conversation-error.js';
+import type { CompatibilityError } from './conversation-error.js';
 import { ContextWindow } from './context-window.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentEvents } from './event.js';
@@ -101,23 +101,23 @@ const ChildTypeId: unique symbol = Symbol.for(
  * @since 0.1.0
  */
 export interface Definition<
-  Name extends string,
-  Tools extends Record<string, Tool.Any>,
+  AgentName extends string,
+  AgentTools extends Record<string, Tool.Any>,
   Children extends ReadonlyArray<Child> = readonly [],
   Skills extends ReadonlyArray<AgentSkill.Skill> = readonly [],
   StopR = never,
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
   OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
-  CodeModeOption extends CodeMode.Option<Tools> = false,
+  CodeModeOption extends CodeMode.Option<AgentTools> = false,
 > {
-  readonly name: Name;
+  readonly name: AgentName;
   /** Stable application-defined compatibility revision for durable history. */
   readonly revision: string;
   readonly description?: string;
   /** Prepended as a system message on every run. */
   readonly instructions: string;
-  readonly toolkit: Toolkit.Toolkit<Tools>;
+  readonly toolkit: Toolkit.Toolkit<AgentTools>;
   /**
    * Scoped toolkits discovered once at the beginning of each run.
    * The resolved snapshot is both model advertisement and dispatch authority.
@@ -128,7 +128,7 @@ export interface Definition<
   readonly stopWhen?: Stop.StopCondition<
     CodeMode.ModelTools<
       VisibleTools<
-        CompiledTools<Tools, Children, Skills, OverflowPolicy>,
+        CompiledTools<AgentTools, Children, Skills, OverflowPolicy>,
         DynamicToolkit.Tools<DynamicSources>
       >,
       CodeModeOption
@@ -236,36 +236,39 @@ export interface Result extends Schema.Struct.Type<typeof Result.fields> {}
  * @category utility types
  * @since 0.1.0
  */
-export type WithOwnHandlers<Tools extends Record<string, Tool.Any>> =
+export type WithOwnHandlers<HandlerTools extends Record<string, Tool.Any>> =
   | LanguageModel.LanguageModel
-  | Tool.HandlersFor<Tools>
+  | Tool.HandlersFor<HandlerTools>
   // An empty toolkit is fine here: `Tools[keyof Tools]` is `never`, and
   // `HandlerServices<never>` resolves to `never` rather than widening to
   // `any`. An earlier comment claimed otherwise; `types.test.ts` pins the
   // truth, because the difference decides whether callers inherit an `any`.
-  | Tool.HandlerServices<Tools[keyof Tools]>
-  | Tool.ResultDecodingServices<Tools[keyof Tools]>
+  | Tool.HandlerServices<HandlerTools[keyof HandlerTools]>
+  | Tool.ResultDecodingServices<HandlerTools[keyof HandlerTools]>
   // The live model stream yields decoded tool-call parameters. Recording the
   // provider-facing form requires encoding those parameters again, so expose
   // the corresponding codec services at the same boundary.
-  | ParameterEncodingServices<Tools>;
+  | ParameterEncodingServices<HandlerTools>;
 
-type ParameterEncodingServices<Tools extends Record<string, Tool.Any>> =
-  Tools[keyof Tools] extends infer Candidate
+type ParameterEncodingServices<EncodingTools extends Record<string, Tool.Any>> =
+  EncodingTools[keyof EncodingTools] extends infer Candidate
     ? Candidate extends Tool.Any
       ? Tool.ParametersSchema<Candidate>['EncodingServices']
       : never
     : never;
 
 type WithOwnHandlersForState<
-  Tools extends Record<string, Tool.Any>,
+  StateTools extends Record<string, Tool.Any>,
   StateDefinition extends AgentState.AnyDefinition | undefined,
 > =
   | LanguageModel.LanguageModel
-  | Tool.HandlersFor<Tools>
-  | WithoutState<Tool.HandlerServices<Tools[keyof Tools]>, StateDefinition>
-  | Tool.ResultDecodingServices<Tools[keyof Tools]>
-  | ParameterEncodingServices<Tools>;
+  | Tool.HandlersFor<StateTools>
+  | WithoutState<
+      Tool.HandlerServices<StateTools[keyof StateTools]>,
+      StateDefinition
+    >
+  | Tool.ResultDecodingServices<StateTools[keyof StateTools]>
+  | ParameterEncodingServices<StateTools>;
 
 /**
  * Discharge an agent's own tool handlers from whatever it required.
@@ -282,9 +285,9 @@ type WithOwnHandlersForState<
  * @since 0.1.0
  */
 export type WithoutOwnHandlers<
-  Requires,
-  Tools extends Record<string, Tool.Any>,
-> = Exclude<Requires, Tool.HandlersFor<Tools>>;
+  HandlerRequirements,
+  HandlerTools extends Record<string, Tool.Any>,
+> = Exclude<HandlerRequirements, Tool.HandlersFor<HandlerTools>>;
 
 /**
  * The state layer opens the definition's handle for the run. Remove that
@@ -292,9 +295,11 @@ export type WithoutOwnHandlers<
  * the layer deliberately leaves for the caller to provide.
  */
 export type WithoutState<
-  Requires,
-  Definition extends AgentState.AnyDefinition | undefined,
-> = Definition extends undefined ? Requires : Exclude<Requires, Definition>;
+  StateRequirements,
+  StateDefinitionType extends AgentState.AnyDefinition | undefined,
+> = StateDefinitionType extends undefined
+  ? StateRequirements
+  : Exclude<StateRequirements, StateDefinitionType>;
 
 /**
  * An autonomous loop over a `LanguageModel`, with a toolkit, optional
@@ -317,8 +322,8 @@ export type WithoutState<
  * @since 0.1.0
  */
 export interface Instance<
-  out Name extends string,
-  in out OwnTools extends Record<string, Tool.Any>,
+  out AgentName extends string,
+  in out AgentOwnTools extends Record<string, Tool.Any>,
   /**
    * What a caller must supply to run this agent.
    *
@@ -327,10 +332,10 @@ export interface Instance<
    * {@link WithOwnHandlers} and attaching handlers changes nothing a caller can
    * observe.
    */
-  out Requires = WithOwnHandlers<OwnTools>,
-  in out RuntimeTools extends Record<string, Tool.Any> = OwnTools,
-  in out DynamicTools extends Record<string, Tool.Any> = {},
-  out BaseRequires = Requires,
+  out AgentRequirements = WithOwnHandlers<AgentOwnTools>,
+  in out RuntimeTools extends Record<string, Tool.Any> = AgentOwnTools,
+  in out DynamicTools extends Record<string, Tool.Any> = Record<never, never>,
+  out BaseRequires = AgentRequirements,
   out InterceptorRequires = never,
   out RunError extends RunFailure | CompatibilityError = RunFailure,
   out StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
@@ -341,7 +346,7 @@ export interface Instance<
 > {
   readonly [TypeId]: TypeId;
   readonly [ChildTypeId]: typeof ChildTypeId;
-  readonly name: Name;
+  readonly name: AgentName;
   readonly revision: LogVocabulary.AgentRevision;
   /** Shown to a parent when this agent is used as a subagent. */
   readonly description?: string | undefined;
@@ -360,12 +365,16 @@ export interface Instance<
    */
   readonly stream: (
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.ObservedEvent<ModelTools>, RunError, Requires>;
+  ) => Stream.Stream<
+    AgentEvents.ObservedEvent<ModelTools>,
+    RunError,
+    AgentRequirements
+  >;
 
   /** Run to completion. A fold of `stream`, not a second implementation. */
   readonly run: (
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, RunError, Requires>;
+  ) => Effect.Effect<Result, RunError, AgentRequirements>;
 
   /**
    * Continue an existing conversation instead of starting one.
@@ -378,12 +387,16 @@ export interface Instance<
   readonly streamIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.ObservedEvent<ModelTools>, RunError, Requires>;
+  ) => Stream.Stream<
+    AgentEvents.ObservedEvent<ModelTools>,
+    RunError,
+    AgentRequirements
+  >;
 
   readonly runIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Effect.Effect<Result, RunError, Requires>;
+  ) => Effect.Effect<Result, RunError, AgentRequirements>;
 
   /**
    * Declare handlers for this agent's tools without attaching them, purely
@@ -392,7 +405,7 @@ export interface Instance<
    * Mirrors `Toolkit.of`, and exists for the same reason: handlers defined
    * away from their agent otherwise get checked only at the point of use.
    */
-  of<Handlers extends Toolkit.HandlersFrom<OwnTools>>(
+  of<Handlers extends Toolkit.HandlersFrom<AgentOwnTools>>(
     handlers: Handlers,
   ): Handlers;
 
@@ -419,15 +432,15 @@ export interface Instance<
    * Calling it again replaces the handlers rather than layering a second set
    * underneath, so the tools advertised always have exactly one handler each.
    */
-  withHandlers<Handlers extends Toolkit.HandlersFrom<OwnTools>>(
+  withHandlers<Handlers extends Toolkit.HandlersFrom<AgentOwnTools>>(
     handlers: Handlers,
   ): Instance<
-    Name,
-    OwnTools,
-    WithoutOwnHandlers<BaseRequires, OwnTools> | InterceptorRequires,
+    AgentName,
+    AgentOwnTools,
+    WithoutOwnHandlers<BaseRequires, AgentOwnTools> | InterceptorRequires,
     RuntimeTools,
     DynamicTools,
-    WithoutOwnHandlers<BaseRequires, OwnTools>,
+    WithoutOwnHandlers<BaseRequires, AgentOwnTools>,
     InterceptorRequires,
     RunError,
     StateDefinition,
@@ -461,8 +474,8 @@ export interface Instance<
   intercepting<const I extends object>(
     interceptor: I & Interception.Interceptor<Interception.Services<I>>,
   ): Instance<
-    Name,
-    OwnTools,
+    AgentName,
+    AgentOwnTools,
     BaseRequires | Interception.Services<I>,
     RuntimeTools,
     DynamicTools,
@@ -497,12 +510,12 @@ export interface Instance<
  * @since 0.1.0
  */
 export interface Child<
-  Name extends string = string,
+  ChildName extends string = string,
   R = unknown,
   RunError extends RunFailure | CompatibilityError = RunFailure,
 > {
   readonly [ChildTypeId]: typeof ChildTypeId;
-  readonly name: Name;
+  readonly name: ChildName;
   readonly revision: LogVocabulary.AgentRevision;
   readonly description?: string | undefined;
   readonly run: (input: Prompt.RawInput) => Effect.Effect<Result, RunError, R>;
@@ -525,7 +538,7 @@ export interface Child<
  * @category utility types
  * @since 0.1.0
  */
-export interface Any extends Child<string, unknown> {
+export interface Any extends Child<string> {
   readonly [TypeId]: TypeId;
 }
 
@@ -637,7 +650,7 @@ export const isAgent = (u: unknown): u is Any =>
   Predicate.isObject(u) &&
   u[TypeId] === TypeId &&
   ChildTypeId in u &&
-  hasProtocol<unknown, RunFailure, Record<string, Tool.Any>>(u);
+  hasProtocol<unknown, RunFailure>(u);
 
 /** Every tool visible to the model after declarative capabilities compile. */
 export type CompiledTools<
@@ -756,8 +769,8 @@ type DynamicDefinition<Sources extends ReadonlyArray<DynamicToolkit.Any>> =
  * @since 0.1.0
  */
 export const make = <
-  const Name extends string,
-  Tools extends Record<string, Tool.Any>,
+  const AgentName extends string,
+  AgentTools extends Record<string, Tool.Any>,
   const Children extends ReadonlyArray<Child> = readonly [],
   const Skills extends ReadonlyArray<AgentSkill.Skill> = readonly [],
   StopR = never,
@@ -765,11 +778,11 @@ export const make = <
     undefined,
   const DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
   const OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
-  const CodeModeOption extends CodeMode.Option<Tools> = false,
+  const CodeModeOption extends CodeMode.Option<AgentTools> = false,
 >(
   definition: Definition<
-    Name,
-    Tools,
+    AgentName,
+    AgentTools,
     Children,
     Skills,
     StopR,
@@ -778,12 +791,12 @@ export const make = <
     OverflowPolicy,
     CodeModeOption
   > &
-    CollisionFreeDefinition<Tools, Children, Skills> &
+    CollisionFreeDefinition<AgentTools, Children, Skills> &
     DynamicDefinition<DynamicSources>,
 ): Instance<
-  Name,
-  Tools,
-  | WithOwnHandlersForState<Tools, StateDefinition>
+  AgentName,
+  AgentTools,
+  | WithOwnHandlersForState<AgentTools, StateDefinition>
   | Subagent.Services<Children>
   | ResultOverflow.Services<OverflowPolicy>
   | StopR
@@ -792,9 +805,9 @@ export const make = <
   | (StateDefinition extends AgentState.AnyDefinition
       ? AgentState.Services<StateDefinition>
       : never),
-  CompiledTools<Tools, Children, Skills, OverflowPolicy>,
+  CompiledTools<AgentTools, Children, Skills, OverflowPolicy>,
   DynamicToolkit.Tools<DynamicSources>,
-  | WithOwnHandlersForState<Tools, StateDefinition>
+  | WithOwnHandlersForState<AgentTools, StateDefinition>
   | Subagent.Services<Children>
   | ResultOverflow.Services<OverflowPolicy>
   | StopR
@@ -808,18 +821,23 @@ export const make = <
   StateDefinition,
   CodeMode.ModelTools<
     VisibleTools<
-      CompiledTools<Tools, Children, Skills, OverflowPolicy>,
+      CompiledTools<AgentTools, Children, Skills, OverflowPolicy>,
       DynamicToolkit.Tools<DynamicSources>
     >,
     CodeModeOption
   >
 > => {
-  type RuntimeTools = CompiledTools<Tools, Children, Skills, OverflowPolicy>;
+  type RuntimeTools = CompiledTools<
+    AgentTools,
+    Children,
+    Skills,
+    OverflowPolicy
+  >;
   type DynamicTools = DynamicToolkit.Tools<DynamicSources>;
   type RunTools = VisibleTools<RuntimeTools, DynamicTools>;
   type ModelTools = CodeMode.ModelTools<RunTools, CodeModeOption>;
   type BaseRequires =
-    | WithOwnHandlersForState<Tools, StateDefinition>
+    | WithOwnHandlersForState<AgentTools, StateDefinition>
     | Subagent.Services<Children>
     | ResultOverflow.Services<OverflowPolicy>
     | StopR
@@ -1096,7 +1114,9 @@ export const make = <
               attempt,
             });
           }
-          if (runtime !== undefined) yield* runtime.modelCall;
+          if (runtime !== undefined) {
+            yield* runtime.modelCall;
+          }
           // Count attempts at the provider boundary, including calls that
           // fail before producing a part. Token counters are updated only
           // once a provider finish part reports usage below.
@@ -1146,7 +1166,9 @@ export const make = <
                   if (encodedPart.type === 'finish') {
                     yield* Observability.usage(encodedPart.usage);
                   }
-                  if (runtime !== undefined) yield* runtime.remainingMillis;
+                  if (runtime !== undefined) {
+                    yield* runtime.remainingMillis;
+                  }
                 }),
               ),
               Stream.map(
@@ -1245,7 +1267,9 @@ export const make = <
       LanguageModel.LanguageModel
     > =>
       Effect.gen(function* () {
-        if (compaction?.contextWindow === undefined) return undefined;
+        if (compaction?.contextWindow === undefined) {
+          return undefined;
+        }
 
         const over = yield* CompactionRuntime.shouldCompact(
           Prompt.concat(yield* Ref.get(chat.history), Prompt.make(input)),
@@ -1254,7 +1278,9 @@ export const make = <
           yield* Ref.get(lastTurn),
         );
 
-        if (!over) return undefined;
+        if (!over) {
+          return undefined;
+        }
         const summarized = yield* compactWithBudget(chat, compaction);
         if (summarized !== undefined && runtime !== undefined) {
           yield* runtime.addUsage(summarized.usage);
@@ -1324,7 +1350,9 @@ export const make = <
           if (step === 1 && wiring.startRun !== undefined) {
             yield* wiring.startRun(input);
           }
-          if (runtime !== undefined) yield* runtime.turn;
+          if (runtime !== undefined) {
+            yield* runtime.turn;
+          }
 
           // Before the request, not after it is refused. Announced the same
           // way the reactive rewrite is, because from the log's point of view
@@ -1390,7 +1418,9 @@ export const make = <
                           // text or tool side effects. Provider retries belong
                           // below this seam; compaction is safe only for a request
                           // rejected before it produced anything.
-                          if (initial.emitted) return Stream.fail(error);
+                          if (initial.emitted) {
+                            return Stream.fail(error);
+                          }
 
                           // State the history the summarizer should see rather
                           // than inherit whatever the rejected turn left behind.
@@ -1419,8 +1449,9 @@ export const make = <
                           );
                           // Retrying an unchanged prompt repeats the same refusal
                           // and can loop provider-side work for no gain.
-                          if (summarized === undefined)
+                          if (summarized === undefined) {
                             return Stream.fail(error);
+                          }
                           if (runtime !== undefined) {
                             yield* runtime.addUsage(summarized.usage);
                           }
@@ -1814,8 +1845,9 @@ export const make = <
                 ),
             );
             if (delivered.some((signal) => signal.kind === 'cancel')) {
-              if (wiring.startRun !== undefined)
+              if (wiring.startRun !== undefined) {
                 yield* wiring.startRun(effective);
+              }
               return Stream.concat(
                 announced,
                 Stream.make(
@@ -1996,11 +2028,11 @@ export const make = <
                                   call.name,
                                   call.request,
                                 ),
-                                (input) => [
+                                (decodedInput) => [
                                   {
                                     toolCallId: call.toolCallId,
                                     toolName: call.name,
-                                    input,
+                                    input: decodedInput,
                                   },
                                 ],
                               );
@@ -2123,8 +2155,8 @@ export const make = <
   };
 
   return fromParts<
-    Name,
-    Tools,
+    AgentName,
+    AgentTools,
     RuntimeTools,
     DynamicTools,
     ModelTools,
@@ -2173,8 +2205,12 @@ const validateGeneratedToolNames = (
   for (const child of children) {
     reserve(Subagent.toolName(child.name), `subagent "${child.name}"`);
   }
-  if (skills.length > 0) reserve(AgentSkill.TOOL_NAME, 'skills');
-  if (resultOverflow) reserve(ResultOverflow.TOOL_NAME, 'resultOverflow');
+  if (skills.length > 0) {
+    reserve(AgentSkill.TOOL_NAME, 'skills');
+  }
+  if (resultOverflow) {
+    reserve(ResultOverflow.TOOL_NAME, 'resultOverflow');
+  }
   if (CodeMode.isEnabled(codeMode)) {
     reserve(CodeMode.TOOL_NAME, 'codeMode');
     const excepted = new Set(codeMode === true ? [] : codeMode.except);
@@ -2326,31 +2362,43 @@ const replaceSystemInstructions = (
  * session and the rest is not. `withHandlers` composes over an entry;
  * durable recording replaces one.
  */
-interface Entry<Tools extends Record<string, Tool.Any>, Requires, Error> {
+interface Entry<
+  EntryTools extends Record<string, Tool.Any>,
+  EntryRequirements,
+  EntryError,
+> {
   readonly stream: (
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.Event<Tools>, Error, Requires>;
+  ) => Stream.Stream<
+    AgentEvents.Event<EntryTools>,
+    EntryError,
+    EntryRequirements
+  >;
   readonly streamIn: (
     chat: Chat.Service,
     input: Prompt.RawInput,
-  ) => Stream.Stream<AgentEvents.Event<Tools>, Error, Requires>;
+  ) => Stream.Stream<
+    AgentEvents.Event<EntryTools>,
+    EntryError,
+    EntryRequirements
+  >;
 }
 
 /** Provide one implementation layer across both primitive stream shapes. */
 const provideEntry = <
-  Tools extends Record<string, Tool.Any>,
-  Requires,
-  Error,
+  EntryTools extends Record<string, Tool.Any>,
+  EntryRequirements,
+  EntryError,
   Provided,
   LayerError,
   LayerRequires,
 >(
-  entry: Entry<Tools, Requires, Error>,
+  entry: Entry<EntryTools, EntryRequirements, EntryError>,
   layer: Layer.Layer<Provided, LayerError, LayerRequires>,
 ): Entry<
-  Tools,
-  Exclude<Requires, Provided> | LayerRequires,
-  Error | LayerError
+  EntryTools,
+  Exclude<EntryRequirements, Provided> | LayerRequires,
+  EntryError | LayerError
 > => ({
   stream: (input) => Stream.provide(entry.stream(input), layer),
   streamIn: (chat, input) => Stream.provide(entry.streamIn(chat, input), layer),
@@ -2366,7 +2414,7 @@ const provideEntry = <
  */
 interface Wiring<
   InterceptorRequires = never,
-  DynamicTools extends Record<string, Tool.Any> = {},
+  DynamicTools extends Record<string, Tool.Any> = Record<never, never>,
 > {
   readonly session: AgentLog.Session | undefined;
   readonly interceptor:
@@ -2403,8 +2451,8 @@ interface Wiring<
  * intercepted by something the agent's type did not declare.
  */
 interface Parts<
-  Name extends string,
-  OwnTools extends Record<string, Tool.Any>,
+  PartsName extends string,
+  PartsOwnTools extends Record<string, Tool.Any>,
   RuntimeTools extends Record<string, Tool.Any>,
   DynamicTools extends Record<string, Tool.Any>,
   ModelTools extends Record<string, Tool.Any>,
@@ -2413,10 +2461,10 @@ interface Parts<
   RunError,
   StateDefinition extends AgentState.AnyDefinition | undefined,
 > {
-  readonly name: Name;
+  readonly name: PartsName;
   readonly revision: LogVocabulary.AgentRevision;
   readonly description: string | undefined;
-  readonly ownToolkit: Toolkit.Toolkit<OwnTools>;
+  readonly ownToolkit: Toolkit.Toolkit<PartsOwnTools>;
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
   readonly instructions: string;
   readonly state: StateDefinition | undefined;
@@ -2437,8 +2485,8 @@ interface Parts<
  * callable.
  */
 const fromParts = <
-  Name extends string,
-  OwnTools extends Record<string, Tool.Any>,
+  PartsName extends string,
+  PartsOwnTools extends Record<string, Tool.Any>,
   RuntimeTools extends Record<string, Tool.Any>,
   DynamicTools extends Record<string, Tool.Any>,
   ModelTools extends Record<string, Tool.Any>,
@@ -2448,8 +2496,8 @@ const fromParts = <
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
 >(
   parts: Parts<
-    Name,
-    OwnTools,
+    PartsName,
+    PartsOwnTools,
     RuntimeTools,
     DynamicTools,
     ModelTools,
@@ -2459,8 +2507,8 @@ const fromParts = <
     StateDefinition
   >,
 ): Instance<
-  Name,
-  OwnTools,
+  PartsName,
+  PartsOwnTools,
   BaseRequires | InterceptorRequires,
   RuntimeTools,
   DynamicTools,
@@ -2618,8 +2666,8 @@ const fromParts = <
     );
 
   const agent: Instance<
-    Name,
-    OwnTools,
+    PartsName,
+    PartsOwnTools,
     BaseRequires | InterceptorRequires,
     RuntimeTools,
     DynamicTools,
@@ -2659,8 +2707,8 @@ const fromParts = <
       interceptor: I & Interception.Interceptor<Interception.Services<I>>,
     ) =>
       fromParts<
-        Name,
-        OwnTools,
+        PartsName,
+        PartsOwnTools,
         RuntimeTools,
         DynamicTools,
         ModelTools,
@@ -2686,12 +2734,12 @@ const fromParts = <
       // beneath the first — and so a session reaches the loop through the
       // rebuilt entry rather than being sealed behind the old one.
       return fromParts<
-        Name,
-        OwnTools,
+        PartsName,
+        PartsOwnTools,
         RuntimeTools,
         DynamicTools,
         ModelTools,
-        WithoutOwnHandlers<BaseRequires, OwnTools>,
+        WithoutOwnHandlers<BaseRequires, PartsOwnTools>,
         InterceptorRequires,
         RunError,
         StateDefinition
@@ -2702,7 +2750,7 @@ const fromParts = <
         ) =>
           provideEntry(parts.entry(incoming), own) as Entry<
             ModelTools,
-            WithoutOwnHandlers<BaseRequires, OwnTools> | WiringRequires,
+            WithoutOwnHandlers<BaseRequires, PartsOwnTools> | WiringRequires,
             RunError
           >,
       });
@@ -2813,9 +2861,9 @@ const emptyTurnState = (): TurnState => ({
  * the same tool call's decoded ones, tracked from `decoded` as calls stream
  * by and looked up when the matching approval request arrives.
  */
-const observe = <Tools extends Record<string, Tool.Any>>(
+const observe = <PartTools extends Record<string, Tool.Any>>(
   state: TurnState,
-  decoded: Response.StreamPart<Tools>,
+  decoded: Response.StreamPart<PartTools>,
   encoded: Response.StreamPartEncoded,
 ): void => {
   state.emitted = true;
@@ -2849,16 +2897,16 @@ const observe = <Tools extends Record<string, Tool.Any>>(
   }
 };
 
-type EncodableToolCall<Tools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<Tools>,
+type EncodableToolCall<PartTools extends Record<string, Tool.Any>> = Extract<
+  Response.StreamPart<PartTools>,
   { readonly type: 'tool-call' }
 >;
-type EncodableToolResult<Tools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<Tools>,
+type EncodableToolResult<PartTools extends Record<string, Tool.Any>> = Extract<
+  Response.StreamPart<PartTools>,
   { readonly type: 'tool-result' }
 >;
-type EncodableFile<Tools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<Tools>,
+type EncodableFile<PartTools extends Record<string, Tool.Any>> = Extract<
+  Response.StreamPart<PartTools>,
   { readonly type: 'file' }
 >;
 const StandardPart = Schema.Union([
@@ -2894,9 +2942,9 @@ const encodeStandardPart = (
     Effect.mapError(encodePartError),
   );
 
-const encodeToolCall = <Tools extends Record<string, Tool.Any>>(
-  part: EncodableToolCall<Tools>,
-  toolkit: Toolkit.WithHandler<Tools>,
+const encodeToolCall = <PartTools extends Record<string, Tool.Any>>(
+  part: EncodableToolCall<PartTools>,
+  toolkit: Toolkit.WithHandler<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   const tool = Object.hasOwn(toolkit.tools, part.name)
     ? toolkit.tools[part.name]
@@ -2921,7 +2969,7 @@ const encodeToolCall = <Tools extends Record<string, Tool.Any>>(
   ) as Effect.Effect<
     unknown,
     Schema.SchemaError,
-    ParameterEncodingServices<Tools>
+    ParameterEncodingServices<PartTools>
   >;
   return encoded.pipe(
     Effect.mapError(encodePartError),
@@ -2935,8 +2983,8 @@ const encodeToolCall = <Tools extends Record<string, Tool.Any>>(
   );
 };
 
-const encodeToolResult = <Tools extends Record<string, Tool.Any>>(
-  part: EncodableToolResult<Tools>,
+const encodeToolResult = <PartTools extends Record<string, Tool.Any>>(
+  part: EncodableToolResult<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
   // The decoded result can be a substituted value that deliberately does not
   // satisfy the tool schema. `encodedResult` is already the exact
@@ -2951,8 +2999,8 @@ const encodeToolResult = <Tools extends Record<string, Tool.Any>>(
     preliminary: part.preliminary,
   });
 
-const encodeFile = <Tools extends Record<string, Tool.Any>>(
-  part: EncodableFile<Tools>,
+const encodeFile = <PartTools extends Record<string, Tool.Any>>(
+  part: EncodableFile<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
   Schema.encodeEffect(Response.FilePart)(part).pipe(
     Effect.mapError(encodePartError),
@@ -2963,9 +3011,9 @@ const assertPartEncodingStrategy = (part: never): never => {
 };
 
 /** Encode a decoded model part before it reaches observers or persistence. */
-const encodePart = <Tools extends Record<string, Tool.Any>>(
-  part: Response.StreamPart<Tools>,
-  toolkit: Toolkit.WithHandler<Tools>,
+const encodePart = <PartTools extends Record<string, Tool.Any>>(
+  part: Response.StreamPart<PartTools>,
+  toolkit: Toolkit.WithHandler<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   switch (part.type) {
     case 'tool-call':
@@ -3020,7 +3068,9 @@ const normalizeProviderError = (
   error: unknown,
   partMetadata?: Record<string, unknown> | undefined,
 ): AiError.AiError => {
-  if (AiError.isAiError(error)) return error;
+  if (AiError.isAiError(error)) {
+    return error;
+  }
 
   const structured = describeProviderError(error, partMetadata);
   const common = {
@@ -3055,13 +3105,15 @@ const describeProviderError = (
   }
 
   const value = error;
-  const metadata = Predicate.isObject(value.metadata) ? value.metadata : {};
+  const metadata = Predicate.isObject(value['metadata'])
+    ? value['metadata']
+    : {};
   const code =
-    value.code ??
-    (typeof value.type === 'string' && value.type !== 'error'
-      ? value.type
+    value['code'] ??
+    (typeof value['type'] === 'string' && value['type'] !== 'error'
+      ? value['type']
       : undefined);
-  const details = [code, value.message, value.error]
+  const details = [code, value['message'], value['error']]
     .map((part) =>
       typeof part === 'string'
         ? part
@@ -3077,10 +3129,10 @@ const describeProviderError = (
     metadata: {
       ...partMetadata,
       ...metadata,
-      ...(value.code === undefined ? {} : { code: value.code }),
-      ...(typeof value.type !== 'string' || value.type === 'error'
+      ...(value['code'] === undefined ? {} : { code: value['code'] }),
+      ...(typeof value['type'] !== 'string' || value['type'] === 'error'
         ? {}
-        : { type: value.type }),
+        : { type: value['type'] }),
     },
   };
 };
@@ -3113,7 +3165,9 @@ const addToolCallCounts = (
   current: Readonly<Record<string, number>>,
   calls: ReadonlyArray<Response.ToolCallPartEncoded>,
 ): Readonly<Record<string, number>> => {
-  if (calls.length === 0) return current;
+  if (calls.length === 0) {
+    return current;
+  }
   // Tool names here come from the model's response, not the toolkit — a call
   // to a nonexistent tool still lands in `toolCalls` — so `__proto__` is a
   // possible key. On a default-prototype object that assignment hits the

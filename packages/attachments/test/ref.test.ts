@@ -110,7 +110,7 @@ describe('AttachmentRef', () => {
           mediaType: 'application/octet-stream',
           byteLength: 0,
         }),
-      ).toThrow();
+      ).toThrow(/./);
     });
   });
 
@@ -124,7 +124,7 @@ describe('AttachmentRef', () => {
             mediaType: 'application/octet-stream',
             byteLength,
           }),
-        ).toThrow();
+        ).toThrow(/./);
       });
     },
   );

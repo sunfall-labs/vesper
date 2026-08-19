@@ -10,7 +10,7 @@ import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import * as AgentLog from '../src/log.js';
-import { RecordingPolicy } from '../src/recording-policy.js';
+import type { RecordingPolicy } from '../src/recording-policy.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
 
 const testLogLayer = Layer.mergeAll(
@@ -82,8 +82,7 @@ describe('recording policy', () => {
         )).records;
       }).pipe(
         Effect.provideService(Redactor, { replacement: '[redacted prompt]' }),
-        Effect.provide(model(seen)),
-        Effect.provide(testLogLayer),
+        Effect.provide(Layer.merge(model(seen), testLogLayer)),
       );
 
       expect(seen[0]).toContain('input secret');

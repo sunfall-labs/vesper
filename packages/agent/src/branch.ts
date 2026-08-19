@@ -85,14 +85,24 @@ export const activePath = (
 
   let index = records.length - 1;
   while (index >= 0) {
-    const envelope = records[index]!;
+    const envelope = records[index];
+    if (envelope === undefined) {
+      break;
+    }
 
     if (envelope.record._tag === 'BranchedFrom') {
       // Start below the marker rather than at it, which is what makes the
       // cursor decrease even when `at` names this record or a later one.
       let next = index - 1;
       const { at } = envelope.record;
-      while (next >= 0 && LogOffset.isAfter(records[next]!.offset, at)) {
+      while (next >= 0) {
+        const candidate = records[next];
+        if (
+          candidate === undefined ||
+          !LogOffset.isAfter(candidate.offset, at)
+        ) {
+          break;
+        }
         next -= 1;
       }
       index = next;
@@ -103,7 +113,13 @@ export const activePath = (
     index -= 1;
   }
 
-  return path.reverse();
+  return path.reduceRight<Array<ConversationRecord.Envelope>>(
+    (result, envelope) => {
+      result.push(envelope);
+      return result;
+    },
+    [],
+  );
 };
 
 export * as AgentBranch from './branch.js';

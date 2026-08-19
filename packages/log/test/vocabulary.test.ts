@@ -7,16 +7,18 @@ describe('log vocabulary', () => {
   it('rejects empty and malformed branded values', () => {
     expect(() =>
       Schema.decodeUnknownSync(LogVocabulary.ConversationId)(''),
-    ).toThrow();
+    ).toThrow(/./);
     expect(() =>
       Schema.decodeUnknownSync(LogVocabulary.AgentRevision)(' revision '),
-    ).toThrow();
-    expect(() => Schema.decodeUnknownSync(LogVocabulary.Epoch)(-1)).toThrow();
+    ).toThrow(/./);
+    expect(() => Schema.decodeUnknownSync(LogVocabulary.Epoch)(-1)).toThrow(
+      /./,
+    );
     expect(() =>
       Schema.decodeUnknownSync(LogVocabulary.ProducerSequence)(
         Number.MAX_SAFE_INTEGER + 1,
       ),
-    ).toThrow();
+    ).toThrow(/./);
   });
 });
 

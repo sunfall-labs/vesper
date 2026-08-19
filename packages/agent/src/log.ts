@@ -6,7 +6,6 @@ import { Tail } from '@sunfall/vesper-log/tail';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Clock,
-  Crypto,
   Effect,
   Exit,
   Option,
@@ -16,6 +15,7 @@ import {
   Stream,
   SynchronizedRef,
 } from 'effect';
+import type { Crypto } from 'effect';
 import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
@@ -39,7 +39,7 @@ export {
 } from './conversation-error.js';
 import * as AgentSignals from './internal/signal-store.js';
 import type { Stop } from './stop.js';
-import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
+import type { RecordingPolicyRuntime } from './recording-policy-runtime.js';
 import * as RecordingSink from './recording-sink.js';
 
 /**
@@ -110,7 +110,7 @@ export const childIdFor = (
   toolCallId: LogVocabulary.ToolCallId,
 ): LogVocabulary.ConversationId =>
   LogVocabulary.ConversationId.make(
-    `child-v1:${parentConversationId.length}:${parentConversationId}${toolCallId}`,
+    `child-v1:${String(parentConversationId.length)}:${parentConversationId}${toolCallId}`,
   );
 
 // Recovery types live in the private recovery module and are re-exported below
@@ -641,13 +641,13 @@ const openWith = (
       const existing = yield* options.branchFrom === undefined
         ? readAggregateSuffix(store, path)
         : readAll(store, path);
+      const branchFrom = options.branchFrom;
       const retainedBeforeClaim =
-        options.branchFrom === undefined
+        branchFrom === undefined
           ? AgentBranch.activePath(existing)
           : AgentBranch.activePath(
               existing.filter(
-                (envelope) =>
-                  !LogOffset.isAfter(envelope.offset, options.branchFrom!),
+                (envelope) => !LogOffset.isAfter(envelope.offset, branchFrom),
               ),
             );
       yield* validateCompatibility(retainedBeforeClaim, options.compatibility);
@@ -682,7 +682,7 @@ const openWith = (
           return yield* Effect.die(acquired.cause);
         }
         if (error.value.reason !== 'conflict') {
-          return yield* Effect.fail(error.value);
+          return yield* error.value;
         }
         lastConflict = error.value;
       }
@@ -766,7 +766,7 @@ const openWith = (
                               source: 'timeout',
                               operation: 'append',
                               reason: 'timeout',
-                              detail: `Conversation append exceeded ${Math.max(1, timeoutMillis - 1)}ms`,
+                              detail: `Conversation append exceeded ${String(Math.max(1, timeoutMillis - 1))}ms`,
                               cause: error,
                             }),
                       ),
@@ -914,7 +914,7 @@ const openWith = (
         );
 
     const child = (
-      options: ChildOptions,
+      childOptions: ChildOptions,
     ): Effect.Effect<
       Session,
       | CompatibilityError
@@ -928,15 +928,15 @@ const openWith = (
           Effect.gen(function* () {
             const childConversationId = childIdFor(
               conversationId,
-              options.toolCallId,
+              childOptions.toolCallId,
             );
             const reference: ConversationRecord.RecordOf<'ChildSession'> = {
               _tag: 'ChildSession',
-              toolCallId: options.toolCallId,
-              agent: options.agent,
+              toolCallId: childOptions.toolCallId,
+              agent: childOptions.agent,
               parentConversationId: conversationId,
               childConversationId,
-              depth: options.depth,
+              depth: childOptions.depth,
             };
 
             yield* ensureChildReference(
@@ -947,8 +947,8 @@ const openWith = (
             );
             const session = yield* openWith(store, childConversationId, {
               compatibility: {
-                agent: options.agent,
-                revision: options.revision,
+                agent: childOptions.agent,
+                revision: childOptions.revision,
               },
             });
             yield* ensureChildReference(
@@ -964,12 +964,12 @@ const openWith = (
           Effect.withSpan('AgentLog.Session.child', {
             attributes: {
               'vesper.conversation.id': conversationId,
-              'vesper.child.agent': options.agent,
+              'vesper.child.agent': childOptions.agent,
               'vesper.child.conversation.id': childIdFor(
                 conversationId,
-                options.toolCallId,
+                childOptions.toolCallId,
               ),
-              'vesper.child.depth': options.depth,
+              'vesper.child.depth': childOptions.depth,
             },
           }),
         );
@@ -1046,18 +1046,14 @@ const openWith = (
           yield* append(persisted, timeoutMillis);
           yield* Effect.forEach(
             records,
-            (record) => {
-              switch (record._tag) {
-                case 'ToolSuspended':
-                  return Observability.waitSuspended;
-                case 'ToolWaitCompleted':
-                  return Observability.waitCompleted;
-                case 'ToolWaitRestarted':
-                  return Observability.waitRestarted;
-                default:
-                  return Effect.void;
-              }
-            },
+            (record) =>
+              record._tag === 'ToolSuspended'
+                ? Observability.waitSuspended
+                : record._tag === 'ToolWaitCompleted'
+                  ? Observability.waitCompleted
+                  : record._tag === 'ToolWaitRestarted'
+                    ? Observability.waitRestarted
+                    : Effect.void,
             { discard: true },
           );
           yield* Ref.set(signalCursor, nextSignalCursor);
@@ -1154,6 +1150,17 @@ interface OpenState {
   readonly signalCursor: LogOffset.Offset;
 }
 
+const oldestFirst = (
+  newestFirst: ReadonlyArray<ConversationRecord.Envelope>,
+): ReadonlyArray<ConversationRecord.Envelope> =>
+  newestFirst.reduceRight<Array<ConversationRecord.Envelope>>(
+    (ordered, envelope) => {
+      ordered.push(envelope);
+      return ordered;
+    },
+    [],
+  );
+
 /** Read only the physical suffix needed to resume cumulative state. */
 const loadOpenState = (
   store: LogStore.Interface,
@@ -1196,10 +1203,12 @@ const readAggregateSuffix = (
           break;
         }
       }
-      if (done || page.upToDate) break;
+      if (done || page.upToDate) {
+        break;
+      }
       before = page.cursor;
     }
-    return newest.reverse();
+    return oldestFirst(newest);
   });
 
 const mergeByOffset = (
@@ -1209,10 +1218,18 @@ const mergeByOffset = (
   const retained = new Map(
     left.map((envelope) => [envelope.offset, envelope] as const),
   );
-  for (const envelope of right) retained.set(envelope.offset, envelope);
-  return [...retained.values()].sort((a, b) =>
-    a.offset < b.offset ? -1 : a.offset > b.offset ? 1 : 0,
+  for (const envelope of right) {
+    retained.set(envelope.offset, envelope);
+  }
+  const ordered = [...retained.values()];
+  ordered.sort((candidate, current) =>
+    LogOffset.isAfter(candidate.offset, current.offset)
+      ? 1
+      : LogOffset.isAfter(current.offset, candidate.offset)
+        ? -1
+        : 0,
   );
+  return ordered;
 };
 
 interface PersistedCompatibility {
@@ -1245,8 +1262,9 @@ const validateCompatibility = (
   // has no definition identity to compare yet. Any actual conversation state
   // without one is legacy history and must not be adopted silently.
   if (identities.length === 0) {
-    const hasConversationState = history.some(({ record }) =>
-      record._tag === 'ChildSession' || record._tag === 'Signal' ? false : true,
+    const hasConversationState = history.some(
+      ({ record }) =>
+        record._tag !== 'ChildSession' && record._tag !== 'Signal',
     );
     return hasConversationState
       ? Effect.fail(
@@ -1266,7 +1284,7 @@ const validateCompatibility = (
       persisted.agent === undefined
         ? 'history predates explicit compatibility metadata'
         : persisted.formatVersion !== FORMAT_VERSION
-          ? `conversation format ${persisted.formatVersion} is unsupported; this release supports format ${FORMAT_VERSION}`
+          ? `conversation format ${String(persisted.formatVersion)} is unsupported; this release supports format ${String(FORMAT_VERSION)}`
           : persisted.agent !== expected.agent
             ? `history contains contradictory agent "${persisted.agent}", not "${expected.agent}"`
             : persisted.agentRevision !== expected.revision
@@ -1309,6 +1327,9 @@ const hydrateHistory = (
           : PromptTransport.decodeWithAttachments(envelope.record.prompt).pipe(
               Effect.provideService(AttachmentStore.Service, attachmentStore),
               Effect.map((prompt) => ({
+                // Envelope is decoded data, not a class instance. The public
+                // interface intentionally merges with its schema value.
+                // oxlint-disable-next-line typescript/no-misused-spread
                 ...envelope,
                 record: {
                   ...envelope.record,
@@ -1410,7 +1431,9 @@ const readResumeHistory = (
             envelope.record.at === LogOffset.START ||
             !LogOffset.isAfter(envelope.offset, envelope.record.at)
           ) {
-            if (envelope.record.at === LogOffset.START) done = true;
+            if (envelope.record.at === LogOffset.START) {
+              done = true;
+            }
             continue;
           }
           before = yield* offsetAfter(envelope.record.at);
@@ -1434,12 +1457,18 @@ const readResumeHistory = (
           }
         }
       }
-      if (done) break;
-      if (jumped) continue;
-      if (page.upToDate) break;
+      if (done) {
+        break;
+      }
+      if (jumped) {
+        continue;
+      }
+      if (page.upToDate) {
+        break;
+      }
       before = page.cursor;
     }
-    return newest.reverse();
+    return oldestFirst(newest);
   });
 
 const RESUME_READ_LIMIT = 32;
@@ -1489,7 +1518,9 @@ interface ForkIdentity {
 }
 
 const forkIdentity = (identity: ForkIdentity): string =>
-  `${FORK_IDENTITY_PREFIX}${JSON.stringify([
+  `${FORK_IDENTITY_PREFIX}${Schema.encodeSync(
+    Schema.fromJsonString(ForkIdentitySchema),
+  )([
     identity.sourceConversationId,
     identity.at,
     identity.records,
@@ -1506,10 +1537,12 @@ const ForkIdentitySchema = Schema.Tuple([
 ]);
 
 const parseForkIdentity = (identity: string): ForkIdentity | undefined => {
-  if (!identity.startsWith(FORK_IDENTITY_PREFIX)) return undefined;
+  if (!identity.startsWith(FORK_IDENTITY_PREFIX)) {
+    return undefined;
+  }
   try {
-    const value = Schema.decodeUnknownSync(ForkIdentitySchema)(
-      JSON.parse(identity.slice(FORK_IDENTITY_PREFIX.length)),
+    const value = Schema.decodeSync(Schema.fromJsonString(ForkIdentitySchema))(
+      identity.slice(FORK_IDENTITY_PREFIX.length),
     );
     return {
       sourceConversationId: value[0],
@@ -1521,6 +1554,10 @@ const parseForkIdentity = (identity: string): ForkIdentity | undefined => {
     return undefined;
   }
 };
+
+const ConversationRecordJson = Schema.fromJsonString(ConversationRecord.Record);
+const encodeConversationRecordSync = Schema.encodeSync(ConversationRecordJson);
+const encodeConversationRecord = Schema.encodeEffect(ConversationRecordJson);
 
 const ensureChildReference = (
   conversationId: LogVocabulary.ConversationId,
@@ -1538,8 +1575,11 @@ const ensureChildReference = (
       ? [record]
       : [],
   );
+  const encodedReference = encodeConversationRecordSync(reference);
   if (
-    links.some((link) => JSON.stringify(link) === JSON.stringify(reference))
+    links.some(
+      (link) => encodeConversationRecordSync(link) === encodedReference,
+    )
   ) {
     return Effect.void;
   }
@@ -1583,44 +1623,73 @@ const seedInto = (
       index < Math.min(written.length, prefix.length);
       index += 1
     ) {
-      const source = prefix[index]!;
-      const expected = reseat(source.record, reseated);
-      if (JSON.stringify(written[index]!.record) !== JSON.stringify(expected)) {
-        return yield* Effect.die(
-          new Error(`Fork destination seed differs at record ${index}`),
+      const source = prefix[index];
+      const destination = written[index];
+      if (source === undefined || destination === undefined) {
+        throw new Error(
+          `Fork destination seed is missing record ${String(index)}`,
         );
       }
-      reseated.set(source.offset, written[index]!.offset);
+      const expected = reseat(source.record, reseated);
+      const destinationEncoded = yield* encodeConversationRecord(
+        destination.record,
+      ).pipe(Effect.orDie);
+      const expectedEncoded = yield* encodeConversationRecord(expected).pipe(
+        Effect.orDie,
+      );
+      if (destinationEncoded !== expectedEncoded) {
+        return yield* Effect.die(
+          new Error(`Fork destination seed differs at record ${String(index)}`),
+        );
+      }
+      reseated.set(source.offset, destination.offset);
     }
 
     // A matching fork identity may be opened again after its independent run
     // has appended beyond the copied prefix. Validate the entire seed above,
     // then leave those genuine destination records untouched.
-    if (written.length >= prefix.length) return;
+    if (written.length >= prefix.length) {
+      return;
+    }
 
     let copied = written.length;
     let pending: Array<ConversationRecord.Record> = [];
 
     const flush = Effect.gen(function* () {
-      if (pending.length === 0) return;
+      if (pending.length === 0) {
+        return;
+      }
       yield* append(pending);
       pending = [];
 
       written = yield* recorded;
       while (copied < written.length) {
-        reseated.set(prefix[copied]!.offset, written[copied]!.offset);
+        const source = prefix[copied];
+        const destination = written[copied];
+        if (source === undefined || destination === undefined) {
+          throw new Error(
+            `Fork destination seed is missing record ${String(copied)}`,
+          );
+        }
+        reseated.set(source.offset, destination.offset);
         copied += 1;
       }
     });
 
     for (let index = written.length; index < prefix.length; index += 1) {
-      const { record } = prefix[index]!;
+      const source = prefix[index];
+      if (source === undefined) {
+        throw new Error(`Fork source seed is missing record ${String(index)}`);
+      }
+      const { record } = source;
       // Flushed *before* any record whose pointer is rewritten through the
       // map, so that the offsets it may name are in it. `Compacted` is the
       // only such case today, and {@link reseat} is the tripwire: adding a
       // record that points into this stream stops it compiling, which is what
       // brings whoever adds it back to this line.
-      if (record._tag === 'Compacted') yield* flush;
+      if (record._tag === 'Compacted') {
+        yield* flush;
+      }
 
       pending.push(reseat(record, reseated));
     }

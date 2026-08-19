@@ -1,7 +1,8 @@
 import { PgClient } from '@effect/sql-pg';
-import { Effect, Layer } from 'effect';
-import { SqlClient } from 'effect/unstable/sql/SqlClient';
-import { SqlError } from 'effect/unstable/sql/SqlError';
+import { Effect } from 'effect';
+import type { Layer } from 'effect';
+import type { SqlClient } from 'effect/unstable/sql/SqlClient';
+import type { SqlError } from 'effect/unstable/sql/SqlError';
 
 import { correctedListen } from './internal/pg-listen.js';
 
@@ -20,7 +21,7 @@ export const make = Effect.fn('VesperPgClient.make')(function* (
 /** Provides both official `PgClient.PgClient` and generic `SqlClient`. */
 export const layer = (
   config: PgClient.PgPoolConfig,
-): Layer.Layer<PgClient.PgClient | SqlClient, SqlError, never> =>
+): Layer.Layer<PgClient.PgClient | SqlClient, SqlError> =>
   PgClient.layerFrom(make(config));
 
 export * as VesperPgClient from './client.js';

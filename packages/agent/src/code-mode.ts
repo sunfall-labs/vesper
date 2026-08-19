@@ -12,7 +12,7 @@ import { AiError, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { CodeExecutor } from './code-executor.js';
 import { renderCodeSdk } from './code-sdk.js';
-import * as AgentLog from './log.js';
+import type * as AgentLog from './log.js';
 import { ResumeProjection } from './resume-projection.js';
 
 export const TOOL_NAME = 'exec' as const;
@@ -40,7 +40,7 @@ export interface StateHandle {
 
 const capturedContext: Effect.Effect<Context.Context<unknown>> = Effect.map(
   Effect.context<never>(),
-  (context) => context as Context.Context<unknown>,
+  (context) => Context.makeUnsafe<unknown>(context.mapUnsafe),
 );
 
 const execTool = (description: string) =>
@@ -183,7 +183,9 @@ export function selectToolkit<
   DirectError | CodeError,
   DirectRequires | CodeRequires
 > {
-  if (!isEnabled(mode)) return direct();
+  if (!isEnabled(mode)) {
+    return direct();
+  }
   // Runtime names are plain strings; that they were drawn from the toolkit's
   // keys is what `Option<Tools>` proved at the definition site, so the one
   // assertion in code mode's typing names that fact here.
@@ -201,9 +203,13 @@ const jsonValue = (value: unknown, path = '$'): CodeExecutor.JsonValue => {
   ) {
     return value;
   }
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
   if (Array.isArray(value)) {
-    return value.map((item, index) => jsonValue(item, `${path}[${index}]`));
+    return value.map((item, index) =>
+      jsonValue(item, `${path}[${String(index)}]`),
+    );
   }
   if (typeof value === 'object') {
     return Object.fromEntries(
@@ -234,14 +240,14 @@ const stateValue = (
     const bytes = encoder.encode(JSON.stringify(item)).byteLength;
     if (bytes > limits.maxValueBytes) {
       throw new StateError(
-        `Code scratch value "${key}" exceeds ${limits.maxValueBytes} bytes`,
+        `Code scratch value "${key}" exceeds ${String(limits.maxValueBytes)} bytes`,
       );
     }
   }
   const total = encoder.encode(JSON.stringify(prepared)).byteLength;
   if (total > limits.maxTotalBytes) {
     throw new StateError(
-      `Code scratch state exceeds ${limits.maxTotalBytes} bytes`,
+      `Code scratch state exceeds ${String(limits.maxTotalBytes)} bytes`,
     );
   }
   return prepared;
@@ -308,7 +314,7 @@ const aiError = (method: string, description: string): AiError.AiError =>
   });
 
 const descriptor = (tool: Tool.Any): CodeExecutor.ToolDescriptor => ({
-  name: tool.name,
+  name: String(tool.name),
   description: Tool.getDescription(tool) ?? '',
   parameters: jsonValue(Tool.getJsonSchema(tool)),
   result: jsonValue(Tool.getJsonSchemaFromSchema(tool.successSchema)),
@@ -318,9 +324,11 @@ const toolFailureMessage = (
   name: string,
   value: CodeExecutor.JsonValue,
 ): string => {
-  if (typeof value === 'string') return value;
-  if (isJsonRecord(value) && typeof value.message === 'string') {
-    return value.message;
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (isJsonRecord(value) && typeof value['message'] === 'string') {
+    return value['message'];
   }
   return `Tool "${name}" failed`;
 };
@@ -347,8 +355,9 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
       ? toolkit.tools[event.name]
       : undefined;
     if (tool === undefined) {
-      return yield* Effect.fail(
-        aiError('nestedToolCall', `Unknown code-mode tool "${event.name}"`),
+      return yield* aiError(
+        'nestedToolCall',
+        `Unknown code-mode tool "${event.name}"`,
       );
     }
     if (tool.needsApproval !== undefined && tool.needsApproval !== false) {
@@ -362,8 +371,9 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
     const stream = yield* toolkit.handle(name, input, event.id);
     const result = yield* Stream.runLast(stream);
     if (Option.isNone(result)) {
-      return yield* Effect.fail(
-        aiError('nestedToolCall', `Tool "${event.name}" returned no result`),
+      return yield* aiError(
+        'nestedToolCall',
+        `Tool "${event.name}" returned no result`,
       );
     }
     const value = jsonValue(result.value.encodedResult);
@@ -560,8 +570,9 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                   Effect.ensuring(execution.interrupt),
                 );
                 if (!completed) {
-                  return yield* Effect.fail(
-                    aiError('execute', 'Executor ended without completion'),
+                  return yield* aiError(
+                    'execute',
+                    'Executor ended without completion',
                   );
                 }
                 yield* state

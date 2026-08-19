@@ -65,8 +65,14 @@ const persist = (input: Prompt.RawInput) =>
       revision: LogVocabulary.AgentRevision.make('1'),
       input,
     });
-    const started = (yield* session.recorded)[0]!.record;
-    if (started._tag !== 'RunStarted') throw new Error('missing RunStarted');
+    const first = (yield* session.recorded).at(0);
+    if (first === undefined) {
+      throw new Error('missing RunStarted record');
+    }
+    const started = first.record;
+    if (started._tag !== 'RunStarted') {
+      throw new Error('missing RunStarted');
+    }
     return started.prompt;
   }).pipe(Effect.provide(testLogLayer));
 
@@ -105,9 +111,14 @@ describe('prompt transport', () => {
         input: filePrompt(bytes),
       });
       const sourceRecords = yield* source.recorded;
-      const persisted = sourceRecords[0]!.record;
-      if (persisted._tag !== 'RunStarted')
+      const sourceRecord = sourceRecords.at(0);
+      if (sourceRecord === undefined) {
+        throw new Error('missing source record');
+      }
+      const persisted = sourceRecord.record;
+      if (persisted._tag !== 'RunStarted') {
         throw new Error('missing RunStarted');
+      }
 
       expect(fileData(persisted.prompt)).toMatchObject({
         _tag: '@sunfall/vesper-agent/PromptAttachment',
@@ -121,7 +132,7 @@ describe('prompt transport', () => {
 
       const fork = yield* AgentLog.fork(
         LogVocabulary.ConversationId.make('attachment-source'),
-        sourceRecords[0]!.offset,
+        sourceRecord.offset,
         LogVocabulary.ConversationId.make('attachment-fork'),
         {
           agent: 'test',
@@ -204,9 +215,14 @@ describe('prompt transport', () => {
             revision: LogVocabulary.AgentRevision.make('1'),
             input: filePrompt(bytes),
           });
-          const started = (yield* session.recorded)[0]!.record;
-          if (started._tag !== 'RunStarted')
+          const first = (yield* session.recorded).at(0);
+          if (first === undefined) {
+            throw new Error('missing RunStarted record');
+          }
+          const started = first.record;
+          if (started._tag !== 'RunStarted') {
             throw new Error('missing RunStarted');
+          }
           return started.prompt;
         }).pipe(Effect.provide(testLogLayer));
 

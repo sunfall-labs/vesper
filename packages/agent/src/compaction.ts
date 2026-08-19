@@ -1,4 +1,4 @@
-import { AiError } from 'effect/unstable/ai';
+import type { AiError } from 'effect/unstable/ai';
 
 /** Policy for proactive and reactive conversation compaction. */
 export interface Policy {

@@ -23,9 +23,24 @@ type Reply =
 
 const decoder = new TextDecoder();
 
-const requestJson = (request: HttpClientRequest.HttpClientRequest): unknown => {
-  if (request.body._tag !== 'Uint8Array') return undefined;
-  return JSON.parse(decoder.decode(request.body.body));
+const present = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('Expected provider-contract fixture value to be present');
+  }
+  return value;
+};
+
+const isRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const requestJson = (
+  request: HttpClientRequest.HttpClientRequest,
+): Readonly<Record<string, unknown>> | undefined => {
+  if (request.body._tag !== 'Uint8Array') {
+    return undefined;
+  }
+  const value: unknown = JSON.parse(decoder.decode(request.body.body));
+  return isRecord(value) ? value : undefined;
 };
 
 const fakeHttp = (replies: ReadonlyArray<Reply>) => {
@@ -34,7 +49,7 @@ const fakeHttp = (replies: ReadonlyArray<Reply>) => {
   const client = HttpClient.make((request) =>
     Effect.suspend(() => {
       requests.push(request);
-      const reply = replies[Math.min(index++, replies.length - 1)]!;
+      const reply = present(replies[Math.min(index++, replies.length - 1)]);
       if ('transport' in reply) {
         return Effect.fail(
           new HttpClientError.HttpClientError({
@@ -268,9 +283,12 @@ const failureOf = (
         Effect.provide(Layer.merge(model, handlers)),
         Effect.result,
       );
-    if (result._tag === 'Success') throw new Error('expected provider failure');
-    if (!AiError.isAiError(result.failure))
+    if (result._tag === 'Success') {
+      throw new Error('expected provider failure');
+    }
+    if (!AiError.isAiError(result.failure)) {
       throw new Error('expected an AiError provider failure');
+    }
     return result.failure;
   });
 
@@ -296,13 +314,18 @@ const textAndCompleted = (
   let completed: unknown;
   for (const event of events) {
     if (event._tag === 'Part') {
-      const part = event.part as {
-        readonly type: string;
-        readonly delta?: string;
-      };
-      if (part.type === 'text-delta') text += part.delta;
+      const part = event['part'];
+      if (
+        isRecord(part) &&
+        part['type'] === 'text-delta' &&
+        typeof part['delta'] === 'string'
+      ) {
+        text += part['delta'];
+      }
     }
-    if (event._tag === 'Completed') completed = event;
+    if (event._tag === 'Completed') {
+      completed = event;
+    }
   }
   return { text, completed };
 };
@@ -315,8 +338,8 @@ describe('official Effect provider seam', () => {
         const fake = fakeHttp([{ status: 200, body: anthropicSuccess }]);
         const events = yield* runAgent(anthropicLayer(fake.layer));
         const observed = textAndCompleted(events);
-        const request = fake.requests[0]!;
-        const body = requestJson(request) as Record<string, unknown>;
+        const request = present(fake.requests[0]);
+        const body = present(requestJson(request));
 
         expect(request.url).toBe('https://anthropic.invalid/v1/messages');
         expect(body).toMatchObject({
@@ -347,8 +370,8 @@ describe('official Effect provider seam', () => {
         const fake = fakeHttp([{ status: 200, body: openAiSuccess }]);
         const events = yield* runAgent(openAiLayer(fake.layer));
         const observed = textAndCompleted(events);
-        const request = fake.requests[0]!;
-        const body = requestJson(request) as Record<string, unknown>;
+        const request = present(fake.requests[0]);
+        const body = present(requestJson(request));
 
         expect(request.url).toBe('https://openai.invalid/v1/responses');
         expect(body).toMatchObject({
@@ -533,8 +556,9 @@ describe('official Effect provider seam', () => {
         const fake = fakeHttp([{ status: 200, body }]);
         const error = yield* failureOf(makeLayer(fake.layer));
         expect(error.reason._tag).toBe('UnknownError');
-        if (error.reason._tag !== 'UnknownError')
+        if (error.reason._tag !== 'UnknownError') {
           throw new Error('expected normalized provider error');
+        }
         expect(error.reason.description).toContain(code);
         expect(error.reason.description).toContain('capacity exhausted');
         expect(error.reason.description).not.toContain('[object Object]');

@@ -6,7 +6,6 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import {
-  Crypto,
   Effect,
   Exit,
   Layer,
@@ -14,6 +13,7 @@ import {
   Ref,
   Schema,
   Stream,
+  type Crypto,
 } from 'effect';
 import {
   LanguageModel,
@@ -66,6 +66,13 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
+const present = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('Expected test fixture value to be present');
+  }
+  return value;
+};
+
 const says = (body: string): Response.StreamPartEncoded[] => [
   { type: 'text-start' as const, id: body },
   { type: 'text-delta' as const, id: body, delta: body },
@@ -81,16 +88,39 @@ const says = (body: string): Response.StreamPartEncoded[] => [
  * quietly taking turns, so "these two ran at the same time" is a test that
  * hangs when it is false instead of an assertion that cannot fail.
  */
+const noop = () => {};
+
+const errorTag = (exit: Exit.Exit<unknown, unknown>): string | undefined => {
+  if (Exit.isSuccess(exit)) {
+    return undefined;
+  }
+  const error = Exit.findErrorOption(exit);
+  if (Option.isNone(error)) {
+    return undefined;
+  }
+  if (
+    typeof error.value === 'object' &&
+    error.value !== null &&
+    '_tag' in error.value &&
+    typeof error.value._tag === 'string'
+  ) {
+    return error.value._tag;
+  }
+  return undefined;
+};
+
 const rendezvous = (participants: number): (() => Promise<void>) => {
   let arrived = 0;
-  let release: () => void = () => {};
+  let release: () => void = noop;
   const opened = new Promise<void>((resolve) => {
     release = resolve;
   });
 
   return () => {
     arrived += 1;
-    if (arrived >= participants) release();
+    if (arrived >= participants) {
+      release();
+    }
     return opened;
   };
 };
@@ -112,10 +142,12 @@ const provider = (
           Stream.unwrap(
             Effect.gen(function* () {
               asked.push(options.prompt);
-              if (hold !== undefined) yield* Effect.promise(hold);
+              if (hold !== undefined) {
+                yield* Effect.promise(hold);
+              }
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
               return Stream.fromIterable(
-                turns[Math.min(index, turns.length - 1)]!,
+                present(turns[Math.min(index, turns.length - 1)]),
               );
             }),
           ),
@@ -154,8 +186,7 @@ const run = <A, E>(
 ) =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(models),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(models, testLogLayer)),
     Effect.scoped,
   );
 
@@ -199,14 +230,12 @@ const failsOnceAfter = (
           Effect.gen(function* () {
             const value = yield* effect;
             if (!(yield* Ref.getAndSet(failed, true))) {
-              return yield* Effect.fail(
-                new LogStore.LogStoreError({
-                  path,
-                  operation,
-                  reason: 'storage',
-                  detail: `crashed after ${operation}`,
-                }),
-              );
+              return yield* new LogStore.LogStoreError({
+                path,
+                operation,
+                reason: 'storage',
+                detail: `crashed after ${operation}`,
+              });
             }
             return value;
           });
@@ -300,7 +329,9 @@ describe('suspended workflow boundaries', () => {
       const sourceRecords = yield* source.recorded;
       const suspendedAt = sourceRecords.at(-1)?.offset;
       expect(suspendedAt).toBeDefined();
-      if (suspendedAt === undefined) return;
+      if (suspendedAt === undefined) {
+        return;
+      }
 
       const branched = yield* Effect.exit(
         AgentLog.open(sourceId, {
@@ -316,12 +347,6 @@ describe('suspended workflow boundaries', () => {
           compatibility,
         ),
       );
-      const errorTag = (exit: typeof branched | typeof forked) => {
-        if (Exit.isSuccess(exit)) return undefined;
-        const error = Exit.findErrorOption(exit);
-        return Option.isSome(error) ? error.value._tag : undefined;
-      };
-
       expect(errorTag(branched)).toBe('SuspendedConversationError');
       expect(errorTag(forked)).toBe('SuspendedConversationError');
 
@@ -381,7 +406,7 @@ describe('two forks of one conversation', () => {
               turn,
               settled,
             ]);
-            const tip = (yield* session.recorded).at(-1)!.offset;
+            const tip = present((yield* session.recorded).at(-1)).offset;
 
             const [left, right] = yield* Effect.all(
               [
@@ -414,10 +439,12 @@ describe('two forks of one conversation', () => {
         // prompts are matched by content rather than by index because two
         // concurrent runs reach the provider in no fixed order.
         const prompts = observed.asked.map(textIn);
-        const forLeft = prompts.find((body) => body.includes('the left one'))!;
-        const forRight = prompts.find((body) =>
-          body.includes('the right one'),
-        )!;
+        const forLeft = present(
+          prompts.find((body) => body.includes('the left one')),
+        );
+        const forRight = present(
+          prompts.find((body) => body.includes('the right one')),
+        );
 
         expect(forLeft).toContain('checking now');
         expect(forLeft).not.toContain('the right one');
@@ -466,7 +493,7 @@ describe('a fork and the conversation it came from', () => {
           { ...turn, usage: { input: 31, output: 17 } },
           { ...settled, usage: { input: 31, output: 17 } },
         ]);
-        const tip = (yield* session.recorded).at(-1)!.offset;
+        const tip = present((yield* session.recorded).at(-1)).offset;
 
         const first = yield* ancestorConversation
           .forkFrom(tip, 'usage-fork', 'fork once')
@@ -504,7 +531,7 @@ describe('a fork and the conversation it came from', () => {
 
         const before = yield* readPath(ANCESTOR);
         yield* ancestorConversation
-          .forkFrom(before.at(-1)!.offset, 'a-fork', 'a new idea')
+          .forkFrom(present(before.at(-1)).offset, 'a-fork', 'a new idea')
           .pipe(Effect.orDie);
 
         const after = yield* readPath(ANCESTOR);
@@ -542,7 +569,7 @@ describe('a fork and the conversation it came from', () => {
           turn,
           settled,
         ]);
-        const tip = (yield* session.recorded).at(-1)!.offset;
+        const tip = present((yield* session.recorded).at(-1)).offset;
 
         yield* ancestorConversation
           .forkFrom(tip, 'a-fork', 'the fork question')
@@ -559,7 +586,7 @@ describe('a fork and the conversation it came from', () => {
           .pipe(Effect.orDie);
 
         const forkLog = yield* readPath('a-fork');
-        const laterFork = textIn(models.asked.at(-1)!);
+        const laterFork = textIn(present(models.asked.at(-1)));
         expect(laterFork).toContain('shared past');
         expect(laterFork).toContain('the fork question');
         // The two conversations diverged at the fork and never rejoined.
@@ -605,14 +632,15 @@ const branchedAncestor = Effect.fn('test.branchedAncestor')(function* (
   );
 
   yield* session.append([started('original'), said('abandoned answer'), turn]);
-  const opening = (yield* session.recorded)[0]!;
+  const opening = present((yield* session.recorded)[0]);
   yield* session.append([{ _tag: 'BranchedFrom', at: opening.offset }]);
 
   yield* session.append([started('real question'), said('answer A'), turn]);
-  const answerA = (yield* session.recorded).find(
+  const answerARecord = (yield* session.recorded).find(
     (envelope) =>
       envelope.record._tag === 'Text' && envelope.record.text === 'answer A',
-  )!;
+  );
+  const answerA = present(answerARecord);
 
   yield* session.append([
     {
@@ -637,7 +665,11 @@ const branchedAncestor = Effect.fn('test.branchedAncestor')(function* (
   ]);
   yield* session.append([said('after compaction'), turn, settled]);
 
-  return { session, answerA, tip: (yield* session.recorded).at(-1)!.offset };
+  return {
+    session,
+    answerA,
+    tip: present((yield* session.recorded).at(-1)).offset,
+  };
 });
 
 describe('the offset pointers in a copied prefix', () => {
@@ -665,17 +697,20 @@ describe('the offset pointers in a copied prefix', () => {
           },
         );
 
-        const copied = fork.history.find(
+        const copiedRecord = fork.history.find(
           (envelope) => envelope.record._tag === 'Compacted',
-        )!;
-        const answerA = fork.history.find(
+        );
+        const copied = present(copiedRecord);
+        const answerARecord = fork.history.find(
           (envelope) =>
             envelope.record._tag === 'Text' &&
             envelope.record.text === 'answer A',
-        )!;
+        );
+        const answerA = present(answerARecord);
 
-        if (copied.record._tag !== 'Compacted')
+        if (copied.record._tag !== 'Compacted') {
           throw new Error('expected copied compaction');
+        }
         const forkBoundary = copied.record.firstKept;
 
         // The premise: the same record sits at a different offset in the fork. If
@@ -731,7 +766,9 @@ describe('the offset pointers in a copied prefix', () => {
             .pipe(Effect.orDie);
 
           const ancestorSignals = yield* readSignals(ANCESTOR);
-          const ancestor = yield* branchedAncestor(ancestorSignals[1]!.offset);
+          const ancestor = yield* branchedAncestor(
+            present(ancestorSignals[1]).offset,
+          );
 
           const fork = yield* AgentLog.fork(
             LogVocabulary.ConversationId.make(ANCESTOR),
@@ -752,12 +789,14 @@ describe('the offset pointers in a copied prefix', () => {
             .pipe(Effect.orDie);
 
           const forkSignals = yield* readSignals('a-fork');
-          const copied = fork.history.find(
+          const copiedRecord = fork.history.find(
             (envelope) => envelope.record._tag === 'SignalReceived',
-          )!;
+          );
+          const copied = present(copiedRecord);
 
-          if (copied.record._tag !== 'SignalReceived')
+          if (copied.record._tag !== 'SignalReceived') {
             throw new Error('expected copied signal');
+          }
           const copiedAt = copied.record.at;
           const delivered = (yield* fork.drainSignalsBounded(1_000)).signals;
 
@@ -766,8 +805,8 @@ describe('the offset pointers in a copied prefix', () => {
           // from the beginning.
           expect(
             LogOffset.isAfter(
-              ancestorSignals[1]!.offset,
-              forkSignals[0]!.offset,
+              present(ancestorSignals[1]).offset,
+              present(forkSignals[0]).offset,
             ),
           ).toBe(true);
 
@@ -816,7 +855,7 @@ describe('forking into an id that is already a conversation', () => {
           turn,
           settled,
         ]);
-        const tip = (yield* session.recorded).at(-1)!.offset;
+        const tip = present((yield* session.recorded).at(-1)).offset;
 
         const occupied = yield* AgentLog.open(
           LogVocabulary.ConversationId.make('already-here'),
@@ -877,7 +916,7 @@ describe('fork seeding recovery', () => {
             },
             turn,
           ]);
-          const copiedText = (yield* ancestor.recorded)[1]!;
+          const copiedText = present((yield* ancestor.recorded)[1]);
           yield* ancestor.append([
             {
               _tag: 'Compacted',
@@ -892,7 +931,7 @@ describe('fork seeding recovery', () => {
             },
             settled,
           ]);
-          const tip = (yield* ancestor.recorded).at(-1)!.offset;
+          const tip = present((yield* ancestor.recorded).at(-1)).offset;
 
           const first = yield* AgentLog.fork(
             LogVocabulary.ConversationId.make(ANCESTOR),

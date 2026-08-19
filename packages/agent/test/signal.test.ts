@@ -32,6 +32,13 @@ const testLogLayer = Layer.mergeAll(
   NodeServices.layer,
 );
 
+const required = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('expected a value');
+  }
+  return value;
+};
+
 const logLayerWithFailingChanges = (failedPath: string) =>
   Layer.effect(
     LogStore.Service,
@@ -114,7 +121,7 @@ const model = (): Model => {
               Effect.gen(function* () {
                 const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
                 prompts.push(JSON.stringify(options.prompt));
-                return Stream.fromIterable(says(`turn ${index + 1}`));
+                return Stream.fromIterable(says(`turn ${String(index + 1)}`));
               }),
             ),
         });
@@ -143,8 +150,7 @@ const run = <A, E>(
 ) =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(scripted.layer),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(scripted.layer, testLogLayer)),
     Effect.scoped,
   );
 
@@ -181,7 +187,7 @@ describe('steering', () => {
       const again = yield* session.drainSignalsBounded(10);
       expect(again.signals).toEqual(first.signals);
 
-      const delivered = first.signals[0]!;
+      const delivered = required(first.signals[0]);
       yield* session.append([
         {
           _tag: 'SignalReceived',
@@ -249,15 +255,18 @@ describe('steering', () => {
 
         const result = yield* run(
           Effect.gen(function* () {
-            const conversation = Conversation.make(bounded, CONVERSATION);
-            yield* conversation
+            const boundedConversation = Conversation.make(
+              bounded,
+              CONVERSATION,
+            );
+            yield* boundedConversation
               .send({
                 kind: 'steer',
                 text: 'too large',
                 source: 'operator',
               })
               .pipe(Effect.orDie);
-            const events = yield* conversation
+            const events = yield* boundedConversation
               .stream('hi')
               .pipe(Stream.runCollect, Effect.orDie);
             return { events, records: yield* readAll() };
@@ -496,8 +505,11 @@ describe('cancelling', () => {
 
         const result = yield* run(
           Effect.gen(function* () {
-            const conversation = Conversation.make(persistent, CONVERSATION);
-            yield* conversation
+            const persistentConversation = Conversation.make(
+              persistent,
+              CONVERSATION,
+            );
+            yield* persistentConversation
               .send({
                 kind: 'cancel',
                 text: 'user closed the tab',
@@ -505,7 +517,7 @@ describe('cancelling', () => {
               })
               .pipe(Effect.orDie);
 
-            return yield* conversation.run('hi').pipe(Effect.orDie);
+            return yield* persistentConversation.run('hi').pipe(Effect.orDie);
           }),
           scripted,
         );
@@ -742,22 +754,25 @@ describe('cancelling', () => {
 
         const outcome = yield* run(
           Effect.gen(function* () {
-            const conversation = Conversation.make(bounded, CONVERSATION);
-            yield* conversation
+            const boundedConversation = Conversation.make(
+              bounded,
+              CONVERSATION,
+            );
+            yield* boundedConversation
               .send({
                 kind: 'steer',
                 text: 'older',
                 source: 'operator',
               })
               .pipe(Effect.orDie);
-            yield* conversation
+            yield* boundedConversation
               .send({
                 kind: 'cancel',
                 text: 'newer',
                 source: 'ui',
               })
               .pipe(Effect.orDie);
-            return yield* conversation.run('hi');
+            return yield* boundedConversation.run('hi');
           }).pipe(Effect.result),
           blocked,
         );
@@ -781,15 +796,17 @@ describe('cancelling', () => {
             .pipe(Effect.orDie);
           return yield* conversation.run('hi');
         }).pipe(
-          Effect.provide(scripted.layer),
           Effect.provide(
-            Layer.mergeAll(
-              logLayerWithFailingChanges(
-                AgentSignals.pathFor(
-                  LogVocabulary.ConversationId.make(CONVERSATION),
+            Layer.merge(
+              scripted.layer,
+              Layer.mergeAll(
+                logLayerWithFailingChanges(
+                  AgentSignals.pathFor(
+                    LogVocabulary.ConversationId.make(CONVERSATION),
+                  ),
                 ),
+                NodeServices.layer,
               ),
-              NodeServices.layer,
             ),
           ),
         );
@@ -867,7 +884,7 @@ describe('cancelling', () => {
 
         const result = yield* conversation
           .run('hi')
-          .pipe(Effect.provide(waitingProvider), Effect.provide(instrumented));
+          .pipe(Effect.provide(Layer.merge(waitingProvider, instrumented)));
         yield* Deferred.await(stopped);
 
         expect(result.text).toBe('after watcher failure');
@@ -904,7 +921,7 @@ describe('cancelling', () => {
 
           yield* conversation
             .run('hi')
-            .pipe(Effect.provide(scripted.layer), Effect.provide(instrumented));
+            .pipe(Effect.provide(Layer.merge(scripted.layer, instrumented)));
           yield* Deferred.await(stopped);
         });
       }),
@@ -984,10 +1001,10 @@ const workThenTalk = (toolTurns: number): Model => {
                 return Stream.fromIterable(
                   index < toolTurns
                     ? [
-                        CALL(`call-${index + 1}`, 'work'),
+                        CALL(`call-${String(index + 1)}`, 'work'),
                         { ...finish(), reason: 'tool-calls' as const },
                       ]
-                    : says(`turn ${index + 1}`),
+                    : says(`turn ${String(index + 1)}`),
                 );
               }),
             ),
@@ -1059,15 +1076,15 @@ describe('a signal that arrives while the run is in flight', () => {
       // Turn 1's boundary drained a signal stream that did not exist yet and
       // survived it; turn 2's tool sent one; turn 3 is where it lands.
       expect(scripted.prompts).toHaveLength(3);
-      expect(occurrences(scripted.prompts[0]!, 'also check the invoice')).toBe(
-        0,
-      );
-      expect(occurrences(scripted.prompts[1]!, 'also check the invoice')).toBe(
-        0,
-      );
-      expect(occurrences(scripted.prompts[2]!, 'also check the invoice')).toBe(
-        1,
-      );
+      expect(
+        occurrences(required(scripted.prompts[0]), 'also check the invoice'),
+      ).toBe(0);
+      expect(
+        occurrences(required(scripted.prompts[1]), 'also check the invoice'),
+      ).toBe(0);
+      expect(
+        occurrences(required(scripted.prompts[2]), 'also check the invoice'),
+      ).toBe(1);
 
       expect(received(written)).toMatchObject([
         { kind: 'steer', text: 'also check the invoice', step: 2 },
@@ -1231,11 +1248,21 @@ describe('a signal that arrives while the run is in flight', () => {
         // after it was sent and appears exactly once thereafter — a second copy is
         // what a cursor stuck at its starting offset would produce.
         expect(scripted.prompts).toHaveLength(4);
-        expect(occurrences(scripted.prompts[0]!, 'first instruction')).toBe(0);
-        expect(occurrences(scripted.prompts[1]!, 'first instruction')).toBe(1);
-        expect(occurrences(scripted.prompts[2]!, 'first instruction')).toBe(1);
-        expect(occurrences(scripted.prompts[3]!, 'first instruction')).toBe(1);
-        expect(occurrences(scripted.prompts[3]!, 'second instruction')).toBe(1);
+        expect(
+          occurrences(required(scripted.prompts[0]), 'first instruction'),
+        ).toBe(0);
+        expect(
+          occurrences(required(scripted.prompts[1]), 'first instruction'),
+        ).toBe(1);
+        expect(
+          occurrences(required(scripted.prompts[2]), 'first instruction'),
+        ).toBe(1);
+        expect(
+          occurrences(required(scripted.prompts[3]), 'first instruction'),
+        ).toBe(1);
+        expect(
+          occurrences(required(scripted.prompts[3]), 'second instruction'),
+        ).toBe(1);
       }),
   );
 
@@ -1261,9 +1288,9 @@ describe('a signal that arrives while the run is in flight', () => {
             ]),
           );
 
-          const conversation = Conversation.make(sending, CONVERSATION);
-          yield* conversation.run('hi').pipe(Effect.orDie);
-          yield* conversation.run('again').pipe(Effect.orDie);
+          const sendingConversation = Conversation.make(sending, CONVERSATION);
+          yield* sendingConversation.run('hi').pipe(Effect.orDie);
+          yield* sendingConversation.run('again').pipe(Effect.orDie);
           return yield* readAll();
         }),
         scripted,

@@ -1,7 +1,7 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Clock, Crypto, Effect, Schema, Semaphore } from 'effect';
+import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { Clock, Effect, Schema, Semaphore, type Crypto } from 'effect';
 
 import * as AgentIds from './ids.js';
 
@@ -27,7 +27,9 @@ const utf8Length = (text: string): number => {
   let bytes = 0;
   for (const character of text) {
     const codePoint = character.codePointAt(0);
-    if (codePoint === undefined) continue;
+    if (codePoint === undefined) {
+      continue;
+    }
     bytes +=
       codePoint <= 0x7f
         ? 1
@@ -140,13 +142,11 @@ const validateSignal = Effect.fn('AgentSignals.validate')(function* (
   );
   const bytes = utf8Length(signal.text) + utf8Length(signal.source);
   if (bytes > MAX_SIGNAL_BYTES) {
-    return yield* Effect.fail(
-      LogStore.makeError(
-        path,
-        'append',
-        'encoding',
-        `signal payload is ${bytes} bytes; maximum is ${MAX_SIGNAL_BYTES}`,
-      ),
+    return yield* LogStore.makeError(
+      path,
+      'append',
+      'encoding',
+      `signal payload is ${String(bytes)} bytes; maximum is ${String(MAX_SIGNAL_BYTES)}`,
     );
   }
   return signal;

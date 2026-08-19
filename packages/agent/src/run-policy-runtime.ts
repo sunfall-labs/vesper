@@ -90,13 +90,11 @@ export const create = Effect.fn('RunPolicy.create')(function* (
     const now = yield* Clock.currentTimeMillis;
     const remaining = started + limits.wallClockMillis - now;
     if (remaining <= 0) {
-      return yield* Effect.fail(
-        error({
-          limit: 'deadline',
-          used: now - started,
-          maximum: limits.wallClockMillis,
-        }),
-      );
+      return yield* error({
+        limit: 'deadline',
+        used: now - started,
+        maximum: limits.wallClockMillis,
+      });
     }
     return remaining;
   });
@@ -113,7 +111,7 @@ export const create = Effect.fn('RunPolicy.create')(function* (
         return [used, { ...current, [field]: used }] as const;
       });
       if (next > maximum) {
-        return yield* Effect.fail(error({ limit, used: next, maximum }));
+        return yield* error({ limit, used: next, maximum });
       }
     });
 
@@ -126,22 +124,18 @@ export const create = Effect.fn('RunPolicy.create')(function* (
         outputTokens: current.outputTokens + usage.output,
       }));
       if (next.inputTokens > limits.maxInputTokens) {
-        return yield* Effect.fail(
-          error({
-            limit: 'input_tokens',
-            used: next.inputTokens,
-            maximum: limits.maxInputTokens,
-          }),
-        );
+        return yield* error({
+          limit: 'input_tokens',
+          used: next.inputTokens,
+          maximum: limits.maxInputTokens,
+        });
       }
       if (next.outputTokens > limits.maxOutputTokens) {
-        return yield* Effect.fail(
-          error({
-            limit: 'output_tokens',
-            used: next.outputTokens,
-            maximum: limits.maxOutputTokens,
-          }),
-        );
+        return yield* error({
+          limit: 'output_tokens',
+          used: next.outputTokens,
+          maximum: limits.maxOutputTokens,
+        });
       }
     });
 
@@ -180,7 +174,9 @@ export const create = Effect.fn('RunPolicy.create')(function* (
           },
         };
       }
-      if (kind === 'cancel') return { accepted: true, bytes };
+      if (kind === 'cancel') {
+        return { accepted: true, bytes };
+      }
       const total = yield* Ref.modify(counters, (current) => {
         const steeredBytes = current.steeredBytes + bytes;
         return [steeredBytes, { ...current, steeredBytes }] as const;

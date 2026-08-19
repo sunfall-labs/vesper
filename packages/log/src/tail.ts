@@ -58,8 +58,8 @@ export const from = (
         LogStore.LogStoreError
       > = Stream.unwrap(
         Effect.gen(function* () {
-          const after = yield* Ref.get(cursor);
-          const page = yield* store.read(path, { after }).pipe(
+          const cursorAfter = yield* Ref.get(cursor);
+          const page = yield* store.read(path, { after: cursorAfter }).pipe(
             // A tail may be installed before its producer creates the stream.
             // `changes` deliberately supports that ordering; keep the
             // subscription alive until a later append wakes this drain.
@@ -68,7 +68,7 @@ export const from = (
               () =>
                 Effect.succeed({
                   records: [],
-                  cursor: after,
+                  cursor: cursorAfter,
                   upToDate: true,
                 } satisfies LogStore.Page),
             ),

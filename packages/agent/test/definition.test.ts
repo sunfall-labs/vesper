@@ -39,7 +39,7 @@ const recording = (
         Effect.gen(function* () {
           yield* Ref.set(
             seenTools,
-            options.tools.map((tool) => tool.name),
+            options.tools.map((tool) => String(tool.name)),
           );
           yield* Ref.set(seenSystem, systemOf(options));
           return [{ type: 'text' as const, text: 'ok' }, finish];
@@ -49,7 +49,7 @@ const recording = (
           Effect.gen(function* () {
             yield* Ref.set(
               seenTools,
-              options.tools.map((tool) => tool.name),
+              options.tools.map((tool) => String(tool.name)),
             );
             yield* Ref.set(seenSystem, systemOf(options));
             return Stream.fromIterable<Response.StreamPartEncoded>([
@@ -66,7 +66,7 @@ const recording = (
 const systemOf = (options: LanguageModel.ProviderOptions): string =>
   options.prompt.content
     .filter((message) => message.role === 'system')
-    .map((message) => String(message.content))
+    .map((message) => message.content)
     .join('\n');
 
 const ping = Tool.make('ping', {
@@ -160,9 +160,13 @@ const drive = <R>(agent: Agent.Child<string, R>) =>
     yield* agent
       .run('go')
       .pipe(
-        Effect.provide(pingHandlers),
-        Effect.provide(recording(tools, system)),
-        Effect.provide(NodeServices.layer),
+        Effect.provide(
+          Layer.mergeAll(
+            pingHandlers,
+            recording(tools, system),
+            NodeServices.layer,
+          ),
+        ),
       );
 
     return { tools: yield* Ref.get(tools), system: yield* Ref.get(system) };

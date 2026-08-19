@@ -84,7 +84,7 @@ const pad = (value: bigint): string =>
  */
 export const fromSeq = (seq: bigint): Offset => {
   if (seq < 0n || seq > MAX_SEQ) {
-    throw new RangeError(`Offset sequence out of range: ${seq}`);
+    throw new RangeError(`Offset sequence out of range: ${String(seq)}`);
   }
   return Offset.make(
     `${pad(seq / COMPONENT_SPAN)}_${pad(seq % COMPONENT_SPAN)}`,
@@ -92,7 +92,7 @@ export const fromSeq = (seq: bigint): Offset => {
 };
 
 const PATTERN = new RegExp(
-  `^(\\d{${COMPONENT_DIGITS}})_(\\d{${COMPONENT_DIGITS}})$`,
+  `^(\\d{${String(COMPONENT_DIGITS)}})_(\\d{${String(COMPONENT_DIGITS)}})$`,
 );
 
 /**
@@ -104,15 +104,19 @@ const PATTERN = new RegExp(
  */
 export const toSeq = (offset: Offset): Effect.Effect<bigint, OffsetError> =>
   Effect.suspend(() => {
-    if (offset === START) return Effect.succeed(-1n);
+    if (offset === START) {
+      return Effect.succeed(-1n);
+    }
 
     const match = PATTERN.exec(String(offset));
     if (match === null) {
       return Effect.fail(new OffsetError({ offset }));
     }
-    return Effect.succeed(
-      BigInt(match[1]!) * COMPONENT_SPAN + BigInt(match[2]!),
-    );
+    const [, high, low] = match;
+    if (high === undefined || low === undefined) {
+      return Effect.fail(new OffsetError({ offset }));
+    }
+    return Effect.succeed(BigInt(high) * COMPONENT_SPAN + BigInt(low));
   });
 
 /** Decode an offset arriving from persistence or another external boundary. */

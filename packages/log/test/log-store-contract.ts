@@ -1,9 +1,10 @@
-import { Deferred, Effect, Fiber, Layer, Option, Stream } from 'effect';
+import { Deferred, Effect, Fiber, Option, Stream } from 'effect';
+import type { Layer } from 'effect';
 import { describe, expect, it } from 'vitest';
 
 import { LogStore } from '../src/log-store.js';
 import { LogOffset } from '../src/offset.js';
-import { ConversationRecord } from '../src/record.js';
+import type { ConversationRecord } from '../src/record.js';
 import { RecordBatch } from '../src/record-batch.js';
 import { Tail } from '../src/tail.js';
 import { LogVocabulary } from '../src/vocabulary.js';
@@ -39,7 +40,16 @@ const producer3 = LogVocabulary.ProducerId.make('producer-3');
 const producerImpostor = LogVocabulary.ProducerId.make('producer-impostor');
 const toolCallId = LogVocabulary.ToolCallId.make('c1');
 const agentRevision = LogVocabulary.AgentRevision.make('1');
-const producerSequence = LogVocabulary.ProducerSequence.make;
+const producerSequence = (value: number): LogVocabulary.ProducerSequence =>
+  LogVocabulary.ProducerSequence.make(value);
+
+const at = <T>(values: ReadonlyArray<T>, index: number): T => {
+  const value = values[index];
+  if (value === undefined) {
+    throw new Error(`missing value at index ${String(index)}`);
+  }
+  return value;
+};
 
 const text = (
   value: string,
@@ -75,15 +85,15 @@ export interface ContractOptions<E> {
   ) => Layer.Layer<LogStore.Service, E>;
 }
 
+const runIn = <E, A>(
+  layer: Layer.Layer<LogStore.Service, E>,
+  effect: Effect.Effect<A, unknown, LogStore.Service>,
+): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(layer)));
+
 export const logStoreContract = <E>(
   name: string,
   options: ContractOptions<E>,
 ): void => {
-  const runIn = <A>(
-    layer: Layer.Layer<LogStore.Service, E>,
-    effect: Effect.Effect<A, unknown, LogStore.Service>,
-  ): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(layer)));
-
   const run = <A>(
     effect: Effect.Effect<A, unknown, LogStore.Service>,
   ): Promise<A> => runIn(options.layer, effect);
@@ -336,9 +346,14 @@ export const logStoreContract = <E>(
         }),
       );
 
-      expect([...offsets].sort()).toEqual(offsets);
-      expect(LogOffset.isAfter(offsets[1]!, offsets[0]!)).toBe(true);
-      expect(LogOffset.isAfter(offsets[0]!, LogOffset.START)).toBe(true);
+      const sorted = offsets.reduce<LogOffset.Offset[]>((result, offset) => {
+        const index = result.findIndex((existing) => existing > offset);
+        result.splice(index === -1 ? result.length : index, 0, offset);
+        return result;
+      }, []);
+      expect(sorted).toEqual(offsets);
+      expect(LogOffset.isAfter(at(offsets, 1), at(offsets, 0))).toBe(true);
+      expect(LogOffset.isAfter(at(offsets, 0), LogOffset.START)).toBe(true);
     });
 
     it('reads exclusively after the supplied offset', async () => {
@@ -348,7 +363,7 @@ export const logStoreContract = <E>(
           yield* append(0, [text('one'), text('two')]);
           const all = yield* store.read('exclusive');
           return yield* store.read('exclusive', {
-            after: all.records[0]!.offset,
+            after: at(all.records, 0).offset,
           });
         }),
       );
@@ -363,7 +378,7 @@ export const logStoreContract = <E>(
           yield* append(0, [text('one'), text('two'), text('three')]);
           const all = yield* store.read('mid-batch');
           return yield* store.read('mid-batch', {
-            after: all.records[1]!.offset,
+            after: at(all.records, 1).offset,
           });
         }),
       );
@@ -440,7 +455,7 @@ export const logStoreContract = <E>(
             yield* append(0, [text('one'), text('two'), text('three')]);
             const all = yield* store.read('backwards-exclusive');
             return yield* store.readBackwards('backwards-exclusive', {
-              before: all.records[2]!.offset,
+              before: at(all.records, 2).offset,
             });
           }),
         );
@@ -968,9 +983,12 @@ export const logStoreContract = <E>(
         params: { nested: { value: 'before' } },
       });
       const record = read.records[0]?.record;
-      expect(record?._tag).toBe('ToolCall');
+      if (record === undefined) {
+        throw new Error('encoded-clone read returned no record');
+      }
+      expect(record._tag).toBe('ToolCall');
       if (
-        record?._tag === 'ToolCall' &&
+        record._tag === 'ToolCall' &&
         typeof record.params === 'object' &&
         record.params !== null
       ) {

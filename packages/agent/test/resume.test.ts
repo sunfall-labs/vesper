@@ -5,7 +5,7 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { beforeEach, describe, expect, it } from '@effect/vitest';
-import { Crypto, Effect, Layer, Ref, Schema, Stream } from 'effect';
+import { type Crypto, Effect, Layer, Ref, Schema, Stream } from 'effect';
 import {
   type LanguageModel as LanguageModelNamespace,
   LanguageModel,
@@ -27,6 +27,13 @@ const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
   NodeServices.layer,
 );
+
+const required = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('expected a value');
+  }
+  return value;
+};
 
 // Resumption from the log — the writer half, and the parity evidence for
 // deleting `@sunfall/vesper-durable`'s checkpointer.
@@ -128,7 +135,7 @@ const provider = (
               asked.push(options.prompt);
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
               return Stream.fromIterable(
-                turns[Math.min(index, turns.length - 1)]!,
+                required(turns[Math.min(index, turns.length - 1)]),
               );
             }),
           ),
@@ -177,11 +184,7 @@ const run = <A, E>(
   >,
   models: Layer.Layer<LanguageModel.LanguageModel>,
 ) =>
-  effect.pipe(
-    Effect.orDie,
-    Effect.provide(models),
-    Effect.provide(testLogLayer),
-  );
+  effect.pipe(Effect.orDie, Effect.provide(Layer.merge(models, testLogLayer)));
 
 const rolesOf = (prompt: Prompt.Prompt) =>
   prompt.content.map((message) => message.role);
@@ -190,7 +193,7 @@ const rolesOf = (prompt: Prompt.Prompt) =>
 const textIn = (prompt: Prompt.Prompt): string =>
   JSON.stringify(prompt.content);
 
-const readAll = Effect.fn('test.readAll')(function* (path = PATH) {
+const readAll = Effect.fn('test.readAll')(function* (path: string = PATH) {
   const store = yield* LogStore.Service;
   const page = yield* store.read(path, { limit: 1000 });
   return page.records;
@@ -223,8 +226,7 @@ describe('resuming a crashed run', () => {
               Stream.takeUntil(
                 (event) =>
                   AgentEvents.isPart(event) &&
-                  (event.part as Response.StreamPartEncoded).type ===
-                    'tool-result',
+                  event.part.type === 'tool-result',
               ),
               Stream.runDrain,
               Effect.orDie,
@@ -273,7 +275,7 @@ describe('resuming a crashed run', () => {
         expect(observed.dispatchedTotal).toBe(1);
 
         // The resumed call was given the conversation, not a fresh start.
-        const resumed = observed.asked[1]!;
+        const resumed = required(observed.asked[1]);
         expect(rolesOf(resumed)).toEqual([
           'system',
           'user',
@@ -302,9 +304,7 @@ describe('resuming a crashed run', () => {
           yield* conversation.stream('hi').pipe(
             Stream.takeUntil(
               (event) =>
-                AgentEvents.isPart(event) &&
-                (event.part as Response.StreamPartEncoded).type ===
-                  'tool-result',
+                AgentEvents.isPart(event) && event.part.type === 'tool-result',
             ),
             Stream.runDrain,
             Effect.orDie,
@@ -348,8 +348,8 @@ describe('resuming an ordinary conversation', () => {
         models.layer,
       );
 
-      expect(rolesOf(asked[0]!)).toEqual(['system', 'user']);
-      expect(textIn(asked[0]!)).toContain('be terse');
+      expect(rolesOf(required(asked[0]))).toEqual(['system', 'user']);
+      expect(textIn(required(asked[0]))).toContain('be terse');
     }),
   );
 
@@ -368,15 +368,15 @@ describe('resuming an ordinary conversation', () => {
         models.layer,
       );
 
-      expect(rolesOf(asked[1]!)).toEqual([
+      expect(rolesOf(required(asked[1]))).toEqual([
         'system',
         'user',
         'assistant',
         'user',
       ]);
-      expect(textIn(asked[1]!)).toContain('first');
-      expect(textIn(asked[1]!)).toContain('done');
-      expect(textIn(asked[1]!)).toContain('second');
+      expect(textIn(required(asked[1]))).toContain('first');
+      expect(textIn(required(asked[1]))).toContain('done');
+      expect(textIn(required(asked[1]))).toContain('second');
     }),
   );
 
@@ -398,8 +398,8 @@ describe('resuming an ordinary conversation', () => {
         models.layer,
       );
 
-      expect(textIn(observed.asked[1]!)).toContain('first');
-      expect(textIn(observed.asked[1]!)).toContain('second');
+      expect(textIn(required(observed.asked[1]))).toContain('first');
+      expect(textIn(required(observed.asked[1]))).toContain('second');
       expect(observed.completed).toMatchObject({
         _tag: 'Completed',
         usage: {
@@ -427,7 +427,7 @@ describe('resuming an ordinary conversation', () => {
         models.layer,
       );
 
-      expect(rolesOf(asked[1]!)).toEqual(['system', 'user']);
+      expect(rolesOf(required(asked[1]))).toEqual(['system', 'user']);
     }),
   );
 
@@ -479,9 +479,12 @@ describe('resuming an ordinary conversation', () => {
 
         yield* run(
           Effect.gen(function* () {
-            const conversation = Conversation.make(anchored, CONVERSATION);
-            yield* conversation.run('first');
-            yield* conversation.run('second');
+            const anchoredConversation = Conversation.make(
+              anchored,
+              CONVERSATION,
+            );
+            yield* anchoredConversation.run('first');
+            yield* anchoredConversation.run('second');
           }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
           models.layer,
         );
@@ -513,7 +516,7 @@ describe('resuming provider-executed tool calls', () => {
         providerExecuted: true,
       });
 
-      const assistant = models.asked[2]!.content.find(
+      const assistant = required(models.asked[2]).content.find(
         (message) => message.role === 'assistant',
       );
       const toolCall = assistant?.content.find(

@@ -3,7 +3,7 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, beforeAll, describe, expect, it } from '@effect/vitest';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import { ConversationRecord } from '@sunfall/vesper-log/record';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Tail } from '@sunfall/vesper-log/tail';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
@@ -38,8 +38,12 @@ describeIntegration('LogStore Postgres backend', () => {
   }, 180_000);
 
   afterAll(async () => {
-    if (database) await database.cleanup();
-    if (harness) await harness.stop();
+    if (database) {
+      await database.cleanup();
+    }
+    if (harness) {
+      await harness.stop();
+    }
   }, 120_000);
 
   const pgLayer = Layer.unwrap(
@@ -149,8 +153,12 @@ describeIntegration('LogStore Postgres backend', () => {
                  AND query = 'LISTEN "vesper_listener_failure"'
                ORDER BY backend_start DESC LIMIT 1`,
                 );
+                const listener = rows[0];
+                if (listener === undefined) {
+                  throw new Error('listener backend row missing');
+                }
                 yield* Effect.promise(() =>
-                  awaitTerminate(database, rows[0]!.pid),
+                  awaitTerminate(database, listener.pid),
                 );
                 return yield* Fiber.join(fiber);
               }),
@@ -387,7 +395,9 @@ const waitForListener = async (
        WHERE datname = current_database() AND query = $1`,
       [`LISTEN "${channel}"`],
     );
-    if (result.rows[0]?.count !== '0') return;
+    if (result.rows[0]?.count !== '0') {
+      return;
+    }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`Listener did not become ready for ${channel}`);

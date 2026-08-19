@@ -22,7 +22,7 @@ export class RunPolicyExhausted extends Schema.TaggedError<RunPolicyExhausted>(
   maximum: Schema.Natural,
 }) {
   override get message(): string {
-    return `Hard run budget ${this.limit} exhausted (${this.used}/${this.maximum})`;
+    return `Hard run budget ${this.limit} exhausted (${String(this.used)}/${String(this.maximum)})`;
   }
 }
 
@@ -72,33 +72,40 @@ export const defaultLimits: Limits = Object.freeze({
   maxSteeredBytes: 256 * 1024,
 });
 
-const safeInteger = (
-  name: keyof Limits,
-  value: number,
-  minimum: number,
-): number => {
+const safeInteger = (name: string, value: number, minimum: number): number => {
   if (!Number.isSafeInteger(value) || value < minimum) {
     throw new RangeError(
-      `RunPolicy.${name} must be a safe integer >= ${minimum}`,
+      `RunPolicy.${name} must be a safe integer >= ${String(minimum)}`,
     );
   }
   return value;
 };
 
+const minimumByLimit: Readonly<Record<string, number>> & {
+  readonly [Name in keyof Limits]: number;
+} = {
+  maxTurns: 0,
+  maxModelCalls: 0,
+  maxDelegatedTasks: 0,
+  maxDelegationDepth: 0,
+  maxConcurrentChildren: 1,
+  maxToolConcurrency: 1,
+  wallClockMillis: 1,
+  maxInputTokens: 0,
+  maxOutputTokens: 0,
+  maxSignalBytes: 0,
+  maxSignalsPerBoundary: 1,
+  maxSteeredBytes: 0,
+};
+
 export const make = (limits: Partial<Limits> = {}): Limits => {
   const merged = { ...defaultLimits, ...limits };
   for (const [name, value] of Object.entries(merged)) {
-    const key = name as keyof Limits;
-    safeInteger(
-      key,
-      value,
-      key === 'maxConcurrentChildren' ||
-        key === 'maxToolConcurrency' ||
-        key === 'wallClockMillis' ||
-        key === 'maxSignalsPerBoundary'
-        ? 1
-        : 0,
-    );
+    const minimum = minimumByLimit[name];
+    if (minimum === undefined) {
+      throw new RangeError(`RunPolicy.${name} is not a recognized limit`);
+    }
+    safeInteger(name, value, minimum);
   }
   return Object.freeze(merged);
 };

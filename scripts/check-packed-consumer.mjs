@@ -17,6 +17,30 @@ const temporaryRoot = await mkdtemp(join(tmpdir(), 'vesper-packed-consumer-'));
 const packDirectory = resolve(temporaryRoot, 'packs');
 const consumerDirectory = resolve(temporaryRoot, 'consumer');
 
+/** @typedef {Record<string, unknown>} JsonObject */
+
+/** @param {unknown} value @returns {value is JsonObject} */
+const isObject = (value) =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** @param {string} source @param {string} description @returns {JsonObject} */
+const parseObject = (source, description) => {
+  const value = /** @type {unknown} */ (JSON.parse(source));
+  if (!isObject(value)) {
+    throw new Error(`${description} must be a JSON object`);
+  }
+  return value;
+};
+
+/** @param {string} source @param {string} description @returns {JsonObject[]} */
+const parseArray = (source, description) => {
+  const value = /** @type {unknown} */ (JSON.parse(source));
+  if (!Array.isArray(value) || !value.every(isObject)) {
+    throw new Error(`${description} must be an array of JSON objects`);
+  }
+  return value;
+};
+
 const run = (args, options = {}) =>
   execFileSync('nub', args, {
     cwd: root,
@@ -25,7 +49,12 @@ const run = (args, options = {}) =>
   });
 
 const exportedTarget = (target) => {
-  const path = typeof target === 'string' ? target : target.default;
+  const path =
+    typeof target === 'string'
+      ? target
+      : isObject(target) && typeof target['default'] === 'string'
+        ? target['default']
+        : undefined;
   if (typeof path !== 'string') {
     throw new Error('Export map entry has no runtime or asset target');
   }
@@ -44,14 +73,19 @@ try {
   const packages = [];
 
   for (const entry of await readdir(packageRoot, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory()) {
+      continue;
+    }
 
     const directory = resolve(packageRoot, entry.name);
-    const manifest = JSON.parse(
+    const manifest = parseObject(
       await readFile(resolve(directory, 'package.json'), 'utf8'),
+      `${entry.name}/package.json`,
     );
-    if (manifest.private === true) continue;
-    const packed = JSON.parse(
+    if (manifest['private'] === true) {
+      continue;
+    }
+    const packed = parseArray(
       run(
         [
           '--cwd',
@@ -63,21 +97,31 @@ try {
         ],
         { capture: true },
       ),
+      `${entry.name} pack result`,
     );
-    const [artifact] = packed;
+    const artifact = packed.at(0);
+    const name = manifest['name'];
+    const version = manifest['version'];
+    const exports = manifest['exports'];
 
-    if (packed.length !== 1 || artifact.name !== manifest.name) {
-      throw new Error(`Unexpected pack result for ${manifest.name}`);
+    if (
+      typeof name !== 'string' ||
+      typeof version !== 'string' ||
+      !isObject(exports) ||
+      artifact === undefined ||
+      typeof artifact['name'] !== 'string' ||
+      typeof artifact['filename'] !== 'string' ||
+      packed.length !== 1 ||
+      artifact['name'] !== name
+    ) {
+      throw new Error(`Unexpected pack result for ${entry.name}`);
     }
 
-    dependencies[manifest.name] = `file:${resolve(
-      packDirectory,
-      artifact.filename,
-    )}`;
-    packages.push({ name: manifest.name, version: manifest.version });
+    dependencies[name] = `file:${resolve(packDirectory, artifact['filename'])}`;
+    packages.push({ name, version });
 
-    for (const [subpath, target] of Object.entries(manifest.exports)) {
-      const specifier = `${manifest.name}/${subpath.slice(2)}`;
+    for (const [subpath, target] of Object.entries(exports)) {
+      const specifier = `${name}/${subpath.slice(2)}`;
       if (exportedTarget(target).endsWith('.js')) {
         imports.push(specifier);
       } else {

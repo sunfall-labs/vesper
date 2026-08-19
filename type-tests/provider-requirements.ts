@@ -2,17 +2,14 @@ import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
 import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
 import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import { Config, Layer } from 'effect';
-import { LanguageModel, Model } from 'effect/unstable/ai';
-import { HttpClient } from 'effect/unstable/http';
+import type { LanguageModel, Model } from 'effect/unstable/ai';
+import type { HttpClient } from 'effect/unstable/http';
 
 type Needs<L> =
   L extends Layer.Layer<infer _Out, infer _Err, infer R> ? R : never;
 type Provides<L> =
   L extends Layer.Layer<infer Out, infer _Err, infer _R> ? Out : never;
-type Equal<A, B> =
-  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-    ? 'yes'
-    : 'no';
+type Equal<A, B> = [A] extends [B] ? ([B] extends [A] ? 'yes' : 'no') : 'no';
 type Has<Member, Union> = [Member] extends [Union] ? 'yes' : 'no';
 
 const anthropic = AnthropicLanguageModel.model('claude-sonnet-4-6', {

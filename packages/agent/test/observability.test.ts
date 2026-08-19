@@ -269,10 +269,9 @@ describe('agent observability spans', () => {
 
         yield* parent.stream('hi').pipe(
           Stream.runDrain,
-          Effect.provide(model.layer),
           // Delegation carries the child-session Crypto requirement even
           // when nothing records, so the type-tests project sees it.
-          Effect.provide(NodeCrypto.layer),
+          Effect.provide(Layer.merge(model.layer, NodeCrypto.layer)),
           Effect.provideService(Tracer.Tracer, tracer),
         );
 
@@ -349,9 +348,9 @@ describe('agent observability spans', () => {
           .run('hi')
           .pipe(
             Effect.orDie,
-            Effect.provide(model.layer),
-            Effect.provide(testLogLayer),
-            Effect.provide(NodeCrypto.layer),
+            Effect.provide(
+              Layer.mergeAll(model.layer, testLogLayer, NodeCrypto.layer),
+            ),
             Effect.provideService(Tracer.Tracer, tracer),
             Effect.scoped,
           );

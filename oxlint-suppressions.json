@@ -1,0 +1,838 @@
+{
+  "benchmarks/src/vesper.ts": {
+    "effecttsgo/global-date-in-effect": {
+      "count": 1
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    }
+  },
+  "benchmarks/src/workflow-operational.ts": {
+    "effecttsgo/global-console": {
+      "count": 1
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    }
+  },
+  "examples/approval-cli/src/cli-wrapper.test.ts": {
+    "effecttsgo/async-function": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 1
+    }
+  },
+  "examples/approval-cli/src/main.ts": {
+    "typescript/switch-exhaustiveness-check": {
+      "count": 1
+    }
+  },
+  "examples/compliance-relay/src/main.ts": {
+    "effecttsgo/multiple-effect-provide": {
+      "count": 1
+    }
+  },
+  "examples/compliance-relay/src/sentences.test.ts": {
+    "effecttsgo/return-effect-in-gen": {
+      "count": 3
+    }
+  },
+  "examples/live-smoke/src/main.ts": {
+    "effecttsgo/async-function": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 2
+    },
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 4
+    },
+    "effecttsgo/schema-number": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-boolean-literal-compare": {
+      "count": 1
+    },
+    "typescript/restrict-template-expressions": {
+      "count": 26
+    },
+    "typescript/switch-exhaustiveness-check": {
+      "count": 2
+    }
+  },
+  "examples/provider-contract/src/provider-contract.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 6
+    },
+    "effecttsgo/return-effect-in-gen": {
+      "count": 3
+    },
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 2
+    }
+  },
+  "packages/agent/src/agent.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 4
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 8
+    },
+    "typescript/consistent-return": {
+      "count": 1
+    },
+    "typescript/no-duplicate-type-constituents": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-type-parameters": {
+      "count": 1
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 10
+    },
+    "typescript/switch-exhaustiveness-check": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/code-executor-node.ts": {
+    "effecttsgo/global-timers": {
+      "count": 1
+    },
+    "effecttsgo/global-timers-in-effect": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/code-executor.ts": {
+    "effecttsgo/extends-native-error": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/code-mode.ts": {
+    "effecttsgo/extends-native-error": {
+      "count": 1
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    },
+    "typescript/consistent-return": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 6
+    }
+  },
+  "packages/agent/src/dispatch.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 3
+    },
+    "effecttsgo/catch-to-or-else-succeed": {
+      "count": 2
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 4
+    }
+  },
+  "packages/agent/src/dynamic-toolkit.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 3
+    }
+  },
+  "packages/agent/src/interception.ts": {
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/log.ts": {
+    "typescript/consistent-return": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 5
+    }
+  },
+  "packages/agent/src/model-plan.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    }
+  },
+  "packages/agent/src/result-overflow.ts": {
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/run-policy-runtime.ts": {
+    "typescript/consistent-return": {
+      "count": 2
+    }
+  },
+  "packages/agent/src/state.ts": {
+    "typescript/no-unnecessary-type-parameters": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/stop.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    }
+  },
+  "packages/agent/src/subagent-runtime.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    },
+    "effecttsgo/multiple-catch-tag": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/testing.ts": {
+    "effecttsgo/instance-of-schema": {
+      "count": 2
+    },
+    "typescript/restrict-template-expressions": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/workflow.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/prefer-typed-schema-decoder": {
+      "count": 1
+    },
+    "typescript/no-redundant-type-constituents": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 2
+    }
+  },
+  "packages/agent/test/assertions.test.ts": {
+    "typescript/no-explicit-any": {
+      "count": 1
+    },
+    "unicorn/no-array-sort": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/child-session.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    },
+    "effecttsgo/unnecessary-effect-gen": {
+      "count": 1
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/code-mode.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 9
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 2
+    },
+    "typescript/no-unsafe-return": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    },
+    "unicorn/no-array-sort": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/compaction.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 3
+    },
+    "effecttsgo/unnecessary-fail-yieldable-error": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/compatibility.test.ts": {
+    "effecttsgo/instance-of-schema": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 2
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/concurrent-conversations.operational.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 4
+    }
+  },
+  "packages/agent/test/conversation.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    }
+  },
+  "packages/agent/test/dispatch.test.ts": {
+    "effecttsgo/global-date": {
+      "count": 2
+    },
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/dynamic-toolkit.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/eval.test.ts": {
+    "effecttsgo/prefer-typed-schema-decoder": {
+      "count": 1
+    },
+    "effecttsgo/schema-sync-in-effect": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/fork.test.ts": {
+    "effecttsgo/new-promise": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/interception-typing.test.ts": {
+    "effecttsgo/floating-effect": {
+      "count": 2
+    }
+  },
+  "packages/agent/test/interception.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 5
+    },
+    "effecttsgo/unnecessary-effect-gen": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/log.test.ts": {
+    "effecttsgo/multiple-effect-provide": {
+      "count": 2
+    },
+    "effecttsgo/redundant-or-die": {
+      "count": 1
+    },
+    "typescript/no-unsafe-argument": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/model-plan.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/prompt-transport.test.ts": {
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/recording-policy.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/result-overflow.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    },
+    "unicorn/no-array-sort": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/resume.test.ts": {
+    "effecttsgo/redundant-or-die": {
+      "count": 4
+    }
+  },
+  "packages/agent/test/settlement.test.ts": {
+    "effecttsgo/multiple-effect-provide": {
+      "count": 2
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/signal.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    },
+    "effecttsgo/redundant-or-die": {
+      "count": 7
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/state.test.ts": {
+    "effecttsgo/schema-number": {
+      "count": 1
+    },
+    "unicorn/no-array-sort": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/stop.test.ts": {
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/subagent.test.ts": {
+    "effecttsgo/layer-merge-all-with-dependencies": {
+      "count": 2
+    },
+    "effecttsgo/unnecessary-effect-gen": {
+      "count": 1
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 4
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 4
+    }
+  },
+  "packages/agent/test/testing.test.ts": {
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    }
+  },
+  "packages/agent/test/workflow-cluster.integration.test.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 10
+    },
+    "effecttsgo/async-function": {
+      "count": 3
+    },
+    "effecttsgo/layer-merge-all-with-dependencies": {
+      "count": 2
+    },
+    "effecttsgo/process-env": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 2
+    },
+    "typescript/no-unsafe-argument": {
+      "count": 2
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 2
+    },
+    "typescript/no-unsafe-call": {
+      "count": 3
+    },
+    "typescript/no-unsafe-member-access": {
+      "count": 3
+    },
+    "typescript/strict-boolean-expressions": {
+      "count": 2
+    }
+  },
+  "packages/agent/test/workflow.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 1
+    },
+    "typescript/consistent-return": {
+      "count": 4
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    }
+  },
+  "packages/attachments/test/attachment-store-contract.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/async-function": {
+      "count": 13
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "vitest/no-conditional-expect": {
+      "count": 7
+    }
+  },
+  "packages/attachments/test/layer-filesystem.test.ts": {
+    "effecttsgo/async-function": {
+      "count": 1
+    },
+    "effecttsgo/missing-layer-context": {
+      "count": 1
+    }
+  },
+  "packages/attachments/test/layer-memory.test.ts": {
+    "effecttsgo/missing-layer-context": {
+      "count": 1
+    }
+  },
+  "packages/attachments/test/ref.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    },
+    "effecttsgo/prefer-typed-schema-decoder": {
+      "count": 2
+    },
+    "effecttsgo/schema-sync-in-effect": {
+      "count": 2
+    }
+  },
+  "packages/log-pg/src/internal/pg-listen.ts": {
+    "effecttsgo/async-function": {
+      "count": 2
+    }
+  },
+  "packages/log-pg/src/layer.ts": {
+    "effecttsgo/extends-native-error": {
+      "count": 1
+    }
+  },
+  "packages/log-pg/test/layer.fencing-race.integration.test.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    },
+    "effecttsgo/async-function": {
+      "count": 6
+    },
+    "effecttsgo/process-env": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 4
+    },
+    "typescript/strict-boolean-expressions": {
+      "count": 2
+    },
+    "vitest/no-conditional-expect": {
+      "count": 1
+    }
+  },
+  "packages/log-pg/test/layer.integration.test.ts": {
+    "effecttsgo/async-function": {
+      "count": 6
+    },
+    "effecttsgo/global-timers": {
+      "count": 1
+    },
+    "effecttsgo/new-promise": {
+      "count": 1
+    },
+    "effecttsgo/process-env": {
+      "count": 1
+    },
+    "typescript/no-confusing-void-expression": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 3
+    },
+    "typescript/restrict-template-expressions": {
+      "count": 1
+    },
+    "typescript/strict-boolean-expressions": {
+      "count": 2
+    }
+  },
+  "packages/log-pg/test/layer.test.ts": {
+    "effecttsgo/new-promise": {
+      "count": 2
+    },
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 1
+    },
+    "effecttsgo/schema-number": {
+      "count": 1
+    },
+    "effecttsgo/schema-sync-in-effect": {
+      "count": 1
+    },
+    "typescript/restrict-template-expressions": {
+      "count": 1
+    }
+  },
+  "packages/log-pg/test/pg-test-harness.ts": {
+    "effecttsgo/async-function": {
+      "count": 6
+    },
+    "effecttsgo/global-timers": {
+      "count": 1
+    },
+    "effecttsgo/new-promise": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 1
+    },
+    "effecttsgo/process-env": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/log/test/adapter.test.ts": {
+    "typescript/no-unsafe-type-assertion": {
+      "count": 3
+    },
+    "typescript/unbound-method": {
+      "count": 1
+    }
+  },
+  "packages/log/test/layer-memory.scaling.test.ts": {
+    "effecttsgo/global-console-in-effect": {
+      "count": 1
+    },
+    "effecttsgo/process-env": {
+      "count": 1
+    },
+    "typescript/restrict-template-expressions": {
+      "count": 2
+    }
+  },
+  "packages/log/test/log-store-contract.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    },
+    "effecttsgo/async-function": {
+      "count": 39
+    },
+    "effecttsgo/global-date": {
+      "count": 1
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "vitest/no-conditional-expect": {
+      "count": 16
+    },
+    "vitest/no-conditional-tests": {
+      "count": 2
+    },
+    "vitest/no-disabled-tests": {
+      "count": 1
+    }
+  },
+  "packages/log/test/record-batch.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 1
+    }
+  },
+  "packages/log/test/vocabulary.test.ts": {
+    "effecttsgo/prefer-typed-schema-decoder": {
+      "count": 4
+    }
+  },
+  "packages/mcp/src/mcp.ts": {
+    "effecttsgo/async-function": {
+      "count": 3
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    },
+    "typescript/consistent-return": {
+      "count": 1
+    },
+    "typescript/no-deprecated": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 5
+    },
+    "typescript/strict-boolean-expressions": {
+      "count": 1
+    }
+  },
+  "packages/mcp/test/mcp.test.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 5
+    },
+    "effecttsgo/async-function": {
+      "count": 13
+    },
+    "effecttsgo/new-promise": {
+      "count": 2
+    },
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    },
+    "typescript/no-unsafe-argument": {
+      "count": 1
+    },
+    "typescript/no-unsafe-return": {
+      "count": 4
+    },
+    "typescript/require-await": {
+      "count": 11
+    }
+  },
+  "packages/workspace/src/glob.ts": {
+    "effecttsgo/extends-native-error": {
+      "count": 1
+    }
+  },
+  "packages/workspace/src/layer-local.ts": {
+    "effecttsgo/async-function": {
+      "count": 2
+    },
+    "effecttsgo/extends-native-error": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 2
+    }
+  },
+  "packages/workspace/test/layer-local.test.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/global-console-in-effect": {
+      "count": 1
+    },
+    "effecttsgo/missing-layer-context": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 2
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/workspace/test/tools.test.ts": {
+    "effecttsgo/multiple-effect-provide": {
+      "count": 1
+    },
+    "effecttsgo/node-builtin-import": {
+      "count": 2
+    },
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 3
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-condition": {
+      "count": 2
+    },
+    "typescript/no-unnecessary-type-assertion": {
+      "count": 2
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 2
+    }
+  },
+  "packages/workspace/test/workspace-contract.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 6
+    },
+    "effecttsgo/async-function": {
+      "count": 17
+    },
+    "effecttsgo/global-date-in-effect": {
+      "count": 1
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 1
+    },
+    "effecttsgo/unknown-in-effect-catch": {
+      "count": 1
+    },
+    "vitest/no-conditional-expect": {
+      "count": 7
+    }
+  },
+  "scripts/check-package-paths.mjs": {
+    "typescript/no-unsafe-argument": {
+      "count": 1
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 2
+    },
+    "typescript/no-unsafe-member-access": {
+      "count": 1
+    }
+  },
+  "scripts/check-packed-consumer.mjs": {
+    "typescript/no-unsafe-argument": {
+      "count": 1
+    },
+    "typescript/restrict-template-expressions": {
+      "count": 1
+    },
+    "typescript/strict-boolean-expressions": {
+      "count": 1
+    }
+  },
+  "type-tests/published-types.ts": {
+    "typescript/no-unnecessary-type-arguments": {
+      "count": 1
+    },
+    "typescript/no-unnecessary-type-parameters": {
+      "count": 2
+    }
+  }
+}

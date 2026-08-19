@@ -12,10 +12,17 @@ const packages = [
   'workspace',
 ] as const;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+const parseJson = (source: string): unknown => JSON.parse(source);
+
 const packageEntries = (name: (typeof packages)[number]): string[] => {
-  const manifest = JSON.parse(
+  const manifest = parseJson(
     readFileSync(resolve(`packages/${name}/package.json`), 'utf8'),
-  ) as { readonly exports: Record<string, unknown> };
+  );
+  if (!isRecord(manifest) || !isRecord(manifest.exports)) {
+    throw new Error(`Invalid package manifest exports for ${name}`);
+  }
   return Object.entries(manifest.exports).flatMap(([specifier, target]) =>
     typeof target === 'object' && target !== null
       ? [`src/${specifier.slice(2)}.ts`]

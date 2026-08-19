@@ -55,15 +55,17 @@ const started = (
   agent = 'test',
   revision: string | undefined = '1',
   formatVersion: number | undefined = 1,
-): ConversationRecord.Record => ({
-  _tag: 'RunStarted',
-  agent,
-  ...(revision === undefined
-    ? {}
-    : { agentRevision: LogVocabulary.AgentRevision.make(revision) }),
-  ...(formatVersion === undefined ? {} : { formatVersion }),
-  prompt: [],
-});
+): ConversationRecord.Record => {
+  return {
+    _tag: 'RunStarted',
+    agent,
+    ...(revision === undefined
+      ? {}
+      : { agentRevision: LogVocabulary.AgentRevision.make(revision) }),
+    ...(formatVersion === undefined ? {} : { formatVersion }),
+    prompt: [],
+  };
+};
 
 const invalidCompatibility = (value: unknown) =>
   value as NonNullable<Parameters<typeof AgentLog.open>[1]>['compatibility'];
@@ -116,11 +118,7 @@ const seed = Effect.fn('test.seedCompatibility')(function* (
 const run = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   calls: { count: number },
-) =>
-  effect.pipe(
-    Effect.provide(provider(calls)),
-    Effect.provide(testLogLayer),
-  ) as Effect.Effect<A, E>;
+) => effect.pipe(Effect.provide(Layer.merge(provider(calls), testLogLayer)));
 
 describe('durable compatibility', () => {
   it.effect.each([
@@ -286,10 +284,14 @@ describe('durable compatibility', () => {
             started('test', '2'),
             { _tag: 'Text', step: 1, text: 'abandon' },
           ]);
+          const record = records.at(1);
+          if (record === undefined) {
+            throw new Error('missing branch record');
+          }
           return yield* Conversation.make(
             definition(),
             'branch-source',
-          ).branchFrom(records[1]!.offset, 'continue');
+          ).branchFrom(record.offset, 'continue');
         }),
         calls,
       );
@@ -308,8 +310,12 @@ describe('durable compatibility', () => {
             started(),
             { _tag: 'Text', step: 1, text: 'keep' },
           ]);
+          const record = records.at(1);
+          if (record === undefined) {
+            throw new Error('missing fork record');
+          }
           return yield* Conversation.make(definition(), 'fork-source').forkFrom(
-            records[1]!.offset,
+            record.offset,
             'fork-target',
             'continue',
           );
@@ -333,15 +339,19 @@ describe('durable compatibility', () => {
               started(),
               { _tag: 'Text', step: 1, text: 'keep' },
             ]);
+            const record = records.at(1);
+            if (record === undefined) {
+              throw new Error('missing source record');
+            }
             const incompatible = Conversation.make(
               definition('test', '2'),
               'incompatible-source',
             );
             const branch = yield* incompatible
-              .branchFrom(records[1]!.offset, 'continue')
+              .branchFrom(record.offset, 'continue')
               .pipe(Effect.exit);
             const fork = yield* incompatible
-              .forkFrom(records[1]!.offset, 'incompatible-target', 'continue')
+              .forkFrom(record.offset, 'incompatible-target', 'continue')
               .pipe(Effect.exit);
             const store = yield* LogStore.Service;
             return {

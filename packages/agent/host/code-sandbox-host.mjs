@@ -2,14 +2,24 @@ import { stripTypeScriptTypes } from 'node:module';
 import { createInterface } from 'node:readline';
 import vm from 'node:vm';
 
+/** @typedef {{name: string}} ToolDescriptor */
+/** @typedef {{maxNestedCalls: number, maxOutputBytes: number, wallClockMillis: number}} Limits */
+/** @typedef {{source: string, state: Record<string, unknown>, tools: ReadonlyArray<ToolDescriptor>, limits: Limits}} ExecuteRequest */
+/** @typedef {{id: string, outcome: 'success', value: unknown} | {id: string, outcome: 'failure', error: unknown}} ToolResponse */
+/** @typedef {{type: 'execute', request: ExecuteRequest} | {type: 'tool_response', response: ToolResponse}} HostMessage */
+/** @typedef {{resolve: (value: unknown) => void, reject: (reason: unknown) => void}} Waiter */
+
 const reader = createInterface({ input: process.stdin });
+/** @type {Map<string, Waiter>} */
 const pending = new Map();
 let running = false;
 
+/** @param {unknown} event */
 const send = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
 
+/** @param {unknown} value */
 const cloneJson = (value) => {
-  const encoded = JSON.stringify(value, (_key, item) => {
+  const encoded = JSON.stringify(value, (_key, /** @type {unknown} */ item) => {
     if (
       item === undefined ||
       typeof item === 'function' ||
@@ -21,11 +31,72 @@ const cloneJson = (value) => {
     }
     return item;
   });
-  if (encoded === undefined)
-    throw new TypeError('Value must be JSON serializable');
-  return JSON.parse(encoded);
+  return /** @type {unknown} */ (JSON.parse(encoded));
 };
 
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+const isRecord = (value) => typeof value === 'object' && value !== null;
+
+/** @param {unknown} value @returns {value is ToolDescriptor} */
+const isToolDescriptor = (value) =>
+  isRecord(value) && typeof value.name === 'string';
+
+/** @param {unknown} value @returns {value is ExecuteRequest} */
+const isExecuteRequest = (value) => {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (typeof value.source !== 'string' || !isRecord(value.state)) {
+    return false;
+  }
+  if (!Array.isArray(value.tools)) {
+    return false;
+  }
+  const tools = /** @type {ReadonlyArray<unknown>} */ (value.tools);
+  if (!tools.every(isToolDescriptor)) {
+    return false;
+  }
+  if (!isRecord(value.limits)) {
+    return false;
+  }
+  return (
+    typeof value.limits.maxNestedCalls === 'number' &&
+    typeof value.limits.maxOutputBytes === 'number' &&
+    typeof value.limits.wallClockMillis === 'number'
+  );
+};
+
+/** @param {unknown} value @returns {value is ToolResponse} */
+const isToolResponse = (value) => {
+  if (!isRecord(value) || typeof value.id !== 'string') {
+    return false;
+  }
+  if (value.outcome === 'success') {
+    return 'value' in value;
+  }
+  return value.outcome === 'failure' && 'error' in value;
+};
+
+/** @param {unknown} value @returns {value is {snapshot: () => string}} */
+const isControl = (value) =>
+  isRecord(value) && typeof value.snapshot === 'function';
+
+/** @param {string} line @returns {HostMessage} */
+const parseMessage = (line) => {
+  const value = /** @type {unknown} */ (JSON.parse(line));
+  if (!isRecord(value) || typeof value.type !== 'string') {
+    throw new TypeError('Host message must be an object');
+  }
+  if (value.type === 'execute' && isExecuteRequest(value.request)) {
+    return { type: 'execute', request: value.request };
+  }
+  if (value.type === 'tool_response' && isToolResponse(value.response)) {
+    return { type: 'tool_response', response: value.response };
+  }
+  throw new TypeError('Host message has invalid shape');
+};
+
+/** @param {ExecuteRequest} request */
 const execute = async (request) => {
   const toolNames = new Set(request.tools.map(({ name }) => name));
   const encoder = new TextEncoder();
@@ -33,12 +104,15 @@ const execute = async (request) => {
   let outputBytes = 0;
   let nestedCalls = 0;
 
+  /** @param {string} name @param {unknown} input */
   const callTool = (name, input) => {
-    if (!toolNames.has(name)) throw new Error(`Unknown tool: ${name}`);
+    if (!toolNames.has(name)) {
+      throw new Error(`Unknown tool: ${name}`);
+    }
     nestedCalls += 1;
     if (nestedCalls > request.limits.maxNestedCalls) {
       throw new Error(
-        `Nested tool calls exceed ${request.limits.maxNestedCalls}`,
+        `Nested tool calls exceed ${String(request.limits.maxNestedCalls)}`,
       );
     }
     const id = String(nextId++);
@@ -48,24 +122,26 @@ const execute = async (request) => {
     send({ _tag: 'ToolCall', id, name, input: cloneJson(input) });
     return promise;
   };
+  /** @param {string} output */
   const emitText = (output) => {
     outputBytes += encoder.encode(output).byteLength;
     if (outputBytes > request.limits.maxOutputBytes) {
       throw new Error(
-        `Code output exceeds ${request.limits.maxOutputBytes} bytes`,
+        `Code output exceeds ${String(request.limits.maxOutputBytes)} bytes`,
       );
     }
     send({ _tag: 'Output', value: output });
   };
-  const sandbox = Object.assign(Object.create(null), {
-    __vesperBridge: { callTool, emitText },
-    __vesperState: JSON.stringify(cloneJson(request.state)),
-    __vesperTools: JSON.stringify(cloneJson(request.tools)),
-  });
+  /** @type {Record<string, unknown>} */
+  const sandbox = {};
+  Object.setPrototypeOf(sandbox, null);
+  sandbox.__vesperBridge = { callTool, emitText };
+  sandbox.__vesperState = JSON.stringify(cloneJson(request.state));
+  sandbox.__vesperTools = JSON.stringify(cloneJson(request.tools));
   const context = vm.createContext(sandbox, {
     codeGeneration: { strings: false, wasm: false },
   });
-  const control = new vm.Script(`
+  const controlScript = new vm.Script(`
     (() => {
       const { callTool, emitText } = globalThis.__vesperBridge
       const state = new Map(Object.entries(JSON.parse(globalThis.__vesperState)))
@@ -139,7 +215,17 @@ const execute = async (request) => {
         snapshot: () => JSON.stringify(Object.fromEntries(state)),
       })
     })()
-  `).runInContext(context, { timeout: request.limits.wallClockMillis });
+  `);
+  const controlValue = /** @type {unknown} */ (
+    controlScript.runInContext(context, {
+      timeout: request.limits.wallClockMillis,
+    })
+  );
+  if (!isControl(controlValue)) {
+    throw new TypeError('Sandbox control initialization failed');
+  }
+  const control = controlValue;
+  /** @type {string} */
   let source;
   try {
     source = stripTypeScriptTypes(
@@ -150,31 +236,45 @@ const execute = async (request) => {
     throw new Error('TypeScript source must use erasable syntax');
   }
   const script = new vm.Script(source);
-  const result = await script.runInContext(context, {
-    timeout: request.limits.wallClockMillis,
-  });
+  const result = /** @type {unknown} */ (
+    await script.runInContext(context, {
+      timeout: request.limits.wallClockMillis,
+    })
+  );
   const structured = result === undefined ? undefined : cloneJson(result);
   if (structured !== undefined) {
-    outputBytes += encoder.encode(JSON.stringify(structured)).byteLength;
+    const encodedStructured = JSON.stringify(structured);
+    outputBytes += encoder.encode(encodedStructured).byteLength;
     if (outputBytes > request.limits.maxOutputBytes) {
       throw new Error(
-        `Code output exceeds ${request.limits.maxOutputBytes} bytes`,
+        `Code output exceeds ${String(request.limits.maxOutputBytes)} bytes`,
       );
     }
   }
+  const state = /** @type {unknown} */ (JSON.parse(control.snapshot()));
+  if (!isRecord(state)) {
+    throw new TypeError('Sandbox state snapshot must be an object');
+  }
   send({
     _tag: 'Completion',
-    state: JSON.parse(control.snapshot()),
+    state,
     ...(structured === undefined ? {} : { result: structured }),
   });
 };
 
 reader.on('line', (line) => {
+  /** @type {HostMessage} */
   let message;
   try {
-    message = JSON.parse(line);
-  } catch {
-    send({ _tag: 'Failure', message: 'Host received invalid JSON' });
+    message = parseMessage(line);
+  } catch (cause) {
+    send({
+      _tag: 'Failure',
+      message:
+        cause instanceof SyntaxError
+          ? 'Host received invalid JSON'
+          : 'Host protocol violation',
+    });
     process.exitCode = 1;
     reader.close();
     return;
@@ -182,14 +282,18 @@ reader.on('line', (line) => {
   if (message.type === 'tool_response') {
     const response = message.response;
     const waiter = pending.get(response.id);
-    if (waiter === undefined) return;
+    if (waiter === undefined) {
+      return;
+    }
     pending.delete(response.id);
-    if (response.outcome === 'success')
+    if (response.outcome === 'success') {
       waiter.resolve(cloneJson(response.value));
-    else waiter.reject(cloneJson(response.error));
+    } else {
+      waiter.reject(cloneJson(response.error));
+    }
     return;
   }
-  if (message.type !== 'execute' || running) {
+  if (running) {
     send({ _tag: 'Failure', message: 'Host protocol violation' });
     process.exitCode = 1;
     reader.close();
@@ -197,19 +301,17 @@ reader.on('line', (line) => {
   }
   running = true;
   execute(message.request)
-    .catch((cause) => {
-      send({
-        _tag: 'Failure',
-        message:
-          cause !== null &&
-          typeof cause === 'object' &&
-          typeof cause.message === 'string'
-            ? cause.message
-            : String(cause),
-      });
+    .catch((/** @type {unknown} */ cause) => {
+      const failureMessage =
+        isRecord(cause) && typeof cause.message === 'string'
+          ? cause.message
+          : String(cause);
+      send({ _tag: 'Failure', message: failureMessage });
       process.exitCode = 1;
     })
-    .finally(() => reader.close())
+    .finally(() => {
+      reader.close();
+    })
     .catch(() => {
       process.exitCode = 1;
     });

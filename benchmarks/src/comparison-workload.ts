@@ -14,15 +14,15 @@ export const COMPARISON_WARMUP = WARMUP;
 
 export const COMPARISON_GROWTH_MESSAGES = 30;
 export const COMPARISON_GROWTH_REPEATS =
-  process.env.VESPER_BENCH_SMOKE === '1' ? 1 : 7;
+  process.env['VESPER_BENCH_SMOKE'] === '1' ? 1 : 7;
 export const COMPARISON_MEMORY_MESSAGES = 60;
 export const COMPARISON_CONCURRENCY = 16;
 export const COMPARISON_CONCURRENCY_ITERATIONS =
-  process.env.VESPER_BENCH_SMOKE === '1' ? 1 : 10;
+  process.env['VESPER_BENCH_SMOKE'] === '1' ? 1 : 10;
 export const COMPARISON_CONCURRENCY_WARMUP =
-  process.env.VESPER_BENCH_SMOKE === '1' ? 0 : 2;
+  process.env['VESPER_BENCH_SMOKE'] === '1' ? 0 : 2;
 export const COMPARISON_PROCESS_REPEATS =
-  process.env.VESPER_BENCH_SMOKE === '1' ? 1 : 7;
+  process.env['VESPER_BENCH_SMOKE'] === '1' ? 1 : 7;
 
 export const stepsFor = (workload: ComparisonWorkload): number =>
   workload === 'tool-loop' ? 8 : 1;

@@ -2,23 +2,23 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { describe, expect, it } from '@effect/vitest';
 import {
   Context,
-  Crypto,
+  type Crypto,
   Effect,
   Schema,
   SchemaTransformation,
   type Stream,
 } from 'effect';
-import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
+import { type LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { Interception } from '../src/interception.js';
 import type * as AgentLog from '../src/log.js';
-import { RecordingPolicy } from '../src/recording-policy.js';
-import { RunPolicy } from '../src/run-policy.js';
+import type { RecordingPolicy } from '../src/recording-policy.js';
+import type { RunPolicy } from '../src/run-policy.js';
 import { Stop } from '../src/stop.js';
 import { AgentState } from '../src/state.js';
-import { Subagent } from '../src/subagent.js';
+import type { Subagent } from '../src/subagent.js';
 
 // The eight narrowing assertions.
 //
@@ -205,7 +205,7 @@ const _exactHandled: Exact<Agent.Requires<typeof handled>, HandledBase> = true;
 const State = AgentState.make({
   id: 'assertion-state',
   version: '1',
-  schema: Schema.Struct({ count: Schema.Number }),
+  schema: Schema.Struct({ count: Schema.Finite }),
   initial: () => ({ count: 0 }),
 });
 const TransformedState = AgentState.make({
@@ -213,7 +213,7 @@ const TransformedState = AgentState.make({
   version: '1',
   schema: Schema.String.pipe(
     Schema.decodeTo(
-      Schema.Number,
+      Schema.Finite,
       SchemaTransformation.transformOrFail<
         number,
         string,
@@ -236,7 +236,7 @@ const _directTransformedCodecRequired: Has<
 const stateTool = Tool.make('stateful', {
   description: 'state-aware handler',
   parameters: Schema.Struct({}),
-  success: Schema.Struct({ count: Schema.Number }),
+  success: Schema.Struct({ count: Schema.Finite }),
   failure: AgentState.Error,
   dependencies: AgentState.dependencies(State, Db),
 });
@@ -263,7 +263,7 @@ const transformedStateful = Agent.make({
     Tool.make('transformed', {
       description: 'transformed state handler',
       parameters: Schema.Struct({}),
-      success: Schema.Number,
+      success: Schema.Finite,
       failure: AgentState.Error,
       dependencies: AgentState.dependencies(
         TransformedState,
@@ -451,10 +451,14 @@ class OtherStopService extends Context.Service<
   { readonly otherStop: true }
 >()('assertions-test/OtherStopService') {}
 
-const serviceStop: Stop.StopCondition<{}, StopService> = () =>
-  Effect.as(StopService, false);
-const otherStop: Stop.StopCondition<{}, OtherStopService> = () =>
-  Effect.as(OtherStopService, false);
+const serviceStop: Stop.StopCondition<
+  Record<string, never>,
+  StopService
+> = () => Effect.as(StopService, false);
+const otherStop: Stop.StopCondition<
+  Record<string, never>,
+  OtherStopService
+> = () => Effect.as(OtherStopService, false);
 const stopped = Agent.make({
   name: 'stopped',
   revision: '1',
@@ -499,10 +503,9 @@ describe('the narrowing assertions', () => {
     expect(_makeRun).toBe('yes');
     expect(_handledRun).toBe('yes');
     expect(_dischargedRun).toBe('no');
-    expect(Object.keys(parent.toolkit.tools).sort()).toEqual([
-      'own',
-      'task_child',
-    ]);
+    expect(
+      Object.keys(parent.toolkit.tools).sort((a, b) => a.localeCompare(b)),
+    ).toEqual(['own', 'task_child']);
     expect([
       _exactPlain,
       _exactHandled,

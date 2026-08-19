@@ -47,19 +47,24 @@ export const TOOL_NAME = 'read_attachment';
  * own parameters — see the note on {@link reader} — so the pointer alone is
  * everything the model needs to retrieve the rest.
  */
+// TaggedStruct currently emits the branded attachment id as explicit `any` in
+// the published declaration. Keep the equivalent explicit struct until its
+// declaration output preserves the Digest type.
 export const Pointer: Schema.Struct<{
   _tag: Schema.Literal<'ToolResultOverflow'>;
   attachmentId: typeof AttachmentRef.Digest;
   byteLength: typeof Schema.Natural;
   mediaType: typeof Schema.String;
   preview: typeof Schema.String;
-}> = Schema.Struct({
-  _tag: Schema.Literal('ToolResultOverflow'),
-  attachmentId: AttachmentRef.Digest,
-  byteLength: Schema.Natural,
-  mediaType: Schema.String,
-  preview: Schema.String,
-});
+}> =
+  // oxlint-disable-next-line effecttsgo/schema-struct-with-tag
+  Schema.Struct({
+    _tag: Schema.Literal('ToolResultOverflow'),
+    attachmentId: AttachmentRef.Digest,
+    byteLength: Schema.Natural,
+    mediaType: Schema.String,
+    preview: Schema.String,
+  });
 export interface Pointer extends Schema.Struct.Type<typeof Pointer.fields> {}
 
 /** Whether a value is a spilled-result pointer, independent of any tool's schema. */
@@ -69,7 +74,7 @@ export const isPointer: (value: unknown) => value is Pointer =
 /** The tool record contributed when overflow is enabled. */
 export type Tools<P extends Policy | undefined> = P extends Policy
   ? Record<typeof TOOL_NAME, ReturnType<typeof makeReadTool>>
-  : {};
+  : Record<never, never>;
 
 /** Services `read_attachment`'s handler needs from the run. */
 export type Services<P extends Policy | undefined> = P extends Policy
@@ -125,7 +130,7 @@ const makeReadTool = (
       'Read back a tool result that overflowed into storage. Copy ' +
       'attachmentId, mediaType, and byteLength from the pointer you received. ' +
       `offset and length are byte offsets into the original content; length ` +
-      `defaults to ${maxLength} and is capped at it, so a large attachment is ` +
+      `defaults to ${String(maxLength)} and is capped at it, so a large attachment is ` +
       'read in pages by advancing offset until hasMore is false.',
     parameters: ReadParameters,
     success: ReadSuccess,
@@ -207,21 +212,25 @@ const clamp = (value: number, min: number, max: number): number =>
  * meaningful recovery for, the same judgment `AttachmentRef.digestOf` makes
  * about a broken platform digest.
  */
-export const wrap = <
-  Tools extends Record<string, Tool.Any>,
+export function wrap<
+  ToolSet extends Record<string, Tool.Any>,
   E,
   R,
   P extends Policy | undefined,
 >(
   policy: P,
-  toolkit: Effect.Effect<Toolkit.WithHandler<Tools>, E, R>,
-): Effect.Effect<Toolkit.WithHandler<Tools>, E, R | Services<P>> => {
+  toolkit: Effect.Effect<Toolkit.WithHandler<ToolSet>, E, R>,
+): Effect.Effect<Toolkit.WithHandler<ToolSet>, E, R | Services<P>>;
+export function wrap<ToolSet extends Record<string, Tool.Any>, E, R>(
+  policy: Policy | undefined,
+  toolkit: Effect.Effect<Toolkit.WithHandler<ToolSet>, E, R>,
+): Effect.Effect<Toolkit.WithHandler<ToolSet>, E, R | AttachmentStore.Service>;
+export function wrap<ToolSet extends Record<string, Tool.Any>, E, R>(
+  policy: Policy | undefined,
+  toolkit: Effect.Effect<Toolkit.WithHandler<ToolSet>, E, R>,
+): Effect.Effect<Toolkit.WithHandler<ToolSet>, E, R | AttachmentStore.Service> {
   if (policy === undefined) {
-    return toolkit as Effect.Effect<
-      Toolkit.WithHandler<Tools>,
-      E,
-      R | Services<P>
-    >;
+    return toolkit;
   }
   const threshold = policy.threshold;
   const previewChars = policy.preview ?? DEFAULT_PREVIEW_CHARS;
@@ -230,11 +239,11 @@ export const wrap = <
     const resolved = yield* toolkit;
     const store = yield* AttachmentStore.Service;
 
-    const handle = <Name extends keyof Tools>(
+    const handle = <Name extends keyof ToolSet>(
       name: Name,
-      params: Tool.Parameters<Tools[Name]>,
+      params: Tool.Parameters<ToolSet[Name]>,
       toolCallId?: string,
-    ): ReturnType<Toolkit.WithHandler<Tools>['handle']> =>
+    ): ReturnType<Toolkit.WithHandler<ToolSet>['handle']> =>
       resolved
         .handle(name, params, toolCallId)
         .pipe(
@@ -243,11 +252,11 @@ export const wrap = <
               spill(store, threshold, previewChars, result),
             ),
           ),
-        ) as ReturnType<Toolkit.WithHandler<Tools>['handle']>;
+        );
 
     return { tools: resolved.tools, handle };
-  }) as Effect.Effect<Toolkit.WithHandler<Tools>, E, R | Services<P>>;
-};
+  });
+}
 
 const spill = <T extends Tool.Any>(
   store: AttachmentStore.Interface,
@@ -256,16 +265,22 @@ const spill = <T extends Tool.Any>(
   result: Tool.HandlerResult<T>,
 ): Effect.Effect<Tool.HandlerResult<T>> =>
   Effect.gen(function* () {
-    if (isPointer(result.encodedResult)) return result;
+    if (isPointer(result.encodedResult)) {
+      return result;
+    }
 
     const text = encodeAsText(result.encodedResult);
     // One UTF-16 code unit never encodes to more than 3 UTF-8 bytes (a
     // surrogate pair is 2 units for 4 bytes), so this bound proves the
     // common case — a result nowhere near the threshold — without paying
     // for a full encode of every result that passes through.
-    if (text.length * 3 <= threshold) return result;
+    if (text.length * 3 <= threshold) {
+      return result;
+    }
     const bytes = utf8.encode(text);
-    if (bytes.byteLength <= threshold) return result;
+    if (bytes.byteLength <= threshold) {
+      return result;
+    }
 
     const mediaType =
       typeof result.encodedResult === 'string'
@@ -288,9 +303,11 @@ const spill = <T extends Tool.Any>(
   });
 
 const encodeAsText = (value: unknown): string => {
-  if (typeof value === 'string') return value;
-  const json = JSON.stringify(value);
-  return json === undefined ? String(value) : json;
+  if (typeof value === 'string') {
+    return value;
+  }
+  const encoded = JSON.stringify(value);
+  return encoded === undefined ? String(value) : encoded;
 };
 
 /** Truncate to a head preview and blank out control characters. */

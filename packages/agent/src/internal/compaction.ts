@@ -1,5 +1,10 @@
 import { Effect, Ref } from 'effect';
-import { AiError, Chat, LanguageModel, Prompt } from 'effect/unstable/ai';
+import {
+  LanguageModel,
+  Prompt,
+  type AiError,
+  type Chat,
+} from 'effect/unstable/ai';
 
 import { Compaction } from '../compaction.js';
 import { ContextWindow } from '../context-window.js';
@@ -76,7 +81,7 @@ export const shouldCompact = (
   prompt: Prompt.Prompt,
   contextWindow: number,
   policy: Compaction.Policy = Compaction.defaultPolicy,
-  usage?: ContextWindow.TurnUsage | undefined,
+  usage?: ContextWindow.TurnUsage,
 ): Effect.Effect<boolean> =>
   Effect.map(ContextWindow.Service, (heuristics) =>
     heuristics.shouldCompact(
@@ -225,9 +230,14 @@ const splitAt = (prompt: Prompt.Prompt, keepRecentTokens: number): Split => {
   let budget = keepRecentTokens;
 
   for (let index = rest.length - 1; index >= 0; index -= 1) {
-    const message = rest[index]!;
+    const message = rest[index];
+    if (message === undefined) {
+      continue;
+    }
     const cost = estimateTokens(Prompt.make([message]));
-    if (budget - cost < 0 && recent.length > 0) break;
+    if (budget - cost < 0 && recent.length > 0) {
+      break;
+    }
     budget -= cost;
     recent.unshift(message);
   }

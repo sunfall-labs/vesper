@@ -36,7 +36,9 @@ const setup = (path: string, count: number) =>
       producerId: claim.producerId,
       epoch: claim.epoch,
       sequence: claim.nextSequence,
-      records: Array.from({ length: count }, (_, index) => entry(`r${index}`)),
+      records: Array.from({ length: count }, (_, index) =>
+        entry(`r${String(index)}`),
+      ),
     });
     return store;
   });
@@ -101,7 +103,7 @@ describe('Tail', () => {
 
       expect(collected.length).toBe(total);
       expect(collected[collected.length - 1]?.record).toMatchObject({
-        text: `r${total - 1}`,
+        text: `r${String(total - 1)}`,
       });
     }).pipe(Effect.provide(memoryLayer)),
   );
@@ -114,7 +116,12 @@ describe('Tail', () => {
       const store = yield* setup('mid', 4);
       const page = yield* store.read('mid');
 
-      const collected = yield* Tail.from('mid', page.records[1]!.offset).pipe(
+      const secondRecord = page.records.at(1);
+      if (secondRecord === undefined) {
+        throw new Error('expected a second record to resume from');
+      }
+      const resumeOffset = secondRecord.offset;
+      const collected = yield* Tail.from('mid', resumeOffset).pipe(
         Stream.take(2),
         Stream.runCollect,
       );

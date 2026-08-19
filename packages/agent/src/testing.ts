@@ -66,7 +66,7 @@ const requestOf = (
   index,
   prompt: options.prompt,
   toolDefinitions: Array.from(options.tools),
-  tools: options.tools.map((tool) => tool.name),
+  tools: options.tools.map((tool): string => String(tool.name)),
   toolChoice: options.toolChoice,
 });
 

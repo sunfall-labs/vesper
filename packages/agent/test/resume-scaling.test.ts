@@ -44,7 +44,7 @@ const counted = (reads: Reads) =>
 
 const text = (
   step: number,
-  value = `text-${step}`,
+  value = `text-${String(step)}`,
 ): ConversationRecord.Record => ({ _tag: 'Text', step, text: value });
 
 const settled = (

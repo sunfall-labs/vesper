@@ -1,5 +1,5 @@
 import { Context, Effect, Schema } from 'effect';
-import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
+import { type LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';

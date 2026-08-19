@@ -97,10 +97,14 @@ const boundedRead = async (
         bytes.length - offset,
         null,
       );
-      if (read.bytesRead === 0) break;
+      if (read.bytesRead === 0) {
+        break;
+      }
       offset += read.bytesRead;
     }
-    if (offset > limit) throw new ReadLimitExceeded();
+    if (offset > limit) {
+      throw new ReadLimitExceeded();
+    }
     return bytes.subarray(0, offset);
   } finally {
     await handle.close();
@@ -134,7 +138,9 @@ class ByteTail {
   }
 
   append(chunk: Uint8Array): void {
-    if (chunk.length === 0) return;
+    if (chunk.length === 0) {
+      return;
+    }
     if (chunk.length >= this.capacity) {
       const discarded = this.#length > 0 || chunk.length > this.capacity;
       this.#bytes.set(chunk.subarray(chunk.length - this.capacity));
@@ -337,12 +343,16 @@ const makeLayer = (
           const { exitCode } = yield* Effect.all(
             {
               exitCode: handle.exitCode,
-              stdout: Stream.runForEach(handle.stdout, (chunk) =>
-                Effect.sync(() => stdout.append(chunk)),
-              ),
-              stderr: Stream.runForEach(handle.stderr, (chunk) =>
-                Effect.sync(() => stderr.append(chunk)),
-              ),
+              stdout: Stream.runForEach(handle.stdout, (chunk) => {
+                return Effect.sync(() => {
+                  stdout.append(chunk);
+                });
+              }),
+              stderr: Stream.runForEach(handle.stderr, (chunk) => {
+                return Effect.sync(() => {
+                  stderr.append(chunk);
+                });
+              }),
             },
             { concurrency: 'unbounded' },
           );

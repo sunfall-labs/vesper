@@ -53,8 +53,11 @@ describeScaling('LogStore memory pagination scaling', () => {
           }
           const elapsedMs = performance.now() - started;
 
-          expect(page!.records).toHaveLength(1);
-          expect(page!.records[0]?.offset).toBe(
+          if (page === undefined) {
+            throw new Error('expected a page from the scaling read');
+          }
+          expect(page.records).toHaveLength(1);
+          expect(page.records[0]?.offset).toBe(
             LogOffset.fromSeq(BigInt(size - 1)),
           );
           console.info(

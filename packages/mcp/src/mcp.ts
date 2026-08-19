@@ -27,7 +27,7 @@ import {
   RcMap,
   Redacted,
   Schema,
-  Scope,
+  type Scope,
 } from 'effect';
 import { AiError, Tool, Toolkit } from 'effect/unstable/ai';
 
@@ -190,6 +190,14 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 5 * 60_000;
 const MAX_SERVER_NAME_LENGTH = 256;
 
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Json));
+const encodeJsonString = Schema.encodeSync(
+  Schema.fromJsonString(Schema.String),
+);
+const encodeJsonPretty = Schema.encodeSync(
+  Schema.fromJsonString(Schema.Unknown, { space: 2 }),
+);
+
 export interface Definition<Name extends string> extends Selection {
   readonly name: Name;
   readonly transport: Transport;
@@ -211,8 +219,8 @@ export interface FromClient<Name extends string, Requires> extends Selection {
 
 /** A redacted bearer token or a resolver invoked before every HTTP request. */
 export type Auth =
-  | Redacted.Redacted<string>
-  | (() => Redacted.Redacted<string> | Promise<Redacted.Redacted<string>>);
+  | Redacted.Redacted
+  | (() => Redacted.Redacted | Promise<Redacted.Redacted>);
 
 /** Convenient remote-server definition; advanced transports still use `make`. */
 export interface RemoteDefinition<Name extends string> extends Selection {
@@ -373,8 +381,8 @@ const connectedClient = Effect.fn('Mcp.connect')(function* <
           definition.clientOptions,
         ),
     ),
-    (client) =>
-      Effect.tryPromise(() => client.close()).pipe(
+    (clientToClose) =>
+      Effect.tryPromise(() => clientToClose.close()).pipe(
         Effect.ignore({
           log: 'Warn',
           message: 'Failed to close MCP client',
@@ -429,30 +437,28 @@ const listAndSelect = Effect.fn('Mcp.listAndSelect')(function* <
   );
   const limits = normalizeLimits(definition.limits);
   if (!Array.isArray(listed.tools)) {
-    return yield* Effect.fail(
-      failure(
-        'listTools',
-        definition.name,
-        new Error('MCP server returned a malformed tools list'),
-      ),
+    return yield* failure(
+      'listTools',
+      definition.name,
+      new Error('MCP server returned a malformed tools list'),
     );
   }
   if (listed.tools.length > limits.maxTools) {
-    return yield* Effect.fail(
-      failure(
-        'listTools',
-        definition.name,
-        new LimitError({
-          resource: 'tool-count',
-          limit: limits.maxTools,
-          actual: listed.tools.length,
-        }),
-      ),
+    return yield* failure(
+      'listTools',
+      definition.name,
+      new LimitError({
+        resource: 'tool-count',
+        limit: limits.maxTools,
+        actual: listed.tools.length,
+      }),
     );
   }
   for (const tool of listed.tools) {
     yield* Effect.try({
-      try: () => validateRemoteTool(definition.name, tool, limits),
+      try: () => {
+        validateRemoteTool(definition.name, tool, limits);
+      },
       catch: (error) => failure('validateTools', definition.name, error),
     });
   }
@@ -494,9 +500,13 @@ export const fingerprints = <const Name extends string>(
     const client = yield* connectedClient(resolved);
     const { selected, limits } = yield* listAndSelect(client, resolved);
     const entries: Array<readonly [string, string]> = [];
-    for (const remote of selected) {
-      const fingerprint = yield* toolFingerprint(resolved.name, remote, limits);
-      entries.push([remote.name, fingerprint]);
+    for (const remoteTool of selected) {
+      const fingerprint = yield* toolFingerprint(
+        resolved.name,
+        remoteTool,
+        limits,
+      );
+      entries.push([remoteTool.name, fingerprint]);
     }
     return Object.fromEntries(entries);
   });
@@ -515,38 +525,36 @@ const adapt = <Name extends string>(
       (params: unknown) => Effect.Effect<string, string | LimitError>
     > = {};
 
-    for (const remote of remoteTools) {
-      validateRemoteTool(definition.name, remote, limits);
-      const name = toolName(definition.name, remote.name);
+    for (const remoteTool of remoteTools) {
+      validateRemoteTool(definition.name, remoteTool, limits);
+      const name = toolName(definition.name, remoteTool.name);
       if (names.has(name)) {
-        return yield* Effect.fail(
-          failure(
-            'adaptTools',
-            definition.name,
-            new Error(`multiple tools normalize to ${JSON.stringify(name)}`),
-          ),
+        return yield* failure(
+          'adaptTools',
+          definition.name,
+          new Error(`multiple tools normalize to ${encodeJsonString(name)}`),
         );
       }
       names.add(name);
 
       const rendered = yield* Effect.try({
         try: () => ({
-          description: description(definition.name, remote, limits),
+          description: description(definition.name, remoteTool, limits),
           inputSchema: normalizeInputSchema(
-            remote.inputSchema,
+            remoteTool.inputSchema,
             limits,
             definition.name,
-            remote.name,
+            remoteTool.name,
           ),
         }),
         catch: (error) => failure('adaptTools', definition.name, error),
       });
 
       if (definition.toolDrift !== undefined) {
-        const pinned = definition.toolDrift.fingerprints[remote.name];
+        const pinned = definition.toolDrift.fingerprints[remoteTool.name];
         if (pinned !== undefined) {
           const current = yield* fingerprintOf({
-            name: remote.name,
+            name: remoteTool.name,
             description: rendered.description,
             inputSchema: rendered.inputSchema,
           });
@@ -554,12 +562,14 @@ const adapt = <Name extends string>(
             const onDrift = definition.toolDrift.onDrift ?? 'reject';
             yield* reportDrift(
               definition.name,
-              remote.name,
+              remoteTool.name,
               pinned,
               current,
               onDrift,
             );
-            if (onDrift === 'reject') continue;
+            if (onDrift === 'reject') {
+              continue;
+            }
           }
         }
       }
@@ -577,7 +587,7 @@ const adapt = <Name extends string>(
       });
       tools.push(tool);
       handlers[name] = (params) =>
-        call(client, definition, remote, params, limits);
+        call(client, definition, remoteTool, params, limits);
     }
 
     const toolkit = Toolkit.make(...tools);
@@ -601,19 +611,14 @@ const call = Effect.fn('Mcp.call')(function* <Name extends string>(
   if (!isJsonObject(params)) {
     return yield* Effect.fail('MCP tool arguments must be a JSON object.');
   }
-  const encodedParams = JSON.stringify(params);
-  if (encodedParams === undefined) {
-    return yield* Effect.fail('MCP tool arguments must be JSON-serializable.');
-  }
+  const encodedParams = encodeJson(params);
   const argumentBytes = utf8Bytes(encodedParams);
   if (argumentBytes > limits.maxArgumentBytes) {
-    return yield* Effect.fail(
-      new LimitError({
-        resource: 'tool-arguments',
-        limit: limits.maxArgumentBytes,
-        actual: argumentBytes,
-      }),
-    );
+    return yield* new LimitError({
+      resource: 'tool-arguments',
+      limit: limits.maxArgumentBytes,
+      actual: argumentBytes,
+    });
   }
   const result = yield* Effect.tryPromise({
     try: (signal) =>
@@ -626,7 +631,7 @@ const call = Effect.fn('Mcp.call')(function* <Name extends string>(
     Effect.timeout(Duration.millis(timeoutFor(definition))),
     Effect.mapError((error) =>
       Cause.isTimeoutError(error)
-        ? `MCP tool timed out after ${timeoutFor(definition)}ms`
+        ? `MCP tool timed out after ${String(timeoutFor(definition))}ms`
         : message(error),
     ),
   );
@@ -635,6 +640,17 @@ const call = Effect.fn('Mcp.call')(function* <Name extends string>(
     ? yield* Effect.fail(formatted || 'MCP tool reported an error.')
     : formatted;
 });
+
+const sorted = <T>(
+  values: ReadonlyArray<T>,
+  compare: (left: T, right: T) => number,
+): T[] => {
+  const result = [...values];
+  // The copy is intentionally mutable. Remote schemas can have many keys, so
+  // insertion sorting would make normalization quadratic in server input.
+  result.sort(compare);
+  return result;
+};
 
 const select = (
   server: string,
@@ -645,7 +661,7 @@ const select = (
     (tool) => tool.execution?.taskSupport !== 'required',
   );
   if (allowlist === undefined) {
-    return callable.sort((left, right) =>
+    return sorted(callable, (left, right) =>
       compareToolNames(server, left, right),
     );
   }
@@ -776,7 +792,10 @@ const normalizeInputSchema = (
   server: string,
   tool: string,
 ): McpTool['inputSchema'] => {
-  if (schema.type !== undefined && schema.type !== 'object') {
+  // The SDK type only admits `"object"`, but discovery is a remote JSON
+  // boundary and can supply any value at runtime.
+  const schemaType: unknown = schema.type;
+  if (schemaType !== undefined && schemaType !== 'object') {
     throw new Error(
       `MCP tool ${JSON.stringify(tool)} from ${JSON.stringify(server)} must use an object input schema`,
     );
@@ -786,8 +805,8 @@ const normalizeInputSchema = (
     type: 'object',
     properties: schema.properties ?? {},
   });
-  const encoded = JSON.stringify(canonical);
-  const schemaBytes = encoded === undefined ? 0 : utf8Bytes(encoded);
+  const encoded = encodeJson(canonical ?? {});
+  const schemaBytes = utf8Bytes(encoded);
   if (schemaBytes > limits.maxSchemaBytes) {
     throw new LimitError({
       resource: 'tool-schema',
@@ -799,8 +818,8 @@ const normalizeInputSchema = (
     ? {
         ...canonical,
         type: 'object',
-        properties: isJsonObject(canonical.properties)
-          ? canonical.properties
+        properties: isJsonObject(canonical['properties'])
+          ? canonical['properties']
           : {},
       }
     : { type: 'object', properties: {} };
@@ -810,26 +829,33 @@ const canonicalJson = (
   value: unknown,
   key?: string,
 ): Schema.Json | undefined => {
-  if (value === undefined) return undefined;
+  if (value === undefined) {
+    return undefined;
+  }
   if (Array.isArray(value)) {
     const items = value.flatMap((item) => {
       const canonical = canonicalJson(item);
       return canonical === undefined ? [] : [canonical];
     });
     return key === 'required' && items.every((item) => typeof item === 'string')
-      ? items.sort()
+      ? sorted(items, (left, right) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        )
       : items;
   }
-  if (typeof value !== 'object' || value === null)
+  if (typeof value !== 'object' || value === null) {
     return isJson(value) ? value : undefined;
-  const entries = Object.entries(value)
-    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
-    .flatMap(([name, item]) => {
-      const canonical = canonicalJson(item, name);
-      if (canonical === undefined) return [];
-      const entry: readonly [string, Schema.Json] = [name, canonical];
-      return [entry];
-    });
+  }
+  const entries = sorted(Object.entries(value), ([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  ).flatMap(([name, item]) => {
+    const canonical = canonicalJson(item, name);
+    if (canonical === undefined) {
+      return [];
+    }
+    const entry: readonly [string, Schema.Json] = [name, canonical];
+    return [entry];
+  });
   return Object.fromEntries(entries);
 };
 
@@ -859,7 +885,7 @@ const fingerprintOf = (input: {
   });
   // `input` is always a defined plain object of defined fields, so
   // `canonicalJson` always returns a defined value here.
-  const material = JSON.stringify(canonical) ?? '{}';
+  const material = encodeJson(canonical ?? {});
   return Effect.promise(async () => {
     const digest = await globalThis.crypto.subtle.digest(
       'SHA-256',
@@ -872,23 +898,23 @@ const fingerprintOf = (input: {
 /** The fingerprint of one remote tool as it will be adapted for the model. */
 const toolFingerprint = (
   server: string,
-  remote: McpTool,
+  remoteTool: McpTool,
   limits: NormalizedLimits,
 ): Effect.Effect<string, AiError.AiError> =>
   Effect.gen(function* () {
     const rendered = yield* Effect.try({
       try: () => ({
-        description: description(server, remote, limits),
+        description: description(server, remoteTool, limits),
         inputSchema: normalizeInputSchema(
-          remote.inputSchema,
+          remoteTool.inputSchema,
           limits,
           server,
-          remote.name,
+          remoteTool.name,
         ),
       }),
       catch: (error) => failure('adaptTools', server, error),
     });
-    return yield* fingerprintOf({ name: remote.name, ...rendered });
+    return yield* fingerprintOf({ name: remoteTool.name, ...rendered });
   });
 
 /** Log a drifted tool's fingerprint mismatch; `'reject'` also excludes it. */
@@ -922,25 +948,24 @@ const formatResult = (
     let totalBytes = 0;
     const append = (part: string): Effect.Effect<void, LimitError> =>
       Effect.gen(function* () {
-        if (part.length === 0) return;
-        const separator = parts.length === 0 ? '' : '\n\n';
-        const actual = totalBytes + utf8Bytes(separator) + utf8Bytes(part);
-        if (actual > maxResultBytes) {
-          return yield* Effect.fail(
-            new LimitError({
+        if (part.length > 0) {
+          const separator = parts.length === 0 ? '' : '\n\n';
+          const actual = totalBytes + utf8Bytes(separator) + utf8Bytes(part);
+          if (actual > maxResultBytes) {
+            return yield* new LimitError({
               resource: 'tool-result',
               limit: maxResultBytes,
               actual,
-            }),
-          );
+            });
+          }
+          parts.push(part);
+          totalBytes = actual;
         }
-        parts.push(part);
-        totalBytes = actual;
       });
 
     if (result.structuredContent !== undefined) {
       yield* append(
-        `Structured content:\n${JSON.stringify(result.structuredContent, undefined, 2)}`,
+        `Structured content:\n${encodeJsonPretty(result.structuredContent)}`,
       );
     }
     for (const item of result.content ?? []) {
@@ -948,22 +973,22 @@ const formatResult = (
         yield* append(item.text);
       } else if (item.type === 'image' || item.type === 'audio') {
         yield* append(
-          `[${item.type === 'image' ? 'Image' : 'Audio'}: ${item.mimeType}, ${item.data.length} base64 chars]`,
+          `[${item.type === 'image' ? 'Image' : 'Audio'}: ${item.mimeType}, ${String(item.data.length)} base64 chars]`,
         );
       } else if (item.type === 'resource') {
         yield* append(
           'text' in item.resource
             ? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
-            : `[Resource: ${item.resource.uri}, ${item.resource.blob.length} base64 chars]`,
+            : `[Resource: ${item.resource.uri}, ${String(item.resource.blob.length)} base64 chars]`,
         );
       } else if (item.type === 'resource_link') {
-        const description =
+        const linkDescription =
           item.description === undefined ? '' : ` - ${item.description}`;
         yield* append(
-          `[Resource link: ${item.name} (${item.uri})${description}]`,
+          `[Resource link: ${item.name} (${item.uri})${linkDescription}]`,
         );
       } else {
-        yield* append(JSON.stringify(item));
+        yield* append(encodeJson(item));
       }
     }
     return parts.join('\n\n') || '(MCP tool returned no content)';
@@ -1027,7 +1052,7 @@ const normalizeLimits = (limits?: Limits): NormalizedLimits => {
     const maximum = maximumLimits[key];
     if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
       throw new RangeError(
-        `MCP ${key} must be a positive integer no greater than ${maximum}`,
+        `MCP ${key} must be a positive integer no greater than ${String(maximum)}`,
       );
     }
   }
@@ -1061,7 +1086,9 @@ const mergeRequestInit = (
   requestInit: RequestInit | undefined,
   headers: HeadersInit | undefined,
 ): RequestInit | undefined => {
-  if (headers === undefined) return requestInit;
+  if (headers === undefined) {
+    return requestInit;
+  }
   const mergedHeaders = new Headers(requestInit?.headers);
   for (const [name, value] of new Headers(headers)) {
     mergedHeaders.set(name, value);
@@ -1070,19 +1097,19 @@ const mergeRequestInit = (
 };
 
 const validateDefinition = <
-  Definition extends Selection & {
+  ServerDefinition extends Selection & {
     readonly name: string;
     readonly optional?: boolean | undefined;
   },
 >(
-  definition: Definition,
-): Definition => {
+  definition: ServerDefinition,
+): ServerDefinition => {
   if (definition.name.trim() === '') {
     throw new Error('MCP server name must be non-empty.');
   }
   if (definition.name.length > MAX_SERVER_NAME_LENGTH) {
     throw new RangeError(
-      `MCP server name must be no longer than ${MAX_SERVER_NAME_LENGTH} characters.`,
+      `MCP server name must be no longer than ${String(MAX_SERVER_NAME_LENGTH)} characters.`,
     );
   }
   if (
@@ -1092,7 +1119,7 @@ const validateDefinition = <
       definition.timeout > MAX_TIMEOUT_MS)
   ) {
     throw new Error(
-      `MCP server ${JSON.stringify(definition.name)} timeout must be a positive number no greater than ${MAX_TIMEOUT_MS}ms.`,
+      `MCP server ${JSON.stringify(definition.name)} timeout must be a positive number no greater than ${String(MAX_TIMEOUT_MS)}ms.`,
     );
   }
   normalizeLimits(definition.limits);
@@ -1128,8 +1155,8 @@ const validateRemoteDefinition = (
 };
 
 const message = (error: unknown): string => {
-  if (error instanceof LimitError) {
-    return `${error._tag}: ${error.resource} exceeded ${error.limit} (actual ${error.actual})`;
+  if (Schema.is(LimitError)(error)) {
+    return `${error._tag}: ${error.resource} exceeded ${String(error.limit)} (actual ${String(error.actual)})`;
   }
   if (
     error instanceof Error &&

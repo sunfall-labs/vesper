@@ -4,7 +4,7 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Crypto, Effect, Exit, Layer, Ref, Schema, Stream } from 'effect';
+import { type Crypto, Effect, Exit, Layer, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
   IdGenerator,
@@ -130,16 +130,21 @@ const provide = <A, E>(
   model: Layer.Layer<LanguageModel.LanguageModel> = approvalScripted(),
 ): Effect.Effect<A, E> =>
   effect.pipe(
-    Effect.provide(model),
     Effect.provide(
-      Layer.mergeAll(
-        LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
-        NodeServices.layer,
-        Layer.succeed(IdGenerator.IdGenerator, IdGenerator.defaultIdGenerator),
+      Layer.merge(
+        model,
+        Layer.mergeAll(
+          LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+          NodeServices.layer,
+          Layer.succeed(
+            IdGenerator.IdGenerator,
+            IdGenerator.defaultIdGenerator,
+          ),
+        ),
       ),
     ),
     Effect.scoped,
-  ) as Effect.Effect<A, E>;
+  );
 
 const CONVERSATION = LogVocabulary.ConversationId.make('approval-conversation');
 const PATH = AgentLog.pathFor(CONVERSATION);
@@ -291,7 +296,7 @@ describe('durable tool approval', () => {
           envelope.record._tag === 'ToolOutcome' ? [envelope.record] : [],
         );
         expect(outcomes.length).toBe(1);
-        const [refusal] = outcomes;
+        const refusal = outcomes.at(0);
         expect(refusal).toMatchObject({
           _tag: 'ToolOutcome',
           step: 1,
@@ -303,8 +308,11 @@ describe('durable tool approval', () => {
         // The refusal is a genuine, decodable `AiError` — the same shape
         // `failureMode: 'return'` already uses for a framework-level
         // failure — not an ad hoc shape only this feature understands.
+        if (refusal === undefined) {
+          throw new Error('expected one durable refusal outcome');
+        }
         const decoded = yield* Schema.decodeUnknownEffect(AiError.AiError)(
-          refusal?.result,
+          refusal.result,
         );
         expect(decoded._tag).toBe('AiError');
         expect(decoded.reason.message).toContain('not this week');

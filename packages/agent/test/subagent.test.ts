@@ -337,17 +337,19 @@ describe('delegation', () => {
             // The child is asked to use its tool; its handler reads `Notebook`,
             // which only the captured context can supply.
             return yield* handler(scribe)({ prompt: 'note this' }).pipe(
-              Effect.provide(layer),
               Effect.provide(
-                notes.toLayer({
-                  write: ({ text }) =>
-                    Effect.gen(function* () {
-                      const notebook = yield* Notebook;
-                      return { note: `${notebook.note}:${text}` };
-                    }),
-                }),
+                Layer.mergeAll(
+                  layer,
+                  notes.toLayer({
+                    write: ({ text }) =>
+                      Effect.gen(function* () {
+                        const notebook = yield* Notebook;
+                        return { note: `${notebook.note}:${text}` };
+                      }),
+                  }),
+                  answering('done', calls),
+                ),
               ),
-              Effect.provide(answering('done', calls)),
               Effect.provideService(Notebook, { note: 'recorded' }),
             );
           }),

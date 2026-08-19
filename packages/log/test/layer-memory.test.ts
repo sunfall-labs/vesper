@@ -65,7 +65,9 @@ describe('LogStore memory linearizability', () => {
       const store = yield* LogStore.Service;
       const outcomes = yield* Effect.all(
         Array.from({ length: 32 }, (_, index) =>
-          store.create('raced-create', `identity-${index}`).pipe(Effect.result),
+          store
+            .create('raced-create', `identity-${String(index)}`)
+            .pipe(Effect.result),
         ),
         { concurrency: 'unbounded' },
       );

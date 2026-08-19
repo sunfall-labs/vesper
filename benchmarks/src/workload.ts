@@ -28,7 +28,7 @@ export const PART_COUNTS: ReadonlyArray<number> = [1, 100, 10_000];
 export const partText = (parts: number): ReadonlyArray<string> => {
   if (PART_OUTPUT_BYTES % parts !== 0) {
     throw new Error(
-      `${PART_OUTPUT_BYTES} output bytes cannot be split into ${parts} parts`,
+      `${String(PART_OUTPUT_BYTES)} output bytes cannot be split into ${String(parts)} parts`,
     );
   }
   return Array.from({ length: parts }, () =>
@@ -52,7 +52,7 @@ export interface ScriptStep {
 export const script = (steps: number): ReadonlyArray<ScriptStep> =>
   Array.from({ length: steps }, (_, index) => ({
     kind: index < steps - 1 ? ('tool' as const) : ('text' as const),
-    orderId: `order_${index}`,
+    orderId: `order_${String(index)}`,
   }));
 
 /** The tool's reply. Same string, same shape, same declared output schema. */
@@ -74,9 +74,9 @@ export const CONVERSATION_MESSAGES = 30;
 export const MEMORY_MESSAGES = 100;
 
 /** Iterations kept, after discarding warmup. */
-const smoke = process.env.VESPER_BENCH_SMOKE === '1';
+const smoke = process.env['VESPER_BENCH_SMOKE'] === '1';
 
-export const HEAVY = process.env.VESPER_BENCH_HEAVY === '1';
+export const HEAVY = process.env['VESPER_BENCH_HEAVY'] === '1';
 
 export const ITERATIONS = smoke ? 2 : 30;
 

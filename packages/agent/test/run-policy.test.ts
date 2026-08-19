@@ -43,9 +43,27 @@ const failedWith = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     }),
   );
 
+const calling = (
+  id: string,
+  name: string,
+  params: unknown,
+): Response.ToolCallPartEncoded => ({
+  type: 'tool-call',
+  id,
+  name,
+  params,
+});
+
 describe('hard run policy', () => {
   it('keeps exported defaults immutable', () => {
     expect(Object.isFrozen(RunPolicy.defaultLimits)).toBe(true);
+  });
+
+  it('rejects unknown runtime limit fields', () => {
+    const limits = { maxTurns: 1, misspelledLimit: 1 };
+    expect(() => RunPolicy.make(limits)).toThrow(
+      'RunPolicy.misspelledLimit is not a recognized limit',
+    );
   });
 
   it.effect('does not let a steer override the shared turn ceiling', () =>
@@ -242,16 +260,6 @@ describe('hard run policy', () => {
           subagents: [child],
           runPolicy: { maxToolConcurrency: 1 },
         }).withHandlers({ work: handler });
-        const calling = (
-          id: string,
-          name: string,
-          params: unknown,
-        ): Response.ToolCallPartEncoded => ({
-          type: 'tool-call',
-          id,
-          name,
-          params,
-        });
         const answering: Response.StreamPartEncoded[] = [
           { type: 'text-start', id: 'answer' },
           { type: 'text-delta', id: 'answer', delta: 'done' },
@@ -294,10 +302,7 @@ describe('hard run policy', () => {
           const running = yield* Effect.forkChild(
             parent
               .run('go')
-              .pipe(
-                Effect.provide(provider),
-                Effect.provide(NodeServices.layer),
-              ),
+              .pipe(Effect.provide(Layer.merge(provider, NodeServices.layer))),
           );
           yield* Deferred.await(entered);
           yield* Effect.sleep(20);
