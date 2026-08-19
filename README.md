@@ -387,15 +387,19 @@ for the multiplayer composition and serialization pattern.
 and a blocking one take the same path through the loop. `streamIn` and `runIn`
 are the same two against a `Chat` the caller already holds. A run stops when
 its `stopWhen` condition holds; the default is "the model asked for no tools",
-and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`, `any`, `all`.
-`Result.outcome` distinguishes `success` from `cancelled`; `steps` counts model
-turns that actually started, so a queued cancellation can return zero while an
-in-flight cancellation preserves its partial text, usage, and one started turn.
-These are soft stops: a steer may request another turn. `runPolicy` is the hard
-boundary and cannot be overridden. Its runtime is created once per root run and
-passed into every descendant, so delegation cannot reset turn, model-call,
-token, deadline, depth, breadth, or concurrent-child accounting. Requested
-tool concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
+and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
+`toolCalledTimes`, `any`, `all`. `Result.outcome` distinguishes `success` from
+`cancelled`; `steps` counts model turns that actually started, so a queued
+cancellation can return zero while an in-flight cancellation preserves its
+partial text, usage, and one started turn. These are soft stops: a pending
+steer, or a signal backlog a turn boundary could not fully drain, outranks a
+positive stop decision for one more turn — so `Stop.maxSteps(N)` is not a hard
+ceiling once a conversation takes signal traffic. `runPolicy` is the hard
+boundary and cannot be overridden; `runPolicy.maxTurns` is the ceiling that
+holds regardless. Its runtime is created once per root run and passed into
+every descendant, so delegation cannot reset turn, model-call, token,
+deadline, depth, breadth, or concurrent-child accounting. Requested tool
+concurrency, including `unbounded`, is clamped to `maxToolConcurrency`.
 `maxInputTokens` and `maxOutputTokens` are checked after each turn's usage is
 known, not before a request is sent — there is no way to ask a provider
 whether a turn will fit a budget before making it — so a run can overshoot
@@ -683,7 +687,12 @@ consumed an instruction and stopped anyway has silently ignored it.
 It never outranks a hard run budget.
 
 Signal reads are bounded by `maxSignalsPerBoundary`; a backlog emits
-`SignalBacklog` and remains after the durable cursor for a later boundary.
+`SignalBacklog` and remains after the durable cursor for a later boundary. A
+boundary that could not fully drain its backlog **also outranks the stop
+condition** for that turn, the same way a steer does — otherwise stopping now
+would drop the undrained signals rather than let the next boundary see them.
+Between the two, `Stop.maxSteps(N)` is a soft ceiling once a conversation
+takes signal traffic; `runPolicy.maxTurns` is the one that still holds.
 Ingress rejects individual payloads over 256 KiB, but Vesper does not impose a
 conversation-wide signal count or storage quota. Authenticate and rate-limit
 public senders, and enforce retention or storage quotas at the application and

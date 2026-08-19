@@ -5,7 +5,14 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
-No changes yet.
+- Added `Stop.toolCalledTimes(name, times)`: stop once a named tool has been
+  called `times` times in total across the whole run, rather than once per
+  turn. Additive; existing stop conditions are unchanged. The name is checked
+  against the toolkit at compile time, the same as `Stop.toolCalled`.
+- Documented that a pending steer, or a signal backlog a turn boundary could
+  not fully drain, outranks a positive stop decision for one more turn — so
+  `Stop.maxSteps(N)` is not a hard ceiling once a conversation takes signal
+  traffic; `RunPolicy.maxTurns` is. No behavior changed.
 
 ## 0.1.0-alpha.1 - 2026-08-18
 
