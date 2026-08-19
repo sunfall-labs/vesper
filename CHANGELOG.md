@@ -5,6 +5,16 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- `codeMode` accepts `{ except: [...] }`: broker every tool behind `exec`
+  except the named ones, which stay directly advertised — gated,
+  intercepted, metered, and durably approvable via `Tool.setNeedsApproval`
+  exactly as if code mode were off for them. Names are compile-time-checked
+  against the toolkit for literal arrays and rejected at construction
+  otherwise. `codeMode: true`/`false` behavior is unchanged, with one
+  fix: a toolkit tool named `exec` is now rejected at construction whenever
+  code mode is enabled, instead of being silently shadowed by the generated
+  `exec` tool.
+
 - Added durable tool approvals without `WorkflowEngine`. A tool marked with
   Effect's own `Tool.setNeedsApproval` now suspends durably in a recorded
   conversation: the run ends with `Result.outcome: 'suspended'` and
