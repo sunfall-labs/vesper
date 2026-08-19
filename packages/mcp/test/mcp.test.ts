@@ -117,6 +117,41 @@ const protocolTransport = (
   return instance;
 };
 
+/** A minimal JSON-RPC transport whose `tools/list` response is parameterized. */
+const transportFor = (tools: McpTool[]): ProtocolTransport => {
+  const instance: ProtocolTransport = {
+    start: async () => {},
+    send: async (message) => {
+      if (!('id' in message) || !('method' in message)) return;
+      let response: JSONRPCMessage;
+      if (message.method === 'initialize') {
+        response = {
+          jsonrpc: '2.0',
+          id: message.id,
+          result: {
+            protocolVersion: LATEST_PROTOCOL_VERSION,
+            capabilities: { tools: {} },
+            serverInfo: { name: 'test', version: '1.0.0' },
+          },
+        };
+      } else if (message.method === 'tools/list') {
+        response = { jsonrpc: '2.0', id: message.id, result: listing(tools) };
+      } else {
+        response = {
+          jsonrpc: '2.0',
+          id: message.id,
+          error: { code: -32601, message: 'unsupported test method' },
+        };
+      }
+      instance.onmessage?.(response);
+    },
+    close: async () => {
+      instance.onclose?.();
+    },
+  };
+  return instance;
+};
+
 const requestId = (body: BodyInit | null | undefined): string | number => {
   if (typeof body !== 'string') throw new Error('Expected a JSON request.');
   const parsed: unknown = JSON.parse(body);
@@ -711,5 +746,159 @@ describe('Mcp', () => {
 
       expect(aborted).toBe(true);
     }).pipe(Effect.scoped),
+  );
+});
+
+describe('Mcp tool fingerprinting and drift detection', () => {
+  const driftedDescription: McpTool = {
+    ...search,
+    description: 'Completely different behavior now.',
+  };
+  const driftedSchema: McpTool = {
+    ...search,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string' },
+        limit: { type: 'number' },
+      },
+      required: ['query', 'limit'],
+    },
+  };
+  const reorderedSearch: McpTool = {
+    ...search,
+    inputSchema: {
+      required: ['query'],
+      type: 'object',
+      properties: { query: { type: 'string' } },
+    },
+  };
+
+  const clientFor = (tool: McpTool) =>
+    ({
+      listTools: async () => listing([tool]),
+      callTool: async () => result('unused'),
+    }) satisfies ClientLike;
+
+  const fingerprintsFor = (tool: McpTool) =>
+    Mcp.fingerprints({
+      name: 'linear',
+      transport: Mcp.transport(() => transportFor([tool])),
+    }).pipe(Effect.scoped);
+
+  it.effect('is stable across schema key order and repeated discovery', () =>
+    Effect.gen(function* () {
+      const first = yield* fingerprintsFor(search);
+      const reordered = yield* fingerprintsFor(reorderedSearch);
+      const again = yield* fingerprintsFor(search);
+
+      expect(Object.keys(first)).toEqual(['search.issues']);
+      expect(first['search.issues']).toMatch(/^[0-9a-f]{64}$/);
+      expect(reordered).toEqual(first);
+      expect(again).toEqual(first);
+    }),
+  );
+
+  it.effect('changes when a tool description changes', () =>
+    Effect.gen(function* () {
+      const original = yield* fingerprintsFor(search);
+      const drifted = yield* fingerprintsFor(driftedDescription);
+
+      expect(drifted['search.issues']).not.toBe(original['search.issues']);
+    }),
+  );
+
+  it.effect('changes when a tool input schema changes', () =>
+    Effect.gen(function* () {
+      const original = yield* fingerprintsFor(search);
+      const drifted = yield* fingerprintsFor(driftedSchema);
+
+      expect(drifted['search.issues']).not.toBe(original['search.issues']);
+    }),
+  );
+
+  it.effect(
+    "'reject' (the default) excludes a tool whose description drifted",
+    () =>
+      Effect.gen(function* () {
+        const pins = yield* fingerprintsFor(search);
+        const ready = yield* Mcp.fromClient({
+          name: 'linear',
+          client: Effect.succeed(clientFor(driftedDescription)),
+          toolDrift: { fingerprints: pins },
+        }).open;
+
+        expect(Object.keys(ready.tools)).toEqual([]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("'reject' excludes a tool whose input schema drifted", () =>
+    Effect.gen(function* () {
+      const pins = yield* fingerprintsFor(search);
+      const ready = yield* Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(clientFor(driftedSchema)),
+        toolDrift: { fingerprints: pins },
+      }).open;
+
+      expect(Object.keys(ready.tools)).toEqual([]);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("'warn' keeps a drifted tool available", () =>
+    Effect.gen(function* () {
+      const pins = yield* fingerprintsFor(search);
+      const ready = yield* Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(clientFor(driftedDescription)),
+        toolDrift: { fingerprints: pins, onDrift: 'warn' },
+      }).open;
+
+      expect(Object.keys(ready.tools)).toEqual(['mcp__linear__search_issues']);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect('a matching pin leaves the tool available', () =>
+    Effect.gen(function* () {
+      const pins = yield* fingerprintsFor(search);
+      const ready = yield* Mcp.fromClient({
+        name: 'linear',
+        client: Effect.succeed(clientFor(search)),
+        toolDrift: { fingerprints: pins },
+      }).open;
+
+      expect(Object.keys(ready.tools)).toEqual(['mcp__linear__search_issues']);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    'a tool absent from pinned fingerprints is trusted on first discovery',
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Mcp.fromClient({
+          name: 'linear',
+          client: Effect.succeed(clientFor(driftedDescription)),
+          toolDrift: { fingerprints: {} },
+        }).open;
+
+        expect(Object.keys(ready.tools)).toEqual([
+          'mcp__linear__search_issues',
+        ]);
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect(
+    'omitting toolDrift leaves discovery unchanged for what would be a drifted tool',
+    () =>
+      Effect.gen(function* () {
+        const ready = yield* Mcp.fromClient({
+          name: 'linear',
+          client: Effect.succeed(clientFor(driftedDescription)),
+        }).open;
+
+        expect(Object.keys(ready.tools)).toEqual([
+          'mcp__linear__search_issues',
+        ]);
+      }).pipe(Effect.scoped),
   );
 });

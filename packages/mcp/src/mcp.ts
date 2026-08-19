@@ -22,6 +22,7 @@ import {
   Context,
   Duration,
   Effect,
+  Encoding,
   Layer,
   RcMap,
   Redacted,
@@ -93,7 +94,42 @@ export interface Selection {
   readonly resetTimeoutOnProgress?: boolean | undefined;
   /** Hard bounds applied to untrusted discovery metadata and tool results. */
   readonly limits?: Limits | undefined;
+  /**
+   * Detect a remote tool's definition changing after it was pinned.
+   *
+   * A tool absent from `fingerprints` is trusted on first discovery, exactly
+   * as it is today; only pinned tools are checked. Omitting `toolDrift`
+   * entirely leaves discovery unchanged.
+   */
+  readonly toolDrift?: ToolDriftPolicy | undefined;
 }
+
+/**
+ * Pinned tool fingerprints and what to do when a pin no longer matches.
+ *
+ * Keyed by the remote tool name the server advertises — the same identity
+ * `tools` allowlists use — not the sanitized `mcp__<server>__<tool>` name
+ * exposed to the model. Obtain values to pin with {@link fingerprints}.
+ */
+export interface ToolDriftPolicy {
+  readonly fingerprints: Readonly<Record<string, string>>;
+  /**
+   * `'reject'` (the default) excludes the drifted tool from the toolkit and
+   * logs a {@link ToolDriftError}. `'warn'` logs the same error but keeps
+   * the tool available.
+   */
+  readonly onDrift?: 'reject' | 'warn' | undefined;
+}
+
+/** A pinned MCP tool fingerprint no longer matches what the server advertises. */
+export class ToolDriftError extends Schema.TaggedError<ToolDriftError>(
+  '@sunfall/vesper-mcp/ToolDriftError',
+)('ToolDriftError', {
+  server: Schema.String,
+  tool: Schema.String,
+  expected: Schema.String,
+  actual: Schema.String,
+}) {}
 
 /** Bounds for one MCP source. Values are validated before a connection opens. */
 export interface Limits {
@@ -365,10 +401,19 @@ const connectedClient = Effect.fn('Mcp.connect')(function* <
   );
 });
 
-const discover = Effect.fn('Mcp.discover')(function* <Name extends string>(
+/** listTools, validate, and apply the allowlist — shared by discovery and {@link fingerprints}. */
+const listAndSelect = Effect.fn('Mcp.listAndSelect')(function* <
+  Name extends string,
+>(
   client: ClientLike,
   definition: Pick<FromClient<Name, never>, keyof Selection | 'name'>,
-): Effect.fn.Return<Toolkit.WithHandler<Tools>, AiError.AiError> {
+): Effect.fn.Return<
+  {
+    readonly selected: ReadonlyArray<McpTool>;
+    readonly limits: NormalizedLimits;
+  },
+  AiError.AiError
+> {
   yield* Effect.annotateCurrentSpan('vesper.mcp.server', definition.name);
   const listed = yield* Effect.tryPromise({
     try: (signal) =>
@@ -415,9 +460,46 @@ const discover = Effect.fn('Mcp.discover')(function* <Name extends string>(
     try: () => select(definition.name, listed.tools, definition.tools),
     catch: (error) => failure('selectTools', definition.name, error),
   });
+  return { selected, limits };
+});
 
+const discover = Effect.fn('Mcp.discover')(function* <Name extends string>(
+  client: ClientLike,
+  definition: Pick<FromClient<Name, never>, keyof Selection | 'name'>,
+): Effect.fn.Return<Toolkit.WithHandler<Tools>, AiError.AiError> {
+  const { selected, limits } = yield* listAndSelect(client, definition);
   return yield* adapt(client, definition, selected, limits);
 });
+
+/**
+ * Discover a server's current tool fingerprints without building a toolkit.
+ *
+ * Run this once, out of band — a setup script or an admin command — to
+ * obtain the values to pin into `toolDrift.fingerprints`. Vesper does not
+ * persist pins itself; storing and reloading them across runs is the
+ * application's job (see the MCP docs for a storage example).
+ */
+export const fingerprints = <const Name extends string>(
+  definition: Definition<Name> | RemoteDefinition<Name>,
+): Effect.Effect<
+  Readonly<Record<string, string>>,
+  AiError.AiError,
+  Scope.Scope
+> =>
+  Effect.gen(function* () {
+    const resolved =
+      'url' in definition
+        ? resolveRemoteDefinition(definition)
+        : validateDefinition(definition);
+    const client = yield* connectedClient(resolved);
+    const { selected, limits } = yield* listAndSelect(client, resolved);
+    const entries: Array<readonly [string, string]> = [];
+    for (const remote of selected) {
+      const fingerprint = yield* toolFingerprint(resolved.name, remote, limits);
+      entries.push([remote.name, fingerprint]);
+    }
+    return Object.fromEntries(entries);
+  });
 
 const adapt = <Name extends string>(
   client: ClientLike,
@@ -447,16 +529,46 @@ const adapt = <Name extends string>(
       }
       names.add(name);
 
+      const rendered = yield* Effect.try({
+        try: () => ({
+          description: description(definition.name, remote, limits),
+          inputSchema: normalizeInputSchema(
+            remote.inputSchema,
+            limits,
+            definition.name,
+            remote.name,
+          ),
+        }),
+        catch: (error) => failure('adaptTools', definition.name, error),
+      });
+
+      if (definition.toolDrift !== undefined) {
+        const pinned = definition.toolDrift.fingerprints[remote.name];
+        if (pinned !== undefined) {
+          const current = yield* fingerprintOf({
+            name: remote.name,
+            description: rendered.description,
+            inputSchema: rendered.inputSchema,
+          });
+          if (current !== pinned) {
+            const onDrift = definition.toolDrift.onDrift ?? 'reject';
+            yield* reportDrift(
+              definition.name,
+              remote.name,
+              pinned,
+              current,
+              onDrift,
+            );
+            if (onDrift === 'reject') continue;
+          }
+        }
+      }
+
       const tool = yield* Effect.try({
         try: () =>
           Tool.dynamic(name, {
-            description: description(definition.name, remote, limits),
-            parameters: normalizeInputSchema(
-              remote.inputSchema,
-              limits,
-              definition.name,
-              remote.name,
-            ),
+            description: rendered.description,
+            parameters: rendered.inputSchema,
             success: Schema.String,
             failure: ToolFailure,
             failureMode: 'return',
@@ -721,6 +833,86 @@ const canonicalJson = (
   return Object.fromEntries(entries);
 };
 
+/**
+ * SHA-256 over the exact model-facing surface of one discovered tool: its
+ * remote name, rendered description, and canonicalized input schema. Key
+ * order never affects the result — the same canonicalization already used
+ * to keep cached tool prompts byte-stable makes the fingerprint stable too.
+ *
+ * Deliberately not threaded through Effect's `Crypto` service the way
+ * `@sunfall/vesper-log` and `@sunfall/vesper-attachments` hash: a tool
+ * fingerprint is not a persisted content address anything durable depends
+ * on, and requiring `Crypto.Crypto` here would force it onto every MCP
+ * source's `Requires`, including the overwhelming majority that never
+ * configure `toolDrift`. `crypto.subtle` is a standard platform primitive,
+ * not a bundled or vendor-specific implementation.
+ */
+const fingerprintOf = (input: {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: unknown;
+}): Effect.Effect<string> => {
+  const canonical = canonicalJson({
+    name: input.name,
+    description: input.description,
+    inputSchema: input.inputSchema,
+  });
+  // `input` is always a defined plain object of defined fields, so
+  // `canonicalJson` always returns a defined value here.
+  const material = JSON.stringify(canonical) ?? '{}';
+  return Effect.promise(async () => {
+    const digest = await globalThis.crypto.subtle.digest(
+      'SHA-256',
+      new TextEncoder().encode(material),
+    );
+    return Encoding.encodeHex(new Uint8Array(digest));
+  });
+};
+
+/** The fingerprint of one remote tool as it will be adapted for the model. */
+const toolFingerprint = (
+  server: string,
+  remote: McpTool,
+  limits: NormalizedLimits,
+): Effect.Effect<string, AiError.AiError> =>
+  Effect.gen(function* () {
+    const rendered = yield* Effect.try({
+      try: () => ({
+        description: description(server, remote, limits),
+        inputSchema: normalizeInputSchema(
+          remote.inputSchema,
+          limits,
+          server,
+          remote.name,
+        ),
+      }),
+      catch: (error) => failure('adaptTools', server, error),
+    });
+    return yield* fingerprintOf({ name: remote.name, ...rendered });
+  });
+
+/** Log a drifted tool's fingerprint mismatch; `'reject'` also excludes it. */
+const reportDrift = (
+  server: string,
+  tool: string,
+  expected: string,
+  actual: string,
+  onDrift: 'reject' | 'warn',
+): Effect.Effect<void> =>
+  Effect.logWarning(
+    onDrift === 'reject'
+      ? `MCP tool ${JSON.stringify(tool)} from ${JSON.stringify(server)} no longer matches its pinned fingerprint; excluding it from the toolkit.`
+      : `MCP tool ${JSON.stringify(tool)} from ${JSON.stringify(server)} no longer matches its pinned fingerprint.`,
+    new ToolDriftError({ server, tool, expected, actual }),
+  ).pipe(
+    Effect.annotateLogs({
+      'vesper.component': 'mcp',
+      'vesper.mcp.server': server,
+      'vesper.mcp.tool': tool,
+      'vesper.mcp.driftDecision': onDrift,
+    }),
+  );
+
 const formatResult = (
   result: CallToolResult,
   maxResultBytes: number,
@@ -910,6 +1102,15 @@ const validateDefinition = <
   ) {
     throw new Error(
       `MCP server ${JSON.stringify(definition.name)} tools must be non-empty names.`,
+    );
+  }
+  if (
+    definition.toolDrift?.onDrift !== undefined &&
+    definition.toolDrift.onDrift !== 'reject' &&
+    definition.toolDrift.onDrift !== 'warn'
+  ) {
+    throw new Error(
+      `MCP server ${JSON.stringify(definition.name)} toolDrift.onDrift must be "reject" or "warn".`,
     );
   }
   return definition;
