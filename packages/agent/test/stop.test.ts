@@ -1,9 +1,11 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Ref, Schema } from 'effect';
-import type { Response } from 'effect/unstable/ai';
+import { Effect, Ref, Schema, Stream } from 'effect';
+import { type Response, Tool, Toolkit } from 'effect/unstable/ai';
 
+import { Agent } from '../src/agent.js';
 import { AgentEvents } from '../src/event.js';
 import { Stop } from '../src/stop.js';
+import { ScriptedModel } from '../src/testing.js';
 
 // The stop conditions decide when an agent stops calling the model, which is
 // to say when it stops spending money. Only `maxSteps` was exercised, and only
@@ -17,10 +19,46 @@ const call = (name: string): Response.ToolCallPartEncoded => ({
   params: {},
 });
 
+const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
+  type: 'finish' as const,
+  reason,
+  usage: {
+    inputTokens: { total: 1, uncached: 1, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: 1 },
+  },
+});
+
+const searchTool = Tool.make('search', {
+  description: 'Search for something.',
+  parameters: Schema.Struct({ query: Schema.String }),
+  success: Schema.Struct({ result: Schema.String }),
+});
+
+const searcher = Agent.make({
+  name: 'searcher',
+  revision: '1',
+  instructions: 'x',
+  toolkit: Toolkit.make(searchTool),
+  stopWhen: Stop.toolCalledTimes('search', 3),
+}).withHandlers({
+  search: ({ query }) => Effect.succeed({ result: `found ${query}` }),
+});
+
+const searchCall = (
+  id: string,
+  query: string,
+): Response.ToolCallPartEncoded => ({
+  type: 'tool-call',
+  id,
+  name: 'search',
+  params: { query },
+});
+
 const state = (over: Partial<Stop.State<Record<string, never>>> = {}) => ({
   step: 1,
   toolCalls: [] as ReadonlyArray<Response.ToolCallPartEncoded>,
   usage: { input: 0, output: 0 },
+  toolCallCounts: {} as Readonly<Record<string, number>>,
   ...over,
 });
 
@@ -96,6 +134,63 @@ describe('stop conditions', () => {
     }),
   );
 
+  // `toolCallCounts` is cumulative across the whole run, unlike `toolCalls`
+  // which only ever holds the turn just requested — so this reads the
+  // cumulative field rather than counting `toolCalls` itself.
+  it.effect(
+    'fires once a tool has been called `times` times in total, not per turn',
+    () =>
+      Effect.gen(function* () {
+        expect(
+          yield* decide(Stop.toolCalledTimes('search', 3), {
+            toolCallCounts: { search: 2 },
+          }),
+        ).toBe(false);
+        expect(
+          yield* decide(Stop.toolCalledTimes('search', 3), {
+            toolCallCounts: { search: 3 },
+          }),
+        ).toBe(true);
+        // A tool never seen has no entry at all, not a zero.
+        expect(
+          yield* decide(Stop.toolCalledTimes('search', 1), {
+            toolCallCounts: {},
+          }),
+        ).toBe(false);
+      }),
+  );
+
+  it.effect('composes `toolCalledTimes` with `any` and `all`', () =>
+    Effect.gen(function* () {
+      const counts = { search: 3, issue_refund: 1 };
+
+      expect(
+        yield* decide(
+          Stop.any(Stop.toolCalledTimes('search', 3), Stop.maxSteps(99)),
+          { toolCallCounts: counts },
+        ),
+      ).toBe(true);
+      expect(
+        yield* decide(
+          Stop.all(
+            Stop.toolCalledTimes('search', 3),
+            Stop.toolCalledTimes('issue_refund', 2),
+          ),
+          { toolCallCounts: counts },
+        ),
+      ).toBe(false);
+      expect(
+        yield* decide(
+          Stop.all(
+            Stop.toolCalledTimes('search', 3),
+            Stop.toolCalledTimes('issue_refund', 1),
+          ),
+          { toolCallCounts: counts },
+        ),
+      ).toBe(true);
+    }),
+  );
+
   // The boundary cases, which are the ones a composition accidentally hits:
   // an empty `any` must never stop the loop, and an empty `all` must stop it
   // immediately. Getting either backwards is an unbounded bill or a loop that
@@ -155,4 +250,58 @@ describe('stop conditions', () => {
         expect(yield* decide(Stop.defaultCondition())).toBe(true);
       }),
   );
+
+  // Exercises the loop, not just the pure function: `toolCallCounts` has to
+  // be threaded turn to turn by `agent.ts`'s `decide` stage, and this is
+  // what pins that wiring rather than only the arithmetic above. Two calls
+  // to `search` land in the first turn and a third in the second, so a
+  // per-turn count would never reach 3 and the run would never stop.
+  it.effect('counts tool calls cumulatively across turns, not per turn', () =>
+    Effect.gen(function* () {
+      const model = ScriptedModel.make([
+        [
+          searchCall('c1', 'a'),
+          searchCall('c2', 'b'),
+          finish('tool-calls'),
+        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+        [
+          searchCall('c3', 'c'),
+          finish('tool-calls'),
+        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+      ]);
+
+      const tags = yield* searcher.stream('go').pipe(
+        Stream.map((event) => event._tag),
+        Stream.runCollect,
+        Effect.provide(model.layer),
+      );
+      const requests = yield* model.requests;
+
+      // The third `search` call is what crosses the threshold, so the
+      // model is asked for exactly two turns — not a third to observe the
+      // tool result, and not stuck forever because a per-turn count of 1
+      // never reaches 3.
+      expect(requests).toHaveLength(2);
+      expect(
+        Array.from(tags).filter((tag) => tag === 'TurnStarted'),
+      ).toHaveLength(2);
+      expect(
+        Array.from(tags).filter((tag) => tag === 'Completed'),
+      ).toHaveLength(1);
+    }),
+  );
 });
+
+// Compile-time: `Stop.toolCalledTimes` is keyed to the toolkit the same way
+// `Stop.toolCalled` is, so naming a tool the agent does not have is a type
+// error rather than a condition that silently never fires.
+const stopConditionToolNameAssertions = (): void => {
+  const valid: Stop.StopCondition<Agent.Tools<typeof searcher>> =
+    Stop.toolCalledTimes('search', 3);
+  void valid;
+  const misspelled: Stop.StopCondition<Agent.Tools<typeof searcher>> =
+    // @ts-expect-error Tool names are checked against the toolkit.
+    Stop.toolCalledTimes('serach', 3);
+  void misspelled;
+};
+void stopConditionToolNameAssertions;

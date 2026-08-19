@@ -9,6 +9,14 @@ import type { Response, Tool } from 'effect/unstable/ai';
 // A stop condition is an Effect so a policy can consult a service — a budget
 // tracker, a deadline, an approval queue — without the loop needing to know
 // which.
+//
+// A stop condition answering `true` is a request, not a guarantee: the turn
+// boundary that evaluates it also drains signals, and a pending `steer` or a
+// backlog it could not fully drain this boundary outranks a positive
+// decision for one more turn (see `agent.ts`'s `decide` stage). So a
+// condition like `maxSteps(N)` is not a hard ceiling once a conversation
+// takes signal traffic — only `RunPolicy.maxTurns` cannot be overridden that
+// way.
 
 export interface State<Tools extends Record<string, Tool.Any>> {
   /** 1 for the first model call. */
@@ -17,6 +25,13 @@ export interface State<Tools extends Record<string, Tool.Any>> {
   readonly toolCalls: ReadonlyArray<Response.ToolCallPartEncoded>;
   /** Cumulative token usage across every step of this run. */
   readonly usage: Usage;
+  /**
+   * Cumulative count of calls to each tool, by name, across every step of
+   * this run. Unlike `usage`, this does not carry over across a durable
+   * conversation's separate `run` calls — it starts at zero with `step`,
+   * each time the loop is entered.
+   */
+  readonly toolCallCounts: Readonly<Record<string, number>>;
   readonly _tools?: Tools;
 }
 
@@ -65,11 +80,16 @@ export const noToolCalls =
     Effect.succeed(state.toolCalls.length === 0);
 
 /**
- * Hard step ceiling.
+ * Step ceiling.
  *
  * Always compose this with a real condition. A loop bounded only by step
  * count will happily burn the whole budget on a model stuck in a two-tool
  * cycle, and a loop with no ceiling at all will do it forever.
+ *
+ * Not actually hard: a pending steer, or a signal backlog the run could not
+ * fully drain at a turn boundary, outranks this (and every other stop
+ * condition) for one more turn — see the module comment above. Use
+ * `RunPolicy.maxTurns` for a ceiling signal traffic cannot push past.
  */
 export const maxSteps =
   <Tools extends Record<string, Tool.Any>>(
@@ -102,6 +122,25 @@ export const toolCalled =
   ): StopCondition<Tools> =>
   (state) =>
     Effect.succeed(state.toolCalls.some((call) => call.name === name));
+
+/**
+ * Stop once a named tool has been called `times` times in total across the
+ * whole run — cumulative, not per turn. `toolCalled` fires the moment a tool
+ * is seen once; this is for the tool a model may reasonably call more than
+ * once before the run should end, such as a `search` step capped at three
+ * tries or a retry-style tool with its own budget.
+ *
+ * The name is keyed to the toolkit the same way `toolCalled`'s is, so a
+ * misspelled tool name is a compile error rather than a condition that
+ * silently never fires.
+ */
+export const toolCalledTimes =
+  <Tools extends Record<string, Tool.Any>>(
+    name: keyof Tools & string,
+    times: number,
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed((state.toolCallCounts[name] ?? 0) >= times);
 
 /** Stop when any condition holds. */
 export function any<

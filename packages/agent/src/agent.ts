@@ -1123,6 +1123,7 @@ export const make = <
     const turn = (
       chat: Chat.Service,
       usage: Ref.Ref<Stop.Usage>,
+      toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
       lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
       step: number,
       pending: Prompt.RawInput,
@@ -1282,6 +1283,10 @@ export const make = <
               const totals = yield* Ref.updateAndGet(usage, (current) =>
                 addUsage(current, seen.usage),
               );
+              const toolCallTotals = yield* Ref.updateAndGet(
+                toolCallCounts,
+                (current) => addToolCallCounts(current, seen.toolCalls),
+              );
               if (runtime !== undefined && seen.usage !== undefined) {
                 const accounted = yield* Effect.exit(
                   runtime.addUsage({
@@ -1380,13 +1385,20 @@ export const make = <
                 step,
                 toolCalls: seen.toolCalls,
                 usage: totals,
+                toolCallCounts: toolCallTotals,
               });
 
-              // A steer outranks the stop condition for one more turn,
-              // including a step ceiling. The ceiling is a runaway-loop guard
-              // and a steer is a person asking for more work; stopping anyway
-              // would consume the instruction and ignore it, which is the one
-              // outcome nobody can debug. A cancel outranks everything.
+              // A steer, or a signal backlog this boundary could not fully
+              // drain, outranks the stop condition for one more turn,
+              // including a step ceiling — `Stop.maxSteps` is not a hard
+              // ceiling once a run takes signal traffic; `runPolicy.maxTurns`
+              // is. The ceiling is a runaway-loop guard and a steer is a
+              // person asking for more work; stopping anyway would consume
+              // the instruction and ignore it, which is the one outcome
+              // nobody can debug. A backlog is the same shape: it means more
+              // signals are already waiting, so stopping now would drop them
+              // on the floor rather than let the next boundary see them. A
+              // cancel outranks everything.
               const stop =
                 cancelled ||
                 (wanted && steers.length === 0 && !drained.backlog);
@@ -1412,6 +1424,7 @@ export const make = <
                     turn(
                       chat,
                       usage,
+                      toolCallCounts,
                       lastTurn,
                       step + 1,
                       steeringInput(steers),
@@ -1745,11 +1758,14 @@ export const make = <
           const usage = yield* Ref.make<Stop.Usage>(
             wiring.initialUsage ?? { input: 0, output: 0 },
           );
+          const toolCallCounts = yield* Ref.make<
+            Readonly<Record<string, number>>
+          >({});
           const lastTurn = yield* Ref.make<ContextWindow.TurnUsage | undefined>(
             wiring.lastTurn,
           );
           const remaining = yield* runtime.remainingMillis;
-          return turn(chat, usage, lastTurn, 1, input).pipe(
+          return turn(chat, usage, toolCallCounts, lastTurn, 1, input).pipe(
             Stream.interruptWhen(
               Effect.sleep(remaining).pipe(
                 Effect.andThen(
@@ -2686,5 +2702,17 @@ const addStopUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
   input: left.input + right.input,
   output: left.output + right.output,
 });
+
+const addToolCallCounts = (
+  current: Readonly<Record<string, number>>,
+  calls: ReadonlyArray<Response.ToolCallPartEncoded>,
+): Readonly<Record<string, number>> => {
+  if (calls.length === 0) return current;
+  const next = { ...current };
+  for (const call of calls) {
+    next[call.name] = (next[call.name] ?? 0) + 1;
+  }
+  return next;
+};
 
 export * as Agent from './agent.js';
