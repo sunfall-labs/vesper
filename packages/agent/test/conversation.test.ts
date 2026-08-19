@@ -4,12 +4,12 @@ import { LogOffset } from '@sunfall/vesper-log/offset';
 import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Context, Crypto, Effect, Layer, Stream } from 'effect';
+import { Context, Effect, Layer, Stream, type Crypto } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import { RecordingPolicy } from '../src/recording-policy.js';
+import type { RecordingPolicy } from '../src/recording-policy.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
@@ -53,11 +53,7 @@ const provide = <A, E>(
     LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
   >,
 ) =>
-  effect.pipe(
-    Effect.provide(model),
-    Effect.provide(testLogLayer),
-    Effect.scoped,
-  );
+  effect.pipe(Effect.provide(Layer.merge(model, testLogLayer)), Effect.scoped);
 
 type EffR<T> = T extends Effect.Effect<unknown, unknown, infer R> ? R : never;
 type EffE<T> = T extends Effect.Effect<unknown, infer E, unknown> ? E : never;
@@ -120,9 +116,7 @@ describe('Conversation', () => {
       const error = yield* Conversation.make(agent, 'storage-failure')
         .run('hello')
         .pipe(
-          Effect.provide(model),
-          Effect.provide(failing),
-          Effect.provide(NodeCrypto.layer),
+          Effect.provide(Layer.mergeAll(model, failing, NodeCrypto.layer)),
           Effect.flip,
         );
       expect(error).toMatchObject({ reason: 'storage' });
@@ -139,9 +133,7 @@ describe('Conversation', () => {
         const result = yield* Conversation.make(agent, 'append-failure')
           .run('hello')
           .pipe(
-            Effect.provide(model),
-            Effect.provide(failing),
-            Effect.provide(NodeCrypto.layer),
+            Effect.provide(Layer.mergeAll(model, failing, NodeCrypto.layer)),
             Effect.result,
           );
 
@@ -184,9 +176,7 @@ describe('Conversation', () => {
 
       for (const { operation, store } of cases) {
         const error = yield* operation.pipe(
-          Effect.provide(model),
-          Effect.provide(store),
-          Effect.provide(NodeCrypto.layer),
+          Effect.provide(Layer.mergeAll(model, store, NodeCrypto.layer)),
           Effect.flip,
         );
         expect(error).toMatchObject({ reason: 'storage' });
@@ -219,8 +209,7 @@ describe('Conversation', () => {
       const error = yield* Conversation.make(agent, 'signal-failure')
         .send({ kind: 'cancel', text: 'stop', source: 'test' })
         .pipe(
-          Effect.provide(failing),
-          Effect.provide(NodeCrypto.layer),
+          Effect.provide(Layer.mergeAll(failing, NodeCrypto.layer)),
           Effect.flip,
         );
       expect(error).toMatchObject({ reason: 'storage' });
@@ -256,14 +245,22 @@ describe('Conversation', () => {
         const source = Conversation.make(agent, 'source');
         yield* source.run('first');
         const records = yield* source.records().pipe(Stream.runCollect);
-        const at = Array.from(records)[0]!.offset;
+        const first = Array.from(records).at(0);
+        if (first === undefined) {
+          throw new Error('missing source record');
+        }
+        const at = first.offset;
         yield* source.branchFrom(at, 'branched');
         yield* source.forkFrom(at, 'fork-target', 'forked');
         const fork = Conversation.make(agent, 'fork-target');
         const forkRecords = yield* fork
           .records()
           .pipe(Stream.take(6), Stream.runCollect);
-        expect(Array.from(forkRecords)[0]!.conversationId).toBe('fork-target');
+        const forkFirst = Array.from(forkRecords).at(0);
+        if (forkFirst === undefined) {
+          throw new Error('missing fork record');
+        }
+        expect(forkFirst.conversationId).toBe('fork-target');
         expect(source.id).toBe('source');
       }),
     ),
@@ -283,7 +280,11 @@ describe('Conversation', () => {
           let records = yield* conversation
             .records()
             .pipe(Stream.take(5), Stream.runCollect);
-          const at = Array.from(records)[0]!.offset;
+          const first = Array.from(records).at(0);
+          if (first === undefined) {
+            throw new Error('missing policy record');
+          }
+          const at = first.offset;
           yield* conversation.run('resume secret');
           yield* conversation.branchFrom(at, 'branch secret');
           yield* conversation.forkFrom(at, 'policy-fork', 'fork secret');

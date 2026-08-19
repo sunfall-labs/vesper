@@ -159,7 +159,7 @@ const program = Effect.gen(function* () {
   yield* Console.log(`Eval: ${report.passed ? 'passed' : 'failed'}`);
 
   const requests = yield* storyModel.requests;
-  yield* Console.log(`Fake provider calls: ${requests.length}`);
+  yield* Console.log(`Fake provider calls: ${String(requests.length)}`);
 }).pipe(Effect.provide(World), Effect.scoped);
 
 NodeRuntime.runMain(program);

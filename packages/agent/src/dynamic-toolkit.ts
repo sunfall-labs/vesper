@@ -1,4 +1,4 @@
-import { Effect, Scope } from 'effect';
+import { Effect, type Scope } from 'effect';
 import { AiError, type Tool, type Toolkit } from 'effect/unstable/ai';
 
 const ResourcesTypeId: unique symbol = Symbol.for(
@@ -26,11 +26,11 @@ export interface Any {
 
 /** A toolkit whose definitions and handlers are resolved when a run starts. */
 export interface Source<
-  Tools extends Record<string, Tool.Any>,
+  ToolSet extends Record<string, Tool.Any>,
   out Requires = never,
 > extends Any {
   readonly open: Effect.Effect<
-    Toolkit.WithHandler<Tools>,
+    Toolkit.WithHandler<ToolSet>,
     AiError.AiError,
     Requires
   >;
@@ -38,15 +38,18 @@ export interface Source<
 
 /** A source whose acquisition is scoped but adds no public Scope requirement. */
 export type ScopedSource<
-  Tools extends Record<string, Tool.Any>,
+  ToolSet extends Record<string, Tool.Any>,
   Requires = never,
-> = Source<Tools, Requires | Scope.Scope>;
+> = Source<ToolSet, Requires | Scope.Scope>;
 
 /** Create a scoped runtime toolkit source. */
-export const make = <Tools extends Record<string, Tool.Any>, Requires = never>(
-  open: Effect.Effect<Toolkit.WithHandler<Tools>, AiError.AiError, Requires>,
+export const make = <
+  ToolSet extends Record<string, Tool.Any>,
+  Requires = never,
+>(
+  open: Effect.Effect<Toolkit.WithHandler<ToolSet>, AiError.AiError, Requires>,
   options?: { readonly resource?: ResourceDefinition | undefined },
-): Source<Tools, Requires> => {
+): Source<ToolSet, Requires> => {
   const resource = options?.resource;
   return {
     open:
@@ -104,11 +107,13 @@ export function optional(source: Any, resource: ResourceDefinition): Any {
 /** The tools contributed by a tuple of sources. */
 export type Tools<Sources extends ReadonlyArray<Any>> =
   Sources extends readonly []
-    ? {}
+    ? Record<never, never>
     : Toolkit.MergeRecords<SourceTools<Sources[number]>>;
 
 type SourceTools<S> =
-  S extends Source<infer Tools, infer _Requires> ? Tools : never;
+  S extends Source<infer SourceToolsRecord, infer _Requires>
+    ? SourceToolsRecord
+    : never;
 
 /** Services required to open a tuple of sources. */
 export type Services<Sources extends ReadonlyArray<Any>> =
@@ -148,7 +153,7 @@ export function open(
 }
 
 /** An already-resolved empty dynamic toolkit. */
-export const empty: Toolkit.WithHandler<{}> = {
+export const empty: Toolkit.WithHandler<Record<never, never>> = {
   tools: {},
   handle: () =>
     Effect.fail(
@@ -178,7 +183,9 @@ export const resources = (toolkit: unknown): ReadonlyArray<Resource> =>
  */
 export const resourceContext = (toolkit: unknown): string => {
   const current = resources(toolkit);
-  if (current.length === 0) return '';
+  if (current.length === 0) {
+    return '';
+  }
   const lines = current.map((resource) => {
     const tools =
       resource.tools.length === 0 ? 'no tools' : resource.tools.join(', ');
@@ -200,7 +207,9 @@ export function merge(
   ...toolkits: ReadonlyArray<unknown>
 ): Toolkit.WithHandler<Record<string, Tool.Any>> {
   const resolved = toolkits.map((toolkit) => {
-    if (isResolvedToolkit(toolkit)) return toolkit;
+    if (isResolvedToolkit(toolkit)) {
+      return toolkit;
+    }
     throw new Error('Expected a resolved dynamic toolkit.');
   });
   return mergeRuntime(...resolved);
@@ -266,19 +275,19 @@ const mergeRuntime = (
   );
 };
 
-const available = <Tools extends Record<string, Tool.Any>>(
+const available = <ToolSet extends Record<string, Tool.Any>>(
   resource: ResourceDefinition,
-  toolkit: Toolkit.WithHandler<Tools>,
+  toolkit: Toolkit.WithHandler<ToolSet>,
 ): Resource => ({
   ...resource,
   status: 'available',
   tools: Object.keys(toolkit.tools),
 });
 
-const annotate = <Tools extends Record<string, Tool.Any>>(
-  toolkit: Toolkit.WithHandler<Tools>,
+const annotate = <ToolSet extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<ToolSet>,
   snapshots: ReadonlyArray<Resource>,
-): Toolkit.WithHandler<Tools> & {
+): Toolkit.WithHandler<ToolSet> & {
   readonly [ResourcesTypeId]: ReadonlyArray<Resource>;
 } => ({
   tools: toolkit.tools,
@@ -334,7 +343,9 @@ const isResolvedToolkit = (
 type MergedTools<Toolkits extends ReadonlyArray<unknown>> =
   Toolkit.SimplifyRecord<
     Toolkit.MergeRecords<
-      Toolkits[number] extends Toolkit.WithHandler<infer Tools> ? Tools : never
+      Toolkits[number] extends Toolkit.WithHandler<infer ToolSet>
+        ? ToolSet
+        : never
     >
   >;
 

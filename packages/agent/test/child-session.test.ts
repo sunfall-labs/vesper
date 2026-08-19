@@ -4,7 +4,7 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeServices from '@effect/platform-node/NodeServices';
-import { Crypto, Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
+import { Effect, Exit, Layer, Option, Ref, Stream, type Crypto } from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -53,6 +53,13 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
+const present = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('Expected test fixture value to be present');
+  }
+  return value;
+};
+
 const says = (text: string): Response.StreamPartEncoded[] => [
   { type: 'text-start' as const, id: text },
   { type: 'text-delta' as const, id: text, delta: text },
@@ -69,6 +76,12 @@ const delegates = (id: string, child: string): Response.StreamPartEncoded[] => [
   },
   finish('tool-calls'),
 ];
+
+const childIdFor = (conversationId: string, toolCallId: string) =>
+  AgentLog.childIdFor(
+    LogVocabulary.ConversationId.make(conversationId),
+    LogVocabulary.ToolCallId.make(toolCallId),
+  );
 
 /**
  * One model shared by every agent in the tree, replying in script order.
@@ -95,7 +108,7 @@ const scripted = (
               prompts.push(options.prompt);
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
               return Stream.fromIterable(
-                turns[Math.min(index, turns.length - 1)]!,
+                present(turns[Math.min(index, turns.length - 1)]),
               );
             }),
           ),
@@ -127,8 +140,7 @@ const run = <A, E>(
 ) =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(scripted(turns)),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(scripted(turns), testLogLayer)),
     Effect.scoped,
   );
 
@@ -138,7 +150,7 @@ const runInSession = <R>(
   input: string,
 ) =>
   Effect.flatMap(RunPolicyRuntime.create(RunPolicy.defaultLimits), (runtime) =>
-    protocolOf<R, Agent.Error<typeof child>>(child)!.run(
+    present(protocolOf<R, Agent.Error<typeof child>>(child)).run(
       runtime,
       session,
       input,
@@ -180,14 +192,12 @@ const failsOnceAfterChildStage = (
         Effect.gen(function* () {
           const value = yield* effect;
           if (!(yield* Ref.getAndSet(failed, true))) {
-            return yield* Effect.fail(
-              new LogStore.LogStoreError({
-                path,
-                operation,
-                reason: 'storage',
-                detail: `crashed after ${stage}`,
-              }),
-            );
+            return yield* new LogStore.LogStoreError({
+              path,
+              operation,
+              reason: 'storage',
+              detail: `crashed after ${stage}`,
+            });
           }
           return value;
         });
@@ -245,11 +255,6 @@ describe('child conversation ids', () => {
   });
 
   it('is deterministic and preserves distinct Unicode strings', () => {
-    const childIdFor = (conversationId: string, toolCallId: string) =>
-      AgentLog.childIdFor(
-        LogVocabulary.ConversationId.make(conversationId),
-        LogVocabulary.ToolCallId.make(toolCallId),
-      );
     const composed = childIdFor('café/親', '工具/é');
     expect(childIdFor('café/親', '工具/é')).toBe(composed);
     expect(childIdFor('cafe\u0301/親', '工具/é')).not.toBe(composed);
@@ -297,8 +302,12 @@ describe('a recorded delegation', () => {
             child: childSessions(yield* readAll(childId)),
           };
         }).pipe(
-          Effect.provide(failsOnceAfterChildStage(stage, childId)),
-          Effect.provide(NodeCrypto.layer),
+          Effect.provide(
+            Layer.merge(
+              failsOnceAfterChildStage(stage, childId),
+              NodeCrypto.layer,
+            ),
+          ),
         );
 
         expect(Exit.isFailure(result.first)).toBe(true);
@@ -453,9 +462,11 @@ describe('a recorded delegation', () => {
         }).pipe(
           Effect.orDie,
           Effect.provide(
-            scripted([says('researched'), says('repeated')], prompts),
+            Layer.merge(
+              scripted([says('researched'), says('repeated')], prompts),
+              testLogLayer,
+            ),
           ),
-          Effect.provide(testLogLayer),
         );
 
         expect(result.resumed.text).toBe('researched');
@@ -522,16 +533,18 @@ describe('a recorded delegation', () => {
         }).pipe(
           Effect.orDie,
           Effect.provide(
-            scripted(
-              [
-                says('child side effect'),
-                delegates('call-a', 'researcher'),
-                says('parent finished'),
-              ],
-              prompts,
+            Layer.merge(
+              scripted(
+                [
+                  says('child side effect'),
+                  delegates('call-a', 'researcher'),
+                  says('parent finished'),
+                ],
+                prompts,
+              ),
+              testLogLayer,
             ),
           ),
-          Effect.provide(testLogLayer),
         );
 
         expect(result.resumed.text).toBe('parent finished');
@@ -575,7 +588,9 @@ describe('a recorded delegation', () => {
             streamText: (options) => {
               prompts.push(options.prompt);
               calls += 1;
-              if (calls === 2) return Stream.fail(crash);
+              if (calls === 2) {
+                return Stream.fail(crash);
+              }
               return Stream.fromIterable(
                 calls === 1
                   ? says('first turn survived')
@@ -611,7 +626,7 @@ describe('a recorded delegation', () => {
         });
         const resumed = yield* runInSession(worker, reopened, 'continue');
         return { failed, resumed };
-      }).pipe(Effect.provide(models), Effect.provide(testLogLayer));
+      }).pipe(Effect.provide(Layer.merge(models, testLogLayer)));
 
       expect(result.failed._tag).toBe('Failure');
       expect(result.resumed.text).toBe('resumed turn');
@@ -882,8 +897,9 @@ describe('delegation without recording', () => {
         .run('go')
         .pipe(
           Effect.orDie,
-          Effect.provide(scripted(oneDelegation)),
-          Effect.provide(NodeCrypto.layer),
+          Effect.provide(
+            Layer.merge(scripted(oneDelegation), NodeCrypto.layer),
+          ),
         );
 
       // No `LogStoreMemory.layer` in this pipeline. If delegation had started

@@ -2,7 +2,16 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { Cause, Deferred, Effect, Layer, Option, Queue, Stream } from 'effect';
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Layer,
+  Option,
+  Queue,
+  Schema,
+  Stream,
+} from 'effect';
 
 import { CodeExecutor } from './code-executor.js';
 
@@ -14,6 +23,11 @@ export interface Options {
 const defaultHostUrl = new URL(
   '../host/code-sandbox-host.mjs',
   import.meta.url,
+);
+
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeJson = Schema.decodeUnknownSync(
+  Schema.fromJsonString(Schema.Unknown),
 );
 
 const isEvent = (value: unknown): value is CodeExecutor.Event => {
@@ -52,7 +66,7 @@ const write = (
 ): Effect.Effect<void, CodeExecutor.ExecutorError> =>
   Effect.try({
     try: () => {
-      child.stdin.write(`${JSON.stringify(value)}\n`);
+      child.stdin.write(`${encodeJson(value)}\n`);
     },
     catch: (cause) =>
       new CodeExecutor.ExecutorError(
@@ -71,7 +85,7 @@ const start = (
       return yield* Effect.fail(
         new CodeExecutor.ExecutorError(
           'protocol',
-          `Code source exceeds ${request.limits.maxSourceBytes} bytes`,
+          `Code source exceeds ${String(request.limits.maxSourceBytes)} bytes`,
         ),
       );
     }
@@ -108,7 +122,7 @@ const start = (
           [
             permissionFlag,
             `--allow-fs-read=${hostPath}`,
-            `--max-old-space-size=${heapMiB}`,
+            `--max-old-space-size=${String(heapMiB)}`,
             hostPath,
           ],
           {
@@ -134,7 +148,9 @@ const start = (
       }
     };
     const terminate = () => {
-      if (child.exitCode !== null || child.signalCode !== null) return;
+      if (child.exitCode !== null || child.signalCode !== null) {
+        return;
+      }
       child.kill();
       forceKill ??= setTimeout(() => {
         if (child.exitCode === null && child.signalCode === null) {
@@ -143,20 +159,26 @@ const start = (
       }, 1_000);
     };
     const timeout = setTimeout(() => {
-      if (terminal) return;
+      if (terminal) {
+        return;
+      }
       timedOut = true;
       terminate();
     }, request.limits.wallClockMillis);
 
     const finish = (event: CodeExecutor.Completion | CodeExecutor.Failure) => {
-      if (terminal) return;
+      if (terminal) {
+        return;
+      }
       terminal = true;
       clearTimers();
       Queue.offerUnsafe(queue, event);
       Queue.endUnsafe(queue);
     };
     const fail = (error: CodeExecutor.ExecutorError) => {
-      if (terminal) return;
+      if (terminal) {
+        return;
+      }
       terminal = true;
       clearTimers();
       Queue.failCauseUnsafe(queue, Cause.fail(error));
@@ -167,7 +189,7 @@ const start = (
     lines.on('line', (line) => {
       let parsed: unknown;
       try {
-        parsed = JSON.parse(line);
+        parsed = decodeJson(line);
       } catch {
         fail(
           new CodeExecutor.ExecutorError(
@@ -216,13 +238,13 @@ const start = (
       if (timedOut) {
         finish({
           _tag: 'Failure',
-          message: `Code execution exceeded ${request.limits.wallClockMillis}ms`,
+          message: `Code execution exceeded ${String(request.limits.wallClockMillis)}ms`,
         });
       } else if (!terminal) {
         fail(
           new CodeExecutor.ExecutorError(
             'unavailable',
-            `Code sandbox host exited before completion (${signal ?? code ?? 'unknown'})`,
+            `Code sandbox host exited before completion (${String(signal ?? code ?? 'unknown')})`,
           ),
         );
       }

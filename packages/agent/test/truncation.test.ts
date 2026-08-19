@@ -3,7 +3,7 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
-import { Crypto, Effect, Layer, Stream } from 'effect';
+import { type Crypto, Effect, Layer, Stream } from 'effect';
 import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
@@ -80,8 +80,7 @@ const run = <A, E>(
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(scripted(reason)),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(scripted(reason), testLogLayer)),
     Effect.scoped,
   );
 
@@ -112,13 +111,11 @@ describe('a turn the provider truncated at the output cap', () => {
       const reasons = yield* run(
         agent.stream('hi').pipe(
           Stream.filter(
-            (event) =>
-              event._tag === 'Part' &&
-              (event.part as Response.StreamPartEncoded).type === 'finish',
+            (event) => event._tag === 'Part' && event.part.type === 'finish',
           ),
           Stream.map((event) =>
-            event._tag === 'Part'
-              ? (event.part as { readonly reason: string }).reason
+            event._tag === 'Part' && event.part.type === 'finish'
+              ? event.part.reason
               : 'not-a-part',
           ),
           Stream.runCollect,

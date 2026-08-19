@@ -5,7 +5,7 @@ import { Effect } from 'effect';
 import { RecordBatch } from '../src/record-batch.js';
 
 describe('record batch', () => {
-  it('keeps branded record JSON and fingerprints representation-transparent', () =>
+  it.effect('canonicalizes branded record JSON before fingerprinting', () =>
     Effect.gen(function* () {
       const wire = {
         conversationId: 'conversation-1',
@@ -21,11 +21,26 @@ describe('record batch', () => {
       const entry = yield* RecordBatch.decodeEntry(wire);
       const prepared = yield* RecordBatch.prepare([entry]);
 
-      expect(prepared.encoded).toBe(JSON.stringify([wire]));
-      expect(prepared.fingerprint).toBe(
-        '52444ef19045615f0c872c2a2ac3c8f9be729dfad83ff1fdafaf01fbd37a6705',
+      expect(prepared.encoded).toBe(
+        JSON.stringify([
+          {
+            conversationId: 'conversation-1',
+            record: {
+              _tag: 'ToolCall',
+              id: 'call-1',
+              name: 'search',
+              params: { query: 'vesper' },
+              step: 2,
+            },
+            timestamp: 1_700_000_000_000,
+          },
+        ]),
       );
-    }).pipe(Effect.provide(NodeServices.layer)));
+      expect(prepared.fingerprint).toBe(
+        'e80efade27b874768388165413dafe56c6a5873d2066bf775bdbb23fc61f5f3d',
+      );
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect('rejects non-finite and non-integral durable numeric fields', () =>
     Effect.gen(function* () {

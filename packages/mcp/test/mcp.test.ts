@@ -54,6 +54,14 @@ const result = (text: string, isError = false): CallToolResult => ({
   isError,
 });
 
+const at = <T>(values: ReadonlyArray<T>, index: number): T => {
+  const value = values[index];
+  if (value === undefined) {
+    throw new Error(`missing value at index ${String(index)}`);
+  }
+  return value;
+};
+
 const modelSystem = (request: {
   readonly prompt: {
     readonly content: ReadonlyArray<{
@@ -66,6 +74,14 @@ const modelSystem = (request: {
     .filter((message) => message.role === 'system')
     .map((message) => String(message.content))
     .join('\n');
+
+const definitions = (
+  toolkit: Toolkit.WithHandler<Mcp.Tools>,
+): Array<{ name: string; schema: unknown }> =>
+  Object.entries(toolkit.tools).map(([name, tool]) => ({
+    name,
+    schema: Tool.getJsonSchema(tool),
+  }));
 
 const protocolTransport = (
   lifecycle: {
@@ -81,7 +97,9 @@ const protocolTransport = (
       lifecycle.opened += 1;
     },
     send: async (message) => {
-      if (!('id' in message) || !('method' in message)) return;
+      if (!('id' in message) || !('method' in message)) {
+        return;
+      }
       let response: JSONRPCMessage;
       if (message.method === 'initialize') {
         response = {
@@ -110,7 +128,9 @@ const protocolTransport = (
     },
     close: async () => {
       lifecycle.closed += 1;
-      if (options?.closeFailure !== undefined) throw options.closeFailure;
+      if (options?.closeFailure !== undefined) {
+        throw options.closeFailure;
+      }
       instance.onclose?.();
     },
   };
@@ -122,7 +142,9 @@ const transportFor = (tools: McpTool[]): ProtocolTransport => {
   const instance: ProtocolTransport = {
     start: async () => {},
     send: async (message) => {
-      if (!('id' in message) || !('method' in message)) return;
+      if (!('id' in message) || !('method' in message)) {
+        return;
+      }
       let response: JSONRPCMessage;
       if (message.method === 'initialize') {
         response = {
@@ -153,7 +175,9 @@ const transportFor = (tools: McpTool[]): ProtocolTransport => {
 };
 
 const requestId = (body: BodyInit | null | undefined): string | number => {
-  if (typeof body !== 'string') throw new Error('Expected a JSON request.');
+  if (typeof body !== 'string') {
+    throw new Error('Expected a JSON request.');
+  }
   const parsed: unknown = JSON.parse(body);
   if (
     typeof parsed !== 'object' ||
@@ -178,7 +202,7 @@ describe('Mcp', () => {
       Effect.gen(function* () {
         const calls: Array<{ name: string; args: unknown }> = [];
         const client = {
-          listTools: async () => listing([search, create]),
+          listTools: () => Promise.resolve(listing([search, create])),
           callTool: async ({ name, arguments: args }) => {
             calls.push({ name, args });
             return result('VES-42');
@@ -199,7 +223,7 @@ describe('Mcp', () => {
           'mcp__linear_prod__search_issues',
         ]);
         expect(
-          ready.tools.mcp__linear_prod__search_issues?.description,
+          ready.tools['mcp__linear_prod__search_issues']?.description,
         ).toContain('MCP tool "search.issues" from "linear.prod"');
         expect(Array.from(handled).at(-1)).toMatchObject({
           result: 'VES-42',
@@ -248,12 +272,15 @@ describe('Mcp', () => {
         },
         ['project', 'query'],
       );
+      // The SDK type requires `type`, but remote JSON can omit it. Exercise
+      // that valid wire shape without weakening the statically typed fixture.
+      Reflect.deleteProperty(secondSearch.inputSchema, 'type');
       const source = (tools: McpTool[]) =>
         Mcp.fromClient({
           name: 'linear',
           client: Effect.succeed({
-            listTools: async () => listing(tools),
-            callTool: async () => result('unused'),
+            listTools: () => Promise.resolve(listing(tools)),
+            callTool: () => Promise.resolve(result('unused')),
           } satisfies ClientLike),
         });
 
@@ -264,12 +291,6 @@ describe('Mcp', () => {
         ],
         { concurrency: 'unbounded' },
       );
-      const definitions = (toolkit: Toolkit.WithHandler<Mcp.Tools>) =>
-        Object.values(toolkit.tools).map((tool) => ({
-          name: tool.name,
-          schema: Tool.getJsonSchema(tool),
-        }));
-
       expect(Object.keys(first.tools)).toEqual([
         'mcp__linear__create_issue',
         'mcp__linear__search_issues',
@@ -296,8 +317,8 @@ describe('Mcp', () => {
           Mcp.fromClient({
             name: 'linear',
             client: Effect.succeed({
-              listTools: async () => listing(punctuationTools),
-              callTool: async () => result('unused'),
+              listTools: () => Promise.resolve(listing(punctuationTools)),
+              callTool: () => Promise.resolve(result('unused')),
             } satisfies ClientLike),
             ...(allowlist === undefined ? {} : { tools: allowlist }),
           });
@@ -322,8 +343,8 @@ describe('Mcp', () => {
     Effect.gen(function* () {
       const lifecycle = { opened: 0, closed: 0 };
       const client = {
-        listTools: async () => listing([search]),
-        callTool: async () => result('VES-42'),
+        listTools: () => Promise.resolve(listing([search])),
+        callTool: () => Promise.resolve(result('VES-42')),
       } satisfies ClientLike;
       const source = Mcp.fromClient({
         name: 'linear',
@@ -383,7 +404,7 @@ describe('Mcp', () => {
           discoveries += 1;
           return listing(discoveries === 1 ? [search] : []);
         },
-        callTool: async () => result('unused'),
+        callTool: () => Promise.resolve(result('unused')),
       } satisfies ClientLike;
       const source = Mcp.fromClient({
         name: 'linear',
@@ -412,10 +433,10 @@ describe('Mcp', () => {
         ['mcp__linear__search_issues'],
         [],
       ]);
-      expect(modelSystem(requests[0]!)).toContain(
+      expect(modelSystem(at(requests, 0))).toContain(
         'MCP server "linear": available; mcp__linear__search_issues.',
       );
-      expect(modelSystem(requests[1]!)).toContain(
+      expect(modelSystem(at(requests, 1))).toContain(
         'MCP server "linear": available; no tools.',
       );
     }).pipe(Effect.scoped),
@@ -430,7 +451,7 @@ describe('Mcp', () => {
           listTools: async () => {
             throw new Error('offline');
           },
-          callTool: async () => result('unused'),
+          callTool: () => Promise.resolve(result('unused')),
         } satisfies ClientLike),
       });
 
@@ -532,7 +553,7 @@ describe('Mcp', () => {
       const source = Mcp.remote({
         name: 'linear',
         url: 'https://mcp.example.test',
-        auth: () => Redacted.make(`token-${(token += 1)}`),
+        auth: () => Redacted.make(`token-${String((token += 1))}`),
         headers: { 'x-vesper-test': 'present' },
         fetch,
       });
@@ -542,7 +563,9 @@ describe('Mcp', () => {
       expect(Object.keys(ready.tools)).toEqual(['mcp__linear__search_issues']);
       expect(authorization.length).toBeGreaterThanOrEqual(3);
       expect(authorization).toEqual(
-        authorization.map((_header, index) => `Bearer token-${index + 1}`),
+        authorization.map(
+          (_header, index) => `Bearer token-${String(index + 1)}`,
+        ),
       );
       expect(customHeaders).toEqual(authorization.map(() => 'present'));
     }).pipe(Effect.scoped),
@@ -551,8 +574,8 @@ describe('Mcp', () => {
   it.effect('fails closed for unknown or repeated allowlist names', () =>
     Effect.gen(function* () {
       const client = {
-        listTools: async () => listing([search]),
-        callTool: async () => result('unused'),
+        listTools: () => Promise.resolve(listing([search])),
+        callTool: () => Promise.resolve(result('unused')),
       } satisfies ClientLike;
       const unknown = Mcp.fromClient({
         name: 'linear',
@@ -579,8 +602,8 @@ describe('Mcp', () => {
         name: 'linear',
         limits: { maxTools: 1 },
         client: Effect.succeed({
-          listTools: async () => listing([search, create]),
-          callTool: async () => result('unused'),
+          listTools: () => Promise.resolve(listing([search, create])),
+          callTool: () => Promise.resolve(result('unused')),
         } satisfies ClientLike),
       });
       const malformedSchema = Mcp.fromClient({
@@ -598,7 +621,7 @@ describe('Mcp', () => {
                 }),
               ),
             ]),
-          callTool: async () => result('unused'),
+          callTool: () => Promise.resolve(result('unused')),
         } satisfies ClientLike),
       });
 
@@ -622,8 +645,8 @@ describe('Mcp', () => {
         client: Effect.sync(() => {
           evaluated = true;
           return {
-            listTools: async () => listing([]),
-            callTool: async () => result('unused'),
+            listTools: () => Promise.resolve(listing([])),
+            callTool: () => Promise.resolve(result('unused')),
           } satisfies ClientLike;
         }),
       }),
@@ -636,8 +659,8 @@ describe('Mcp', () => {
     () =>
       Effect.gen(function* () {
         const client = {
-          listTools: async () => listing([search]),
-          callTool: async () => result('x'.repeat(100)),
+          listTools: () => Promise.resolve(listing([search])),
+          callTool: () => Promise.resolve(result('x'.repeat(100))),
         } satisfies ClientLike;
         const ready = yield* Mcp.fromClient({
           name: 'linear',
@@ -678,14 +701,16 @@ describe('Mcp', () => {
         name: 'linear',
         timeout: 1,
         client: Effect.succeed({
-          listTools: async () => listing([search]),
+          listTools: () => Promise.resolve(listing([search])),
           callTool: async (_params, options) => {
             started = true;
             expect(options?.timeout).toBe(1);
             return new Promise<CallToolResult>((_resolve, reject) => {
               options?.signal?.addEventListener(
                 'abort',
-                () => reject(new Error('aborted')),
+                () => {
+                  reject(new Error('aborted'));
+                },
                 { once: true },
               );
             });
@@ -776,8 +801,8 @@ describe('Mcp tool fingerprinting and drift detection', () => {
 
   const clientFor = (tool: McpTool) =>
     ({
-      listTools: async () => listing([tool]),
-      callTool: async () => result('unused'),
+      listTools: () => Promise.resolve(listing([tool])),
+      callTool: () => Promise.resolve(result('unused')),
     }) satisfies ClientLike;
 
   const fingerprintsFor = (tool: McpTool) =>

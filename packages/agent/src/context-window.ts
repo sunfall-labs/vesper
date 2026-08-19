@@ -93,10 +93,7 @@ export interface Heuristics {
    * implementation should treat it as exact for everything up to that message
    * and estimate only what follows.
    */
-  readonly estimate: (
-    prompt: Prompt.Prompt,
-    usage?: TurnUsage | undefined,
-  ) => Estimate;
+  readonly estimate: (prompt: Prompt.Prompt, usage?: TurnUsage) => Estimate;
 
   /** Whether `contextTokens` is close enough to the ceiling to compact. */
   readonly shouldCompact: (
@@ -159,7 +156,9 @@ export const usageAnchored: Heuristics = {
   estimate: (prompt, usage) => {
     if (usage !== undefined) {
       for (let index = prompt.content.length - 1; index >= 0; index -= 1) {
-        if (prompt.content[index]?.role !== 'assistant') continue;
+        if (prompt.content[index]?.role !== 'assistant') {
+          continue;
+        }
         const usageTokens = usage.inputTokens + usage.outputTokens;
         const trailingTokens = estimateTokens(
           Prompt.make(prompt.content.slice(index + 1)),

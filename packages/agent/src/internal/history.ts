@@ -149,16 +149,27 @@ export const compactionBoundary = (
         summarizedMessages: split.summarizedMessages,
         keptMessages: split.keptMessages,
         message:
-          `Live compaction split ${expectedMessages} messages, but durable ` +
-          `history rebuilt ${built.length}`,
+          `Live compaction split ${String(expectedMessages)} messages, but durable ` +
+          `history rebuilt ${String(built.length)}`,
       }),
     );
   }
-  return Effect.succeed(
-    split.keptMessages === 0
-      ? LogOffset.START
-      : built[built.length - split.keptMessages]!.offset,
-  );
+  if (split.keptMessages === 0) {
+    return Effect.succeed(LogOffset.START);
+  }
+  const firstKept = built[built.length - split.keptMessages];
+  if (firstKept === undefined) {
+    return Effect.fail(
+      new CompactionAlignmentError({
+        expectedMessages,
+        recordedMessages: built.length,
+        summarizedMessages: split.summarizedMessages,
+        keptMessages: split.keptMessages,
+        message: 'Compaction kept-message boundary is outside rebuilt history',
+      }),
+    );
+  }
+  return Effect.succeed(firstKept.offset);
 };
 
 /** A rebuilt message, and the record that started it. */
@@ -185,11 +196,18 @@ export const rebuild = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
 ): ReadonlyArray<Placed> => {
   const latest = lastCompaction(records);
-  if (latest === undefined) return fold(records);
+  if (latest === undefined) {
+    return fold(records);
+  }
 
-  const compaction = records[latest]!;
+  const compaction = records[latest];
+  if (compaction === undefined) {
+    return fold(records);
+  }
   const record = compaction.record;
-  if (record._tag !== 'Compacted') return fold(records);
+  if (record._tag !== 'Compacted') {
+    return fold(records);
+  }
 
   return [
     // The summary stands where the compaction record does, so a later
@@ -211,7 +229,10 @@ const lastCompaction = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
 ): number | undefined => {
   for (let index = records.length - 1; index >= 0; index -= 1) {
-    if (records[index]!.record._tag === 'Compacted') return index;
+    const record = records[index];
+    if (record?.record._tag === 'Compacted') {
+      return index;
+    }
   }
   return undefined;
 };
@@ -230,7 +251,9 @@ const keptFrom = (
   compaction: number,
   firstKept: LogOffset.Offset,
 ): number => {
-  if (firstKept === LogOffset.START) return compaction;
+  if (firstKept === LogOffset.START) {
+    return compaction;
+  }
   const index = records.findIndex(
     (envelope) => !LogOffset.isAfter(firstKept, envelope.offset),
   );
@@ -273,7 +296,7 @@ const fold = (
     const content = assistant.filter(
       (part) =>
         part.type !== 'tool-call' ||
-        part.providerExecuted === true ||
+        part.providerExecuted ||
         answered.has(part.id),
     );
     const answers = results.filter((result) => asked.has(result.id));
@@ -312,12 +335,16 @@ const fold = (
     },
 
     Text: (record) => {
-      if (assistant.length === 0) assistantAt = currentOffset;
+      if (assistant.length === 0) {
+        assistantAt = currentOffset;
+      }
       assistant.push(Prompt.makePart('text', { text: record.text }));
     },
 
     ToolCall: (record) => {
-      if (assistant.length === 0) assistantAt = currentOffset;
+      if (assistant.length === 0) {
+        assistantAt = currentOffset;
+      }
       assistant.push(
         Prompt.makePart('tool-call', {
           id: record.id,
@@ -329,7 +356,9 @@ const fold = (
     },
 
     ToolOutcome: (record) => {
-      if (results.length === 0) resultsAt = currentOffset;
+      if (results.length === 0) {
+        resultsAt = currentOffset;
+      }
       results.push(
         Prompt.makePart('tool-result', {
           id: record.id,

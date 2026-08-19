@@ -7,19 +7,31 @@ import { defineConfig } from 'vitest/config';
 // built output, so a failing test points at the file you would edit. The
 // TypeScript paths are the canonical public source map; Vitest inherits it so
 // this config cannot drift into a second list of aliases.
-const tsconfig = JSON.parse(
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+const isStringArray = (value: unknown): value is ReadonlyArray<string> =>
+  Array.isArray(value) && value.every((item) => typeof item === 'string');
+
+const parsed: unknown = JSON.parse(
   readFileSync(new URL('./tsconfig.base.json', import.meta.url), 'utf8'),
-) as {
-  readonly compilerOptions?: {
-    readonly paths?: Readonly<Record<string, ReadonlyArray<string>>>;
-  };
-};
+);
+const tsconfig = isRecord(parsed) ? parsed : {};
+const compilerOptions = isRecord(tsconfig.compilerOptions)
+  ? tsconfig.compilerOptions
+  : {};
+const paths = isRecord(compilerOptions.paths) ? compilerOptions.paths : {};
 
 const alias = Object.fromEntries(
-  Object.entries(tsconfig.compilerOptions?.paths ?? {})
-    .filter(([specifier]) => specifier.startsWith('@sunfall/vesper-'))
+  Object.entries(paths)
+    .filter(
+      ([specifier, targets]) =>
+        specifier.startsWith('@sunfall/vesper-') && isStringArray(targets),
+    )
     .map(([specifier, targets]) => {
-      const source = targets[0];
+      if (!isStringArray(targets)) {
+        throw new Error(`Invalid source targets for ${specifier}`);
+      }
+      const source = targets.at(0);
       if (source === undefined) {
         throw new Error(`Missing source target for ${specifier}`);
       }

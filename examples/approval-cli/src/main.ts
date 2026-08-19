@@ -78,11 +78,11 @@ const releaseAgent = Agent.make({
     'Release only through the provided tool, then explain what happened.',
   toolkit: Toolkit.make(release),
 }).withHandlers({
-  release_to_environment: ({ changeId, environment, release }) =>
+  release_to_environment: ({ changeId, environment, release: releaseName }) =>
     Effect.gen(function* () {
       const choice = yield* approval({
         changeId,
-        release,
+        release: releaseName,
         environment,
         reason:
           'All automated checks passed; production still requires a human.',
@@ -90,7 +90,7 @@ const releaseAgent = Agent.make({
 
       return {
         status: choice.decision === 'approve' ? 'released' : 'declined',
-        release,
+        release: releaseName,
         environment,
         actor: choice.actor,
       } as const;
@@ -121,7 +121,9 @@ const releaseResult = (
   | { readonly status: 'released' | 'declined'; readonly actor: string }
   | undefined => {
   for (const message of prompt.content) {
-    if (message.role !== 'tool') continue;
+    if (message.role !== 'tool') {
+      continue;
+    }
     for (const part of message.content) {
       if (
         part.type !== 'tool-result' ||

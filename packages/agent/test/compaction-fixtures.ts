@@ -3,7 +3,7 @@ import {
   AiError,
   type LanguageModel as LanguageModelNamespace,
   LanguageModel,
-  Prompt,
+  type Prompt,
   type Response,
 } from 'effect/unstable/ai';
 
@@ -129,11 +129,13 @@ export const fakeProvider = (options: ProviderOptions = {}) => {
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
 
               if (options.turns !== undefined) {
-                return Stream.fromIterable(
-                  options.turns[
-                    Math.min(index, options.turns.length - 1)
-                  ] as ReadonlyArray<Response.StreamPartEncoded>,
+                const turn = options.turns.at(
+                  Math.min(index, options.turns.length - 1),
                 );
+                if (turn === undefined) {
+                  throw new Error('scripted provider needs at least one turn');
+                }
+                return Stream.fromIterable(turn);
               }
 
               return Stream.fromIterable([

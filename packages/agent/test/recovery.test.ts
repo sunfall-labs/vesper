@@ -1,6 +1,7 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { RecordBatch } from '@sunfall/vesper-log/record-batch';
-import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { FORMAT_VERSION } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Option } from 'effect';

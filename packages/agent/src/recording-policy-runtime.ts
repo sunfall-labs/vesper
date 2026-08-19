@@ -1,5 +1,5 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
-import { Context, Effect } from 'effect';
+import { Effect, type Context } from 'effect';
 
 import type { RecordingPolicy } from './recording-policy.js';
 

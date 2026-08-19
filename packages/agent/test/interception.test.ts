@@ -5,7 +5,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import {
   Context,
-  Crypto,
+  type Crypto,
   Effect,
   Layer,
   Ref,
@@ -34,6 +34,13 @@ const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
   NodeServices.layer,
 );
+
+const required = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('expected a value');
+  }
+  return value;
+};
 
 // The three seams, and what each is allowed to do.
 //
@@ -88,6 +95,10 @@ const refused = new AiError.AiError({
 /** One provider call: either the parts it streams, or the error it fails with. */
 type Call = ReadonlyArray<Response.StreamPartEncoded> | AiError.AiError;
 
+const isParts = (
+  call: Call,
+): call is ReadonlyArray<Response.StreamPartEncoded> => Array.isArray(call);
+
 /**
  * A model driven by a script, recording the prompt it was handed per call.
  *
@@ -106,10 +117,11 @@ const scripted = (calls: ReadonlyArray<Call>, prompts: string[] = []) =>
             Effect.gen(function* () {
               const index = yield* Ref.getAndUpdate(made, (n) => n + 1);
               prompts.push(JSON.stringify(options.prompt));
-              const call = calls[Math.min(index, calls.length - 1)]!;
-              return Array.isArray(call)
-                ? Stream.fromIterable(call)
-                : Stream.fail(call as AiError.AiError);
+              const call = required(calls[Math.min(index, calls.length - 1)]);
+              if (isParts(call)) {
+                return Stream.fromIterable(call);
+              }
+              return Stream.fail(call);
             }),
           ),
       });
@@ -166,8 +178,7 @@ const run = <A, E>(
 ) =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(scripted(calls, prompts)),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(scripted(calls, prompts), testLogLayer)),
     Effect.scoped,
   );
 
@@ -1194,8 +1205,8 @@ describe('Interception.compose', () => {
 
   describe('onIndeterminateToolCall', () => {
     const indeterminate: ReadonlyArray<ConversationRecord.Record> = [
-      crashed[0]!,
-      crashed[1]!,
+      required(crashed[0]),
+      required(crashed[1]),
       { _tag: 'ToolStarted', id: CALL_ID, name: 'lookup' },
     ];
 

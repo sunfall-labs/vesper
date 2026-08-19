@@ -38,13 +38,13 @@ const conversation = LogVocabulary.ConversationId.make('state-test');
 const Count = AgentState.make({
   id: 'count',
   version: '1',
-  schema: Schema.Struct({ count: Schema.Number }),
+  schema: Schema.Struct({ count: Schema.Finite }),
   initial: () => ({ count: 0 }),
 });
 const SameIdCount = AgentState.make({
   id: 'count',
   version: '1',
-  schema: Schema.Struct({ count: Schema.Number }),
+  schema: Schema.Struct({ count: Schema.Finite }),
   initial: () => ({ count: 10 }),
 });
 class StateCodecService extends Context.Service<
@@ -56,7 +56,7 @@ const OffsetState = AgentState.make({
   version: '1',
   schema: Schema.String.pipe(
     Schema.decodeTo(
-      Schema.Number,
+      Schema.Finite,
       SchemaTransformation.transformOrFail<
         number,
         string,
@@ -77,7 +77,7 @@ const EncodeFailureState = AgentState.make({
   version: '1',
   schema: Schema.String.pipe(
     Schema.decodeTo(
-      Schema.Number,
+      Schema.Finite,
       SchemaTransformation.transformOrFail<number, string>({
         decode: (value) => Effect.succeed(Number(value)),
         encode: () =>
@@ -92,7 +92,7 @@ const EncodeFailureState = AgentState.make({
 const DecodeFailureState = AgentState.make({
   id: 'decode-failure',
   version: '1',
-  schema: Schema.Number,
+  schema: Schema.Finite,
   initial: () => 0,
 });
 
@@ -137,16 +137,20 @@ const model = Layer.effect(
                   ? [
                       {
                         type: 'tool-call',
-                        id: `increment-${call}`,
+                        id: `increment-${String(call)}`,
                         name: 'increment',
                         params: {},
                       },
                       { ...finish, reason: 'tool-calls' },
                     ]
                   : [
-                      { type: 'text-start', id: `text-${call}` },
-                      { type: 'text-delta', id: `text-${call}`, delta: 'ok' },
-                      { type: 'text-end', id: `text-${call}` },
+                      { type: 'text-start', id: `text-${String(call)}` },
+                      {
+                        type: 'text-delta',
+                        id: `text-${String(call)}`,
+                        delta: 'ok',
+                      },
+                      { type: 'text-end', id: `text-${String(call)}` },
                       finish,
                     ],
               ),
@@ -178,7 +182,7 @@ describe('recorded agent state', () => {
       const increment = Tool.make('increment', {
         description: 'Increment the recorded count.',
         parameters: Schema.Struct({}),
-        success: Schema.Struct({ count: Schema.Number }),
+        success: Schema.Struct({ count: Schema.Finite }),
         failure: AgentState.Error,
         dependencies: AgentState.dependencies(Count),
       });
@@ -197,9 +201,9 @@ describe('recorded agent state', () => {
       });
 
       return Effect.gen(function* () {
-        const conversation = Conversation.make(agent, 'agent-state');
-        yield* conversation.run('first');
-        yield* conversation.run('second');
+        const agentConversation = Conversation.make(agent, 'agent-state');
+        yield* agentConversation.run('first');
+        yield* agentConversation.run('second');
         const session = yield* AgentLog.open(
           LogVocabulary.ConversationId.make('agent-state'),
           { compatibility },
@@ -207,11 +211,7 @@ describe('recorded agent state', () => {
         expect(yield* (yield* AgentState.open(Count, session)).get).toEqual({
           count: 2,
         });
-      }).pipe(
-        Effect.provide(model),
-        Effect.provide(testLogLayer),
-        Effect.orDie,
-      );
+      }).pipe(Effect.provide(Layer.merge(model, testLogLayer)), Effect.orDie);
     },
   );
 
@@ -333,7 +333,7 @@ describe('recorded agent state', () => {
       const increment = Tool.make('increment', {
         description: 'Increment the ephemeral count.',
         parameters: Schema.Struct({}),
-        success: Schema.Struct({ count: Schema.Number }),
+        success: Schema.Struct({ count: Schema.Finite }),
         failure: AgentState.Error,
         dependencies: AgentState.dependencies(Count),
       });
@@ -369,20 +369,20 @@ describe('recorded agent state', () => {
                       ? Stream.fromIterable<Response.StreamPartEncoded>([
                           {
                             type: 'tool-call',
-                            id: `increment-${call}`,
+                            id: `increment-${String(call)}`,
                             name: 'increment',
                             params: {},
                           },
                           { ...finish, reason: 'tool-calls' },
                         ])
                       : Stream.fromIterable<Response.StreamPartEncoded>([
-                          { type: 'text-start', id: `text-${call}` },
+                          { type: 'text-start', id: `text-${String(call)}` },
                           {
                             type: 'text-delta',
-                            id: `text-${call}`,
+                            id: `text-${String(call)}`,
                             delta: 'ok',
                           },
-                          { type: 'text-end', id: `text-${call}` },
+                          { type: 'text-end', id: `text-${String(call)}` },
                           finish,
                         ]),
                 ),
@@ -394,7 +394,7 @@ describe('recorded agent state', () => {
       yield* Effect.all([agent.run('left'), agent.run('right')], {
         concurrency: 'unbounded',
       }).pipe(Effect.provide(ordinaryModel));
-      expect([...(yield* Ref.get(seen))].sort()).toEqual([1, 1]);
+      expect([...(yield* Ref.get(seen))].sort((a, b) => a - b)).toEqual([1, 1]);
     }).pipe(Effect.orDie),
   );
 
@@ -403,8 +403,8 @@ describe('recorded agent state', () => {
     () => {
       const setCount = Tool.make('set_count', {
         description: 'Set the recorded count.',
-        parameters: Schema.Struct({ count: Schema.Number }),
-        success: Schema.Struct({ count: Schema.Number }),
+        parameters: Schema.Struct({ count: Schema.Finite }),
+        success: Schema.Struct({ count: Schema.Finite }),
         failure: AgentState.Error,
         dependencies: AgentState.dependencies(Count),
       });
@@ -437,7 +437,7 @@ describe('recorded agent state', () => {
                       ? Stream.fromIterable<Response.StreamPartEncoded>([
                           {
                             type: 'tool-call',
-                            id: `set-count-${call}`,
+                            id: `set-count-${String(call)}`,
                             name: 'set_count',
                             params: {
                               count: JSON.stringify(options.prompt).includes(
@@ -450,13 +450,13 @@ describe('recorded agent state', () => {
                           { ...finish, reason: 'tool-calls' },
                         ])
                       : Stream.fromIterable<Response.StreamPartEncoded>([
-                          { type: 'text-start', id: `text-${call}` },
+                          { type: 'text-start', id: `text-${String(call)}` },
                           {
                             type: 'text-delta',
-                            id: `text-${call}`,
+                            id: `text-${String(call)}`,
                             delta: 'ok',
                           },
-                          { type: 'text-end', id: `text-${call}` },
+                          { type: 'text-end', id: `text-${String(call)}` },
                           finish,
                         ]),
                 ),
@@ -488,8 +488,7 @@ describe('recorded agent state', () => {
           count: 2,
         });
       }).pipe(
-        Effect.provide(setCountModel),
-        Effect.provide(testLogLayer),
+        Effect.provide(Layer.merge(setCountModel, testLogLayer)),
         Effect.orDie,
       );
     },
@@ -546,7 +545,11 @@ describe('recorded agent state', () => {
       const session = yield* open();
       yield* (yield* AgentState.open(Count, session)).set({ count: 7 });
       yield* session.append([{ _tag: 'Text', step: 1, text: 'kept' }]);
-      const firstKept = (yield* session.recorded).at(-1)!.offset;
+      const lastRecord = (yield* session.recorded).at(-1);
+      if (lastRecord === undefined) {
+        throw new Error('missing kept record');
+      }
+      const firstKept = lastRecord.offset;
       yield* session.append([
         {
           _tag: 'Compacted',
@@ -690,7 +693,7 @@ describe('recorded agent state', () => {
       const Other = AgentState.make({
         id: 'other',
         version: '1',
-        schema: Schema.Struct({ count: Schema.Number }),
+        schema: Schema.Struct({ count: Schema.Finite }),
         initial: () => ({ count: 0 }),
       });
       const result = yield* Effect.exit(AgentState.open(Other, reopened));
@@ -710,7 +713,7 @@ describe('recorded agent state', () => {
     const Other = AgentState.make({
       id: 'other-agent-state',
       version: '7',
-      schema: Schema.Struct({ count: Schema.Number }),
+      schema: Schema.Struct({ count: Schema.Finite }),
       initial: () => ({ count: 0 }),
     });
     const agent = Agent.make({
@@ -785,7 +788,11 @@ describe('recorded agent state', () => {
       const session = yield* open();
       const state = yield* AgentState.open(Count, session);
       yield* state.set({ count: 1 });
-      const afterOne = (yield* session.recorded).at(-1)!.offset;
+      const afterOneRecord = (yield* session.recorded).at(-1);
+      if (afterOneRecord === undefined) {
+        throw new Error('missing state record');
+      }
+      const afterOne = afterOneRecord.offset;
       yield* state.set({ count: 2 });
 
       const branched = yield* AgentLog.open(conversation, {
@@ -826,7 +833,11 @@ describe('recorded agent state', () => {
     Effect.gen(function* () {
       const session = yield* open();
       yield* (yield* AgentState.open(Count, session)).set({ count: 13 });
-      const checkpoint = (yield* session.recorded).at(-1)!.offset;
+      const checkpointRecord = (yield* session.recorded).at(-1);
+      if (checkpointRecord === undefined) {
+        throw new Error('missing checkpoint record');
+      }
+      const checkpoint = checkpointRecord.offset;
       yield* session.append([
         {
           _tag: 'RunSettled',

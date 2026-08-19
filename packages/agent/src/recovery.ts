@@ -1,5 +1,5 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Option, Ref } from 'effect';
 
 import { AgentBranch } from './branch.js';
@@ -109,7 +109,9 @@ export const fold = (
     ToolCall: (record) => {
       if (running) {
         const key = settledKey(record.name, record.id);
-        if (!calls.has(key)) order.push(key);
+        if (!calls.has(key)) {
+          order.push(key);
+        }
         calls.set(key, {
           step: record.step,
           name: record.name,
@@ -202,16 +204,18 @@ export const fold = (
           ? undefined
           : `Cannot recover indeterminate tool ${unmatched.name} (${unmatched.id}): ` +
             'durable ToolStarted has no matching ToolCall',
-    pending: order.flatMap((key) =>
-      recoveries.get(key)?._tag !== 'Settled' && calls.has(key)
-        ? [calls.get(key)!]
-        : [],
-    ),
-    indeterminate: order.flatMap((key) =>
-      recoveries.get(key)?._tag === 'Indeterminate' && calls.has(key)
-        ? [calls.get(key)!]
-        : [],
-    ),
+    pending: order.flatMap((key) => {
+      const recovery = recoveries.get(key);
+      const call = calls.get(key);
+      return recovery?._tag !== 'Settled' && call !== undefined ? [call] : [];
+    }),
+    indeterminate: order.flatMap((key) => {
+      const recovery = recoveries.get(key);
+      const call = calls.get(key);
+      return recovery?._tag === 'Indeterminate' && call !== undefined
+        ? [call]
+        : [];
+    }),
     suspended: order.flatMap((key): ReadonlyArray<SuspendedToolCall> => {
       const recovery = recoveries.get(key);
       const call = calls.get(key);
@@ -429,7 +433,9 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       completedWait: (token) =>
         Option.fromNullishOr(completedWaitOutcomes.get(token)),
       pendingToolState: Effect.map(Ref.get(pending), (current) => {
-        if (current.size === 0) return 'none';
+        if (current.size === 0) {
+          return 'none';
+        }
         for (const key of current) {
           if (recoveries.get(key)?._tag !== 'Suspended') {
             return 'indeterminate';

@@ -43,7 +43,7 @@ const standardLayer = Layer.merge(
 );
 
 /** The standard workspace toolkit without application-owned tools. */
-export const standard: Composition<{}> = {
+export const standard: Composition<Record<never, never>> = {
   toolkit: WorkspaceTools.toolkit,
   layer: standardLayer,
 };

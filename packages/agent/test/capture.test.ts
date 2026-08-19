@@ -1,4 +1,4 @@
-import { Context, Crypto, Effect, Layer, Schema } from 'effect';
+import { Context, type Crypto, Effect, type Layer, Schema } from 'effect';
 import { Tool, Toolkit } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 

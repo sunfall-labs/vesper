@@ -200,7 +200,7 @@ describe('code mode tool broker', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
       const requests = yield* model.requests;
       const prompt = JSON.stringify(requests[1]?.prompt);
 
@@ -236,7 +236,7 @@ describe('code mode tool broker', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
       const requests = yield* model.requests;
       const prompt = JSON.stringify(requests[1]?.prompt);
 
@@ -304,7 +304,7 @@ describe('code mode tool broker', () => {
 
       const result = yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
       const requests = yield* model.requests;
       const executions = yield* executor.requests;
 
@@ -385,7 +385,7 @@ describe('code mode tool broker', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
       expect(yield* executor.responses).toEqual([
         {
@@ -420,7 +420,9 @@ describe('code mode tool broker', () => {
         work: ({ id }) =>
           Effect.gen(function* () {
             entered += 1;
-            if (entered === 2) yield* Deferred.succeed(bothEntered, undefined);
+            if (entered === 2) {
+              yield* Deferred.succeed(bothEntered, undefined);
+            }
             yield* Deferred.await(bothEntered);
             return id;
           }),
@@ -446,8 +448,7 @@ describe('code mode tool broker', () => {
       yield* agent
         .run('go')
         .pipe(
-          Effect.provide(model.layer),
-          Effect.provide(executor.layer),
+          Effect.provide(Layer.merge(model.layer, executor.layer)),
           Effect.timeout('500 millis'),
         );
       expect(entered).toBe(2);
@@ -509,7 +510,7 @@ describe('code mode tool broker', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executorLayer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executorLayer)));
       expect(maximum).toBe(1);
     });
   });
@@ -553,7 +554,7 @@ describe('code mode tool broker', () => {
 
         yield* agent
           .run('go')
-          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
         expect(yield* executor.responses).toEqual([
           {
@@ -609,7 +610,7 @@ describe('code mode tool broker', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
       expect(yield* executor.responses).toEqual([
         {
@@ -685,7 +686,7 @@ describe('code mode tool broker', () => {
 
       yield* agent
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
       expect(handled).toBe(0);
       expect(yield* executor.responses).toEqual([
@@ -774,7 +775,7 @@ describe('code mode tool broker', () => {
 
         yield* agent
           .run('go')
-          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
         expect(yield* executor.responses).toEqual([
           {
@@ -849,16 +850,15 @@ describe('code mode tool broker', () => {
 
         const result = yield* agent
           .run('go')
-          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
         const requests = yield* model.requests;
         const executions = yield* executor.requests;
 
         expect(result.text).toBe('done');
         // Both halves advertised on every request, nothing else.
-        expect([...(requests[0]?.tools ?? [])].sort()).toEqual([
-          'exec',
-          'release',
-        ]);
+        expect(
+          [...(requests[0]?.tools ?? [])].sort((a, b) => a.localeCompare(b)),
+        ).toEqual(['exec', 'release']);
         // The broker catalogs only the brokered half.
         expect(executions[0]?.tools.map((tool) => tool.name)).toEqual([
           'lookup',
@@ -911,7 +911,7 @@ describe('code mode tool broker', () => {
 
         const suspended = yield* conversation
           .run('release r1')
-          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
         expect(suspended.outcome).toBe('suspended');
         expect(suspended.pendingApprovals).toEqual([
           {
@@ -925,7 +925,7 @@ describe('code mode tool broker', () => {
         yield* conversation.resolveApproval('release-call', 'approve');
         const resolved = yield* conversation
           .run()
-          .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
         expect(resolved.outcome).toBe('success');
         expect(released).toBe(1);
@@ -1016,14 +1016,14 @@ describe('code mode scratch state', () => {
         yield* conversation
           .run('first')
           .pipe(
-            Effect.provide(firstModel.layer),
-            Effect.provide(firstExecutor.layer),
+            Effect.provide(Layer.merge(firstModel.layer, firstExecutor.layer)),
           );
         yield* conversation
           .run('second')
           .pipe(
-            Effect.provide(secondModel.layer),
-            Effect.provide(secondExecutor.layer),
+            Effect.provide(
+              Layer.merge(secondModel.layer, secondExecutor.layer),
+            ),
           );
         const records = yield* conversation.records().pipe(Stream.runCollect);
         const prompts = [
@@ -1076,8 +1076,7 @@ describe('code mode scratch state', () => {
       yield* conversation
         .run('fail')
         .pipe(
-          Effect.provide(failedModel.layer),
-          Effect.provide(failedExecutor.layer),
+          Effect.provide(Layer.merge(failedModel.layer, failedExecutor.layer)),
         );
 
       const nextExecutor = CodeExecutor.fake([
@@ -1103,10 +1102,7 @@ describe('code mode scratch state', () => {
       ]);
       yield* conversation
         .run('continue')
-        .pipe(
-          Effect.provide(nextModel.layer),
-          Effect.provide(nextExecutor.layer),
-        );
+        .pipe(Effect.provide(Layer.merge(nextModel.layer, nextExecutor.layer)));
 
       expect((yield* nextExecutor.requests)[0]?.state).toEqual({});
     }).pipe(Effect.provide(logLayer), Effect.scoped),
@@ -1146,7 +1142,7 @@ describe('code mode scratch state', () => {
 
       yield* conversation
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
       const records = yield* conversation.records().pipe(Stream.runCollect);
       const requests = yield* model.requests;
 
@@ -1179,7 +1175,7 @@ describe('code mode scratch state', () => {
           _tag: 'Completion',
           state: Object.fromEntries(
             Array.from({ length: 5 }, (_, index) => [
-              `value-${index}`,
+              `value-${String(index)}`,
               'x'.repeat(60 * 1024),
             ]),
           ),
@@ -1200,7 +1196,7 @@ describe('code mode scratch state', () => {
 
       yield* conversation
         .run('go')
-        .pipe(Effect.provide(model.layer), Effect.provide(executor.layer));
+        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
       const records = yield* conversation.records().pipe(Stream.runCollect);
       const requests = yield* model.requests;
 
@@ -1259,14 +1255,14 @@ describe('code mode scratch state', () => {
         yield* conversation
           .run('first')
           .pipe(
-            Effect.provide(firstModel.layer),
-            Effect.provide(firstExecutor.layer),
+            Effect.provide(Layer.merge(firstModel.layer, firstExecutor.layer)),
           );
         yield* conversation
           .run('second')
           .pipe(
-            Effect.provide(secondModel.layer),
-            Effect.provide(secondExecutor.layer),
+            Effect.provide(
+              Layer.merge(secondModel.layer, secondExecutor.layer),
+            ),
           );
 
         expect((yield* secondExecutor.requests)[0]?.state).toEqual({

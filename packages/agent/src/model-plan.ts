@@ -1,4 +1,4 @@
-import { Effect, ExecutionPlan, Layer, Schema, Stream } from 'effect';
+import { Effect, Layer, Stream, type ExecutionPlan, type Schema } from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -30,7 +30,7 @@ type AttemptResult<A, E> =
   | { readonly _tag: 'Bypass'; readonly error: E };
 
 type GenerateTextWithoutToolkit = Omit<
-  LanguageModel.GenerateTextOptions<{}>,
+  LanguageModel.GenerateTextOptions<Record<never, never>>,
   'toolkit'
 > & {
   readonly toolkit?: undefined;
@@ -120,13 +120,15 @@ export const layer = <Provides, AdditionalAcceptedInput, PlanR>(
         );
 
       function generateText<
-        Request extends LanguageModel.GenerateTextOptions<{}> & {
+        Request extends LanguageModel.GenerateTextOptions<
+          Record<never, never>
+        > & {
           readonly toolkit?: undefined;
         },
       >(
         request: Request,
       ): Effect.Effect<
-        LanguageModel.GenerateTextResponse<{}>,
+        LanguageModel.GenerateTextResponse<Record<never, never>>,
         LanguageModel.ExtractError<Request>,
         LanguageModel.ExtractServices<Request>
       >;
@@ -191,13 +193,15 @@ export const layer = <Provides, AdditionalAcceptedInput, PlanR>(
       }
 
       function streamText<
-        Request extends LanguageModel.GenerateTextOptions<{}> & {
+        Request extends LanguageModel.GenerateTextOptions<
+          Record<never, never>
+        > & {
           readonly toolkit?: undefined;
         },
       >(
         request: Request,
       ): Stream.Stream<
-        Response.StreamPart<{}>,
+        Response.StreamPart<Record<never, never>>,
         LanguageModel.ExtractError<Request>,
         LanguageModel.ExtractServices<Request>
       >;

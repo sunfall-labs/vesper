@@ -127,15 +127,16 @@ export const make = <A, Encoded = A, DecodeR = never, EncodeR = never>(
       message: 'State id must be non-empty',
     });
   }
-  if (options.version.trim() === '')
+  if (options.version.trim() === '') {
     throw new StateDefinitionError({
       message: 'State version must be non-empty',
       stateId: options.id,
     });
+  }
   const tag = Context.Service<
     Definition<A, Encoded, DecodeR, EncodeR>,
     Handle<A, EncodeR>
-  >(`@sunfall/vesper-agent/state/${options.id}/${nextContextKey++}`);
+  >(`@sunfall/vesper-agent/state/${options.id}/${String(nextContextKey++)}`);
   return Object.assign(tag, {
     id: options.id,
     version: options.version,
@@ -192,15 +193,13 @@ const openEffect = Effect.fn('AgentState.open')(function* <
     persisted !== undefined &&
     (persisted.id !== definition.id || persisted.version !== definition.version)
   ) {
-    return yield* Effect.fail(
-      new StateCompatibilityError({
-        message: 'Persisted state schema does not match the agent definition',
-        stateId: definition.id,
-        stateVersion: definition.version,
-        persistedId: persisted.id,
-        persistedVersion: persisted.version,
-      }),
-    );
+    return yield* new StateCompatibilityError({
+      message: 'Persisted state schema does not match the agent definition',
+      stateId: definition.id,
+      stateVersion: definition.version,
+      persistedId: persisted.id,
+      persistedVersion: persisted.version,
+    });
   }
   const initial =
     persisted === undefined
@@ -258,10 +257,7 @@ const openEffect = Effect.fn('AgentState.open')(function* <
   const modify: Handle<A, EncodeR>['modify'] = (f) =>
     SynchronizedRef.modifyEffect(current, (value) => {
       const [result, next] = f(value);
-      return Effect.map(
-        persist(next),
-        (persisted) => [result, persisted] as const,
-      );
+      return Effect.map(persist(next), (saved) => [result, saved] as const);
     });
 
   const set: Handle<A, EncodeR>['set'] = (value) =>
@@ -290,7 +286,7 @@ export function open<A, Encoded = A, DecodeR = never, EncodeR = never>(
     readonly initial: () => A;
   },
   session: undefined,
-): Effect.Effect<Handle<A, never>, Error, never>;
+): Effect.Effect<Handle<A>, Error>;
 /** Open a state handle backed by a persisted session and its codec services. */
 export function open<A, Encoded = A, DecodeR = never, EncodeR = never>(
   definition: {

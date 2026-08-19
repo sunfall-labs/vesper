@@ -19,6 +19,12 @@ interface AttachmentEnvelope {
   readonly ref: AttachmentRef.Ref;
 }
 
+interface AttachmentEnvelopeCandidate {
+  readonly _tag: typeof ATTACHMENT_TAG;
+  readonly version: number;
+  readonly ref: unknown;
+}
+
 /** A persisted prompt could not be safely handed to the model. */
 export class DecodeError extends Schema.TaggedError<DecodeError>(
   '@sunfall/vesper-agent/PromptDecodeError',
@@ -51,24 +57,26 @@ export const encode = (prompt: unknown): unknown =>
 /** Restore file data from Vesper's transport envelope, accepting legacy prompts. */
 export const decode = (prompt: unknown): unknown =>
   mapFileData(prompt, (data) => {
-    if (!isEnvelopeCandidate(data)) return data;
+    if (!isEnvelopeCandidate(data)) {
+      return data;
+    }
     if (
-      data._tag !== TAG ||
-      data.version !== 1 ||
-      (data.encoding !== 'base64' && data.encoding !== 'url') ||
-      typeof data.value !== 'string'
+      data['_tag'] !== TAG ||
+      data['version'] !== 1 ||
+      (data['encoding'] !== 'base64' && data['encoding'] !== 'url') ||
+      typeof data['value'] !== 'string'
     ) {
       throw new Error('Malformed Vesper prompt file-data envelope');
     }
-    if (data.encoding === 'url') {
+    if (data['encoding'] === 'url') {
       try {
-        return new URL(data.value);
+        return new URL(data['value']);
       } catch {
         throw new Error('Malformed URL in Vesper prompt file-data envelope');
       }
     }
     return Result.getOrThrowWith(
-      Encoding.decodeBase64(data.value),
+      Encoding.decodeBase64(data['value']),
       () => new Error('Malformed base64 in Vesper prompt file-data envelope'),
     );
   });
@@ -114,10 +122,12 @@ export const encodeWithAttachments = (
   AttachmentStore.Service
 > =>
   mapFileDataEffect(prompt, (data, part) => {
-    if (!(data instanceof Uint8Array)) return Effect.succeed(data);
+    if (!(data instanceof Uint8Array)) {
+      return Effect.succeed(data);
+    }
     const mediaType =
-      typeof part.mediaType === 'string'
-        ? part.mediaType
+      typeof part['mediaType'] === 'string'
+        ? part['mediaType']
         : 'application/octet-stream';
     return Effect.gen(function* () {
       const store = yield* AttachmentStore.Service;
@@ -191,23 +201,32 @@ const mapFileData = (
   prompt: unknown,
   transform: (data: unknown) => unknown,
 ): unknown => {
-  if (!Array.isArray(prompt)) return prompt;
-  let changed = false;
+  if (!isUnknownArray(prompt)) {
+    return prompt;
+  }
   const messages = prompt.map((message) => {
-    if (!isObject(message) || !Array.isArray(message.content)) return message;
-    let contentChanged = false;
-    const content = message.content.map((part) => {
-      if (!isObject(part) || part.type !== 'file') return part;
-      const data = transform(part.data);
-      if (data === part.data) return part;
-      contentChanged = true;
+    if (!isObject(message) || !isUnknownArray(message['content'])) {
+      return message;
+    }
+    const originalContent = message['content'];
+    const content = message['content'].map((part) => {
+      if (!isObject(part) || part['type'] !== 'file') {
+        return part;
+      }
+      const data = transform(part['data']);
+      if (data === part['data']) {
+        return part;
+      }
       return { ...part, data };
     });
-    if (!contentChanged) return message;
-    changed = true;
+    if (content.every((part, index) => part === originalContent[index])) {
+      return message;
+    }
     return { ...message, content };
   });
-  return changed ? messages : prompt;
+  return messages.some((message, index) => message !== prompt[index])
+    ? messages
+    : prompt;
 };
 
 const mapFileDataEffect = <E, R>(
@@ -217,21 +236,21 @@ const mapFileDataEffect = <E, R>(
     part: Record<PropertyKey, unknown>,
   ) => Effect.Effect<unknown, E, R>,
 ): Effect.Effect<unknown, E, R> =>
-  !Array.isArray(prompt)
+  !isUnknownArray(prompt)
     ? Effect.succeed(prompt)
     : Effect.map(
         Effect.forEach(prompt, (message) => {
-          if (!isObject(message) || !Array.isArray(message.content)) {
+          if (!isObject(message) || !isUnknownArray(message['content'])) {
             return Effect.succeed(message);
           }
-          const originalContent = message.content;
+          const originalContent = message['content'];
           return Effect.map(
             Effect.forEach(originalContent, (part) => {
-              if (!isObject(part) || part.type !== 'file') {
+              if (!isObject(part) || part['type'] !== 'file') {
                 return Effect.succeed(part);
               }
-              return Effect.map(transform(part.data, part), (data) =>
-                data === part.data ? part : { ...part, data },
+              return Effect.map(transform(part['data'], part), (data) =>
+                data === part['data'] ? part : { ...part, data },
               );
             }),
             (content) =>
@@ -246,13 +265,18 @@ const mapFileDataEffect = <E, R>(
 const isObject = (value: unknown): value is Record<PropertyKey, unknown> =>
   typeof value === 'object' && value !== null;
 
+const isUnknownArray = (value: unknown): value is ReadonlyArray<unknown> =>
+  Array.isArray(value);
+
 const isEnvelopeCandidate = (
   value: unknown,
 ): value is Record<PropertyKey, unknown> =>
-  isObject(value) && '_tag' in value && value._tag === TAG;
+  isObject(value) && '_tag' in value && value['_tag'] === TAG;
 
-const isAttachmentEnvelope = (value: unknown): value is AttachmentEnvelope =>
-  isObject(value) && '_tag' in value && value._tag === ATTACHMENT_TAG;
+const isAttachmentEnvelope = (
+  value: unknown,
+): value is AttachmentEnvelopeCandidate =>
+  isObject(value) && '_tag' in value && value['_tag'] === ATTACHMENT_TAG;
 
 const messageOf = (cause: unknown): string =>
   cause instanceof Error ? cause.message : String(cause);

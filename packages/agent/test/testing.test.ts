@@ -73,7 +73,11 @@ describe('ScriptedModel', () => {
           'streamText',
           'streamText',
         ]);
-        expect(requests[0]!.tools).toEqual(['lookup_order']);
+        const firstRequest = requests[0];
+        if (firstRequest === undefined) {
+          throw new Error('missing first request');
+        }
+        expect(firstRequest.tools).toEqual(['lookup_order']);
         expect(yield* model.remaining).toEqual({ generate: 0, stream: 0 });
       }),
   );

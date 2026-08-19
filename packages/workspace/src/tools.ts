@@ -79,11 +79,9 @@ export class CommandPolicy extends Context.Service<
 export const commandPolicyLayer = (
   config: CommandPolicyConfig,
 ): Layer.Layer<CommandPolicy> => {
-  const valid = (value: number): boolean =>
-    Number.isFinite(value) && Number.isInteger(value) && value > 0;
   if (
-    !valid(config.defaultTimeoutMs) ||
-    !valid(config.maxTimeoutMs) ||
+    !isValidTimeout(config.defaultTimeoutMs) ||
+    !isValidTimeout(config.maxTimeoutMs) ||
     config.defaultTimeoutMs > config.maxTimeoutMs
   ) {
     throw new RangeError(
@@ -95,6 +93,9 @@ export const commandPolicyLayer = (
     allowShell: config.allowShell ?? false,
   });
 };
+
+const isValidTimeout = (value: number): boolean =>
+  Number.isFinite(value) && Number.isInteger(value) && value > 0;
 
 // --------------------------------------------------------------- the limits
 
@@ -386,13 +387,11 @@ const resolvePath = (
     const normalizedRoot = WorkspacePath.normalize(root.path);
     const resolution = WorkspacePath.resolve(normalizedRoot, input);
     if (!resolution.ok) {
-      return yield* Effect.fail(
-        new PathOutsideWorkspace({
-          path: input,
-          root: '.',
-          reason: resolution.reason,
-        }),
-      );
+      return yield* new PathOutsideWorkspace({
+        path: input,
+        root: '.',
+        reason: resolution.reason,
+      });
     }
     if (!filesystem.allowSymlinks) {
       const segments = WorkspacePath.relative(normalizedRoot, resolution.path);
@@ -411,12 +410,10 @@ const resolvePath = (
         if (segment !== normalizedRoot) {
           current = current === '/' ? `/${segment}` : `${current}/${segment}`;
         }
-        if (yield* check(current)) {
-          return yield* Effect.fail(
-            new SymlinkDenied({
-              path: WorkspacePath.relative(normalizedRoot, resolution.path),
-            }),
-          );
+        if ((yield* check(current)) === true) {
+          return yield* new SymlinkDenied({
+            path: WorkspacePath.relative(normalizedRoot, resolution.path),
+          });
         }
       }
     }
@@ -446,9 +443,7 @@ const readText = (
     const decoded = WorkspaceOutput.decodeText(bytes);
     return decoded.ok
       ? decoded.text
-      : yield* Effect.fail(
-          new BinaryContent({ path: display, reason: decoded.reason }),
-        );
+      : yield* new BinaryContent({ path: display, reason: decoded.reason });
   });
 
 interface WalkEntry {
@@ -515,7 +510,7 @@ const walk = (
 
       if (listing._tag === 'Failure') {
         if (isRoot) {
-          return yield* Effect.fail(listing.failure);
+          return yield* listing.failure;
         }
         unreadableDirectories.push(relative);
         continue;
@@ -523,9 +518,14 @@ const walk = (
       isRoot = false;
 
       const remainingEntries = MAX_WALK_ENTRIES - entries.length;
-      const sortedNames = [...listing.success].sort();
+      const sortedNames = [...listing.success];
+      // The copied array is local and may contain thousands of entries. Native
+      // sorting avoids turning a bounded walk into quadratic work.
+      sortedNames.sort();
       const names = sortedNames.slice(0, remainingEntries);
-      if (sortedNames.length > names.length) truncated = true;
+      if (sortedNames.length > names.length) {
+        truncated = true;
+      }
       const stats = yield* Effect.forEach(
         names,
         (name) => driver.stat(`${absolute}/${name}`).pipe(Effect.result),
@@ -540,7 +540,11 @@ const walk = (
         }
 
         const childRelative = relative === '' ? name : `${relative}/${name}`;
-        const stat = stats[nameIndex]!;
+        const stat = stats[nameIndex];
+        if (stat === undefined) {
+          unreadableEntries.push(childRelative);
+          continue;
+        }
 
         // A `stat` that failed is an entry that vanished between the listing
         // and the check, or one we may not look at. Either way it is not
@@ -552,11 +556,12 @@ const walk = (
           continue;
         }
 
-        const type = stat.success.isSymbolicLink
-          ? 'symlink'
-          : stat.success.isDirectory
-            ? 'directory'
-            : 'file';
+        const type =
+          stat.success.isSymbolicLink === true
+            ? 'symlink'
+            : stat.success.isDirectory
+              ? 'directory'
+              : 'file';
 
         entries.push({ path: childRelative, type, size: stat.success.size });
 
@@ -607,24 +612,40 @@ const unsafeRegexReason = (pattern: string): string | undefined => {
       escaped = true;
       continue;
     }
-    if (character === '[') inClass = true;
-    if (character === ']' && inClass) inClass = false;
-    if (inClass) continue;
+    if (character === '[') {
+      inClass = true;
+    }
+    if (character === ']' && inClass) {
+      inClass = false;
+    }
+    if (inClass) {
+      continue;
+    }
     if (character === '(') {
       groups.push({ containsAlternation: false, containsQuantifier: false });
       continue;
     }
     if (character === '|' && groups.length > 0) {
-      groups[groups.length - 1]!.containsAlternation = true;
+      const group = groups[groups.length - 1];
+      if (group !== undefined) {
+        group.containsAlternation = true;
+      }
       continue;
     }
     const quantified =
       character === '*' || character === '+' || character === '{';
-    if (character === '*' || character === '+') unboundedQuantifiers += 1;
-    if (quantified && groups.length > 0) {
-      groups[groups.length - 1]!.containsQuantifier = true;
+    if (character === '*' || character === '+') {
+      unboundedQuantifiers += 1;
     }
-    if (character !== ')') continue;
+    if (quantified && groups.length > 0) {
+      const group = groups[groups.length - 1];
+      if (group !== undefined) {
+        group.containsQuantifier = true;
+      }
+    }
+    if (character !== ')') {
+      continue;
+    }
 
     const group = groups.pop() ?? {
       containsAlternation: false,
@@ -639,7 +660,10 @@ const unsafeRegexReason = (pattern: string): string | undefined => {
       return 'ambiguous or nested quantified groups are not supported by bounded search';
     }
     if ((group.containsQuantifier || groupQuantified) && groups.length > 0) {
-      groups[groups.length - 1]!.containsQuantifier = true;
+      const parent = groups[groups.length - 1];
+      if (parent !== undefined) {
+        parent.containsQuantifier = true;
+      }
     }
   }
   if (unboundedQuantifiers > 4) {
@@ -962,9 +986,10 @@ const handleWrite = Effect.fn('WorkspaceTools.writeFile')(function* (params: {
   const driver = yield* WorkspaceDriver.Service;
   const bytes = WorkspaceOutput.utf8Size(params.content);
   if (bytes > MAX_WRITABLE_BYTES) {
-    return yield* Effect.fail(
-      new FileTooLarge({ path: params.path, maxBytes: MAX_WRITABLE_BYTES }),
-    );
+    return yield* new FileTooLarge({
+      path: params.path,
+      maxBytes: MAX_WRITABLE_BYTES,
+    });
   }
   const { absolute, display, root } = yield* resolvePath(params.path, 'write');
 
@@ -973,13 +998,13 @@ const handleWrite = Effect.fn('WorkspaceTools.writeFile')(function* (params: {
     .pipe(Effect.mapError(fromFileError('write', display)), Effect.result);
 
   if (existing._tag === 'Success' && !existing.success.isFile) {
-    return yield* Effect.fail(new NotAFile({ path: display }));
+    return yield* new NotAFile({ path: display });
   }
   // A missing file is the ordinary case for a write. A permission or I/O
   // failure is not evidence of absence: preserve it rather than attempting a
   // write that could have a different result from the probe.
   if (existing._tag === 'Failure' && existing.failure._tag !== 'FileNotFound') {
-    return yield* Effect.fail(existing.failure);
+    return yield* existing.failure;
   }
   const created =
     existing._tag === 'Failure' && existing.failure._tag === 'FileNotFound';
@@ -1023,18 +1048,17 @@ const handleEdit = Effect.fn('WorkspaceTools.editFile')(function* (params: {
 
       const occurrences = text.split(params.oldText).length - 1;
       if (occurrences === 0) {
-        return yield* Effect.fail(
-          new EditTargetMissing({ path: display, target: params.oldText }),
-        );
+        return yield* new EditTargetMissing({
+          path: display,
+          target: params.oldText,
+        });
       }
       if (occurrences > 1 && params.replaceAll !== true) {
-        return yield* Effect.fail(
-          new EditTargetAmbiguous({
-            path: display,
-            target: params.oldText,
-            occurrences,
-          }),
-        );
+        return yield* new EditTargetAmbiguous({
+          path: display,
+          target: params.oldText,
+          occurrences,
+        });
       }
 
       // `split`/`join` rather than `replace`: `$&` and friends in `newText` are
@@ -1046,9 +1070,10 @@ const handleEdit = Effect.fn('WorkspaceTools.editFile')(function* (params: {
         replacements * WorkspaceOutput.utf8Size(params.oldText) +
         replacements * WorkspaceOutput.utf8Size(params.newText);
       if (updatedBytes > MAX_WRITABLE_BYTES) {
-        return yield* Effect.fail(
-          new FileTooLarge({ path: display, maxBytes: MAX_WRITABLE_BYTES }),
-        );
+        return yield* new FileTooLarge({
+          path: display,
+          maxBytes: MAX_WRITABLE_BYTES,
+        });
       }
       const updated =
         params.replaceAll === true
@@ -1107,9 +1132,10 @@ const handleSearch = Effect.fn('WorkspaceTools.searchFiles')(
 
     const unsafe = unsafeRegexReason(params.pattern);
     if (unsafe !== undefined) {
-      return yield* Effect.fail(
-        new InvalidPattern({ pattern: params.pattern, reason: unsafe }),
-      );
+      return yield* new InvalidPattern({
+        pattern: params.pattern,
+        reason: unsafe,
+      });
     }
     const expression = yield* Effect.try({
       try: () =>
@@ -1179,8 +1205,11 @@ const handleSearch = Effect.fn('WorkspaceTools.searchFiles')(
       candidateIndex < selected.length;
       candidateIndex += 1
     ) {
-      const candidate = selected[candidateIndex]!;
-      const bytes = reads[candidateIndex]!;
+      const candidate = selected[candidateIndex];
+      const bytes = reads[candidateIndex];
+      if (candidate === undefined || bytes === undefined) {
+        continue;
+      }
       if (bytes._tag === 'Failure') {
         if (bytes.failure._tag === 'FileReadLimitExceeded') {
           largeFilesSkipped += 1;
@@ -1203,7 +1232,10 @@ const handleSearch = Effect.fn('WorkspaceTools.searchFiles')(
           truncated = true;
           break;
         }
-        const line = lines[index]!;
+        const line = lines[index];
+        if (line === undefined) {
+          continue;
+        }
         if (line.length > MAX_REGEX_LINE_CHARS) {
           longLinesSkipped += 1;
           continue;
@@ -1246,8 +1278,8 @@ const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
 }) {
   const driver = yield* WorkspaceDriver.Service;
   const policy = yield* CommandPolicy;
-  if (!policy.allowShell) {
-    return yield* Effect.fail(new ShellDisabled({}));
+  if (policy.allowShell !== true) {
+    return yield* new ShellDisabled({});
   }
   const { absolute, display } = yield* resolvePath(params.cwd ?? '.', 'run');
   const requestedTimeoutMs = params.timeoutMs ?? policy.defaultTimeoutMs;

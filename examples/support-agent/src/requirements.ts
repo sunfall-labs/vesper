@@ -1,10 +1,10 @@
-import { Agent } from '@sunfall/vesper-agent/agent';
+import type { Agent } from '@sunfall/vesper-agent/agent';
 import type { Effect, Layer } from 'effect';
 import type { LanguageModel, Tool } from 'effect/unstable/ai';
 import type { WorkflowEngine } from 'effect/unstable/workflow';
 import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
 
-import {
+import type {
   OrderRepo,
   RefundAuthorization,
   SupportState,

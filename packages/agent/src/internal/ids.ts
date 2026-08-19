@@ -11,10 +11,14 @@ export const producerId: Effect.Effect<
   LogVocabulary.ProducerId,
   never,
   Crypto.Crypto
-> = randomUuid().pipe(Effect.map(LogVocabulary.ProducerId.make));
+> = randomUuid().pipe(
+  Effect.map((uuid) => LogVocabulary.ProducerId.make(uuid)),
+);
 
 export const toolCallId: Effect.Effect<
   LogVocabulary.ToolCallId,
   never,
   Crypto.Crypto
-> = randomUuid().pipe(Effect.map(LogVocabulary.ToolCallId.make));
+> = randomUuid().pipe(
+  Effect.map((uuid) => LogVocabulary.ToolCallId.make(uuid)),
+);

@@ -12,31 +12,34 @@ const custom = Tool.make('lookup_issue', {
 
 describe('WorkspaceAgent', () => {
   it('provides the six standard workspace tools explicitly', () => {
-    expect(Object.keys(WorkspaceAgent.standard).sort()).toEqual([
-      'layer',
-      'toolkit',
-    ]);
-    expect(Object.keys(WorkspaceAgent.standard.toolkit.tools).sort()).toEqual([
-      'edit_file',
-      'list_files',
-      'read_file',
-      'run_shell',
-      'search_files',
-      'write_file',
-    ]);
+    expect(new Set(Object.keys(WorkspaceAgent.standard))).toEqual(
+      new Set(['layer', 'toolkit']),
+    );
+    expect(new Set(Object.keys(WorkspaceAgent.standard.toolkit.tools))).toEqual(
+      new Set([
+        'edit_file',
+        'list_files',
+        'read_file',
+        'run_shell',
+        'search_files',
+        'write_file',
+      ]),
+    );
   });
 
   it('adds standard tools without losing application tools', () => {
     const adapter = WorkspaceAgent.compose(Toolkit.make(custom));
-    expect(Object.keys(adapter.toolkit.tools).sort()).toEqual([
-      'edit_file',
-      'list_files',
-      'lookup_issue',
-      'read_file',
-      'run_shell',
-      'search_files',
-      'write_file',
-    ]);
+    expect(new Set(Object.keys(adapter.toolkit.tools))).toEqual(
+      new Set([
+        'edit_file',
+        'list_files',
+        'lookup_issue',
+        'read_file',
+        'run_shell',
+        'search_files',
+        'write_file',
+      ]),
+    );
   });
 
   it('rejects collisions from a widened toolkit at runtime', () => {

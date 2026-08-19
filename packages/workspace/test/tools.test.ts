@@ -44,6 +44,9 @@ afterAll(() => {
 
 let counter = 0;
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
 /** A fresh directory, used as the workspace root for one case. */
 const workspace = (): string => {
   counter += 1;
@@ -85,8 +88,20 @@ const call = <Name extends keyof Tools>(
     const kit = yield* WorkspaceTools.toolkit;
     const stream = yield* kit.handle(name, params);
     const chunks = yield* Stream.runCollect(stream);
-    const last = chunks[chunks.length - 1]!;
-    const value = last.result as Record<string, unknown>;
+    const last = chunks.at(-1);
+    if (last === undefined) {
+      return {
+        kind: 'call-error',
+        error: new Error('tool returned no result'),
+      };
+    }
+    if (!isRecord(last.result)) {
+      return {
+        kind: 'call-error',
+        error: new Error('tool returned a non-object result'),
+      };
+    }
+    const value = last.result;
     return last.isFailure
       ? ({
           kind: 'tool-failure',
@@ -111,7 +126,7 @@ const call = <Name extends keyof Tools>(
 
 /** Narrow to a successful result, failing the test with the outcome if not. */
 const expectOk = (outcome: Outcome): Record<string, unknown> => {
-  expect(outcome.kind, JSON.stringify(outcome)).toBe('ok');
+  expect(outcome.kind).toBe('ok');
   return outcome.kind === 'ok' ? outcome.value : {};
 };
 
@@ -124,6 +139,79 @@ const expectFailure = (
     outcome.kind === 'tool-failure' ? outcome.tag : JSON.stringify(outcome),
   ).toBe(tag);
   return outcome.kind === 'tool-failure' ? outcome.error : {};
+};
+
+const arrayProperty = (
+  value: Record<string, unknown>,
+  property: string,
+): ReadonlyArray<unknown> => {
+  const entries = value[property];
+  if (!Array.isArray(entries)) {
+    throw new Error(`${property} was not an array`);
+  }
+  return entries;
+};
+
+const pathEntries = (
+  value: Record<string, unknown>,
+): ReadonlyArray<{
+  path: string;
+}> =>
+  Schema.decodeUnknownSync(
+    Schema.Array(Schema.Struct({ path: Schema.String })),
+  )(value['entries']);
+
+const typedEntries = (
+  value: Record<string, unknown>,
+): ReadonlyArray<{
+  path: string;
+  type: string;
+}> =>
+  Schema.decodeUnknownSync(
+    Schema.Array(Schema.Struct({ path: Schema.String, type: Schema.String })),
+  )(value['entries']);
+
+const matchEntries = (
+  value: Record<string, unknown>,
+): ReadonlyArray<{
+  path: string;
+  line: number;
+  text: string;
+}> =>
+  Schema.decodeUnknownSync(
+    Schema.Array(
+      Schema.Struct({
+        path: Schema.String,
+        line: Schema.Finite,
+        text: Schema.String,
+      }),
+    ),
+  )(value['matches']);
+
+const populateListTree = (directory: string): void => {
+  mkdirSync(join(directory, 'src/deep'), { recursive: true });
+  mkdirSync(join(directory, 'node_modules/pkg'), { recursive: true });
+  writeFileSync(join(directory, 'README.md'), '');
+  writeFileSync(join(directory, 'src/a.ts'), '');
+  writeFileSync(join(directory, 'src/deep/b.ts'), '');
+  writeFileSync(join(directory, 'src/deep/c.txt'), '');
+  writeFileSync(join(directory, 'node_modules/pkg/index.js'), '');
+};
+
+const populateSearchTree = (directory: string): void => {
+  mkdirSync(join(directory, 'src'), { recursive: true });
+  writeFileSync(join(directory, 'src/a.ts'), 'const needle = 1;\nother\n');
+  writeFileSync(join(directory, 'src/b.ts'), 'no match here\n');
+  writeFileSync(join(directory, 'notes.md'), 'needle in prose\n');
+};
+
+const schemaFor = (name: string): Record<string, unknown> => {
+  const tools = WorkspaceTools.toolkit.tools as Record<string, Tool.Any>;
+  const tool = tools[name];
+  if (tool === undefined) {
+    throw new Error(`no tool named ${name}`);
+  }
+  return ToolNamespace.getJsonSchema(tool) as Record<string, unknown>;
 };
 
 // ------------------------------------------------------------------- typing
@@ -212,14 +300,16 @@ const _layerProvidesHandlers: Has<Tool.HandlersFor<Tools>, LayerOutput> = 'yes';
 it('states its requirements in the type', () => {
   // The assertions above are the test; this exists so a `tsc` regression is
   // reported in the same run as everything else.
-  expect(Object.keys(WorkspaceTools.toolkit.tools).sort()).toEqual([
-    'edit_file',
-    'list_files',
-    'read_file',
-    'run_shell',
-    'search_files',
-    'write_file',
-  ]);
+  expect(new Set(Object.keys(WorkspaceTools.toolkit.tools))).toEqual(
+    new Set([
+      'edit_file',
+      'list_files',
+      'read_file',
+      'run_shell',
+      'search_files',
+      'write_file',
+    ]),
+  );
 });
 
 // ---------------------------------------------------------------- read_file
@@ -804,36 +894,25 @@ describe('edit_file', () => {
 // --------------------------------------------------------------- list_files
 
 describe('list_files', () => {
-  const tree = (directory: string): void => {
-    mkdirSync(join(directory, 'src/deep'), { recursive: true });
-    mkdirSync(join(directory, 'node_modules/pkg'), { recursive: true });
-    writeFileSync(join(directory, 'README.md'), '');
-    writeFileSync(join(directory, 'src/a.ts'), '');
-    writeFileSync(join(directory, 'src/deep/b.ts'), '');
-    writeFileSync(join(directory, 'src/deep/c.txt'), '');
-    writeFileSync(join(directory, 'node_modules/pkg/index.js'), '');
-  };
-
   it.live('walks recursively and types each entry', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateListTree(directory);
 
       const value = expectOk(yield* call(directory, 'list_files', {}));
-      const entries = value['entries'] as ReadonlyArray<{
-        path: string;
-        type: string;
-      }>;
+      const entries = typedEntries(value);
 
-      expect(entries.map((entry) => entry.path).sort()).toEqual([
-        'README.md',
-        'node_modules',
-        'src',
-        'src/a.ts',
-        'src/deep',
-        'src/deep/b.ts',
-        'src/deep/c.txt',
-      ]);
+      expect(new Set(entries.map((entry) => entry.path))).toEqual(
+        new Set([
+          'README.md',
+          'node_modules',
+          'src',
+          'src/a.ts',
+          'src/deep',
+          'src/deep/b.ts',
+          'src/deep/c.txt',
+        ]),
+      );
       expect(entries.find((entry) => entry.path === 'src')?.type).toBe(
         'directory',
       );
@@ -848,12 +927,12 @@ describe('list_files', () => {
     () =>
       Effect.gen(function* () {
         const directory = workspace();
-        tree(directory);
+        populateListTree(directory);
 
         const value = expectOk(yield* call(directory, 'list_files', {}));
 
         expect(value['ignoredDirectories']).toEqual(['node_modules']);
-        const entries = value['entries'] as ReadonlyArray<{ path: string }>;
+        const entries = pathEntries(value);
         expect(
           entries.some((entry) => entry.path.startsWith('node_modules/')),
         ).toBe(false);
@@ -863,24 +942,23 @@ describe('list_files', () => {
   it.live('filters by glob', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateListTree(directory);
 
       const value = expectOk(
         yield* call(directory, 'list_files', { pattern: '**/*.ts' }),
       );
-      const entries = value['entries'] as ReadonlyArray<{ path: string }>;
+      const entries = pathEntries(value);
 
-      expect(entries.map((entry) => entry.path).sort()).toEqual([
-        'src/a.ts',
-        'src/deep/b.ts',
-      ]);
+      expect(new Set(entries.map((entry) => entry.path))).toEqual(
+        new Set(['src/a.ts', 'src/deep/b.ts']),
+      );
     }),
   );
 
   it.live('returns malformed glob ranges as InvalidPattern', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateListTree(directory);
 
       expectFailure(
         yield* call(directory, 'list_files', { pattern: '[z-a]' }),
@@ -897,10 +975,7 @@ describe('list_files', () => {
       symlinkSync(join(directory, 'real'), join(directory, 'link'));
 
       const value = expectOk(yield* call(directory, 'list_files', {}));
-      const entries = value['entries'] as ReadonlyArray<{
-        path: string;
-        type: string;
-      }>;
+      const entries = typedEntries(value);
 
       expect(entries.find((entry) => entry.path === 'link')?.type).toBe(
         'symlink',
@@ -929,13 +1004,13 @@ describe('list_files', () => {
   it.live('caps the result at `limit` and says it was capped', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateListTree(directory);
 
       const value = expectOk(
         yield* call(directory, 'list_files', { limit: 2 }),
       );
 
-      expect((value['entries'] as ReadonlyArray<unknown>).length).toBe(2);
+      expect(arrayProperty(value, 'entries')).toHaveLength(2);
       expect(value['truncated']).toBe(true);
     }),
   );
@@ -943,18 +1018,17 @@ describe('list_files', () => {
   it.live('starts from a subdirectory when asked', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateListTree(directory);
 
       const value = expectOk(
         yield* call(directory, 'list_files', { path: 'src/deep' }),
       );
-      const entries = value['entries'] as ReadonlyArray<{ path: string }>;
+      const entries = pathEntries(value);
 
       expect(value['directory']).toBe('src/deep');
-      expect(entries.map((entry) => entry.path).sort()).toEqual([
-        'b.ts',
-        'c.txt',
-      ]);
+      expect(new Set(entries.map((entry) => entry.path))).toEqual(
+        new Set(['b.ts', 'c.txt']),
+      );
     }),
   );
 
@@ -993,26 +1067,15 @@ describe('list_files', () => {
 // ------------------------------------------------------------- search_files
 
 describe('search_files', () => {
-  const tree = (directory: string): void => {
-    mkdirSync(join(directory, 'src'), { recursive: true });
-    writeFileSync(join(directory, 'src/a.ts'), 'const needle = 1;\nother\n');
-    writeFileSync(join(directory, 'src/b.ts'), 'no match here\n');
-    writeFileSync(join(directory, 'notes.md'), 'needle in prose\n');
-  };
-
   it.live('returns one entry per matching line, with line numbers', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateSearchTree(directory);
 
       const value = expectOk(
         yield* call(directory, 'search_files', { pattern: 'needle' }),
       );
-      const matches = value['matches'] as ReadonlyArray<{
-        path: string;
-        line: number;
-        text: string;
-      }>;
+      const matches = matchEntries(value);
 
       expect(matches).toEqual([
         { path: 'notes.md', line: 1, text: 'needle in prose' },
@@ -1025,7 +1088,7 @@ describe('search_files', () => {
   it.live('narrows by glob', () =>
     Effect.gen(function* () {
       const directory = workspace();
-      tree(directory);
+      populateSearchTree(directory);
 
       const value = expectOk(
         yield* call(directory, 'search_files', {
@@ -1034,11 +1097,9 @@ describe('search_files', () => {
         }),
       );
 
-      expect(
-        (value['matches'] as ReadonlyArray<{ path: string }>).map(
-          (match) => match.path,
-        ),
-      ).toEqual(['src/a.ts']);
+      expect(matchEntries(value).map((match) => match.path)).toEqual([
+        'src/a.ts',
+      ]);
     }),
   );
 
@@ -1050,7 +1111,7 @@ describe('search_files', () => {
       const sensitive = expectOk(
         yield* call(directory, 'search_files', { pattern: 'needle' }),
       );
-      expect((sensitive['matches'] as ReadonlyArray<unknown>).length).toBe(0);
+      expect(arrayProperty(sensitive, 'matches')).toHaveLength(0);
 
       const insensitive = expectOk(
         yield* call(directory, 'search_files', {
@@ -1058,7 +1119,7 @@ describe('search_files', () => {
           ignoreCase: true,
         }),
       );
-      expect((insensitive['matches'] as ReadonlyArray<unknown>).length).toBe(1);
+      expect(arrayProperty(insensitive, 'matches')).toHaveLength(1);
     }),
   );
 
@@ -1172,7 +1233,7 @@ describe('search_files', () => {
         yield* call(directory, 'search_files', { pattern: 'needle', limit: 5 }),
       );
 
-      expect((value['matches'] as ReadonlyArray<unknown>).length).toBe(5);
+      expect(arrayProperty(value, 'matches')).toHaveLength(5);
       expect(value['truncated']).toBe(true);
     }),
   );
@@ -1366,13 +1427,6 @@ describe('run_shell', () => {
 // — which is an `InvalidOutputError` on the stream, so it ended the run rather
 // than coming back as a tool result the model could correct.
 describe('the JSON schema these tools advertise', () => {
-  const schemaFor = (name: string): Record<string, unknown> => {
-    const tools = WorkspaceTools.toolkit.tools as Record<string, Tool.Any>;
-    const tool = tools[name];
-    if (tool === undefined) throw new Error(`no tool named ${name}`);
-    return ToolNamespace.getJsonSchema(tool) as Record<string, unknown>;
-  };
-
   const propertyOf = (
     tool: string,
     property: string,

@@ -29,11 +29,7 @@ export const handler =
   ) =>
   (input: { readonly prompt: string }, call?: CallContext) =>
     Effect.gen(function* () {
-      const protocol = protocolOf<
-        R,
-        Agent.RunFailure,
-        Record<string, Tool.Any>
-      >(child);
+      const protocol = protocolOf<R, Agent.RunFailure>(child);
       if (protocol === undefined) {
         return yield* Effect.die(
           new Error('Subagent was not created by Agent.make'),
@@ -44,7 +40,7 @@ export const handler =
       if (depth >= maxDepth) {
         return yield* Effect.fail({
           refused:
-            `Delegation depth ${maxDepth} reached; complete this task ` +
+            `Delegation depth ${String(maxDepth)} reached; complete this task ` +
             'directly instead of delegating further.',
         });
       }
@@ -155,8 +151,7 @@ type DelegationHandler = (
   call: CallContext,
 ) => Effect.Effect<
   { readonly result: string; readonly steps: number },
-  AiError.AiError | RunPolicy.RunPolicyExhausted | { readonly refused: string },
-  never
+  AiError.AiError | RunPolicy.RunPolicyExhausted | { readonly refused: string }
 >;
 
 type DelegateResult<Children extends ReadonlyArray<Agent.Child>> = {

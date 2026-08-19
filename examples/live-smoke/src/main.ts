@@ -13,7 +13,7 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import {
   Conversation,
-  DurabilityError,
+  type DurabilityError,
 } from '@sunfall/vesper-agent/conversation';
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
@@ -22,15 +22,16 @@ import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStorePg } from '@sunfall/vesper-log-pg/layer';
-import { LogStore } from '@sunfall/vesper-log/log-store';
+import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { VesperPgClient } from '@sunfall/vesper-log-pg/client';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import {
   Config,
+  Clock,
   Console,
   Context,
-  Crypto,
+  type Crypto,
   Effect,
   ExecutionPlan,
   Layer,
@@ -40,7 +41,7 @@ import {
 } from 'effect';
 import {
   AiError,
-  LanguageModel,
+  type LanguageModel,
   type Response,
   Tool,
   Toolkit,
@@ -268,7 +269,9 @@ const absorb = <Tools extends Record<string, Tool.Any>>(
   }
 
   const part = event.encodedPart;
-  if (!trace.partTypes.includes(part.type)) trace.partTypes.push(part.type);
+  if (!trace.partTypes.includes(part.type)) {
+    trace.partTypes.push(part.type);
+  }
 
   switch (part.type) {
     case 'tool-call':
@@ -335,8 +338,8 @@ const report = (trace: Trace): Effect.Effect<void> =>
 
 // ------------------------------------------------------------------ the log
 
-const readAll = <A extends Agent.Any>(
-  agent: A,
+const readAll = (
+  agent: Agent.Any,
   conversationId: string,
 ): Effect.Effect<
   ReadonlyArray<ConversationRecord.Envelope>,
@@ -510,7 +513,7 @@ const curator = Agent.make({
 const delegatePhase = Effect.gen(function* () {
   yield* heading('subagents — delegation, child sessions, service propagation');
 
-  const conversationId = `smoke-delegate-${Date.now()}`;
+  const conversationId = `smoke-delegate-${yield* Clock.currentTimeMillis}`;
   const trace = yield* observe(
     Conversation.make(curator, conversationId).stream(
       'When was the north kiln commissioned, and how hot does it fire?',
@@ -677,7 +680,11 @@ const seedConversation = (conversationId: string) =>
     const records = yield* readAll(notetaker, conversationId).pipe(
       Effect.orDie,
     );
-    const afterFirstRun = records[records.length - 1]!.offset;
+    const lastRecord = records.at(-1);
+    if (lastRecord === undefined) {
+      throw new Error('first run did not append a record');
+    }
+    const afterFirstRun = lastRecord.offset;
 
     const second = yield* conversation.run(
       'Correction: the container id is CONTAINER-BETA. Acknowledge it in five words.',
@@ -702,7 +709,7 @@ const seedConversation = (conversationId: string) =>
 const logPhase = Effect.gen(function* () {
   yield* heading('the log — run, then continue from records alone');
 
-  const conversationId = `smoke-log-${Date.now()}`;
+  const conversationId = `smoke-log-${yield* Clock.currentTimeMillis}`;
   const seeded = yield* seedConversation(conversationId);
 
   const records = yield* readAll(notetaker, conversationId).pipe(Effect.orDie);
@@ -716,8 +723,12 @@ const logPhase = Effect.gen(function* () {
     'records() returned the current finite snapshot and completed',
   );
 
+  const followFrom = records.at(-2);
+  if (followFrom === undefined) {
+    throw new Error('conversation did not append enough records to follow');
+  }
   const followed = yield* Conversation.make(notetaker, conversationId)
-    .follow(records[records.length - 2]!.offset)
+    .follow(followFrom.offset)
     .pipe(Stream.take(1), Stream.runCollect);
   yield* check(
     followed[0]?.offset === records[records.length - 1]?.offset,
@@ -892,7 +903,7 @@ const durabilityPhase = Effect.gen(function* () {
   yield* heading('durability — resume through a fresh Postgres pool');
 
   const databaseUrl = yield* Config.redacted('VESPER_DATABASE_URL');
-  const conversationId = `smoke-durable-${Date.now()}`;
+  const conversationId = `smoke-durable-${yield* Clock.currentTimeMillis}`;
   const storeLayer = () =>
     LogStorePg.layer().pipe(
       Layer.provide(
@@ -922,17 +933,21 @@ const durabilityPhase = Effect.gen(function* () {
   const { recordsBefore, recordsAfter, resumed } = yield* Effect.gen(
     function* () {
       const conversation = Conversation.make(notetaker, conversationId);
-      const recordsBefore = yield* conversation
+      const freshRecordsBefore = yield* conversation
         .records()
         .pipe(Stream.runCollect);
-      const resumed = yield* conversation.run(
+      const freshResumed = yield* conversation.run(
         'What is the durable shipment code? Answer briefly.',
       );
-      spentByConversation(conversationId, resumed.usage);
-      const recordsAfter = yield* conversation
+      spentByConversation(conversationId, freshResumed.usage);
+      const freshRecordsAfter = yield* conversation
         .records()
         .pipe(Stream.runCollect);
-      return { recordsBefore, recordsAfter, resumed };
+      return {
+        recordsBefore: freshRecordsBefore,
+        recordsAfter: freshRecordsAfter,
+        resumed: freshResumed,
+      };
     },
   ).pipe(Effect.provide(storeLayer()), Effect.scoped);
 
@@ -1031,12 +1046,11 @@ const workspacePhase = Effect.gen(function* () {
       WorkspaceTools.layer,
       WorkspaceTools.shellEnabledCommandPolicyLayer,
       WorkspaceTools.defaultFilesystemPolicyLayer,
+      // The local driver needs a process spawner, and is provided here rather
+      // than inherited from the program's NodeServices.
+      WorkspaceLocal.layer.pipe(Layer.provide(NodeServices.layer)),
     ),
   ),
-  // The local driver needs a process spawner, and it is provided here rather
-  // than inherited from the program's `NodeServices` so this phase's
-  // requirement channel is `LanguageModel` alone, like every other phase's.
-  Effect.provide(WorkspaceLocal.layer.pipe(Layer.provide(NodeServices.layer))),
 );
 
 // ------------------------------------------------------------- long prompts
@@ -1055,7 +1069,11 @@ const filler = (approximateTokens: number): string => {
   let length = 0;
   let index = 0;
   while (length < targetChars) {
-    const sentence = `${index}. ${FILLER_SENTENCES[index % FILLER_SENTENCES.length]!}`;
+    const fillerSentence = FILLER_SENTENCES[index % FILLER_SENTENCES.length];
+    if (fillerSentence === undefined) {
+      throw new Error('filler sentence list is empty');
+    }
+    const sentence = `${index}. ${fillerSentence}`;
     parts.push(sentence);
     length += sentence.length + 1;
     index += 1;
@@ -1082,7 +1100,7 @@ const usagePhase = Effect.gen(function* () {
   yield* heading('usage — what the provider reports for a long prompt');
 
   const bulk = filler(6_000);
-  const conversationId = `smoke-usage-${Date.now()}`;
+  const conversationId = `smoke-usage-${yield* Clock.currentTimeMillis}`;
 
   const conversation = Conversation.make(parrot, conversationId);
   const first = yield* observe(
@@ -1158,7 +1176,7 @@ const rambler = Agent.make({
 const compactionProactivePhase = Effect.gen(function* () {
   yield* heading('compaction — proactive, from the estimator');
 
-  const conversationId = `smoke-compact-${Date.now()}`;
+  const conversationId = `smoke-compact-${yield* Clock.currentTimeMillis}`;
 
   // repeated `conversation.run` calls, which continue durable history.
   //
@@ -1315,7 +1333,7 @@ const compactionReactivePhase = Effect.gen(function* () {
     ),
   );
 
-  const conversationId = `smoke-overflow-${Date.now()}`;
+  const conversationId = `smoke-overflow-${yield* Clock.currentTimeMillis}`;
 
   // `conversation.run` for both turns, so the second turn's prompt is the
   // first turn rebuilt from records *plus* the new half — which puts it over the
@@ -1393,14 +1411,15 @@ const phases: Record<
 
 const PHASES = [...Object.keys(phases), 'durability'] as const;
 
-const phaseFor = (name: string) =>
-  name === 'durability'
-    ? durabilityPhase.pipe(Effect.provide(NodeServices.layer))
-    : phases[name] === undefined
-      ? undefined
-      : phases[name]!.pipe(Effect.provide(memoryLogLayer)).pipe(
-          Effect.provide(NodeServices.layer),
-        );
+const phaseFor = (name: string) => {
+  if (name === 'durability') {
+    return durabilityPhase.pipe(Effect.provide(NodeServices.layer));
+  }
+  const phase = phases[name];
+  return phase?.pipe(
+    Effect.provide(Layer.merge(memoryLogLayer, NodeServices.layer)),
+  );
+};
 
 /** Everything except the one that sends a quarter of a million tokens. */
 const DEFAULT_PHASES = [
@@ -1500,9 +1519,11 @@ const command = Command.make(
           const effect = phaseFor(name);
           if (effect === undefined) {
             return yield* Effect.die(new Error(`Unknown phase: ${name}`));
+          } else {
+            yield* effect;
           }
-          yield* effect;
         }
+        return undefined;
       });
 
       const primary = yield* modelFor(

@@ -14,6 +14,13 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
+const present = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('Expected test fixture value to be present');
+  }
+  return value;
+};
+
 const textTurn = (
   id: string,
   deltas: ReadonlyArray<string>,
@@ -38,7 +45,7 @@ const scripted = (
         Stream.unwrap(
           Effect.gen(function* () {
             const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
-            const parts = turns[Math.min(index, turns.length - 1)]!;
+            const parts = present(turns[Math.min(index, turns.length - 1)]);
             return Stream.fromIterable(parts).pipe(
               Stream.tap((part) =>
                 // Park before the terminal part so a test can inspect what
@@ -183,7 +190,7 @@ describe('Agent.stream', () => {
         ),
       );
 
-      expect(completed[0]!.usage).toEqual({ input: 20, output: 8 });
+      expect(present(completed[0]).usage).toEqual({ input: 20, output: 8 });
     }),
   );
 });
@@ -208,9 +215,9 @@ describe('Agent.run', () => {
 
       expect(both.ran.text).toBe('hello');
       expect(both.ran).toMatchObject({
-        text: both.streamed!.text,
-        steps: both.streamed!.steps,
-        usage: both.streamed!.usage,
+        text: present(both.streamed).text,
+        steps: present(both.streamed).steps,
+        usage: present(both.streamed).usage,
       });
     }),
   );

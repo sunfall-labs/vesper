@@ -5,7 +5,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it, test } from '@effect/vitest';
 import {
-  Crypto,
+  type Crypto,
   Effect,
   Fiber,
   Layer,
@@ -32,6 +32,13 @@ const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
   NodeServices.layer,
 );
+
+const required = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('expected a value');
+  }
+  return value;
+};
 
 // The tool-dispatch seam.
 //
@@ -90,7 +97,7 @@ const scripted = (prompts: string[]) =>
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
               prompts.push(JSON.stringify(options.prompt));
               return Stream.fromIterable(
-                turns[Math.min(index, turns.length - 1)]!,
+                required(turns[Math.min(index, turns.length - 1)]),
               );
             }),
           ),
@@ -161,8 +168,7 @@ const run = <A, E>(
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(scripted(prompts)),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(scripted(prompts), testLogLayer)),
     Effect.scoped,
   );
 
@@ -273,7 +279,9 @@ describe('responsive cancellation arbitration', () => {
       yield* Effect.yieldNow;
       const beforeSettlement = yield* Ref.get(cancelled);
       expect(Option.isSome(permit)).toBe(true);
-      if (Option.isSome(permit)) yield* permit.value.settle;
+      if (Option.isSome(permit)) {
+        yield* permit.value.settle;
+      }
       yield* Fiber.join(cancelling);
       const result = {
         dispatched: Option.isSome(permit),
@@ -292,7 +300,9 @@ describe('responsive cancellation arbitration', () => {
       const second = yield* arbitration.commit;
       expect(Option.isSome(first)).toBe(true);
       expect(Option.isSome(second)).toBe(true);
-      if (Option.isNone(first) || Option.isNone(second)) return;
+      if (Option.isNone(first) || Option.isNone(second)) {
+        return;
+      }
 
       yield* first.value.settle;
       yield* first.value.settle;
@@ -672,8 +682,9 @@ describe('recovering indeterminate tool execution', () => {
             .run('hi')
             .pipe(Effect.result);
         }).pipe(
-          Effect.provide(differentCallProvider(calls)),
-          Effect.provide(testLogLayer),
+          Effect.provide(
+            Layer.merge(differentCallProvider(calls), testLogLayer),
+          ),
           Effect.scoped,
         );
 
@@ -703,8 +714,7 @@ describe('recovering indeterminate tool execution', () => {
           .run('hi')
           .pipe(Effect.result);
       }).pipe(
-        Effect.provide(differentCallProvider(calls)),
-        Effect.provide(testLogLayer),
+        Effect.provide(Layer.merge(differentCallProvider(calls), testLogLayer)),
         Effect.scoped,
       );
 
@@ -728,7 +738,7 @@ describe('recovering indeterminate tool execution', () => {
             yield* Conversation.make(
               agentWith({ count: 0 }).intercepting({
                 onIndeterminateToolCall: (call) => {
-                  resolved.push(call.toolCallId!);
+                  resolved.push(required(call.toolCallId));
                   return Effect.succeed(
                     Interception.reconcile({
                       status: 'confirmed',
@@ -765,10 +775,19 @@ describe('recovering indeterminate tool execution', () => {
           yield* Conversation.make(
             agentWith({ count: 0 }).intercepting({
               onIndeterminateToolCall: (call) => {
-                seen.push(call.toolCallId!);
+                seen.push(required(call.toolCallId));
+                const params = call.params;
+                if (
+                  typeof params !== 'object' ||
+                  params === null ||
+                  !('id' in params) ||
+                  typeof params.id !== 'string'
+                ) {
+                  throw new Error('expected an id parameter');
+                }
                 return Effect.succeed(
                   Interception.reconcile({
-                    status: `confirmed:${String((call.params as { id: string }).id)}`,
+                    status: `confirmed:${params.id}`,
                     at: RECORDED.toISOString(),
                   }),
                 );

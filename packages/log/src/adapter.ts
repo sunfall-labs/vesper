@@ -1,7 +1,7 @@
-import { Crypto, Effect, Schema } from 'effect';
+import { Effect, Schema, type Crypto } from 'effect';
 
 import { LogStore } from './log-store.js';
-import { ConversationRecord } from './record.js';
+import type { ConversationRecord } from './record.js';
 import { RecordBatch } from './record-batch.js';
 import { LogVocabulary } from './vocabulary.js';
 
@@ -49,29 +49,27 @@ export const validateInput = (
 ): Effect.Effect<ValidatedInput, LogStore.LogStoreError> =>
   Effect.gen(function* () {
     if (input.records.length === 0) {
-      return yield* Effect.fail(
-        LogStore.makeError(
-          input.path,
-          'append',
-          'empty',
-          'append carried no records',
-        ),
+      return yield* LogStore.makeError(
+        input.path,
+        'append',
+        'empty',
+        'append carried no records',
       );
     }
 
-    const sequence = yield* Schema.decodeUnknownEffect(
-      LogVocabulary.ProducerSequence,
-    )(input.sequence).pipe(
+    const sequence = yield* Schema.decodeEffect(LogVocabulary.ProducerSequence)(
+      input.sequence,
+    ).pipe(
       Effect.mapError(() =>
         LogStore.makeError(
           input.path,
           'append',
           'conflict',
-          `sequence ${input.sequence} is not a safe natural integer`,
+          `sequence ${String(input.sequence)} is not a safe natural integer`,
         ),
       ),
     );
-    const epoch = yield* Schema.decodeUnknownEffect(LogVocabulary.Epoch)(
+    const epoch = yield* Schema.decodeEffect(LogVocabulary.Epoch)(
       input.epoch,
     ).pipe(
       Effect.mapError(() =>
@@ -79,13 +77,13 @@ export const validateInput = (
           input.path,
           'append',
           'conflict',
-          `epoch ${input.epoch} is not a safe natural integer`,
+          `epoch ${String(input.epoch)} is not a safe natural integer`,
         ),
       ),
     );
-    const producerId = yield* Schema.decodeUnknownEffect(
-      LogVocabulary.ProducerId,
-    )(input.producerId).pipe(
+    const producerId = yield* Schema.decodeEffect(LogVocabulary.ProducerId)(
+      input.producerId,
+    ).pipe(
       Effect.mapError(() =>
         LogStore.makeError(
           input.path,
@@ -121,13 +119,13 @@ export const decide = (
     if (input.epoch !== state.epoch) {
       return yield* reject(
         'fenced',
-        `epoch ${input.epoch} is not the current epoch ${state.epoch}`,
+        `epoch ${String(input.epoch)} is not the current epoch ${String(state.epoch)}`,
       );
     }
     if (input.producerId !== state.producerId) {
       return yield* reject(
         'conflict',
-        `producer ${input.producerId} does not hold epoch ${state.epoch}`,
+        `producer ${String(input.producerId)} does not hold epoch ${String(state.epoch)}`,
       );
     }
 
@@ -141,7 +139,7 @@ export const decide = (
       if (prepared.fingerprint !== state.lastFingerprint) {
         return yield* reject(
           'conflict',
-          `sequence ${input.sequence} was reused with different content`,
+          `sequence ${String(input.sequence)} was reused with different content`,
         );
       }
       return {
@@ -154,7 +152,7 @@ export const decide = (
     if (input.sequence !== state.nextSequence) {
       return yield* reject(
         input.sequence > state.nextSequence ? 'gap' : 'conflict',
-        `expected sequence ${state.nextSequence}, got ${input.sequence}`,
+        `expected sequence ${String(state.nextSequence)}, got ${String(input.sequence)}`,
       );
     }
 

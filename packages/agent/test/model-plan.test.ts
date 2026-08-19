@@ -268,8 +268,7 @@ describe('ModelPlan', () => {
         prompt: 'call the tool',
         toolkit,
       }).pipe(
-        Effect.provide(ModelPlan.layer(plan)),
-        Effect.provide(handlers),
+        Effect.provide(Layer.merge(ModelPlan.layer(plan), handlers)),
         Effect.flip,
       );
       const exactError: AiError.AiError | 'handler-blocked' = error;
@@ -278,8 +277,7 @@ describe('ModelPlan', () => {
         prompt: 'call the tool',
         toolkit,
       }).pipe(
-        Effect.provide(ModelPlan.layer(plan)),
-        Effect.provide(aiErrorHandlers),
+        Effect.provide(Layer.merge(ModelPlan.layer(plan), aiErrorHandlers)),
         Effect.flip,
       );
 
@@ -316,8 +314,9 @@ describe('ModelPlan', () => {
         toolkit,
       }).pipe(
         Stream.runDrain,
-        Effect.provide(ModelPlan.layer(streamingPlan)),
-        Effect.provide(aiErrorHandlers),
+        Effect.provide(
+          Layer.merge(ModelPlan.layer(streamingPlan), aiErrorHandlers),
+        ),
         Effect.flip,
       );
 

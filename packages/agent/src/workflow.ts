@@ -5,9 +5,9 @@ import {
   ConversationId as ConversationIdSchema,
   LogVocabulary,
 } from '@sunfall/vesper-log/vocabulary';
-import type { Crypto, Schedule, SchemaIssue } from 'effect';
+import type { Cause, Crypto, Schedule, SchemaIssue } from 'effect';
 import { Effect, Exit, Layer, Option, Schema, Stream } from 'effect';
-import { AiError, type Prompt, Tool } from 'effect/unstable/ai';
+import { AiError, type Prompt, type Tool } from 'effect/unstable/ai';
 import {
   Activity,
   DurableDeferred,
@@ -232,7 +232,7 @@ export interface StepOptions<
     input: Input,
   ) => Effect.Effect<Success['Type'], Error['Type'], Requires>;
   readonly interruptRetryPolicy?:
-    | Schedule.Schedule<unknown, import('effect').Cause.Cause<unknown>>
+    | Schedule.Schedule<unknown, Cause.Cause<unknown>>
     | undefined;
 }
 
@@ -288,22 +288,50 @@ export class PathError extends Schema.TaggedError<PathError>(
   '@sunfall/vesper-agent/AgentWorkflow/PathError',
 )('PathError', { message: Schema.String }) {}
 
-interface PendingWaitFields<Request> {
+const changesPending = (record: ConversationRecord.Record): boolean => {
+  switch (record._tag) {
+    case 'ToolSuspended':
+    case 'ToolResumed':
+    case 'ToolWaitCompleted':
+    case 'ToolWaitRestarted':
+    case 'ToolOutcome':
+    case 'RunSettled':
+    case 'Completed':
+    case 'BranchedFrom':
+      return true;
+    case 'ChildSession':
+    case 'CodeStateCheckpoint':
+    case 'Compacted':
+    case 'RunStarted':
+    case 'Signal':
+    case 'SignalReceived':
+    case 'StateCheckpoint':
+    case 'Text':
+    case 'ToolCall':
+    case 'ToolStarted':
+    case 'TurnFinished':
+      return false;
+    default:
+      return false;
+  }
+};
+
+interface PendingWaitFields<RequestValue> {
   readonly conversationId: LogVocabulary.ConversationId;
   readonly offset: LogOffset.Offset;
   readonly toolCallId: LogVocabulary.ToolCallId;
   readonly toolName: string;
   readonly key: string;
   readonly token: string;
-  readonly request: Request;
+  readonly request: RequestValue;
 }
 
 /** One independently keyed external wait that can still be completed. */
 export interface PendingWait<
-  Request,
+  RequestValue,
   Success extends Schema.Constraint,
   Error extends Schema.Constraint,
-> extends PendingWaitFields<Request> {
+> extends PendingWaitFields<RequestValue> {
   readonly complete: (
     value: Success['Type'],
   ) => Effect.Effect<
@@ -322,26 +350,26 @@ export interface PendingWait<
 
 /** A named durable wait used from inside a recorded workflow tool handler. */
 export interface Wait<
-  Request extends Schema.Constraint,
+  WaitRequest extends Schema.Constraint,
   Success extends Schema.Constraint,
   Error extends Schema.Constraint,
 > {
   (
-    request: Request['Type'],
+    request: WaitRequest['Type'],
   ): Effect.Effect<
     Success['Type'],
     Error['Type'] | AiError.AiError,
     | WorkflowEngine.WorkflowEngine
     | WorkflowInstance
     | ToolExecution.Current
-    | Request['EncodingServices']
+    | WaitRequest['EncodingServices']
     | Success['EncodingServices']
     | Error['EncodingServices']
     | Success['DecodingServices']
     | Error['DecodingServices']
   >;
   readonly waitName: string;
-  readonly request: Request;
+  readonly request: WaitRequest;
   readonly success: Success;
   readonly error: Error;
   /** Wait for the independently keyed request that needs an external result. */
@@ -349,9 +377,9 @@ export interface Wait<
     conversation: Conversation.Instance<A, Requires>,
     key: string,
   ) => Effect.Effect<
-    PendingWait<Request['Type'], Success, Error>,
+    PendingWait<WaitRequest['Type'], Success, Error>,
     LogStore.LogStoreError | Schema.SchemaError | WaitStateError,
-    LogStore.Service | Request['DecodingServices']
+    LogStore.Service | WaitRequest['DecodingServices']
   >;
   /** Complete a serialized pending wait by its exact durable token. */
   readonly complete: (
@@ -374,14 +402,14 @@ export interface Wait<
 
 /** Options for one externally completed durable handler wait. */
 export interface WaitOptions<
-  Request extends Schema.Constraint,
+  WaitRequest extends Schema.Constraint,
   Success extends Schema.Constraint,
   Error extends Schema.Constraint,
 > {
   readonly name: string;
   /** Stable identity for this logical wait within one workflow execution. */
-  readonly key: (request: Request['Type']) => string;
-  readonly request: Request;
+  readonly key: (request: WaitRequest['Type']) => string;
+  readonly request: WaitRequest;
   readonly success: Success;
   readonly error: Error;
 }
@@ -395,19 +423,19 @@ export interface WaitOptions<
  * activities before returning the external result here.
  */
 export const wait = <
-  Request extends Schema.Constraint,
+  WaitRequest extends Schema.Constraint,
   Success extends Schema.Constraint,
   Error extends Schema.Constraint,
 >(
-  options: WaitOptions<Request, Success, Error>,
-): Wait<Request, Success, Error> => {
+  options: WaitOptions<WaitRequest, Success, Error>,
+): Wait<WaitRequest, Success, Error> => {
   if (options.name.length === 0) {
     throw new Error('AgentWorkflow.wait requires a non-empty name');
   }
   const error = options.error;
   const prefix = `${options.name}/`;
-  const keyFor = (request: Request['Type']) => {
-    const key = options.key(request);
+  const keyFor = (requestValue: WaitRequest['Type']) => {
+    const key = options.key(requestValue);
     if (key.length === 0) {
       throw new Error(
         `AgentWorkflow wait "${options.name}" produced an empty key`,
@@ -450,8 +478,8 @@ export const wait = <
       };
     });
 
-  const run = (request: Request['Type']) => {
-    const key = keyFor(request);
+  const run = (requestValue: WaitRequest['Type']) => {
+    const key = keyFor(requestValue);
     return Effect.gen(function* () {
       const execution = yield* ToolExecution.Current;
       const deferred = deferredFor(key);
@@ -481,8 +509,8 @@ export const wait = <
       }
 
       const encoded = yield* Schema.encodeUnknownEffect(options.request)(
-        request,
-      ).pipe(Effect.mapError(encodeFailure('request', request)));
+        requestValue,
+      ).pipe(Effect.mapError(encodeFailure('request', requestValue)));
       yield* execution.session.append([
         {
           _tag: 'ToolSuspended',
@@ -508,9 +536,9 @@ export const wait = <
     conversation: Conversation.Instance<A, Requires>,
     stored: ReadonlyArray<ConversationRecord.Envelope>,
   ): Effect.Effect<
-    ReadonlyArray<PendingWaitFields<Request['Type']>>,
+    ReadonlyArray<PendingWaitFields<WaitRequest['Type']>>,
     Schema.SchemaError,
-    Request['DecodingServices']
+    WaitRequest['DecodingServices']
   > => {
     const actionable = new Map<string, SuspendedEnvelope>();
 
@@ -520,6 +548,10 @@ export const wait = <
         case 'ToolSuspended':
           if (record.wait === options.name) {
             actionable.set(record.token, {
+              // Envelope is a schema-decoded data object. Its declaration-
+              // mergeable public interface shares a name with the schema
+              // value, so the type-aware rule mistakes it for a class.
+              // oxlint-disable-next-line typescript/no-misused-spread
               ...envelope,
               record,
             });
@@ -543,6 +575,19 @@ export const wait = <
         case 'Completed':
           actionable.clear();
           break;
+        case 'BranchedFrom':
+        case 'ChildSession':
+        case 'CodeStateCheckpoint':
+        case 'Compacted':
+        case 'RunStarted':
+        case 'Signal':
+        case 'SignalReceived':
+        case 'StateCheckpoint':
+        case 'Text':
+        case 'ToolCall':
+        case 'ToolStarted':
+        case 'TurnFinished':
+          break;
         default:
           break;
       }
@@ -551,14 +596,14 @@ export const wait = <
     return Effect.forEach(actionable.values(), (envelope) =>
       Schema.decodeUnknownEffect(options.request)(envelope.record.request).pipe(
         Effect.map(
-          (request): PendingWaitFields<Request['Type']> => ({
+          (decodedRequest): PendingWaitFields<WaitRequest['Type']> => ({
             conversationId: conversation.id,
             offset: envelope.offset,
             toolCallId: envelope.record.id,
             toolName: envelope.record.name,
-            key: keyFor(request),
+            key: keyFor(decodedRequest),
             token: envelope.record.token,
-            request,
+            request: decodedRequest,
           }),
         ),
       ),
@@ -574,7 +619,7 @@ export const wait = <
       // created its conversation stream. A pending wait is a follower, so an
       // absent stream is its empty initial state rather than a failed lookup.
       Effect.catchIf(
-        (error) => error.reason === 'not_found',
+        (cause) => cause.reason === 'not_found',
         () => Effect.succeed<ReadonlyArray<ConversationRecord.Envelope>>([]),
       ),
       Effect.flatMap((stored) =>
@@ -588,50 +633,39 @@ export const wait = <
       ),
     );
 
-  const changesPending = (record: ConversationRecord.Record): boolean => {
-    switch (record._tag) {
-      case 'ToolSuspended':
-      case 'ToolResumed':
-      case 'ToolWaitCompleted':
-      case 'ToolWaitRestarted':
-      case 'ToolOutcome':
-      case 'RunSettled':
-      case 'Completed':
-      case 'BranchedFrom':
-        return true;
-      default:
-        return false;
-    }
-  };
-
   const complete = (token: string, value: Success['Type']) =>
-    Effect.flatMap(fromToken(token), ({ deferred, token }) =>
+    Effect.flatMap(fromToken(token), ({ deferred, token: deferredToken }) =>
       Schema.encodeUnknownEffect(Schema.toCodecJson(options.success))(
         value,
       ).pipe(
         Effect.asVoid,
-        Effect.andThen(DurableDeferred.succeed(deferred, { token, value })),
+        Effect.andThen(
+          DurableDeferred.succeed(deferred, { token: deferredToken, value }),
+        ),
       ),
     );
 
   const fail = (token: string, failure: Error['Type']) =>
-    Effect.flatMap(fromToken(token), ({ deferred, token }) =>
+    Effect.flatMap(fromToken(token), ({ deferred, token: deferredToken }) =>
       Schema.encodeUnknownEffect(Schema.toCodecJson(options.error))(
         failure,
       ).pipe(
         Effect.asVoid,
         Effect.andThen(
-          DurableDeferred.fail(deferred, { token, error: failure }),
+          DurableDeferred.fail(deferred, {
+            token: deferredToken,
+            error: failure,
+          }),
         ),
       ),
     );
 
   const selectPending = (
-    items: ReadonlyArray<PendingWaitFields<Request['Type']>>,
+    items: ReadonlyArray<PendingWaitFields<WaitRequest['Type']>>,
     conversationId: LogVocabulary.ConversationId,
     key: string,
   ): Effect.Effect<
-    Option.Option<PendingWaitFields<Request['Type']>>,
+    Option.Option<PendingWaitFields<WaitRequest['Type']>>,
     WaitStateError
   > => {
     const matching = items.filter((pending) => pending.key === key);
@@ -639,7 +673,7 @@ export const wait = <
       return Effect.fail(
         new WaitStateError({
           message:
-            `Wait "${options.name}" has ${matching.length} active tokens ` +
+            `Wait "${options.name}" has ${String(matching.length)} active tokens ` +
             `for key "${key}" in conversation ${conversationId}`,
           conversationId,
           wait: options.name,
@@ -651,8 +685,8 @@ export const wait = <
   };
 
   const bindPending = (
-    pending: PendingWaitFields<Request['Type']>,
-  ): PendingWait<Request['Type'], Success, Error> => ({
+    pending: PendingWaitFields<WaitRequest['Type']>,
+  ): PendingWait<WaitRequest['Type'], Success, Error> => ({
     ...pending,
     complete: (value) => complete(pending.token, value),
     fail: (failure) => fail(pending.token, failure),
@@ -662,9 +696,9 @@ export const wait = <
     conversation: Conversation.Instance<A, Requires>,
     key: string,
   ): Effect.Effect<
-    PendingWait<Request['Type'], Success, Error>,
+    PendingWait<WaitRequest['Type'], Success, Error>,
     LogStore.LogStoreError | Schema.SchemaError | WaitStateError,
-    LogStore.Service | Request['DecodingServices']
+    LogStore.Service | WaitRequest['DecodingServices']
   > => {
     if (key.length === 0) {
       throw new Error(
@@ -678,7 +712,9 @@ export const wait = <
         conversation.id,
         key,
       );
-      if (Option.isSome(existing)) return bindPending(existing.value);
+      if (Option.isSome(existing)) {
+        return bindPending(existing.value);
+      }
 
       const found = yield* conversation.follow(initial.cursor).pipe(
         Stream.filter(({ record }) => changesPending(record)),
@@ -692,7 +728,9 @@ export const wait = <
         Stream.map((pending) => pending.value),
         Stream.runHead,
       );
-      if (Option.isNone(found)) return yield* Effect.never;
+      if (Option.isNone(found)) {
+        return yield* Effect.never;
+      }
       return bindPending(found.value);
     });
   };
@@ -847,7 +885,7 @@ const bind = <
           Effect.mapError(
             (error) =>
               new PathError({
-                message: `Cannot decode restarted workflow payload: ${error}`,
+                message: `Cannot decode restarted workflow payload: ${String(error)}`,
               }),
           ),
         );

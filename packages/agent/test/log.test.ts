@@ -6,7 +6,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import {
-  Crypto,
+  type Crypto,
   Deferred,
   Effect,
   Fiber,
@@ -92,9 +92,11 @@ const scripted = (
           Stream.unwrap(
             Effect.gen(function* () {
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
-              return Stream.fromIterable(
-                turns[Math.min(index, turns.length - 1)]!,
-              );
+              const turn = turns[Math.min(index, turns.length - 1)];
+              if (turn === undefined) {
+                throw new Error('missing scripted turn');
+              }
+              return Stream.fromIterable(turn);
             }),
           ),
       });
@@ -473,8 +475,12 @@ describe('Conversation.records', () => {
           yield* conversation.run('hi').pipe(Effect.orDie);
           const written = yield* readAll();
 
+          const offset = written[3]?.offset;
+          if (offset === undefined) {
+            throw new Error('missing resume offset');
+          }
           return yield* conversation
-            .records(written[3]!.offset)
+            .records(offset)
             .pipe(Stream.take(1), Stream.runCollect, Effect.orDie);
         }),
       );

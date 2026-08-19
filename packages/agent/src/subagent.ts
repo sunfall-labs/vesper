@@ -1,4 +1,4 @@
-import { Context, Crypto, Schema } from 'effect';
+import { Context, Schema, type Crypto } from 'effect';
 import { Tool } from 'effect/unstable/ai';
 
 import type { Agent } from './agent.js';
@@ -109,7 +109,7 @@ export const tool = <const Name extends string>(
 /** Runtime form whose dynamic name lets an arbitrary child tuple build a layer. */
 export const runtimeTool = (child: Pick<Agent.Child, 'name' | 'description'>) =>
   makeTool(
-    String(toolName(child.name)),
+    toolName(child.name),
     child.description ??
       `Delegate a self-contained task to the ${child.name} agent.`,
   );

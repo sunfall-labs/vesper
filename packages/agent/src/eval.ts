@@ -117,7 +117,9 @@ const evidence = <Tools extends Record<string, Tool.Any>>(
   const toolCalls: ToolCall<Tools>[] = [];
   const toolResults: ToolResult<Tools>[] = [];
   for (const event of events) {
-    if (event._tag !== 'Part') continue;
+    if (event._tag !== 'Part') {
+      continue;
+    }
     if (event.part.type === 'tool-call') {
       toolCalls.push({ step: event.step, part: event.part });
     } else if (event.part.type === 'tool-result') {
@@ -318,8 +320,8 @@ export interface SuiteDefinition<
  */
 export const ScoreReport = Schema.Struct({
   name: Schema.String,
-  weight: Schema.Number,
-  value: Schema.Number,
+  weight: Schema.Finite,
+  value: Schema.Finite,
   detail: Schema.optionalKey(Schema.String),
 });
 export interface ScoreReport extends Schema.Struct.Type<
@@ -329,7 +331,7 @@ export interface ScoreReport extends Schema.Struct.Type<
 /** One case's outcome in a persisted suite report. */
 export const CaseReport = Schema.Struct({
   name: Schema.String,
-  score: Schema.Number,
+  score: Schema.Finite,
   passed: Schema.Boolean,
   scores: Schema.Array(ScoreReport),
   /** Present only when the case failed to run or score at all. */
@@ -353,9 +355,9 @@ export const SuiteReport = Schema.Struct({
   cases: Schema.Array(CaseReport),
   passed: Schema.Natural,
   failed: Schema.Natural,
-  meanScore: Schema.Number,
+  meanScore: Schema.Finite,
   startedAt: Schema.Int,
-  durationMillis: Schema.Number,
+  durationMillis: Schema.Finite,
 });
 export interface SuiteReport extends Schema.Struct.Type<
   typeof SuiteReport.fields
@@ -480,11 +482,11 @@ export const CaseDelta = Schema.Struct({
     'unchanged',
   ]),
   /** Absent only when `status` is `new`. */
-  baselineScore: Schema.optionalKey(Schema.Number),
+  baselineScore: Schema.optionalKey(Schema.Finite),
   /** Absent only when `status` is `removed`. */
-  currentScore: Schema.optionalKey(Schema.Number),
+  currentScore: Schema.optionalKey(Schema.Finite),
   /** Present only when the case ran in both reports. */
-  scoreDelta: Schema.optionalKey(Schema.Number),
+  scoreDelta: Schema.optionalKey(Schema.Finite),
 });
 export interface CaseDelta extends Schema.Struct.Type<
   typeof CaseDelta.fields
@@ -518,8 +520,12 @@ const deltaStatus = (
     return before.passed ? 'regressed' : 'improved';
   }
   const delta = after.score - before.score;
-  if (delta < -SCORE_EPSILON) return 'regressed';
-  if (delta > SCORE_EPSILON) return 'improved';
+  if (delta < -SCORE_EPSILON) {
+    return 'regressed';
+  }
+  if (delta > SCORE_EPSILON) {
+    return 'improved';
+  }
   return 'unchanged';
 };
 

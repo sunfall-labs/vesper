@@ -1,6 +1,6 @@
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Schema } from 'effect';
-import { AiError, Prompt, type Tool } from 'effect/unstable/ai';
+import { Prompt, type AiError, type Tool } from 'effect/unstable/ai';
 
 import type { Stop } from './stop.js';
 
@@ -465,7 +465,9 @@ export const compose = <const I1 extends object, const I2 extends object>(
 
             if (first.beforeTurn !== undefined) {
               const decision = yield* first.beforeTurn(context);
-              if (decision._tag === 'ProceedWith') rewritten = decision.input;
+              if (decision._tag === 'ProceedWith') {
+                rewritten = decision.input;
+              }
             }
 
             const seenBySecond =
@@ -475,7 +477,9 @@ export const compose = <const I1 extends object, const I2 extends object>(
 
             if (second.beforeTurn !== undefined) {
               const decision = yield* second.beforeTurn(seenBySecond);
-              if (decision._tag === 'ProceedWith') rewritten = decision.input;
+              if (decision._tag === 'ProceedWith') {
+                rewritten = decision.input;
+              }
             }
 
             return rewritten === undefined ? proceed : proceedWith(rewritten);
@@ -501,7 +505,9 @@ export const compose = <const I1 extends object, const I2 extends object>(
           Effect.gen(function* () {
             if (first.beforeToolCall !== undefined) {
               const decision = yield* first.beforeToolCall(context);
-              if (decision._tag === 'Answer') return decision;
+              if (decision._tag === 'Answer') {
+                return decision;
+              }
             }
             return second.beforeToolCall === undefined
               ? dispatch

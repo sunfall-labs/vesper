@@ -24,6 +24,32 @@ import {
 const describeIntegration =
   process.env['RUN_POSTGRES_INTEGRATION'] === '1' ? describe : describe.skip;
 
+const runOn = <A>(
+  runtime: ManagedRuntime.ManagedRuntime<LogStore.Service, unknown>,
+  build: (log: LogStore.Interface) => Effect.Effect<A, LogStore.LogStoreError>,
+): Promise<A> => runtime.runPromise(Effect.flatMap(LogStore.Service, build));
+
+const text = (value: string): ConversationRecord.Entry => ({
+  conversationId: LogVocabulary.ConversationId.make('conversation-1'),
+  timestamp: 1_700_000_000_000,
+  record: { _tag: 'Text', step: 1, text: value },
+});
+
+const recordText = (envelope: ConversationRecord.Envelope) =>
+  envelope.record._tag === 'Text' ? envelope.record.text : envelope.record._tag;
+
+const forkGated = <A>(
+  runtime: ManagedRuntime.ManagedRuntime<LogStore.Service, unknown>,
+  gate: Deferred.Deferred<void>,
+  effect: Effect.Effect<A, LogStore.LogStoreError, LogStore.Service>,
+) =>
+  runtime.runFork(
+    Effect.gen(function* () {
+      yield* Deferred.await(gate);
+      return yield* Effect.result(effect);
+    }),
+  );
+
 // Real two-connection fencing races.
 //
 // `layer.integration.test.ts` runs the shared `logStoreContract` plus a
@@ -70,50 +96,13 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
   afterAll(async () => {
     await writerA?.dispose();
     await writerB?.dispose();
-    if (database) await database.cleanup();
-    if (harness) await harness.stop();
+    if (database) {
+      await database.cleanup();
+    }
+    if (harness) {
+      await harness.stop();
+    }
   }, 120_000);
-
-  /** Run one `LogStore` call to completion on a specific connection. */
-  const runOn = <A>(
-    runtime: ManagedRuntime.ManagedRuntime<LogStore.Service, unknown>,
-    build: (
-      log: LogStore.Interface,
-    ) => Effect.Effect<A, LogStore.LogStoreError>,
-  ): Promise<A> => runtime.runPromise(Effect.flatMap(LogStore.Service, build));
-
-  const text = (value: string): ConversationRecord.Entry => ({
-    conversationId: LogVocabulary.ConversationId.make('conversation-1'),
-    timestamp: 1_700_000_000_000,
-    record: { _tag: 'Text', step: 1, text: value },
-  });
-
-  const recordText = (envelope: ConversationRecord.Envelope) =>
-    envelope.record._tag === 'Text'
-      ? envelope.record.text
-      : envelope.record._tag;
-
-  /**
-   * Park `effect` on `runtime` behind `gate` and fork it immediately.
-   * `Deferred.await` suspends synchronously while the gate is unfulfilled, so
-   * calling this for every racing branch before releasing the gate is what
-   * guarantees they are all still waiting when release happens — not a
-   * `Promise.all` of independently-started work that merely *tends* to
-   * overlap. `Effect.result` runs inside the fork, before the fiber can be
-   * joined, so a fenced or conflicting outcome comes back as a `Result` to
-   * assert on rather than an exception to catch.
-   */
-  const forkGated = <A>(
-    runtime: ManagedRuntime.ManagedRuntime<LogStore.Service, unknown>,
-    gate: Deferred.Deferred<void>,
-    effect: Effect.Effect<A, LogStore.LogStoreError, LogStore.Service>,
-  ) =>
-    runtime.runFork(
-      Effect.gen(function* () {
-        yield* Deferred.await(gate);
-        return yield* Effect.result(effect);
-      }),
-    );
 
   /** Race one effect per writer connection, released by one shared gate. */
   const race = async <A>(
@@ -144,12 +133,12 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
         iteration < ACQUIRE_RACE_ITERATIONS;
         iteration += 1
       ) {
-        const path = `race-acquire-${iteration}`;
+        const path = `race-acquire-${String(iteration)}`;
         const producerA = LogVocabulary.ProducerId.make(
-          `writer-a-${iteration}`,
+          `writer-a-${String(iteration)}`,
         );
         const producerB = LogVocabulary.ProducerId.make(
-          `writer-b-${iteration}`,
+          `writer-b-${String(iteration)}`,
         );
 
         await runOn(writerA, (log) => log.create(path, 'identity'));
@@ -224,7 +213,11 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
 
         const page = await runOn(writerA, (log) => log.read(path));
         expect(page.records).toHaveLength(1);
-        expect(recordText(page.records[0]!)).toBe('winner');
+        const firstRecord = page.records[0];
+        if (firstRecord === undefined) {
+          throw new Error('race winner record missing');
+        }
+        expect(recordText(firstRecord)).toBe('winner');
       }
 
       // Not a correctness assertion on any single iteration — a check that
@@ -246,12 +239,12 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
         iteration < INTERLEAVE_RACE_ITERATIONS;
         iteration += 1
       ) {
-        const path = `race-interleave-${iteration}`;
+        const path = `race-interleave-${String(iteration)}`;
         const producerA = LogVocabulary.ProducerId.make(
-          `interleave-a-${iteration}`,
+          `interleave-a-${String(iteration)}`,
         );
         const producerB = LogVocabulary.ProducerId.make(
-          `interleave-b-${iteration}`,
+          `interleave-b-${String(iteration)}`,
         );
 
         await runOn(writerA, (log) => log.create(path, 'identity'));
@@ -344,9 +337,9 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
         iteration < IDEMPOTENT_RACE_ITERATIONS;
         iteration += 1
       ) {
-        const path = `race-idempotent-${iteration}`;
+        const path = `race-idempotent-${String(iteration)}`;
         const producer = LogVocabulary.ProducerId.make(
-          `idempotent-${iteration}`,
+          `idempotent-${String(iteration)}`,
         );
 
         await runOn(writerA, (log) => log.create(path, 'identity'));

@@ -1,5 +1,6 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import { ConversationRecord, FORMAT_VERSION } from '@sunfall/vesper-log/record';
+import { FORMAT_VERSION } from '@sunfall/vesper-log/record';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Cause, Effect, Exit, Option, Stream } from 'effect';
 import type { Response, Tool } from 'effect/unstable/ai';
@@ -142,7 +143,7 @@ const settle = (
         );
         if (Option.isNone(completed)) {
           yield* Effect.logError(
-            `Agent settlement append timed out after ${session.settlementTimeoutMillis}ms; leaving the run orphaned`,
+            `Agent settlement append timed out after ${String(session.settlementTimeoutMillis)}ms; leaving the run orphaned`,
           ).pipe(
             Effect.annotateLogs({
               'vesper.component': 'agent',
@@ -198,14 +199,16 @@ interface Pending {
 }
 
 const flush = (pending: Pending): ReadonlyArray<ConversationRecord.Record> => {
-  if (pending.text === '') return [];
-  const record: ConversationRecord.Record = {
+  if (pending.text === '') {
+    return [];
+  }
+  const textRecord: ConversationRecord.Record = {
     _tag: 'Text',
     step: pending.step,
     text: pending.text,
   };
   pending.text = '';
-  return [record];
+  return [textRecord];
 };
 
 const signalOffset = (offset: string): LogOffset.Offset => {
@@ -220,13 +223,17 @@ const signalOffset = (offset: string): LogOffset.Offset => {
 
 const recordsFor = <Tools extends Record<string, Tool.Any>>(
   pending: Pending,
-  event: AgentEvents.Event<Tools>,
+  lifecycleEvent: AgentEvents.Event<Tools>,
 ): ReadonlyArray<ConversationRecord.Record> => {
-  if (event._tag === 'Part') {
-    return partRecords(pending, event.step, event.encodedPart);
+  if (lifecycleEvent._tag === 'Part') {
+    return partRecords(
+      pending,
+      lifecycleEvent.step,
+      lifecycleEvent.encodedPart,
+    );
   }
 
-  return AgentEvents.Lifecycle.match(event, {
+  return AgentEvents.Lifecycle.match(lifecycleEvent, {
     TurnStarted: () => [],
     TurnFinished: (event) => {
       pending.steps = event.step;
@@ -237,7 +244,9 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
       ];
     },
     Signalled: (event) => {
-      if (event.kind === 'cancel') pending.cancelled = true;
+      if (event.kind === 'cancel') {
+        pending.cancelled = true;
+      }
       return [
         ...flush(pending),
         {

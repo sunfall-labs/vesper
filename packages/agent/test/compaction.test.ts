@@ -26,6 +26,13 @@ import {
   withCompaction,
 } from '../src/internal/compaction.js';
 
+const required = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('expected a value');
+  }
+  return value;
+};
+
 // When compaction fires, and what one compaction does.
 //
 // This file covers the mechanism end to end in memory: the estimate and the
@@ -53,6 +60,67 @@ const seeded = Prompt.make([
   message('assistant', 'b'.repeat(4_000)),
   message('user', 'recent'),
 ]);
+
+/** Run against a fresh fake provider and hand back what it was asked. */
+const run = <A, E>(
+  build: (
+    chat: Chat.Service,
+  ) => Effect.Effect<A, E, LanguageModel.LanguageModel>,
+  history: Prompt.Prompt,
+): Effect.Effect<
+  {
+    value: A;
+    history: Prompt.Prompt;
+    models: ReturnType<typeof fakeProvider>;
+  },
+  E
+> => {
+  const models = fakeProvider();
+
+  return Effect.gen(function* () {
+    const chat = yield* Chat.fromPrompt(history);
+    const value = yield* build(chat);
+    return { value, history: yield* Ref.get(chat.history), models };
+  }).pipe(Effect.provide(models.layer));
+};
+
+const textsOf = (prompt: Prompt.Prompt) =>
+  prompt.content.map((m) =>
+    typeof m.content === 'string'
+      ? m.content
+      : m.content.map((p) => ('text' in p ? p.text : '')).join(''),
+  );
+
+const seededHistory = () =>
+  Chat.fromPrompt(
+    Prompt.make([
+      { role: 'system', content: 'S' },
+      message('user', 'a'.repeat(400)),
+      message('assistant', 'b'.repeat(400)),
+    ]),
+  );
+
+const textOf = (prompt: Prompt.Prompt) =>
+  JSON.stringify(
+    prompt.content.map((m) =>
+      typeof m.content === 'string'
+        ? m.content
+        : m.content.map((p) => ('text' in p ? p.text : '')).join(''),
+    ),
+  );
+
+/** Collects every `Warn`-level message logged while `layer` is provided. */
+const captureWarnings = () => {
+  const messages: unknown[] = [];
+  const logger = Logger.make<unknown, void>(
+    ({ logLevel, message: logMessage }) => {
+      if (logLevel === 'Warn') {
+        messages.push(logMessage);
+      }
+    },
+  );
+  return { messages, layer: Logger.layer([logger]) };
+};
 
 describe('estimateTokens', () => {
   it('counts text across message shapes', () => {
@@ -228,30 +296,6 @@ describe('compact', () => {
     instructions: 'sum',
   };
 
-  /** Run against a fresh fake provider and hand back what it was asked. */
-  const run = <A>(
-    build: (
-      chat: Chat.Service,
-    ) => Effect.Effect<A, unknown, LanguageModel.LanguageModel>,
-    history: Prompt.Prompt,
-  ): Effect.Effect<{
-    value: A;
-    history: Prompt.Prompt;
-    models: ReturnType<typeof fakeProvider>;
-  }> => {
-    const models = fakeProvider();
-
-    return Effect.gen(function* () {
-      const chat = yield* Chat.fromPrompt(history);
-      const value = yield* build(chat);
-      return { value, history: yield* Ref.get(chat.history), models };
-    }).pipe(Effect.provide(models.layer)) as Effect.Effect<{
-      value: A;
-      history: Prompt.Prompt;
-      models: typeof models;
-    }>;
-  };
-
   const terse = Prompt.make([
     { role: 'system' as const, content: 'BE TERSE' },
     message('user', 'a'.repeat(200)),
@@ -265,13 +309,6 @@ describe('compact', () => {
     message('user', 'recent'),
   ]);
 
-  const textsOf = (prompt: Prompt.Prompt) =>
-    prompt.content.map((m) =>
-      typeof m.content === 'string'
-        ? m.content
-        : m.content.map((p) => ('text' in p ? p.text : '')).join(''),
-    );
-
   // A summarization request is a conversation with an instruction stapled to
   // the end, and a model handed one without being told otherwise answers the
   // conversation. This is the sentence that tells it otherwise.
@@ -281,7 +318,7 @@ describe('compact', () => {
       Effect.gen(function* () {
         const { models } = yield* run((chat) => compact(chat, policy), terse);
 
-        const sent = models.summaries[0]!;
+        const sent = required(models.summaries[0]);
         expect(sent.content[0]).toMatchObject({
           role: 'system',
           content: defaultSystem,
@@ -300,7 +337,7 @@ describe('compact', () => {
         headless,
       );
 
-      expect(models.summaries[0]!.content[0]).toMatchObject({
+      expect(required(models.summaries[0]).content[0]).toMatchObject({
         role: 'system',
         content: 'MINE',
       });
@@ -480,7 +517,9 @@ describe('withCompaction', () => {
 
         const turn = Effect.gen(function* () {
           const attempt = yield* Ref.updateAndGet(attempts, (n) => n + 1);
-          if (attempt === 1) return yield* Effect.fail(overflow);
+          if (attempt === 1) {
+            return yield* Effect.fail(overflow);
+          }
           return 'ok';
         });
 
@@ -490,7 +529,7 @@ describe('withCompaction', () => {
         );
 
         return { value, attempts: yield* Ref.get(attempts) };
-      }) as Effect.Effect<{ value: string; attempts: number }>;
+      });
 
       expect(result.value).toBe('ok');
       expect(result.attempts).toBe(2);
@@ -547,15 +586,6 @@ describe('withCompaction', () => {
 // the retry was rejected for exactly the same reason and the run died having
 // paid for a summary.
 describe('the loop’s reactive compaction', () => {
-  const seeded = () =>
-    Chat.fromPrompt(
-      Prompt.make([
-        { role: 'system', content: 'S' },
-        message('user', 'a'.repeat(400)),
-        message('assistant', 'b'.repeat(400)),
-      ]),
-    );
-
   const reactive = Agent.make({
     name: 'reactive',
     revision: '1',
@@ -566,22 +596,13 @@ describe('the loop’s reactive compaction', () => {
     compaction: { reserveTokens: 0, keepRecentTokens: 10, instructions: 'sum' },
   });
 
-  const textOf = (prompt: Prompt.Prompt) =>
-    JSON.stringify(
-      prompt.content.map((m) =>
-        typeof m.content === 'string'
-          ? m.content
-          : m.content.map((p) => ('text' in p ? p.text : '')).join(''),
-      ),
-    );
-
   const overflowing = () => {
     // Big enough that history plus input is refused, small enough that the
     // summary plus the kept tail plus the input is not.
     const models = fakeProvider({ limit: 150 });
 
     return Effect.gen(function* () {
-      const chat = yield* seeded();
+      const chat = yield* seededHistory();
       const value = yield* reactive.runIn(chat, 'MARKER');
       return {
         value,
@@ -601,7 +622,7 @@ describe('the loop’s reactive compaction', () => {
         const { models } = yield* overflowing();
 
         expect(models.asked).toHaveLength(2);
-        const retried = textOf(models.asked[1]!);
+        const retried = textOf(required(models.asked[1]));
 
         expect(retried.split('MARKER')).toHaveLength(2);
       }),
@@ -615,11 +636,11 @@ describe('the loop’s reactive compaction', () => {
     Effect.gen(function* () {
       const { models } = yield* overflowing();
 
-      const summarized = textOf(models.summaries[0]!);
+      const summarized = textOf(required(models.summaries[0]));
       expect(summarized).toContain('a'.repeat(400));
       expect(summarized).not.toContain('MARKER');
 
-      const retried = textOf(models.asked[1]!);
+      const retried = textOf(required(models.asked[1]));
       expect(retried).toContain('Summary of earlier conversation');
       expect(retried).not.toContain('a'.repeat(400));
     }),
@@ -631,8 +652,8 @@ describe('the loop’s reactive compaction', () => {
     Effect.gen(function* () {
       const { models } = yield* overflowing();
 
-      expect(textOf(models.asked[1]!).length).toBeLessThan(
-        textOf(models.asked[0]!).length,
+      expect(textOf(required(models.asked[1])).length).toBeLessThan(
+        textOf(required(models.asked[0])).length,
       );
     }),
   );
@@ -707,11 +728,13 @@ describe('the loop’s reactive compaction', () => {
         const events: string[] = [];
 
         yield* Effect.gen(function* () {
-          const chat = yield* seeded();
+          const chat = yield* seededHistory();
           return yield* reactive.streamIn(chat, 'next').pipe(
             Stream.tap((event) =>
               Effect.sync(() => {
-                if (event._tag === 'Part') events.push(event.part.type);
+                if (event._tag === 'Part') {
+                  events.push(event.part.type);
+                }
               }),
             ),
             Stream.runDrain,
@@ -753,7 +776,7 @@ describe('the loop’s reactive compaction', () => {
         );
 
         const result = yield* Effect.gen(function* () {
-          const chat = yield* seeded();
+          const chat = yield* seededHistory();
           return yield* reactive.runIn(chat, 'next');
         }).pipe(Effect.orDie, Effect.provide(layer));
 
@@ -803,7 +826,7 @@ describe('compaction from an estimate', () => {
         expect(models.summaries).toHaveLength(1);
         expect(asked).toHaveLength(1);
 
-        const sent = JSON.stringify(asked[0]!.content);
+        const sent = JSON.stringify(required(asked[0]).content);
         expect(sent).toContain('SUMMARY');
         expect(sent).not.toContain('a'.repeat(4_000));
       }),
@@ -827,7 +850,7 @@ describe('compaction from an estimate', () => {
       }).pipe(Effect.provide(models.layer), Effect.orDie);
 
       expect(models.summaries).toHaveLength(0);
-      expect(JSON.stringify(models.asked[0]!.content)).toContain(
+      expect(JSON.stringify(required(models.asked[0]).content)).toContain(
         'a'.repeat(4_000),
       );
     }),
@@ -933,15 +956,6 @@ describe('compaction from an estimate', () => {
 // only early warning. `entryFor` logs it once per run instead of leaving it
 // for someone to notice only after a run dies on a context-window error.
 describe('the proactive-compaction misconfiguration warning', () => {
-  /** Collects every `Warn`-level message logged while `layer` is provided. */
-  const captureWarnings = () => {
-    const messages: unknown[] = [];
-    const logger = Logger.make<unknown, void>(({ logLevel, message }) => {
-      if (logLevel === 'Warn') messages.push(message);
-    });
-    return { messages, layer: Logger.layer([logger]) };
-  };
-
   it.effect('warns exactly once per run when contextWindow is unset', () =>
     Effect.gen(function* () {
       const models = fakeProvider();
@@ -959,11 +973,7 @@ describe('the proactive-compaction misconfiguration warning', () => {
       yield* Effect.gen(function* () {
         const chat = yield* Chat.fromPrompt(seeded);
         yield* agent.runIn(chat, 'next');
-      }).pipe(
-        Effect.provide(models.layer),
-        Effect.provide(layer),
-        Effect.orDie,
-      );
+      }).pipe(Effect.provide(Layer.merge(models.layer, layer)), Effect.orDie);
 
       expect(messages).toHaveLength(1);
       expect(String(messages[0])).toContain('contextWindow');
@@ -985,11 +995,7 @@ describe('the proactive-compaction misconfiguration warning', () => {
       yield* Effect.gen(function* () {
         const chat = yield* Chat.fromPrompt(seeded);
         yield* agent.runIn(chat, 'next');
-      }).pipe(
-        Effect.provide(models.layer),
-        Effect.provide(layer),
-        Effect.orDie,
-      );
+      }).pipe(Effect.provide(Layer.merge(models.layer, layer)), Effect.orDie);
 
       expect(messages).toHaveLength(0);
     }),
@@ -1012,11 +1018,7 @@ describe('the proactive-compaction misconfiguration warning', () => {
       yield* Effect.gen(function* () {
         const chat = yield* Chat.fromPrompt(seeded);
         yield* agent.runIn(chat, 'next');
-      }).pipe(
-        Effect.provide(models.layer),
-        Effect.provide(layer),
-        Effect.orDie,
-      );
+      }).pipe(Effect.provide(Layer.merge(models.layer, layer)), Effect.orDie);
 
       expect(messages).toHaveLength(0);
     }),

@@ -1,5 +1,5 @@
 import { Agent } from '@sunfall/vesper-agent/agent';
-import { Skill } from '@sunfall/vesper-agent/skill';
+import type { Skill } from '@sunfall/vesper-agent/skill';
 import { AgentState } from '@sunfall/vesper-agent/state';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { AgentWorkflow } from '@sunfall/vesper-agent/workflow';
@@ -183,8 +183,8 @@ export const supportAgent = Agent.make({
       }
 
       const confirmation = yield* refundOrder(orderId);
-      yield* state.update((current) => ({
-        ...current,
+      yield* state.update((previous) => ({
+        ...previous,
         orderId,
         refundIssued: true,
       }));

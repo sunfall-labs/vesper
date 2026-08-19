@@ -1,6 +1,6 @@
 import { PgClient } from '@effect/sql-pg';
 import { Crypto, Effect, Layer, Option, Schema, Stream } from 'effect';
-import { SqlError } from 'effect/unstable/sql';
+import type { SqlError } from 'effect/unstable/sql';
 
 import { LogStoreAdapter } from '@sunfall/vesper-log/adapter';
 import { LogStore } from '@sunfall/vesper-log/log-store';
@@ -60,6 +60,13 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 /** A row as PostgreSQL hands it back. */
 type Row = Readonly<Record<string, unknown>>;
+
+const asLogStoreError =
+  (path: string, operation: LogStore.Operation) =>
+  (error: SqlError.SqlError | LogStore.LogStoreError): LogStore.LogStoreError =>
+    Schema.is(LogStore.LogStoreError)(error)
+      ? error
+      : LogStore.makeError(path, operation, 'storage', error.message);
 
 /** The database operations the log store actually uses. */
 export interface Client {
@@ -166,7 +173,9 @@ const asBigInt = (
   field: string,
   value: unknown,
 ): Effect.Effect<bigint, RowDecodeError> => {
-  if (typeof value === 'bigint') return Effect.succeed(value);
+  if (typeof value === 'bigint') {
+    return Effect.succeed(value);
+  }
   if (typeof value === 'number' && Number.isSafeInteger(value)) {
     return Effect.succeed(BigInt(value));
   }
@@ -193,7 +202,7 @@ const StreamRowSchema = Schema.Struct({
   nextProducerSequence: LogVocabulary.ProducerSequence,
 });
 
-const readStreamRow = (row: Row): Effect.Effect<StreamRow, unknown> =>
+const readStreamRow = (row: Row): Effect.Effect<StreamRow, RowDecodeError> =>
   Effect.gen(function* () {
     const identity = yield* asString('identity', row['identity']);
     const epoch = yield* asNumber('epoch', row['epoch']);
@@ -205,7 +214,7 @@ const readStreamRow = (row: Row): Effect.Effect<StreamRow, unknown> =>
       'next_producer_sequence',
       row['next_producer_sequence'],
     );
-    const decoded = yield* Schema.decodeUnknownEffect(StreamRowSchema)({
+    const decoded = yield* Schema.decodeEffect(StreamRowSchema)({
       identity,
       epoch,
       producerId,
@@ -226,7 +235,13 @@ const readStreamRow = (row: Row): Effect.Effect<StreamRow, unknown> =>
       lastFingerprint,
       lastOffset,
     };
-  });
+  }).pipe(
+    Effect.mapError((error) =>
+      error instanceof RowDecodeError
+        ? error
+        : new RowDecodeError('row', error, 'a valid stream row'),
+    ),
+  );
 
 const readRecord = (row: Row) =>
   Effect.gen(function* () {
@@ -272,23 +287,13 @@ export const make = (
       transactionStatementTimeoutMs < 1
     ) {
       throw new Error(
-        `transactionStatementTimeoutMs must be a positive integer, got ${transactionStatementTimeoutMs}`,
+        `transactionStatementTimeoutMs must be a positive integer, got ${String(transactionStatementTimeoutMs)}`,
       );
     }
     const streams = `${schema}.streams`;
     const records = `${schema}.records`;
 
     const failure = LogStore.makeError;
-
-    /** Driver failures become `storage`; our own failures pass through. */
-    const asLogStoreError =
-      (path: string, operation: LogStore.Operation) =>
-      (
-        error: SqlError.SqlError | LogStore.LogStoreError,
-      ): LogStore.LogStoreError =>
-        error instanceof LogStore.LogStoreError
-          ? error
-          : LogStore.makeError(path, operation, 'storage', error.message);
 
     const create = Effect.fn('LogStore.create')(function* (
       path: string,
@@ -307,8 +312,11 @@ export const make = (
 
       const row = rows[0];
       if (row === undefined) {
-        return yield* Effect.fail(
-          failure(path, 'create', 'conflict', 'a stream already exists here'),
+        return yield* failure(
+          path,
+          'create',
+          'conflict',
+          'a stream already exists here',
         );
       }
       const decoded = yield* readStreamRow(row).pipe(
@@ -329,7 +337,7 @@ export const make = (
       producerId: LogVocabulary.ProducerId,
       expected?: LogStore.AcquireExpected,
     ) {
-      const decodedProducerId = yield* Schema.decodeUnknownEffect(
+      const decodedProducerId = yield* Schema.decodeEffect(
         LogVocabulary.ProducerId,
       )(producerId).pipe(
         Effect.mapError(() =>
@@ -363,18 +371,19 @@ export const make = (
             .unsafe(`SELECT 1 FROM ${streams} WHERE path = $1`, [path])
             .pipe(Effect.mapError(asLogStoreError(path, 'acquire')));
           if (existing[0] !== undefined) {
-            return yield* Effect.fail(
-              failure(
-                path,
-                'acquire',
-                'conflict',
-                `stream changed from epoch ${expected.epoch} at ${expected.head}`,
-              ),
+            return yield* failure(
+              path,
+              'acquire',
+              'conflict',
+              `stream changed from epoch ${String(expected.epoch)} at ${String(expected.head)}`,
             );
           }
         }
-        return yield* Effect.fail(
-          failure(path, 'acquire', 'not_found', 'no stream at this path'),
+        return yield* failure(
+          path,
+          'acquire',
+          'not_found',
+          'no stream at this path',
         );
       }
 
@@ -392,7 +401,7 @@ export const make = (
       return {
         path,
         producerId: decodedProducerId,
-        epoch: yield* Schema.decodeUnknownEffect(LogVocabulary.Epoch)(
+        epoch: yield* Schema.decodeEffect(LogVocabulary.Epoch)(
           epochNumber,
         ).pipe(
           Effect.mapError((error) =>
@@ -417,7 +426,7 @@ export const make = (
         .withTransaction(
           Effect.gen(function* () {
             yield* client.unsafe(
-              `SET LOCAL statement_timeout = ${transactionStatementTimeoutMs}`,
+              `SET LOCAL statement_timeout = ${String(transactionStatementTimeoutMs)}`,
             );
             // The row lock. Every check below reads state that the write at the
             // bottom then advances, so the two have to be one critical section
@@ -434,13 +443,11 @@ export const make = (
 
             const found = locked[0];
             if (found === undefined) {
-              return yield* Effect.fail(
-                failure(
-                  input.path,
-                  'append',
-                  'not_found',
-                  'no stream at this path',
-                ),
+              return yield* failure(
+                input.path,
+                'append',
+                'not_found',
+                'no stream at this path',
               );
             }
             const state = yield* readStreamRow(found).pipe(
@@ -460,7 +467,9 @@ export const make = (
               nextSequence: state.nextProducerSequence,
               lastFingerprint: state.lastFingerprint,
             }).pipe(Effect.provideService(Crypto.Crypto, crypto));
-            if (decision.kind === 'retry') return state.lastOffset;
+            if (decision.kind === 'retry') {
+              return state.lastOffset;
+            }
 
             // Everything above rejects without writing. From here the batch
             // either commits whole or the transaction rolls back.
@@ -536,10 +545,10 @@ export const make = (
 
     const read = Effect.fn('LogStore.read')(function* (
       path: string,
-      options?: LogStore.ReadOptions,
+      readOptions?: LogStore.ReadOptions,
     ) {
       const { after, limit } = yield* LogStore.normalizeReadOptions(
-        options,
+        readOptions,
       ).pipe(
         Effect.mapError((error) =>
           failure(path, 'read', 'invalid', error.detail),
@@ -569,15 +578,21 @@ export const make = (
         .pipe(Effect.mapError(asLogStoreError(path, 'read')));
 
       if (rows.length === 0) {
-        return yield* Effect.fail(
-          failure(path, 'read', 'not_found', 'no stream at this path'),
+        return yield* failure(
+          path,
+          'read',
+          'not_found',
+          'no stream at this path',
         );
       }
 
       // The stream exists but has nothing past `after`: the lateral side
       // produced no row and the outer join filled it with nulls.
       const first = rows[0];
-      if (first?.['record_offset'] == null) {
+      if (
+        first?.['record_offset'] === null ||
+        first?.['record_offset'] === undefined
+      ) {
         return {
           records: [],
           cursor: after,
@@ -612,10 +627,10 @@ export const make = (
 
     const readBackwards = Effect.fn('LogStore.readBackwards')(function* (
       path: string,
-      options?: LogStore.ReadBackwardsOptions,
+      readBackwardsOptions?: LogStore.ReadBackwardsOptions,
     ) {
       const normalized = yield* LogStore.normalizeReadBackwardsOptions(
-        options,
+        readBackwardsOptions,
       ).pipe(
         Effect.mapError((error) =>
           failure(path, 'readBackwards', 'invalid', error.detail),
@@ -639,12 +654,18 @@ export const make = (
         )
         .pipe(Effect.mapError(asLogStoreError(path, 'readBackwards')));
       if (rows.length === 0) {
-        return yield* Effect.fail(
-          failure(path, 'readBackwards', 'not_found', 'no stream at this path'),
+        return yield* failure(
+          path,
+          'readBackwards',
+          'not_found',
+          'no stream at this path',
         );
       }
       const first = rows[0];
-      if (first?.['record_offset'] == null) {
+      if (
+        first?.['record_offset'] === null ||
+        first?.['record_offset'] === undefined
+      ) {
         return {
           records: [],
           cursor: before ?? LogOffset.START,

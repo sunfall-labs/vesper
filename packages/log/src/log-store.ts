@@ -1,8 +1,8 @@
-import { Context, Effect, Option, Schema, Stream } from 'effect';
+import { Context, Effect, Option, Schema, type Stream } from 'effect';
 
 import { LogOffset } from './offset.js';
 import type { ConversationRecord } from './record.js';
-import { LogVocabulary } from './vocabulary.js';
+import type { LogVocabulary } from './vocabulary.js';
 
 // The append-only log every conversation is written to.
 //
@@ -229,17 +229,18 @@ export const normalizeReadOptions = (
     const after = options?.after ?? LogOffset.START;
     yield* LogOffset.toSeq(after).pipe(
       Effect.mapError(
-        () => new ReadOptionsError({ detail: `malformed offset: ${after}` }),
+        () =>
+          new ReadOptionsError({
+            detail: `malformed offset: ${String(after)}`,
+          }),
       ),
     );
 
     const limit = options?.limit ?? DEFAULT_READ_LIMIT;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) {
-      return yield* Effect.fail(
-        new ReadOptionsError({
-          detail: `limit must be an integer from 1 through ${MAX_READ_LIMIT}, got ${limit}`,
-        }),
-      );
+      return yield* new ReadOptionsError({
+        detail: `limit must be an integer from 1 through ${String(MAX_READ_LIMIT)}, got ${String(limit)}`,
+      });
     }
     return { after, limit };
   });
@@ -254,18 +255,16 @@ export const normalizeReadBackwardsOptions = (
         Effect.mapError(
           () =>
             new ReadOptionsError({
-              detail: `malformed offset: ${options.before}`,
+              detail: `malformed offset: ${String(options.before)}`,
             }),
         ),
       );
     }
     const limit = options?.limit ?? DEFAULT_READ_LIMIT;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_READ_LIMIT) {
-      return yield* Effect.fail(
-        new ReadOptionsError({
-          detail: `limit must be an integer from 1 through ${MAX_READ_LIMIT}, got ${limit}`,
-        }),
-      );
+      return yield* new ReadOptionsError({
+        detail: `limit must be an integer from 1 through ${String(MAX_READ_LIMIT)}, got ${String(limit)}`,
+      });
     }
     return {
       before: Option.fromUndefinedOr(options?.before),

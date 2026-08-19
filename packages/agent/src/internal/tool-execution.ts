@@ -1,12 +1,13 @@
 import { Context } from 'effect';
 
+import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import type * as AgentLog from '../log.js';
 
 /** The recorded tool invocation currently evaluating its handler. */
 export interface Execution {
   readonly session: AgentLog.Session;
   readonly name: string;
-  readonly toolCallId: import('@sunfall/vesper-log/vocabulary').LogVocabulary.ToolCallId;
+  readonly toolCallId: LogVocabulary.ToolCallId;
 }
 
 /**

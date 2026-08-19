@@ -1,14 +1,16 @@
-import { PgClient } from '@effect/sql-pg';
+import type { PgClient } from '@effect/sql-pg';
 import { Cause, Duration, Effect, Queue, Redacted, Stream } from 'effect';
 import {
   ConnectionError,
   SqlError,
   UnknownError,
 } from 'effect/unstable/sql/SqlError';
-import pg from 'pg';
+import { Client } from 'pg';
+import type { ClientConfig, Notification } from 'pg';
 
 const escapeIdentifier = (identifier: string): string =>
   `"${identifier.replaceAll('"', '""')}"`;
+const ignoreError = (): void => {};
 
 const connectionError = (
   cause: unknown,
@@ -26,7 +28,7 @@ const queryError = (
 ): SqlError =>
   new SqlError({ reason: new UnknownError({ cause, message, operation }) });
 
-const clientConfig = (config: PgClient.PgPoolConfig): pg.ClientConfig => ({
+const clientConfig = (config: PgClient.PgPoolConfig): ClientConfig => ({
   connectionString: config.url ? Redacted.value(config.url) : undefined,
   user: config.username,
   host: config.host,
@@ -34,23 +36,21 @@ const clientConfig = (config: PgClient.PgPoolConfig): pg.ClientConfig => ({
   password: config.password ? Redacted.value(config.password) : undefined,
   ssl: config.ssl,
   port: config.port,
-  ...(config.stream ? { stream: config.stream } : {}),
-  connectionTimeoutMillis: config.connectTimeout
-    ? Duration.toMillis(Duration.fromInputUnsafe(config.connectTimeout))
-    : undefined,
+  ...(config.stream !== undefined ? { stream: config.stream } : {}),
+  connectionTimeoutMillis:
+    config.connectTimeout !== undefined
+      ? Duration.toMillis(Duration.fromInputUnsafe(config.connectTimeout))
+      : undefined,
   application_name: config.applicationName ?? '@sunfall/vesper-log-pg-listener',
   types: config.types,
 });
 
 /** The listener lifecycle surface used here, kept small enough to fake fully. */
 export interface ListenerClient {
-  on(event: 'notification', listener: (message: pg.Notification) => void): this;
+  on(event: 'notification', listener: (message: Notification) => void): this;
   on(event: 'error', listener: (error: Error) => void): this;
   on(event: 'end', listener: () => void): this;
-  off(
-    event: 'notification',
-    listener: (message: pg.Notification) => void,
-  ): this;
+  off(event: 'notification', listener: (message: Notification) => void): this;
   off(event: 'error', listener: (error: Error) => void): this;
   off(event: 'end', listener: () => void): this;
   connect(): Promise<unknown>;
@@ -65,22 +65,24 @@ export const correctedListen =
     Stream.callback<string, SqlError>(
       Effect.fnUntraced(function* (queue) {
         const client: ListenerClient =
-          makeClient?.() ?? new pg.Client(clientConfig(config));
+          makeClient?.() ?? new Client(clientConfig(config));
         let terminal = false;
         let connectAttempted = false;
         let listening = false;
 
         const fail = (error: SqlError) => {
-          if (terminal) return;
+          if (terminal) {
+            return;
+          }
           terminal = true;
           Queue.failCauseUnsafe(queue, Cause.fail(error));
         };
-        const onNotification = (message: pg.Notification) => {
+        const onNotification = (message: Notification) => {
           if (message.channel === channel) {
             Queue.offerUnsafe(queue, message.payload ?? '');
           }
         };
-        const onError = (cause: Error) =>
+        const onError = (cause: Error): void => {
           fail(
             connectionError(
               cause,
@@ -88,7 +90,8 @@ export const correctedListen =
               'listen',
             ),
           );
-        const onEnd = () =>
+        };
+        const onEnd = (): void => {
           fail(
             connectionError(
               new Error('Postgres listener connection ended'),
@@ -96,8 +99,7 @@ export const correctedListen =
               'listen',
             ),
           );
-        const ignoreError = () => {};
-
+        };
         client.on('notification', onNotification);
         client.on('error', onError);
         client.on('end', onEnd);
@@ -120,7 +122,9 @@ export const correctedListen =
             }
             // An attempted connection can own a socket even if connect rejects
             // or is interrupted; end is also how pg cancels a pending attempt.
-            if (connectAttempted) await client.end().catch(() => undefined);
+            if (connectAttempted) {
+              await client.end().catch(() => undefined);
+            }
           }).pipe(Effect.timeoutOption('1 second')),
         );
 

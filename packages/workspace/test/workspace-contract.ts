@@ -1,4 +1,11 @@
-import { Duration, Effect, Fiber, Layer, Predicate, Schedule } from 'effect';
+import {
+  Duration,
+  Effect,
+  Fiber,
+  Predicate,
+  Schedule,
+  type Layer,
+} from 'effect';
 import { describe, expect, it } from 'vitest';
 
 import { WorkspaceDriver } from '../src/driver.js';
@@ -28,6 +35,40 @@ export interface ContractOptions<E> {
 
 let counter = 0;
 
+/** Poll until a command observed through the filesystem has started. */
+const waitUntil = (
+  check: Effect.Effect<boolean, unknown, WorkspaceDriver.Service>,
+): Effect.Effect<void, unknown, WorkspaceDriver.Service> =>
+  check.pipe(
+    Effect.flatMap((ready) =>
+      ready ? Effect.void : Effect.fail('pending' as const),
+    ),
+    Effect.retry(Schedule.spaced(Duration.millis(25))),
+    Effect.timeoutOrElse({
+      duration: Duration.seconds(10),
+      orElse: () => Effect.die(new Error('waitUntil never became true')),
+    }),
+  );
+
+/** Ask the kernel whether a recorded process still exists. */
+const processIsRunning = (text: string): Effect.Effect<boolean, unknown> =>
+  Effect.try({
+    try: () => {
+      const pid = Number(text);
+      if (!Number.isSafeInteger(pid) || pid <= 0) {
+        throw new Error(`Invalid process id: ${text}`);
+      }
+      process.kill(pid, 0);
+      return true;
+    },
+    catch: (error) => error,
+  }).pipe(
+    Effect.catchIf(
+      (error) => Predicate.hasProperty(error, 'code') && error.code === 'ESRCH',
+      () => Effect.succeed(false),
+    ),
+  );
+
 export const workspaceContract = <E>(
   name: string,
   options: ContractOptions<E>,
@@ -45,45 +86,6 @@ export const workspaceContract = <E>(
     yield* driver.mkdir(path, { recursive: true });
     return path;
   });
-
-  /**
-   * Poll until `check` succeeds. Used only to observe a command that has
-   * started, which no interface here reports — every other wait in this suite
-   * is a real deadline being tested.
-   */
-  const waitUntil = (
-    check: Effect.Effect<boolean, unknown, WorkspaceDriver.Service>,
-  ): Effect.Effect<void, unknown, WorkspaceDriver.Service> =>
-    check.pipe(
-      Effect.flatMap((ready) =>
-        ready ? Effect.void : Effect.fail('pending' as const),
-      ),
-      Effect.retry(Schedule.spaced(Duration.millis(25))),
-      Effect.timeoutOrElse({
-        duration: Duration.seconds(10),
-        orElse: () => Effect.die(new Error('waitUntil never became true')),
-      }),
-    );
-
-  /** Ask the kernel whether a recorded process still exists. */
-  const processIsRunning = (text: string): Effect.Effect<boolean, unknown> =>
-    Effect.try({
-      try: () => {
-        const pid = Number(text);
-        if (!Number.isSafeInteger(pid) || pid <= 0) {
-          throw new Error(`Invalid process id: ${text}`);
-        }
-        process.kill(pid, 0);
-        return true;
-      },
-      catch: (error) => error,
-    }).pipe(
-      Effect.catchIf(
-        (error) =>
-          Predicate.hasProperty(error, 'code') && error.code === 'ESRCH',
-        () => Effect.succeed(false),
-      ),
-    );
 
   describe(`WorkspaceDriver contract: ${name}`, () => {
     it('round-trips text through writeFile and readFile', async () => {
@@ -163,7 +165,7 @@ export const workspaceContract = <E>(
         }),
       );
 
-      expect([...entries].sort()).toEqual(['one', 'three', 'two']);
+      expect(new Set(entries)).toEqual(new Set(['one', 'three', 'two']));
     });
 
     it('exists reports presence and absence', async () => {
@@ -332,7 +334,7 @@ export const workspaceContract = <E>(
     });
 
     it('exec fails with CommandTimeout and terminates the command', async () => {
-      const { childRunning, outcome } = await run(
+      const { childRunning, outcome: commandOutcome } = await run(
         Effect.gen(function* () {
           const driver = yield* WorkspaceDriver.Service;
           const dir = yield* scratch();
@@ -356,10 +358,12 @@ export const workspaceContract = <E>(
         }),
       );
 
-      expect(outcome._tag).toBe('Failure');
-      if (outcome._tag === 'Failure') {
-        expect(outcome.failure).toBeInstanceOf(WorkspaceDriver.CommandTimeout);
-        expect(outcome.failure).toMatchObject({ timeoutMs: 200 });
+      expect(commandOutcome._tag).toBe('Failure');
+      if (commandOutcome._tag === 'Failure') {
+        expect(commandOutcome.failure).toBeInstanceOf(
+          WorkspaceDriver.CommandTimeout,
+        );
+        expect(commandOutcome.failure).toMatchObject({ timeoutMs: 200 });
       }
       expect(childRunning).toBe(false);
     });

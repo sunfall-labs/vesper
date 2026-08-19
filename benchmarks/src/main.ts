@@ -28,8 +28,8 @@ const SELF = fileURLToPath(import.meta.url);
  * exactly the shape of measurement that once had this project reporting a
  * 1m42s startup for something that takes well under a second.
  */
-const SMOKE = process.env.VESPER_BENCH_SMOKE === '1';
-const HEAVY = process.env.VESPER_BENCH_HEAVY === '1';
+const SMOKE = process.env['VESPER_BENCH_SMOKE'] === '1';
+const HEAVY = process.env['VESPER_BENCH_HEAVY'] === '1';
 const MEMORY_REPEATS = SMOKE ? 1 : 5;
 const STARTUP_REPEATS = SMOKE ? 1 : 5;
 
@@ -63,13 +63,13 @@ const child = async (side: SideName, scenario: ScenarioName): Promise<void> => {
     const expected = result.samples.length * result.turnsPerSample;
     if (result.modelCalls !== expected) {
       throw new Error(
-        `${side}/${scenario} reported ${result.modelCalls} calls for ${expected} measured turns`,
+        `${side}/${scenario} reported ${String(result.modelCalls)} calls for ${String(expected)} measured turns`,
       );
     }
   }
   if (scenario === 'history-open' && result.modelCalls !== 0) {
     throw new Error(
-      `history fixture unexpectedly made ${result.modelCalls} model calls`,
+      `history fixture unexpectedly made ${String(result.modelCalls)} model calls`,
     );
   }
 
@@ -97,7 +97,7 @@ const runChild = (
     proc.on('error', reject);
     proc.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(`${side}/${scenario} exited with ${code}`));
+        reject(new Error(`${side}/${scenario} exited with ${String(code)}`));
         return;
       }
       const marker = out.lastIndexOf('##BENCH##');
@@ -105,7 +105,12 @@ const runChild = (
         reject(new Error(`${side}/${scenario} produced no result`));
         return;
       }
-      resolve(JSON.parse(out.slice(marker + 9).trim()) as ScenarioResult);
+      const parsed: unknown = JSON.parse(out.slice(marker + 9).trim());
+      if (!isScenarioResult(parsed)) {
+        reject(new Error(`${side}/${scenario} produced an invalid result`));
+        return;
+      }
+      resolve(parsed);
     });
   });
 
@@ -123,6 +128,12 @@ const line = (text = ''): void => {
 
 const mib = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
 
+const formatMiBRange = (s: { min: number; max: number }): string =>
+  `(${mib(s.min)}-${mib(s.max)})`;
+
+const formatMsRange = (s: { min: number; max: number }): string =>
+  `(${formatMs(s.min)}-${formatMs(s.max)})`;
+
 const report = (results: ReadonlyArray<ScenarioResult>): void => {
   const byScenario = new Map<ScenarioName, ScenarioResult[]>();
   for (const result of results) {
@@ -132,8 +143,12 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
   }
 
   for (const [scenario, list] of byScenario) {
+    const firstResult = list.at(0);
+    if (firstResult === undefined) {
+      continue;
+    }
     line(`\n## ${scenario}`);
-    line(`   ${list[0]!.unit}`);
+    line(`   ${firstResult.unit}`);
 
     if (scenario === 'memory') {
       // One heap reading is an anecdote: a forced GC is advisory and the
@@ -153,14 +168,12 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       for (const [side, seen] of bySide) {
         const heap = summarise(seen.map((r) => r.heapBytes ?? 0));
         const rss = summarise(seen.map((r) => r.rssBytes ?? 0));
-        const range = (s: { min: number; max: number }) =>
-          `(${mib(s.min)}-${mib(s.max)})`;
         line(
-          `   ${side.padEnd(9)} ${mib(heap.median).padStart(9)} ${range(
+          `   ${side.padEnd(9)} ${mib(heap.median).padStart(9)} ${formatMiBRange(
             heap,
-          ).padStart(15)} ${mib(rss.median).padStart(9)} ${range(rss).padStart(
-            15,
-          )}   n=${heap.n}`,
+          ).padStart(15)} ${mib(rss.median).padStart(9)} ${formatMiBRange(
+            rss,
+          ).padStart(15)}   n=${String(heap.n)}`,
         );
       }
       continue;
@@ -170,7 +183,7 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       const picks = [1, 5, 10, 20, 30, 40];
       line(
         `   ${'side'.padEnd(9)} ` +
-          picks.map((i) => `msg ${i}`.padStart(9)).join(' ') +
+          picks.map((i) => `msg ${String(i)}`.padStart(9)).join(' ') +
           '   (ms, median)',
       );
       for (const r of list) {
@@ -187,13 +200,17 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       for (const r of list) {
         const first = (r.growth ?? []).find((g) => g.index === 1);
         const last = (r.growth ?? []).at(-1);
-        if (first === undefined || last === undefined) continue;
+        if (first === undefined || last === undefined) {
+          continue;
+        }
         const a = summarise(first.samples).median;
         const b = summarise(last.samples).median;
         line(
-          `   ${r.side.padEnd(9)} message ${last.index} costs ${(b / a).toFixed(
+          `   ${r.side.padEnd(9)} message ${String(last.index)} costs ${(
+            b / a
+          ).toFixed(
             1,
-          )}x message 1` + ` (n=${first.samples.length} conversations)`,
+          )}x message 1 (n=${String(first.samples.length)} conversations)`,
         );
       }
       continue;
@@ -203,7 +220,7 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       const turns = list[0]?.series?.map((s) => s.turns) ?? [];
       line(
         `   ${'side'.padEnd(9)} ` +
-          turns.map((k) => `K=${k}`.padStart(9)).join(' ') +
+          turns.map((k) => `K=${String(k)}`.padStart(9)).join(' ') +
           '   (ms per turn, median)',
       );
       for (const r of list) {
@@ -213,9 +230,7 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
         line(`   ${r.side.padEnd(9)} ${cells.join(' ')}`);
       }
       line(
-        `   flat across K = cost scales with the turn;` +
-          ` rising = cost scales with the history` +
-          ` (n=${list[0]?.series?.[0]?.samples.length ?? 0} per cell)`,
+        `   flat across K = cost scales with the turn; rising = cost scales with the history (n=${String(list[0]?.series?.[0]?.samples.length ?? 0)} per cell)`,
       );
       continue;
     }
@@ -224,7 +239,7 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       const parts = list[0]?.partSeries?.map((s) => s.parts) ?? [];
       line(
         `   ${'side'.padEnd(11)} ` +
-          parts.map((count) => `N=${count}`.padStart(11)).join(' ') +
+          parts.map((count) => `N=${String(count)}`.padStart(11)).join(' ') +
           '   (ms, median)',
       );
       for (const r of list) {
@@ -235,7 +250,7 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       }
       line(
         `   fixed 10,000-byte output; model calls: ${list
-          .map((r) => `${r.side}=${r.modelCalls}`)
+          .map((r) => `${r.side}=${String(r.modelCalls)}`)
           .join(', ')}`,
       );
       continue;
@@ -248,7 +263,7 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       for (const point of list[0]?.historySeries ?? []) {
         const summary = summarise(point.samples);
         line(
-          `   ${point.mode.padEnd(22)} ${String(point.records).padStart(9)} ${String(point.liveRecords).padStart(6)} ${String(point.pages).padStart(7)} ${String(point.recordsRead).padStart(7)} ${formatMs(summary.median).padStart(10)} ${formatMs(summary.min).padStart(10)} ${formatMs(summary.max).padStart(10)}   n=${summary.n}`,
+          `   ${point.mode.padEnd(22)} ${String(point.records).padStart(9)} ${String(point.liveRecords).padStart(6)} ${String(point.pages).padStart(7)} ${String(point.recordsRead).padStart(7)} ${formatMs(summary.median).padStart(10)} ${formatMs(summary.min).padStart(10)} ${formatMs(summary.max).padStart(10)}   n=${String(summary.n)}`,
         );
       }
       continue;
@@ -269,14 +284,14 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       for (const [side, seen] of bySide) {
         const construct = summarise(seen.map((r) => r.constructMs ?? 0));
         const first = summarise(seen.map((r) => r.firstPartMs ?? 0));
-        const range = (s: { min: number; max: number }) =>
-          `(${formatMs(s.min)}-${formatMs(s.max)})`;
         line(
-          `   ${side.padEnd(9)} ${formatMs(construct.median).padStart(10)} ${range(
+          `   ${side.padEnd(9)} ${formatMs(construct.median).padStart(10)} ${formatMsRange(
             construct,
-          ).padStart(15)} ${formatMs(first.median).padStart(11)} ${range(
+          ).padStart(
+            15,
+          )} ${formatMs(first.median).padStart(11)} ${formatMsRange(
             first,
-          ).padStart(15)}   n=${construct.n}`,
+          ).padStart(15)}   n=${String(construct.n)}`,
         );
       }
       continue;
@@ -308,8 +323,8 @@ const report = (results: ReadonlyArray<ScenarioResult>): void => {
       );
     }
     line(
-      `   n=${list[0]!.samples.length} kept per side` +
-        `; model calls: ${list.map((r) => `${r.side}=${r.modelCalls}`).join(', ')}`,
+      `   n=${String(firstResult.samples.length)} kept per side` +
+        `; model calls: ${list.map((r) => `${r.side}=${String(r.modelCalls)}`).join(', ')}`,
     );
   }
 };
@@ -328,7 +343,7 @@ const parent = async (): Promise<void> => {
           : 1;
     for (let i = 0; i < repeats; i++) {
       process.stderr.write(
-        `running ${side}/${scenario}${repeats > 1 ? ` (${i + 1}/${repeats})` : ''}...\n`,
+        `running ${side}/${scenario}${repeats > 1 ? ` (${String(i + 1)}/${String(repeats)})` : ''}...\n`,
       );
       results.push(await runChild(side, scenario));
     }
@@ -343,9 +358,47 @@ const parent = async (): Promise<void> => {
   report(results);
 };
 
+const isSideName = (value: unknown): value is SideName =>
+  value === 'vesper' || value === 'vesper+log';
+
+const isScenarioName = (value: unknown): value is ScenarioName =>
+  value === 'turn' ||
+  value === 'conversation' ||
+  value === 'startup' ||
+  value === 'memory' ||
+  value === 'scaling' ||
+  value === 'growth' ||
+  value === 'parts' ||
+  value === 'history-open' ||
+  value === 'backpressure';
+
+const isScenarioResult = (value: unknown): value is ScenarioResult => {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  if (
+    !('side' in value) ||
+    !('scenario' in value) ||
+    !('samples' in value) ||
+    !('unit' in value)
+  ) {
+    return false;
+  }
+  return (
+    isSideName(value.side) &&
+    isScenarioName(value.scenario) &&
+    typeof value.unit === 'string' &&
+    Array.isArray(value.samples) &&
+    value.samples.every((sample) => typeof sample === 'number')
+  );
+};
+
 const argv = process.argv.slice(2);
 if (argv[0] === '--child') {
-  await child(argv[1] as SideName, argv[2] as ScenarioName);
+  if (!isSideName(argv[1]) || !isScenarioName(argv[2])) {
+    throw new Error('invalid benchmark child arguments');
+  }
+  await child(argv[1], argv[2]);
 } else {
   await parent();
 }

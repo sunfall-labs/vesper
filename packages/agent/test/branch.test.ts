@@ -5,7 +5,7 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { beforeEach, describe, expect, it } from '@effect/vitest';
-import { Crypto, Effect, Layer, Ref, Schema, Stream } from 'effect';
+import { Effect, Layer, Ref, Schema, Stream, type Crypto } from 'effect';
 import {
   LanguageModel,
   Prompt,
@@ -58,6 +58,13 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
+const present = <A>(value: A | undefined): A => {
+  if (value === undefined) {
+    throw new Error('Expected test fixture value to be present');
+  }
+  return value;
+};
+
 const says = (body: string): Response.StreamPartEncoded[] => [
   { type: 'text-start' as const, id: body },
   { type: 'text-delta' as const, id: body, delta: body },
@@ -103,7 +110,7 @@ const provider = (
               asked.push(options.prompt);
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
               return Stream.fromIterable(
-                turns[Math.min(index, turns.length - 1)]!,
+                present(turns[Math.min(index, turns.length - 1)]),
               );
             }),
           ),
@@ -154,8 +161,7 @@ const run = <A, E>(
 ) =>
   effect.pipe(
     Effect.orDie,
-    Effect.provide(models),
-    Effect.provide(testLogLayer),
+    Effect.provide(Layer.merge(models, testLogLayer)),
     Effect.scoped,
   );
 
@@ -481,7 +487,7 @@ describe('branching a live conversation', () => {
           const first = yield* readAll();
 
           yield* conversation
-            .branchFrom(first[0]!.offset, 'actually, hello')
+            .branchFrom(present(first[0]).offset, 'actually, hello')
             .pipe(Effect.orDie);
 
           return yield* readAll();
@@ -522,7 +528,10 @@ describe('branching a live conversation', () => {
           const first = yield* readAll();
 
           yield* conversation
-            .branchFrom(first[0]!.offset, 'what is the status, precisely?')
+            .branchFrom(
+              present(first[0]).offset,
+              'what is the status, precisely?',
+            )
             .pipe(Effect.orDie);
 
           return models.asked;
@@ -531,7 +540,7 @@ describe('branching a live conversation', () => {
       ).pipe(
         Effect.tap((asked) =>
           Effect.sync(() => {
-            const branched = asked[1]!;
+            const branched = present(asked[1]);
             expect(rolesOf(branched)).toEqual(['system', 'user', 'user']);
             expect(textIn(branched)).toContain('what is the status?');
             expect(textIn(branched)).toContain('precisely');
@@ -552,7 +561,7 @@ describe('branching a live conversation', () => {
         const first = yield* readAll();
 
         yield* conversation
-          .branchFrom(first[0]!.offset, 'edited')
+          .branchFrom(present(first[0]).offset, 'edited')
           .pipe(Effect.orDie);
         yield* conversation.run('and then?').pipe(Effect.orDie);
 
@@ -564,7 +573,7 @@ describe('branching a live conversation', () => {
         Effect.sync(() => {
           // The branch is where the conversation continues from now: an ordinary
           // `resume` afterwards sees the edited turn and not the original one.
-          const resumed = asked[2]!;
+          const resumed = present(asked[2]);
           expect(textIn(resumed)).toContain('edited');
           expect(textIn(resumed)).toContain('turn 2');
           expect(textIn(resumed)).not.toContain('turn 1');
@@ -585,7 +594,7 @@ describe('branching a live conversation', () => {
         const records = yield* readAll();
 
         const branched = yield* conversation
-          .branchFrom(records[0]!.offset, 'edited')
+          .branchFrom(present(records[0]).offset, 'edited')
           .pipe(Effect.orDie);
 
         return { first: first.usage, branched: branched.usage };
@@ -633,7 +642,7 @@ describe('a steer delivered before the branch', () => {
         const askedBeforeBranch = models.asked.length;
 
         yield* conversation
-          .branchFrom(first[0]!.offset, 'try again')
+          .branchFrom(present(first[0]).offset, 'try again')
           .pipe(Effect.orDie);
 
         return {
@@ -690,7 +699,7 @@ describe('a steer delivered before the branch', () => {
           .pipe(Effect.orDie);
 
         yield* conversation
-          .branchFrom(first[0]!.offset, 'try again')
+          .branchFrom(present(first[0]).offset, 'try again')
           .pipe(Effect.orDie);
 
         return yield* readAll();
@@ -789,7 +798,7 @@ describe('a crashed run on the abandoned branch', () => {
         const before = yield* readAll();
 
         yield* conversation
-          .branchFrom(before[0]!.offset, 'where is order 43?')
+          .branchFrom(present(before[0]).offset, 'where is order 43?')
           .pipe(Effect.orDie);
 
         return { dispatchedTotal: dispatched.count, asked: models.asked };
@@ -801,8 +810,8 @@ describe('a crashed run on the abandoned branch', () => {
           // The tool ran, rather than being answered from a branch that is no
           // longer part of the conversation.
           expect(observed.dispatchedTotal).toBe(1);
-          expect(textIn(observed.asked[1]!)).toContain('shipped:42');
-          expect(textIn(observed.asked[1]!)).not.toContain('from-log');
+          expect(textIn(present(observed.asked[1]))).toContain('shipped:42');
+          expect(textIn(present(observed.asked[1]))).not.toContain('from-log');
         }),
       ),
     );
@@ -826,7 +835,7 @@ describe('a crashed run on the abandoned branch', () => {
       Effect.tap((observed) =>
         Effect.sync(() => {
           expect(observed.dispatchedTotal).toBe(0);
-          expect(textIn(observed.asked[1]!)).toContain('from-log');
+          expect(textIn(present(observed.asked[1]))).toContain('from-log');
         }),
       ),
     );

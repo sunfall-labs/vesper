@@ -1,4 +1,5 @@
-import { Effect, Layer } from 'effect';
+import { Effect, Schema } from 'effect';
+import type { Layer } from 'effect';
 import { describe, expect, it } from 'vitest';
 
 import { AttachmentStore } from '../src/attachment-store.js';
@@ -231,7 +232,8 @@ export const attachmentStoreContract = <E>(
           const ref = yield* store.put(original, { mediaType: 'text/plain' });
 
           const tampered = original.slice();
-          tampered[0] = original[0]! ^ 0xff;
+          const firstByte = original[0] ?? 0;
+          tampered[0] = firstByte ^ 0xff;
           yield* options.overwriteUnsafe(ref, tampered);
 
           return {
@@ -244,9 +246,8 @@ export const attachmentStoreContract = <E>(
       expect(outcome.result._tag).toBe('Failure');
       if (outcome.result._tag === 'Failure') {
         if (
-          !(
-            outcome.result.failure instanceof
-            AttachmentStore.AttachmentIntegrityError
+          !Schema.is(AttachmentStore.AttachmentIntegrityError)(
+            outcome.result.failure,
           )
         ) {
           throw outcome.result.failure;

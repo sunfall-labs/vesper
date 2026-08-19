@@ -26,7 +26,12 @@ describe('LogOffset', () => {
       const seqs = [0n, 1n, 9n, 10n, 99n, 100n, 10n ** 15n, 10n ** 16n];
       const offsets = seqs.map(LogOffset.fromSeq);
 
-      expect([...offsets].sort()).toEqual(offsets);
+      expect(
+        offsets.slice(1).every((offset, index) => {
+          const previous = offsets.at(index);
+          return previous !== undefined && previous < offset;
+        }),
+      ).toBe(true);
     });
   });
 
@@ -35,10 +40,7 @@ describe('LogOffset', () => {
       expect(LogOffset.isAfter(LogOffset.fromSeq(0n), LogOffset.START)).toBe(
         true,
       );
-      expect([LogOffset.fromSeq(0n), LogOffset.START].sort()).toEqual([
-        LogOffset.START,
-        LogOffset.fromSeq(0n),
-      ]);
+      expect(LogOffset.START < LogOffset.fromSeq(0n)).toBe(true);
     });
   });
 

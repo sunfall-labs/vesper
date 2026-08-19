@@ -93,7 +93,9 @@ export const hasProtocol = <
 >(
   agent: object,
 ): agent is ProtocolCarrier<Requires, RunError, Tools> => {
-  if (!(ProtocolTypeId in agent)) return false;
+  if (!(ProtocolTypeId in agent)) {
+    return false;
+  }
   const protocol = agent[ProtocolTypeId];
   return (
     typeof protocol === 'object' &&

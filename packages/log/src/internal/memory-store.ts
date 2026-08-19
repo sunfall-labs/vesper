@@ -13,7 +13,7 @@ import {
 import { LogStoreAdapter } from '../adapter.js';
 import { LogStore } from '../log-store.js';
 import { LogOffset } from '../offset.js';
-import { ConversationRecord } from '../record.js';
+import type { ConversationRecord } from '../record.js';
 import { RecordBatch } from '../record-batch.js';
 import { LogVocabulary } from '../vocabulary.js';
 
@@ -54,6 +54,18 @@ interface SignalState {
   subscribers: number;
 }
 
+const metaOf = (path: string, state: StreamState): LogStore.StreamMeta => ({
+  path,
+  identity: state.identity,
+  epoch: state.epoch,
+  producerId:
+    state.producerId === undefined
+      ? Option.none()
+      : Option.some(state.producerId),
+  head: state.lastOffset,
+  records: state.records.length,
+});
+
 /** First record whose offset is strictly greater than the exclusive cursor. */
 const firstAfter = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
@@ -63,9 +75,15 @@ const firstAfter = (
   let high = records.length;
   while (low < high) {
     const middle = low + Math.floor((high - low) / 2);
-    const held = records[middle]!;
-    if (LogOffset.isAfter(held.offset, after)) high = middle;
-    else low = middle + 1;
+    const held = records[middle];
+    if (held === undefined) {
+      throw new Error(`record index ${String(middle)} unexpectedly missing`);
+    }
+    if (LogOffset.isAfter(held.offset, after)) {
+      high = middle;
+    } else {
+      low = middle + 1;
+    }
   }
   return low;
 };
@@ -89,8 +107,11 @@ export const build = (
         Effect.gen(function* () {
           const state = MutableHashMap.get(streams, path);
           if (Option.isNone(state)) {
-            return yield* Effect.fail(
-              failure(path, operation, 'not_found', 'no stream at this path'),
+            return yield* failure(
+              path,
+              operation,
+              'not_found',
+              'no stream at this path',
             );
           }
           return state.value;
@@ -135,28 +156,16 @@ export const build = (
           }),
         );
 
-      const metaOf = (
-        path: string,
-        state: StreamState,
-      ): LogStore.StreamMeta => ({
-        path,
-        identity: state.identity,
-        epoch: state.epoch,
-        producerId:
-          state.producerId === undefined
-            ? Option.none()
-            : Option.some(state.producerId),
-        head: state.lastOffset,
-        records: state.records.length,
-      });
-
       const createUnlocked = Effect.fn('LogStore.create')(function* (
         path: string,
         identity: string,
       ) {
         if (MutableHashMap.has(streams, path)) {
-          return yield* Effect.fail(
-            failure(path, 'create', 'conflict', 'a stream already exists here'),
+          return yield* failure(
+            path,
+            'create',
+            'conflict',
+            'a stream already exists here',
           );
         }
 
@@ -186,13 +195,11 @@ export const build = (
           expected !== undefined &&
           (state.epoch !== expected.epoch || state.lastOffset !== expected.head)
         ) {
-          return yield* Effect.fail(
-            failure(
-              path,
-              'acquire',
-              'conflict',
-              `stream changed from epoch ${expected.epoch} at ${expected.head}`,
-            ),
+          return yield* failure(
+            path,
+            'acquire',
+            'conflict',
+            `stream changed from epoch ${String(expected.epoch)} at ${String(expected.head)}`,
           );
         }
 
@@ -240,7 +247,9 @@ export const build = (
           ),
           lastFingerprint: state.lastFingerprint,
         }).pipe(Effect.provideService(Crypto.Crypto, crypto));
-        if (decision.kind === 'retry') return state.lastOffset;
+        if (decision.kind === 'retry') {
+          return state.lastOffset;
+        }
 
         // Everything above rejects without writing; nothing below can fail.
         // That is what makes the batch atomic, and it is why the validation is
@@ -318,11 +327,18 @@ export const build = (
               ? end - 1
               : end;
           const start = Math.max(0, exclusiveEnd - normalized.limit);
-          const records = state.records.slice(start, exclusiveEnd).reverse();
+          const records = state.records.slice(start, exclusiveEnd);
+          const reversed: ConversationRecord.Envelope[] = [];
+          for (let index = records.length - 1; index >= 0; index -= 1) {
+            const record = records[index];
+            if (record !== undefined) {
+              reversed.push(record);
+            }
+          }
           return {
-            records,
+            records: reversed,
             cursor:
-              records.at(-1)?.offset ??
+              reversed.at(-1)?.offset ??
               Option.getOrElse(normalized.before, () => state.lastOffset),
             upToDate: start === 0,
           } satisfies LogStore.BackwardsPage;
@@ -357,22 +373,23 @@ export const build = (
           : Stream.unwrap(
               exclusive(
                 Effect.gen(function* () {
-                  const { subscription } = yield* Effect.acquireRelease(
-                    Effect.uninterruptible(
-                      Effect.gen(function* () {
-                        const signal = yield* acquireSignal(path);
-                        const subscription = yield* PubSub.subscribe(
-                          signal.pubsub,
-                        );
-                        return { signal, subscription };
-                      }),
-                    ),
-                    ({ signal }) => releaseSignal(path, signal.pubsub),
-                  );
+                  const { subscription: subscriptionHandle } =
+                    yield* Effect.acquireRelease(
+                      Effect.uninterruptible(
+                        Effect.gen(function* () {
+                          const signal = yield* acquireSignal(path);
+                          const acquiredSubscription = yield* PubSub.subscribe(
+                            signal.pubsub,
+                          );
+                          return { signal, subscription: acquiredSubscription };
+                        }),
+                      ),
+                      ({ signal }) => releaseSignal(path, signal.pubsub),
+                    );
                   const opening: Stream.Stream<void> = Stream.make(undefined);
                   return Stream.concat(
                     opening,
-                    Stream.fromSubscription(subscription),
+                    Stream.fromSubscription(subscriptionHandle),
                   );
                 }),
               ),

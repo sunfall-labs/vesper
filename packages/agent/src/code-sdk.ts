@@ -10,6 +10,10 @@ const isRecord = (
   typeof value === 'object' &&
   !Array.isArray(value);
 
+const isJsonArray = (
+  value: CodeExecutor.JsonValue,
+): value is ReadonlyArray<CodeExecutor.JsonValue> => Array.isArray(value);
+
 const property = (name: string): string =>
   identifier.test(name) ? name : JSON.stringify(name);
 
@@ -30,13 +34,19 @@ const reference = (
   root: Readonly<Record<string, CodeExecutor.JsonValue>>,
   path: string,
 ): CodeExecutor.JsonValue | undefined => {
-  if (!path.startsWith('#/')) return undefined;
+  if (!path.startsWith('#/')) {
+    return undefined;
+  }
   let current: CodeExecutor.JsonValue = root;
   for (const encoded of path.slice(2).split('/')) {
-    if (!isRecord(current)) return undefined;
+    if (!isRecord(current)) {
+      return undefined;
+    }
     const key = encoded.replaceAll('~1', '/').replaceAll('~0', '~');
     const next: CodeExecutor.JsonValue | undefined = current[key];
-    if (next === undefined) return undefined;
+    if (next === undefined) {
+      return undefined;
+    }
     current = next;
   }
   return current;
@@ -48,14 +58,22 @@ const renderSchema = (
   depth = 0,
   references: ReadonlySet<string> = new Set(),
 ): string => {
-  if (value === true) return 'unknown';
-  if (value === false || !isRecord(value) || depth >= 16) return 'never';
+  if (value === true) {
+    return 'unknown';
+  }
+  if (value === false || !isRecord(value) || depth >= 16) {
+    return 'never';
+  }
 
   const ref = member(value, '$ref');
   if (typeof ref === 'string') {
-    if (references.has(ref)) return 'unknown';
+    if (references.has(ref)) {
+      return 'unknown';
+    }
     const resolved = reference(root, ref);
-    if (resolved === undefined) return 'unknown';
+    if (resolved === undefined) {
+      return 'unknown';
+    }
     return renderSchema(
       resolved,
       root,
@@ -65,14 +83,18 @@ const renderSchema = (
   }
 
   const constant = member(value, 'const');
-  if (constant !== undefined) return literal(constant);
+  if (constant !== undefined) {
+    return literal(constant);
+  }
 
   const enumeration = member(value, 'enum');
-  if (Array.isArray(enumeration)) return union(enumeration.map(literal));
+  if (Array.isArray(enumeration)) {
+    return union(enumeration.map(literal));
+  }
 
   for (const keyword of ['oneOf', 'anyOf'] as const) {
     const choices = member(value, keyword);
-    if (Array.isArray(choices)) {
+    if (choices !== undefined && isJsonArray(choices)) {
       return union(
         choices.map((choice) =>
           renderSchema(choice, root, depth + 1, references),
@@ -82,7 +104,7 @@ const renderSchema = (
   }
 
   const all = member(value, 'allOf');
-  if (Array.isArray(all)) {
+  if (all !== undefined && isJsonArray(all)) {
     const rendered = all.map((choice) =>
       renderSchema(choice, root, depth + 1, references),
     );
@@ -107,6 +129,8 @@ const renderSchema = (
         ? 'object'
         : undefined;
   switch (type) {
+    case undefined:
+      return 'unknown';
     case 'null':
       return 'null';
     case 'boolean':

@@ -3,7 +3,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
 
 import { LogStoreAdapter } from '../src/adapter.js';
-import { ConversationRecord } from '../src/record.js';
+import type { ConversationRecord } from '../src/record.js';
 import { LogVocabulary } from '../src/vocabulary.js';
 
 const producer = LogVocabulary.ProducerId.make('producer');

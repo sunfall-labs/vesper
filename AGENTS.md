@@ -16,6 +16,7 @@ nub run test
 nub run typecheck
 nub run lint
 nub run lint:fix
+nub run lint:prune
 nub run format
 nub run format:check
 nub run knip

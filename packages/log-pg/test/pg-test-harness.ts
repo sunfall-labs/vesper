@@ -2,9 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 
 import { PostgreSqlContainer } from '@testcontainers/postgresql';
-import { PgClient } from '@effect/sql-pg';
+import type { PgClient } from '@effect/sql-pg';
 import { ManagedRuntime, Redacted } from 'effect';
-import pg from 'pg';
+import { Pool } from 'pg';
 
 import { VesperPgClient } from '../src/client.js';
 
@@ -43,7 +43,7 @@ const IMAGE = process.env['ARBOR_POSTGRES_TEST_IMAGE'] ?? 'postgres:16-alpine';
 
 export interface ProvisionedTestDatabase {
   readonly connectionString: string;
-  readonly adminPool: pg.Pool;
+  readonly adminPool: Pool;
   readonly pgLayer: ReturnType<typeof VesperPgClient.layer>;
   readonly runtime: ManagedRuntime.ManagedRuntime<PgClient.PgClient, unknown>;
   readonly cleanup: () => Promise<void>;
@@ -77,10 +77,7 @@ const PG_OBJECT_IN_USE = '55006';
 const DRAIN_ATTEMPTS = 20;
 const DRAIN_INTERVAL_MS = 25;
 
-const waitForConnectionsToClose = async (
-  admin: pg.Pool,
-  databaseName: string,
-) => {
+const waitForConnectionsToClose = async (admin: Pool, databaseName: string) => {
   for (let attempt = 0; attempt < DRAIN_ATTEMPTS; attempt += 1) {
     const result = await admin.query<{ count: string }>(
       `SELECT count(*)::text AS count
@@ -88,7 +85,9 @@ const waitForConnectionsToClose = async (
        WHERE datname = $1 AND pid <> pg_backend_pid()`,
       [databaseName],
     );
-    if (Number(result.rows[0]?.count ?? 0) === 0) return;
+    if (Number(result.rows[0]?.count ?? 0) === 0) {
+      return;
+    }
     await delay(DRAIN_INTERVAL_MS);
   }
 };
@@ -100,12 +99,14 @@ const waitForConnectionsToClose = async (
  * still holds surfaces to that client as an unhandled 57P01 and fails the run
  * after its assertions have already passed.
  */
-const dropDatabase = async (admin: pg.Pool, databaseName: string) => {
+const dropDatabase = async (admin: Pool, databaseName: string) => {
   try {
     await admin.query(`DROP DATABASE IF EXISTS "${databaseName}"`);
     return;
   } catch (error) {
-    if ((error as { code?: string })?.code !== PG_OBJECT_IN_USE) throw error;
+    if ((error as { code?: string })?.code !== PG_OBJECT_IN_USE) {
+      throw error;
+    }
   }
 
   await admin.query(
@@ -135,7 +136,7 @@ export const createPostgresTestHarness =
       .start();
 
     const adminConnectionString = container.getConnectionUri();
-    const admin = new pg.Pool({ connectionString: adminConnectionString });
+    const admin = new Pool({ connectionString: adminConnectionString });
 
     return {
       adminConnectionString,
@@ -147,7 +148,7 @@ export const createPostgresTestHarness =
           adminConnectionString,
           databaseName,
         );
-        const databaseAdmin = new pg.Pool({ connectionString });
+        const databaseAdmin = new Pool({ connectionString });
         await databaseAdmin.query(SCHEMA_DDL);
 
         const pgLayer = VesperPgClient.layer({

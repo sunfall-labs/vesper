@@ -23,24 +23,32 @@ export const summarise = (samples: ReadonlyArray<number>): Summary => {
     throw new Error('summarise: no samples');
   }
 
-  const sorted = [...samples].sort((a, b) => a - b);
+  const sorted = [...samples];
+  // Sorting is part of the measurement harness, so keep its overhead
+  // O(n log n) as sample counts grow.
+  sorted.sort((left, right) => left - right);
   const n = sorted.length;
+  const at = (index: number): number => {
+    const value = sorted[index];
+    if (value === undefined) {
+      throw new Error(`summarise: missing sample at index ${String(index)}`);
+    }
+    return value;
+  };
   const mean = sorted.reduce((a, b) => a + b, 0) / n;
   const variance =
     n < 2 ? 0 : sorted.reduce((acc, x) => acc + (x - mean) ** 2, 0) / (n - 1);
   const stddev = Math.sqrt(variance);
 
   const median =
-    n % 2 === 1
-      ? sorted[(n - 1) / 2]!
-      : (sorted[n / 2 - 1]! + sorted[n / 2]!) / 2;
+    n % 2 === 1 ? at((n - 1) / 2) : (at(n / 2 - 1) + at(n / 2)) / 2;
 
   return {
     n,
-    min: sorted[0]!,
+    min: at(0),
     median,
     mean,
-    max: sorted[n - 1]!,
+    max: at(n - 1),
     stddev,
     rsdPercent: mean === 0 ? 0 : (stddev / mean) * 100,
   };

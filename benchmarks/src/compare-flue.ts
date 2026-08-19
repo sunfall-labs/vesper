@@ -15,6 +15,10 @@ import type { ScenarioResult } from './workload.ts';
 
 const SELF = fileURLToPath(import.meta.url);
 const SIDES: ReadonlyArray<ComparisonSide> = ['vesper+log', 'flue@2.0.3'];
+const REVERSED_SIDES: ReadonlyArray<ComparisonSide> = [
+  'flue@2.0.3',
+  'vesper+log',
+];
 const TIMED: ReadonlyArray<ComparisonWorkload> = [
   'one-turn',
   'tool-loop',
@@ -22,23 +26,37 @@ const TIMED: ReadonlyArray<ComparisonWorkload> = [
   'concurrency',
 ];
 
+const isComparisonSide = (value: string | undefined): value is ComparisonSide =>
+  value === 'vesper+log' || value === 'flue@2.0.3';
+
+const isComparisonWorkload = (
+  value: string | undefined,
+): value is ComparisonWorkload =>
+  value === 'one-turn' ||
+  value === 'tool-loop' ||
+  value === 'startup' ||
+  value === 'growth' ||
+  value === 'memory' ||
+  value === 'concurrency';
+
 const validate = (result: ComparisonResult): void => {
   if (result.workload === 'growth') {
     const points = result.growth ?? [];
-    if (points.length === 0)
+    if (points.length === 0) {
       throw new Error(`${result.side}/growth has no points`);
+    }
     for (const point of points) {
       const expected = point.samples.length * point.callsPerSample;
       if (point.modelCalls !== expected) {
         throw new Error(
-          `${result.side}/growth point ${point.index} reported ${point.modelCalls} calls for ${expected} expected`,
+          `${result.side}/growth point ${String(point.index)} reported ${String(point.modelCalls)} calls for ${String(expected)} expected`,
         );
       }
     }
     const expected = points.reduce((sum, point) => sum + point.modelCalls, 0);
     if (result.modelCalls !== expected) {
       throw new Error(
-        `${result.side}/growth reported ${result.modelCalls} calls for ${expected} point calls`,
+        `${result.side}/growth reported ${String(result.modelCalls)} calls for ${String(expected)} point calls`,
       );
     }
     return;
@@ -53,10 +71,34 @@ const validate = (result: ComparisonResult): void => {
   const expected = sampleCount * result.callsPerSample;
   if (result.modelCalls !== expected) {
     throw new Error(
-      `${result.side}/${result.workload} reported ${result.modelCalls} calls for ${expected} expected`,
+      `${result.side}/${result.workload} reported ${String(result.modelCalls)} calls for ${String(expected)} expected`,
     );
   }
 };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null;
+
+const parseJson = (text: string): unknown =>
+  /** @type {unknown} */ (JSON.parse(text));
+
+const isComparisonResult = (value: unknown): value is ComparisonResult =>
+  isRecord(value) &&
+  typeof value['side'] === 'string' &&
+  typeof value['workload'] === 'string' &&
+  Array.isArray(value['samples']) &&
+  typeof value['modelCalls'] === 'number';
+
+const isConformanceResult = (value: unknown): value is ConformanceResult =>
+  isRecord(value) &&
+  typeof value['side'] === 'string' &&
+  Array.isArray(value['checks']);
+
+const isScenarioResult = (value: unknown): value is ScenarioResult =>
+  isRecord(value) &&
+  typeof value['side'] === 'string' &&
+  typeof value['scenario'] === 'string' &&
+  Array.isArray(value['samples']);
 
 const child = async (
   side: ComparisonSide,
@@ -86,6 +128,7 @@ const historyChild = async (): Promise<void> => {
 const runChild = <T>(
   args: ReadonlyArray<string>,
   label: string,
+  decode: (value: unknown) => value is T,
   startup = false,
 ): Promise<T> =>
   new Promise((resolve, reject) => {
@@ -106,7 +149,7 @@ const runChild = <T>(
     proc.on('error', reject);
     proc.on('close', (code) => {
       if (code !== 0) {
-        reject(new Error(`${label} exited with ${code}`));
+        reject(new Error(`${label} exited with ${String(code)}`));
         return;
       }
       const marker = out.lastIndexOf('##BENCH##');
@@ -114,7 +157,12 @@ const runChild = <T>(
         reject(new Error(`${label} produced no result`));
         return;
       }
-      resolve(JSON.parse(out.slice(marker + 9).trim()) as T);
+      const value = parseJson(out.slice(marker + 9).trim());
+      if (!decode(value)) {
+        reject(new Error(`${label} produced an invalid result`));
+        return;
+      }
+      resolve(value);
     });
   });
 
@@ -153,7 +201,7 @@ const growthTable = (results: ReadonlyArray<ComparisonResult>): void => {
   );
   const picks = [1, 5, 10, 20, 30];
   line(
-    `${'side'.padEnd(12)} ${picks.map((index) => `msg ${index}`.padStart(9)).join(' ')}   medians`,
+    `${'side'.padEnd(12)} ${picks.map((index) => `msg ${String(index)}`.padStart(9)).join(' ')}   medians`,
   );
   for (const result of results.filter((entry) => entry.workload === 'growth')) {
     const cells = picks.map((index) => {
@@ -176,7 +224,7 @@ const processTable = (results: ReadonlyArray<ComparisonResult>): void => {
     );
     const summary = summarise(startup.flatMap((entry) => entry.samples));
     line(
-      `${'cold complete'.padEnd(12)} ${side.padEnd(12)} ${formatMs(summary.median).padStart(10)} ${formatMs(summary.min).padStart(10)} ${formatMs(summary.max).padStart(10)}   ${summary.n}`,
+      `${'cold complete'.padEnd(12)} ${side.padEnd(12)} ${formatMs(summary.median).padStart(10)} ${formatMs(summary.min).padStart(10)} ${formatMs(summary.max).padStart(10)}   ${String(summary.n)}`,
     );
     const memory = results.filter(
       (entry) => entry.side === side && entry.workload === 'memory',
@@ -184,10 +232,10 @@ const processTable = (results: ReadonlyArray<ComparisonResult>): void => {
     const heap = summarise(memory.map((entry) => entry.heapBytes ?? 0));
     const rss = summarise(memory.map((entry) => entry.rssBytes ?? 0));
     line(
-      `${'heap MiB'.padEnd(12)} ${side.padEnd(12)} ${mib(heap.median).padStart(10)} ${mib(heap.min).padStart(10)} ${mib(heap.max).padStart(10)}   ${heap.n}`,
+      `${'heap MiB'.padEnd(12)} ${side.padEnd(12)} ${mib(heap.median).padStart(10)} ${mib(heap.min).padStart(10)} ${mib(heap.max).padStart(10)}   ${String(heap.n)}`,
     );
     line(
-      `${'rss MiB'.padEnd(12)} ${side.padEnd(12)} ${mib(rss.median).padStart(10)} ${mib(rss.min).padStart(10)} ${mib(rss.max).padStart(10)}   ${rss.n}`,
+      `${'rss MiB'.padEnd(12)} ${side.padEnd(12)} ${mib(rss.median).padStart(10)} ${mib(rss.min).padStart(10)} ${mib(rss.max).padStart(10)}   ${String(rss.n)}`,
     );
   }
 };
@@ -231,7 +279,11 @@ const parent = async (): Promise<void> => {
     for (const side of SIDES) {
       process.stderr.write(`running ${side}/${workload}...\n`);
       results.push(
-        await runChild(['--child', side, workload], `${side}/${workload}`),
+        await runChild(
+          ['--child', side, workload],
+          `${side}/${workload}`,
+          isComparisonResult,
+        ),
       );
     }
   }
@@ -239,16 +291,16 @@ const parent = async (): Promise<void> => {
     ['startup', 'memory'] as const
   ).entries()) {
     for (let repeat = 0; repeat < COMPARISON_PROCESS_REPEATS; repeat++) {
-      const order =
-        (repeat + workloadIndex) % 2 === 0 ? SIDES : [...SIDES].reverse();
+      const order = (repeat + workloadIndex) % 2 === 0 ? SIDES : REVERSED_SIDES;
       for (const side of order) {
         process.stderr.write(
-          `running ${side}/${workload} (${repeat + 1}/${COMPARISON_PROCESS_REPEATS})...\n`,
+          `running ${side}/${workload} (${String(repeat + 1)}/${String(COMPARISON_PROCESS_REPEATS)})...\n`,
         );
         results.push(
           await runChild(
             ['--child', side, workload],
             `${side}/${workload}`,
+            isComparisonResult,
             workload === 'startup',
           ),
         );
@@ -259,12 +311,17 @@ const parent = async (): Promise<void> => {
   const history = await runChild<ScenarioResult>(
     ['--history'],
     'Vesper/history-open',
+    isScenarioResult,
   );
   const conformance: ConformanceResult[] = [];
   for (const side of SIDES) {
     process.stderr.write(`running ${side}/conformance...\n`);
     conformance.push(
-      await runChild(['--conformance', side], `${side}/conformance`),
+      await runChild(
+        ['--conformance', side],
+        `${side}/conformance`,
+        isConformanceResult,
+      ),
     );
   }
 
@@ -301,9 +358,15 @@ const parent = async (): Promise<void> => {
 
 const argv = process.argv.slice(2);
 if (argv[0] === '--child') {
-  await child(argv[1] as ComparisonSide, argv[2] as ComparisonWorkload);
+  if (!isComparisonSide(argv[1]) || !isComparisonWorkload(argv[2])) {
+    throw new Error('invalid comparison child arguments');
+  }
+  await child(argv[1], argv[2]);
 } else if (argv[0] === '--conformance') {
-  await conformanceChild(argv[1] as ComparisonSide);
+  if (!isComparisonSide(argv[1])) {
+    throw new Error('invalid comparison conformance arguments');
+  }
+  await conformanceChild(argv[1]);
 } else if (argv[0] === '--history') {
   await historyChild();
 } else {

@@ -1,4 +1,4 @@
-import { Context, Effect, Schema } from 'effect';
+import { Context, Schema, type Effect } from 'effect';
 
 // The workspace seam: a filesystem and a shell behind one service, so a local
 // process, a container, or a remote worker are interchangeable by layer.

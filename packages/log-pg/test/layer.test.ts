@@ -10,6 +10,17 @@ import {
   type ListenerClient,
 } from '../src/internal/pg-listen.js';
 
+const at = <T>(values: ReadonlyArray<T>, index: number): T => {
+  const value = values[index];
+  if (value === undefined) {
+    throw new Error(`missing value at index ${String(index)}`);
+  }
+  return value;
+};
+
+const inTransaction = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect;
+const unusedListen = () => Stream.die('not used');
+
 class FakeListenerClient implements ListenerClient {
   endCalls = 0;
 
@@ -44,9 +55,6 @@ class FakeListenerClient implements ListenerClient {
 }
 
 describe('LogStore Postgres SQL', () => {
-  const inTransaction = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect;
-  const unusedListen = () => Stream.die('not used');
-
   it.effect('closes a listener client when connect fails', () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -141,8 +149,10 @@ describe('LogStore Postgres SQL', () => {
         });
 
         expect(statements).toHaveLength(3);
-        expect(statements[0]!.text).toBe('SET LOCAL statement_timeout = 30000');
-        const write = statements[2]!;
+        expect(at(statements, 0).text).toBe(
+          'SET LOCAL statement_timeout = 30000',
+        );
+        const write = at(statements, 2);
         expect(write.text).toContain('jsonb_array_elements($6::jsonb)');
         expect(write.text).toContain('inserted AS');
         expect(write.text).toContain('advanced AS');
@@ -159,7 +169,7 @@ describe('LogStore Postgres SQL', () => {
           ),
         )(JSON.parse(String(write.params[5])));
         expect(encoded).toHaveLength(1_000);
-        expect(Object.keys(encoded[0]!.record.params)).toEqual(['a', 'z']);
+        expect(Object.keys(at(encoded, 0).record.params)).toEqual(['a', 'z']);
       }).pipe(Effect.provide(NodeServices.layer));
     },
   );
@@ -197,10 +207,10 @@ describe('LogStore Postgres SQL', () => {
 
       expect(claim.epoch).toBe(4);
       expect(statements).toHaveLength(1);
-      expect(statements[0]!.text).toContain('SET epoch = epoch + 1');
-      expect(statements[0]!.text).toContain('epoch = $3');
-      expect(statements[0]!.text).toContain('last_offset = $4');
-      expect(statements[0]!.params).toEqual([
+      expect(at(statements, 0).text).toContain('SET epoch = epoch + 1');
+      expect(at(statements, 0).text).toContain('epoch = $3');
+      expect(at(statements, 0).text).toContain('last_offset = $4');
+      expect(at(statements, 0).params).toEqual([
         'stream',
         LogVocabulary.ProducerId.make('producer'),
         3,
@@ -220,7 +230,12 @@ describe('LogStore Postgres SQL', () => {
       yield* store.acquire('stream', LogVocabulary.ProducerId.make('producer'));
 
       expect(statements).toHaveLength(1);
-      expect(statements[0]!.params).toEqual(['stream', 'producer', null, null]);
+      expect(at(statements, 0).params).toEqual([
+        'stream',
+        'producer',
+        null,
+        null,
+      ]);
     }).pipe(Effect.provide(NodeServices.layer));
   });
 

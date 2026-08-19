@@ -6,7 +6,15 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Crypto, Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
+import {
+  type Crypto,
+  Deferred,
+  Effect,
+  Fiber,
+  Layer,
+  Ref,
+  Stream,
+} from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -89,8 +97,7 @@ const blocking = (reached: Deferred.Deferred<void>) =>
         Stream.unwrap(
           Effect.gen(function* () {
             yield* Deferred.succeed(reached, undefined);
-            yield* Effect.never;
-            return Stream.fromIterable(answer);
+            return yield* Effect.never;
           }),
         ),
     }),
@@ -142,23 +149,22 @@ const run = <A, E>(
   >,
   model: Layer.Layer<LanguageModel.LanguageModel> = answering,
 ) =>
-  effect.pipe(
-    Effect.orDie,
-    Effect.provide(model),
-    Effect.provide(testLogLayer),
-  );
+  effect.pipe(Effect.orDie, Effect.provide(Layer.merge(model, testLogLayer)));
 
 const runInSession = <R>(
   child: Agent.Child<string, R>,
   session: AgentLog.Session,
   input: string,
 ) =>
-  Effect.flatMap(RunPolicyRuntime.create(RunPolicy.defaultLimits), (runtime) =>
-    protocolOf<R, Agent.Error<typeof child>>(child)!.run(
-      runtime,
-      session,
-      input,
-    ),
+  Effect.flatMap(
+    RunPolicyRuntime.create(RunPolicy.defaultLimits),
+    (runtime) => {
+      const protocol = protocolOf<R, Agent.Error<typeof child>>(child);
+      if (protocol === undefined) {
+        throw new Error('child does not implement the agent protocol');
+      }
+      return protocol.run(runtime, session, input);
+    },
   );
 
 describe('how a run settles', () => {

@@ -43,7 +43,9 @@ describe('Agent dynamic tools', () => {
                 started,
                 (value) => value + 1,
               );
-              if (count === 2) yield* Deferred.succeed(bothStarted, undefined);
+              if (count === 2) {
+                yield* Deferred.succeed(bothStarted, undefined);
+              }
               yield* Deferred.await(bothStarted);
               return DynamicToolkit.empty;
             }),
@@ -362,16 +364,15 @@ describe('Agent dynamic tools', () => {
   });
 
   it.effect('rejects duplicate resource identities even without tools', () => {
-    const source = () =>
-      DynamicToolkit.make(Effect.succeed(DynamicToolkit.empty), {
-        resource: {
-          id: 'mcp:linear',
-          description: 'MCP server "linear"',
-        },
-      });
+    const source = DynamicToolkit.make(Effect.succeed(DynamicToolkit.empty), {
+      resource: {
+        id: 'mcp:linear',
+        description: 'MCP server "linear"',
+      },
+    });
 
     return Effect.gen(function* () {
-      const result = yield* DynamicToolkit.open([source(), source()]).pipe(
+      const result = yield* DynamicToolkit.open([source, source]).pipe(
         Effect.result,
       );
 
@@ -384,7 +385,7 @@ describe('Agent dynamic tools', () => {
     () =>
       Effect.gen(function* () {
         const unavailable = DynamicToolkit.optional(
-          DynamicToolkit.make<{}>(
+          DynamicToolkit.make<Record<never, never>>(
             Effect.fail(
               new AiError.AiError({
                 module: 'DynamicTest',
@@ -417,10 +418,10 @@ describe('Agent dynamic tools', () => {
         ]);
 
         yield* agent.run('Try Linear.').pipe(Effect.provide(model.layer));
-        const request = (yield* model.requests)[0];
+        const request = (yield* model.requests).at(0);
         const system = request?.prompt.content
           .filter((message) => message.role === 'system')
-          .map((message) => String(message.content))
+          .map((message) => message.content)
           .join('\n');
 
         expect(request?.tools).toEqual([]);
