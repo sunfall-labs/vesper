@@ -82,10 +82,11 @@ export const stdio = (options: StdioServerParameters): Transport =>
   transport(() => new StdioClientTransport(options));
 
 export interface Selection {
-  /** Server tool names to expose, in the order advertised to the model. */
+  /**
+   * Server tool names to expose, in the order advertised to the model.
+   * Omit to expose the callable catalog in canonical name order.
+   */
   readonly tools?: ReadonlyArray<string> | undefined;
-  /** Require Vesper's ordinary approval flow for selected remote tools. */
-  readonly needsApproval?: boolean | ((tool: McpTool) => boolean) | undefined;
   readonly timeout?: number | undefined;
   readonly resetTimeoutOnProgress?: boolean | undefined;
 }
@@ -338,17 +339,12 @@ const adapt = <Name extends string>(
       }
       names.add(name);
 
-      const needsApproval =
-        typeof definition.needsApproval === 'function'
-          ? definition.needsApproval(remote)
-          : definition.needsApproval;
       const tool = Tool.dynamic(name, {
         description: description(definition.name, remote),
         parameters: normalizeInputSchema(remote.inputSchema),
         success: Schema.String,
         failure: Schema.String,
         failureMode: 'return',
-        needsApproval,
       });
       tools.push(tool);
       handlers[name] = (params) => call(client, definition, remote, params);
@@ -396,7 +392,7 @@ const select = (
   const callable = discovered.filter(
     (tool) => tool.execution?.taskSupport !== 'required',
   );
-  if (allowlist === undefined) return callable;
+  if (allowlist === undefined) return callable.sort(compareToolNames);
 
   const duplicates = allowlist.filter(
     (name, index) => allowlist.indexOf(name) !== index,
@@ -428,6 +424,9 @@ const select = (
   });
 };
 
+const compareToolNames = (left: McpTool, right: McpTool): number =>
+  left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+
 const toolName = (server: string, tool: string): string =>
   `mcp__${sanitize(server)}__${sanitize(tool)}`;
 
@@ -456,11 +455,49 @@ const description = (server: string, tool: McpTool): string => {
 
 const normalizeInputSchema = (
   schema: McpTool['inputSchema'],
-): McpTool['inputSchema'] => ({
-  ...schema,
-  type: schema.type ?? 'object',
-  properties: schema.properties ?? {},
-});
+): McpTool['inputSchema'] => {
+  const canonical = canonicalJson({
+    ...schema,
+    type: schema.type ?? 'object',
+    properties: schema.properties ?? {},
+  });
+  return isJsonObject(canonical)
+    ? {
+        ...canonical,
+        type: schema.type ?? 'object',
+        properties: isJsonObject(canonical.properties)
+          ? canonical.properties
+          : {},
+      }
+    : { type: 'object', properties: {} };
+};
+
+const canonicalJson = (
+  value: unknown,
+  key?: string,
+): Schema.Json | undefined => {
+  if (value === undefined) return undefined;
+  if (Array.isArray(value)) {
+    const items = value.flatMap((item) => {
+      const canonical = canonicalJson(item);
+      return canonical === undefined ? [] : [canonical];
+    });
+    return key === 'required' && items.every((item) => typeof item === 'string')
+      ? items.sort()
+      : items;
+  }
+  if (typeof value !== 'object' || value === null)
+    return isJson(value) ? value : undefined;
+  const entries = Object.entries(value)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+    .flatMap(([name, item]) => {
+      const canonical = canonicalJson(item, name);
+      if (canonical === undefined) return [];
+      const entry: readonly [string, Schema.Json] = [name, canonical];
+      return [entry];
+    });
+  return Object.fromEntries(entries);
+};
 
 const formatResult = (result: CallToolResult): string => {
   const parts: string[] = [];

@@ -165,10 +165,7 @@ export const compact = Effect.fn('Agent.compact')(function* (
       { role: 'user', content: [{ type: 'text', text: policy.instructions }] },
     ]),
   });
-  yield* Observability.usage({
-    input: summary.usage.inputTokens.total ?? 0,
-    output: summary.usage.outputTokens.total ?? 0,
-  });
+  yield* Observability.usage(summary.usage);
   yield* Observability.compaction;
 
   yield* Ref.set(

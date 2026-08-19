@@ -5,7 +5,7 @@ const ResourcesTypeId: unique symbol = Symbol.for(
   '@sunfall/vesper-agent/DynamicToolkit/Resources',
 );
 
-/** A model-visible capability whose availability is resolved with its tools. */
+/** A model-visible resource snapshot resolved with its run-start tool catalog. */
 export interface Resource {
   readonly id: string;
   readonly description: string;
@@ -168,11 +168,13 @@ export const resources = (toolkit: unknown): ReadonlyArray<Resource> =>
   hasResources(toolkit) ? toolkit[ResourcesTypeId] : [];
 
 /**
- * Render the current dynamic capability snapshot for the model.
+ * Render the run-start dynamic resource snapshot for the model.
  *
  * This belongs in system context rather than conversation history: an
- * unchanged snapshot remains cacheable, while a changed one supersedes stale
- * availability mentioned by earlier turns without accumulating messages.
+ * unchanged snapshot remains cacheable, while a genuinely changed catalog
+ * supersedes stale discovery state without accumulating messages. Live
+ * operation-specific availability, authorization, and approval belong in
+ * typed tool handlers instead. Toolkit-wide policy may use interception.
  */
 export const resourceContext = (toolkit: unknown): string => {
   const current = resources(toolkit);
@@ -184,7 +186,7 @@ export const resourceContext = (toolkit: unknown): string => {
   });
   return [
     '<dynamic_resources>',
-    'Current tool availability for this submission follows. This snapshot supersedes availability in earlier messages.',
+    'Dynamic resources resolved for this run follow. This run-start snapshot supersedes dynamic-resource state in earlier messages.',
     ...lines,
     '</dynamic_resources>',
   ].join('\n');

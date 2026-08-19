@@ -11,6 +11,9 @@ export interface Request {
   readonly operation: 'generateText' | 'streamText';
   readonly index: number;
   readonly prompt: Prompt.Prompt;
+  /** Exact tool definitions handed to the provider, in provider order. */
+  readonly toolDefinitions: LanguageModel.ProviderOptions['tools'];
+  /** Convenience projection for assertions that only care about names. */
   readonly tools: ReadonlyArray<string>;
   readonly toolChoice: LanguageModel.ProviderOptions['toolChoice'];
 }
@@ -62,6 +65,7 @@ const requestOf = (
   operation,
   index,
   prompt: options.prompt,
+  toolDefinitions: Array.from(options.tools),
   tools: options.tools.map((tool) => tool.name),
   toolChoice: options.toolChoice,
 });
