@@ -8,6 +8,10 @@ characters replaced by `_`, so tools from different servers remain distinct.
 npm install @sunfall/vesper-mcp @sunfall/vesper-agent effect@4.0.0-rc.109
 ```
 
+Node.js 22 or newer is required. `getLinearToken()` below is an
+application-owned resolver; replace it with your secret-management code and do
+not put a raw token in source.
+
 ```ts
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Mcp } from '@sunfall/vesper-mcp/mcp';
@@ -37,6 +41,16 @@ header, reducing accidental exposure through logs and inspection. `headers`,
 `requestInit`, a custom `fetch`, and legacy
 `transport: 'sse'` are also available. For OAuth or a custom transport, use the
 lower-level `Mcp.make({ transport: Mcp.streamableHttp(...) })`.
+
+MCP metadata, schemas, and results are untrusted input. Discovery accepts at
+most 128 tools by default, descriptions up to 8 KiB, schemas and arguments up
+to 64 KiB, and one model-facing result up to 1 MiB; calls and discovery use a
+30-second timeout. Tighten these defaults per source with `limits` and
+`timeout` (each has a validated upper bound). These are acceptance and
+propagation bounds, not transport-memory limits: the MCP SDK materializes a
+response before Vesper can apply `maxResultBytes`. Treat remote descriptions
+and schema text as data, and enforce authorization in typed handlers or
+`beforeToolCall`.
 
 Every submission discovers a fresh tool snapshot. That snapshot is immutable
 across all model turns in the run, and all configured dynamic sources open in

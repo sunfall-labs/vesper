@@ -1,10 +1,44 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Clock, Crypto, Effect } from 'effect';
+import { Clock, Crypto, Effect, Schema, Semaphore } from 'effect';
 
-import type { Signal } from '../conversation.js';
 import * as AgentIds from './ids.js';
+
+/** Out-of-band input addressed to a durable conversation. */
+export const Signal = Schema.Struct({
+  kind: Schema.Literals(['steer', 'cancel']),
+  /** Steering text, or a cancellation reason. */
+  text: Schema.String,
+  /** User or service that sent the signal. */
+  source: Schema.String,
+});
+export type Signal = typeof Signal.Type;
+
+/** Hard ingress ceiling; a run policy may impose a smaller per-run limit. */
+export const MAX_SIGNAL_BYTES = 256 * 1024;
+
+// A process-local lock prevents two ordinary senders from fencing one another
+// between acquire and append. It cannot coordinate separate processes; the
+// durable producer epoch remains the authority there.
+const APPEND_MUTEX = Semaphore.makeUnsafe(1);
+
+const utf8Length = (text: string): number => {
+  let bytes = 0;
+  for (const character of text) {
+    const codePoint = character.codePointAt(0);
+    if (codePoint === undefined) continue;
+    bytes +=
+      codePoint <= 0x7f
+        ? 1
+        : codePoint <= 0x7ff
+          ? 2
+          : codePoint <= 0xffff
+            ? 3
+            : 4;
+  }
+  return bytes;
+};
 
 // Out-of-band input to a running conversation: steering, and cancel.
 //
@@ -44,6 +78,10 @@ import * as AgentIds from './ids.js';
 // cursor is derived from those records. For steering that is the right side
 // to err on: a repeated instruction is visible and recoverable, a dropped one
 // is neither.
+//
+// Sending has no idempotency key. If a caller loses the response after the
+// append may have committed, retrying can duplicate the signal; callers that
+// need exactly-once user-visible actions must deduplicate at their boundary.
 
 /**
  * Where a conversation's signals live.
@@ -75,11 +113,43 @@ export const append = Effect.fn('AgentSignals.append')(function* (
   conversationId: LogVocabulary.ConversationId,
   signal: Signal,
 ) {
+  const path = pathFor(conversationId);
+  const validated = yield* validateSignal(path, signal);
   const store = yield* LogStore.Service;
-  yield* appendRecord(store, conversationId, {
-    _tag: 'Signal',
-    ...signal,
-  });
+  yield* APPEND_MUTEX.withPermits(1)(
+    appendRecord(store, conversationId, {
+      _tag: 'Signal',
+      ...validated,
+    }),
+  );
+});
+
+const validateSignal = Effect.fn('AgentSignals.validate')(function* (
+  path: string,
+  input: unknown,
+) {
+  const signal = yield* Schema.decodeUnknownEffect(Signal)(input).pipe(
+    Effect.mapError(() =>
+      LogStore.makeError(
+        path,
+        'append',
+        'encoding',
+        'signal must contain a steer or cancel kind and string text and source',
+      ),
+    ),
+  );
+  const bytes = utf8Length(signal.text) + utf8Length(signal.source);
+  if (bytes > MAX_SIGNAL_BYTES) {
+    return yield* Effect.fail(
+      LogStore.makeError(
+        path,
+        'append',
+        'encoding',
+        `signal payload is ${bytes} bytes; maximum is ${MAX_SIGNAL_BYTES}`,
+      ),
+    );
+  }
+  return signal;
 });
 
 const appendRecord = (

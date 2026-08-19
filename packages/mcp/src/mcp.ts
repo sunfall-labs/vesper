@@ -18,6 +18,7 @@ import {
   type StdioServerParameters,
 } from '@modelcontextprotocol/client/stdio';
 import {
+  Cause,
   Context,
   Duration,
   Effect,
@@ -87,9 +88,71 @@ export interface Selection {
    * Omit to expose the callable catalog in canonical name order.
    */
   readonly tools?: ReadonlyArray<string> | undefined;
+  /** Discovery and call timeout in milliseconds. Defaults to 30 seconds. */
   readonly timeout?: number | undefined;
   readonly resetTimeoutOnProgress?: boolean | undefined;
+  /** Hard bounds applied to untrusted discovery metadata and tool results. */
+  readonly limits?: Limits | undefined;
 }
+
+/** Bounds for one MCP source. Values are validated before a connection opens. */
+export interface Limits {
+  /** Maximum number of tools accepted from one discovery response. */
+  readonly maxTools?: number | undefined;
+  /** Maximum length of one remote tool name. */
+  readonly maxToolNameLength?: number | undefined;
+  /** Maximum UTF-8 bytes in a remote title or rendered description. */
+  readonly maxDescriptionLength?: number | undefined;
+  /** Maximum UTF-8 bytes in one canonicalized input schema. */
+  readonly maxSchemaBytes?: number | undefined;
+  /** Maximum UTF-8 bytes in encoded tool arguments. */
+  readonly maxArgumentBytes?: number | undefined;
+  /** Maximum UTF-8 bytes returned to the model by one tool call. */
+  readonly maxResultBytes?: number | undefined;
+}
+
+/** A bounded resource supplied by an MCP server exceeded its configured limit. */
+export class LimitError extends Schema.TaggedError<LimitError>(
+  '@sunfall/vesper-mcp/LimitError',
+)('LimitError', {
+  resource: Schema.String,
+  limit: Schema.Natural,
+  actual: Schema.Natural,
+}) {}
+
+const ToolFailure = Schema.Union([Schema.String, LimitError]);
+
+/** The defaults are deliberately conservative for model-facing data. */
+export const defaultLimits = Object.freeze({
+  maxTools: 128,
+  maxToolNameLength: 256,
+  maxDescriptionLength: 8_192,
+  maxSchemaBytes: 64 * 1024,
+  maxArgumentBytes: 64 * 1024,
+  maxResultBytes: 1024 * 1024,
+});
+
+const maximumLimits = {
+  maxTools: 1_024,
+  maxToolNameLength: 1_024,
+  maxDescriptionLength: 64 * 1024,
+  maxSchemaBytes: 1024 * 1024,
+  maxArgumentBytes: 1024 * 1024,
+  maxResultBytes: 16 * 1024 * 1024,
+};
+
+interface NormalizedLimits {
+  readonly maxTools: number;
+  readonly maxToolNameLength: number;
+  readonly maxDescriptionLength: number;
+  readonly maxSchemaBytes: number;
+  readonly maxArgumentBytes: number;
+  readonly maxResultBytes: number;
+}
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 5 * 60_000;
+const MAX_SERVER_NAME_LENGTH = 256;
 
 export interface Definition<Name extends string> extends Selection {
   readonly name: Name;
@@ -292,7 +355,14 @@ const connectedClient = Effect.fn('Mcp.connect')(function* <
         .connect(definition.transport.make(), { signal })
         .then(() => client),
     catch: (error) => failure('connect', definition.name, error),
-  });
+  }).pipe(
+    Effect.timeout(Duration.millis(timeoutFor(definition))),
+    Effect.mapError((error) =>
+      AiError.isAiError(error)
+        ? error
+        : failure('connect', definition.name, error),
+    ),
+  );
 });
 
 const discover = Effect.fn('Mcp.discover')(function* <Name extends string>(
@@ -304,29 +374,67 @@ const discover = Effect.fn('Mcp.discover')(function* <Name extends string>(
     try: (signal) =>
       client.listTools(undefined, listOptions(signal, definition)),
     catch: (error) => failure('listTools', definition.name, error),
-  });
+  }).pipe(
+    Effect.timeout(Duration.millis(timeoutFor(definition))),
+    Effect.mapError((error) =>
+      AiError.isAiError(error)
+        ? error
+        : failure('listTools', definition.name, error),
+    ),
+  );
+  const limits = normalizeLimits(definition.limits);
+  if (!Array.isArray(listed.tools)) {
+    return yield* Effect.fail(
+      failure(
+        'listTools',
+        definition.name,
+        new Error('MCP server returned a malformed tools list'),
+      ),
+    );
+  }
+  if (listed.tools.length > limits.maxTools) {
+    return yield* Effect.fail(
+      failure(
+        'listTools',
+        definition.name,
+        new LimitError({
+          resource: 'tool-count',
+          limit: limits.maxTools,
+          actual: listed.tools.length,
+        }),
+      ),
+    );
+  }
+  for (const tool of listed.tools) {
+    yield* Effect.try({
+      try: () => validateRemoteTool(definition.name, tool, limits),
+      catch: (error) => failure('validateTools', definition.name, error),
+    });
+  }
   const selected = yield* Effect.try({
     try: () => select(definition.name, listed.tools, definition.tools),
     catch: (error) => failure('selectTools', definition.name, error),
   });
 
-  return yield* adapt(client, definition, selected);
+  return yield* adapt(client, definition, selected, limits);
 });
 
 const adapt = <Name extends string>(
   client: ClientLike,
   definition: Pick<FromClient<Name, never>, keyof Selection | 'name'>,
   remoteTools: ReadonlyArray<McpTool>,
+  limits: NormalizedLimits,
 ): Effect.Effect<Toolkit.WithHandler<Tools>, AiError.AiError> =>
   Effect.gen(function* () {
     const names = new Set<string>();
     const tools: Tool.AnyDynamic[] = [];
     const handlers: Record<
       string,
-      (params: unknown) => Effect.Effect<string, string>
+      (params: unknown) => Effect.Effect<string, string | LimitError>
     > = {};
 
     for (const remote of remoteTools) {
+      validateRemoteTool(definition.name, remote, limits);
       const name = toolName(definition.name, remote.name);
       if (names.has(name)) {
         return yield* Effect.fail(
@@ -339,15 +447,25 @@ const adapt = <Name extends string>(
       }
       names.add(name);
 
-      const tool = Tool.dynamic(name, {
-        description: description(definition.name, remote),
-        parameters: normalizeInputSchema(remote.inputSchema),
-        success: Schema.String,
-        failure: Schema.String,
-        failureMode: 'return',
+      const tool = yield* Effect.try({
+        try: () =>
+          Tool.dynamic(name, {
+            description: description(definition.name, remote, limits),
+            parameters: normalizeInputSchema(
+              remote.inputSchema,
+              limits,
+              definition.name,
+              remote.name,
+            ),
+            success: Schema.String,
+            failure: ToolFailure,
+            failureMode: 'return',
+          }),
+        catch: (error) => failure('adaptTools', definition.name, error),
       });
       tools.push(tool);
-      handlers[name] = (params) => call(client, definition, remote, params);
+      handlers[name] = (params) =>
+        call(client, definition, remote, params, limits);
     }
 
     const toolkit = Toolkit.make(...tools);
@@ -362,13 +480,28 @@ const call = Effect.fn('Mcp.call')(function* <Name extends string>(
   definition: Pick<FromClient<Name, never>, keyof Selection | 'name'>,
   tool: McpTool,
   params: unknown,
-): Effect.fn.Return<string, string> {
+  limits: NormalizedLimits,
+): Effect.fn.Return<string, string | LimitError> {
   yield* Effect.annotateCurrentSpan({
     'vesper.mcp.server': definition.name,
     'vesper.mcp.tool': tool.name,
   });
   if (!isJsonObject(params)) {
     return yield* Effect.fail('MCP tool arguments must be a JSON object.');
+  }
+  const encodedParams = JSON.stringify(params);
+  if (encodedParams === undefined) {
+    return yield* Effect.fail('MCP tool arguments must be JSON-serializable.');
+  }
+  const argumentBytes = utf8Bytes(encodedParams);
+  if (argumentBytes > limits.maxArgumentBytes) {
+    return yield* Effect.fail(
+      new LimitError({
+        resource: 'tool-arguments',
+        limit: limits.maxArgumentBytes,
+        actual: argumentBytes,
+      }),
+    );
   }
   const result = yield* Effect.tryPromise({
     try: (signal) =>
@@ -377,8 +510,15 @@ const call = Effect.fn('Mcp.call')(function* <Name extends string>(
         { ...callOptions(signal, definition), toolDefinition: tool },
       ),
     catch: (error) => message(error),
-  });
-  const formatted = formatResult(result);
+  }).pipe(
+    Effect.timeout(Duration.millis(timeoutFor(definition))),
+    Effect.mapError((error) =>
+      Cause.isTimeoutError(error)
+        ? `MCP tool timed out after ${timeoutFor(definition)}ms`
+        : message(error),
+    ),
+  );
+  const formatted = yield* formatResult(result, limits.maxResultBytes);
   return result.isError
     ? yield* Effect.fail(formatted || 'MCP tool reported an error.')
     : formatted;
@@ -392,7 +532,11 @@ const select = (
   const callable = discovered.filter(
     (tool) => tool.execution?.taskSupport !== 'required',
   );
-  if (allowlist === undefined) return callable.sort(compareToolNames);
+  if (allowlist === undefined) {
+    return callable.sort((left, right) =>
+      compareToolNames(server, left, right),
+    );
+  }
 
   const duplicates = allowlist.filter(
     (name, index) => allowlist.indexOf(name) !== index,
@@ -424,8 +568,52 @@ const select = (
   });
 };
 
-const compareToolNames = (left: McpTool, right: McpTool): number =>
-  left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
+const validateRemoteTool = (
+  server: string,
+  tool: McpTool,
+  limits: NormalizedLimits,
+): void => {
+  if (
+    typeof tool !== 'object' ||
+    tool === null ||
+    typeof tool.name !== 'string' ||
+    tool.name.length === 0 ||
+    typeof tool.inputSchema !== 'object' ||
+    tool.inputSchema === null ||
+    Array.isArray(tool.inputSchema)
+  ) {
+    throw new Error(
+      `MCP server ${JSON.stringify(server)} returned malformed tool metadata`,
+    );
+  }
+  if (tool.name.length > limits.maxToolNameLength) {
+    throw new LimitError({
+      resource: 'tool-name',
+      limit: limits.maxToolNameLength,
+      actual: tool.name.length,
+    });
+  }
+  if (
+    (tool.description !== undefined && typeof tool.description !== 'string') ||
+    (tool.title !== undefined && typeof tool.title !== 'string') ||
+    (tool.annotations?.title !== undefined &&
+      typeof tool.annotations.title !== 'string')
+  ) {
+    throw new Error(
+      `MCP tool ${JSON.stringify(tool.name)} from ${JSON.stringify(server)} returned malformed text metadata`,
+    );
+  }
+};
+
+const compareToolNames = (
+  server: string,
+  left: McpTool,
+  right: McpTool,
+): number => {
+  const leftName = toolName(server, left.name);
+  const rightName = toolName(server, right.name);
+  return leftName < rightName ? -1 : leftName > rightName ? 1 : 0;
+};
 
 const toolName = (server: string, tool: string): string =>
   `mcp__${sanitize(server)}__${sanitize(tool)}`;
@@ -437,7 +625,11 @@ const sanitize = (value: string): string => {
   return sanitized || 'unnamed';
 };
 
-const description = (server: string, tool: McpTool): string => {
+const description = (
+  server: string,
+  tool: McpTool,
+  limits: NormalizedLimits,
+): string => {
   const parts: string[] = [];
   if (sanitize(server) !== server || sanitize(tool.name) !== tool.name) {
     parts.push(
@@ -445,26 +637,56 @@ const description = (server: string, tool: McpTool): string => {
     );
   }
   const title = tool.title ?? tool.annotations?.title;
-  if (title !== undefined && title !== tool.name)
-    parts.push(`Title: ${title}.`);
-  if (tool.description !== undefined) parts.push(tool.description);
-  return parts.length === 0
-    ? `MCP tool ${JSON.stringify(tool.name)} from ${JSON.stringify(server)}.`
-    : parts.join(' ');
+  if (title !== undefined && title !== tool.name) {
+    parts.push(`Title: ${metadataText(title, limits)}.`);
+  }
+  if (tool.description !== undefined) {
+    parts.push(metadataText(tool.description, limits));
+  }
+  const rendered =
+    parts.length === 0
+      ? `MCP tool ${JSON.stringify(tool.name)} from ${JSON.stringify(server)}.`
+      : parts.join(' ');
+  const renderedBytes = utf8Bytes(rendered);
+  if (renderedBytes > limits.maxDescriptionLength) {
+    throw new LimitError({
+      resource: 'tool-description',
+      limit: limits.maxDescriptionLength,
+      actual: renderedBytes,
+    });
+  }
+  return rendered;
 };
 
 const normalizeInputSchema = (
   schema: McpTool['inputSchema'],
+  limits: NormalizedLimits,
+  server: string,
+  tool: string,
 ): McpTool['inputSchema'] => {
+  if (schema.type !== undefined && schema.type !== 'object') {
+    throw new Error(
+      `MCP tool ${JSON.stringify(tool)} from ${JSON.stringify(server)} must use an object input schema`,
+    );
+  }
   const canonical = canonicalJson({
     ...schema,
-    type: schema.type ?? 'object',
+    type: 'object',
     properties: schema.properties ?? {},
   });
+  const encoded = JSON.stringify(canonical);
+  const schemaBytes = encoded === undefined ? 0 : utf8Bytes(encoded);
+  if (schemaBytes > limits.maxSchemaBytes) {
+    throw new LimitError({
+      resource: 'tool-schema',
+      limit: limits.maxSchemaBytes,
+      actual: schemaBytes,
+    });
+  }
   return isJsonObject(canonical)
     ? {
         ...canonical,
-        type: schema.type ?? 'object',
+        type: 'object',
         properties: isJsonObject(canonical.properties)
           ? canonical.properties
           : {},
@@ -499,36 +721,61 @@ const canonicalJson = (
   return Object.fromEntries(entries);
 };
 
-const formatResult = (result: CallToolResult): string => {
-  const parts: string[] = [];
-  if (result.structuredContent !== undefined) {
-    parts.push(
-      `Structured content:\n${JSON.stringify(result.structuredContent, undefined, 2)}`,
-    );
-  }
-  for (const item of result.content ?? []) {
-    if (item.type === 'text') {
-      parts.push(item.text);
-    } else if (item.type === 'image' || item.type === 'audio') {
-      parts.push(
-        `[${item.type === 'image' ? 'Image' : 'Audio'}: ${item.mimeType}, ${item.data.length} base64 chars]`,
+const formatResult = (
+  result: CallToolResult,
+  maxResultBytes: number,
+): Effect.Effect<string, LimitError> =>
+  Effect.gen(function* () {
+    const parts: string[] = [];
+    let totalBytes = 0;
+    const append = (part: string): Effect.Effect<void, LimitError> =>
+      Effect.gen(function* () {
+        if (part.length === 0) return;
+        const separator = parts.length === 0 ? '' : '\n\n';
+        const actual = totalBytes + utf8Bytes(separator) + utf8Bytes(part);
+        if (actual > maxResultBytes) {
+          return yield* Effect.fail(
+            new LimitError({
+              resource: 'tool-result',
+              limit: maxResultBytes,
+              actual,
+            }),
+          );
+        }
+        parts.push(part);
+        totalBytes = actual;
+      });
+
+    if (result.structuredContent !== undefined) {
+      yield* append(
+        `Structured content:\n${JSON.stringify(result.structuredContent, undefined, 2)}`,
       );
-    } else if (item.type === 'resource') {
-      parts.push(
-        'text' in item.resource
-          ? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
-          : `[Resource: ${item.resource.uri}, ${item.resource.blob.length} base64 chars]`,
-      );
-    } else if (item.type === 'resource_link') {
-      const description =
-        item.description === undefined ? '' : ` - ${item.description}`;
-      parts.push(`[Resource link: ${item.name} (${item.uri})${description}]`);
-    } else {
-      parts.push(JSON.stringify(item));
     }
-  }
-  return parts.filter(Boolean).join('\n\n') || '(MCP tool returned no content)';
-};
+    for (const item of result.content ?? []) {
+      if (item.type === 'text') {
+        yield* append(item.text);
+      } else if (item.type === 'image' || item.type === 'audio') {
+        yield* append(
+          `[${item.type === 'image' ? 'Image' : 'Audio'}: ${item.mimeType}, ${item.data.length} base64 chars]`,
+        );
+      } else if (item.type === 'resource') {
+        yield* append(
+          'text' in item.resource
+            ? `[Resource: ${item.resource.uri}]\n${item.resource.text}`
+            : `[Resource: ${item.resource.uri}, ${item.resource.blob.length} base64 chars]`,
+        );
+      } else if (item.type === 'resource_link') {
+        const description =
+          item.description === undefined ? '' : ` - ${item.description}`;
+        yield* append(
+          `[Resource link: ${item.name} (${item.uri})${description}]`,
+        );
+      } else {
+        yield* append(JSON.stringify(item));
+      }
+    }
+    return parts.join('\n\n') || '(MCP tool returned no content)';
+  });
 
 const isJson = Schema.is(Schema.Json);
 
@@ -537,6 +784,69 @@ const isJsonObject = (value: unknown): value is JSONObject =>
   value !== null &&
   !Array.isArray(value) &&
   isJson(value);
+
+const utf8Bytes = (value: string): number =>
+  new TextEncoder().encode(value).byteLength;
+
+const metadataText = (value: string, limits: NormalizedLimits): string => {
+  const cleaned = Array.from(value, (character) => {
+    const code = character.codePointAt(0);
+    return code !== undefined &&
+      (code <= 0x08 ||
+        code === 0x0b ||
+        code === 0x0c ||
+        (code >= 0x0e && code <= 0x1f) ||
+        code === 0x7f)
+      ? '�'
+      : character;
+  }).join('');
+  const cleanedBytes = utf8Bytes(cleaned);
+  if (cleanedBytes > limits.maxDescriptionLength) {
+    throw new LimitError({
+      resource: 'tool-description',
+      limit: limits.maxDescriptionLength,
+      actual: cleanedBytes,
+    });
+  }
+  return cleaned;
+};
+
+const normalizeLimits = (limits?: Limits): NormalizedLimits => {
+  const result: NormalizedLimits = {
+    maxTools: limits?.maxTools ?? defaultLimits.maxTools,
+    maxToolNameLength:
+      limits?.maxToolNameLength ?? defaultLimits.maxToolNameLength,
+    maxDescriptionLength:
+      limits?.maxDescriptionLength ?? defaultLimits.maxDescriptionLength,
+    maxSchemaBytes: limits?.maxSchemaBytes ?? defaultLimits.maxSchemaBytes,
+    maxArgumentBytes:
+      limits?.maxArgumentBytes ?? defaultLimits.maxArgumentBytes,
+    maxResultBytes: limits?.maxResultBytes ?? defaultLimits.maxResultBytes,
+  };
+  const entries: ReadonlyArray<readonly [keyof NormalizedLimits, number]> = [
+    ['maxTools', result.maxTools],
+    ['maxToolNameLength', result.maxToolNameLength],
+    ['maxDescriptionLength', result.maxDescriptionLength],
+    ['maxSchemaBytes', result.maxSchemaBytes],
+    ['maxArgumentBytes', result.maxArgumentBytes],
+    ['maxResultBytes', result.maxResultBytes],
+  ];
+  for (const [key, value] of entries) {
+    const maximum = maximumLimits[key];
+    if (!Number.isSafeInteger(value) || value <= 0 || value > maximum) {
+      throw new RangeError(
+        `MCP ${key} must be a positive integer no greater than ${maximum}`,
+      );
+    }
+  }
+  return result;
+};
+
+const timeoutFor = (selection: Selection): number => {
+  // Public constructors call validateDefinition synchronously. Keep this
+  // helper total for internally-created definitions and cached layers.
+  return selection.timeout ?? DEFAULT_TIMEOUT_MS;
+};
 
 const formatNames = (names: ReadonlyArray<string>): string =>
   [...new Set(names)].map((name) => JSON.stringify(name)).join(', ');
@@ -578,14 +888,22 @@ const validateDefinition = <
   if (definition.name.trim() === '') {
     throw new Error('MCP server name must be non-empty.');
   }
-  if (
-    definition.timeout !== undefined &&
-    (!Number.isFinite(definition.timeout) || definition.timeout <= 0)
-  ) {
-    throw new Error(
-      `MCP server ${JSON.stringify(definition.name)} timeout must be a positive number.`,
+  if (definition.name.length > MAX_SERVER_NAME_LENGTH) {
+    throw new RangeError(
+      `MCP server name must be no longer than ${MAX_SERVER_NAME_LENGTH} characters.`,
     );
   }
+  if (
+    definition.timeout !== undefined &&
+    (!Number.isFinite(definition.timeout) ||
+      definition.timeout <= 0 ||
+      definition.timeout > MAX_TIMEOUT_MS)
+  ) {
+    throw new Error(
+      `MCP server ${JSON.stringify(definition.name)} timeout must be a positive number no greater than ${MAX_TIMEOUT_MS}ms.`,
+    );
+  }
+  normalizeLimits(definition.limits);
   if (
     definition.tools !== undefined &&
     definition.tools.some((tool) => tool.length === 0)
@@ -608,8 +926,27 @@ const validateRemoteDefinition = (
   }
 };
 
-const message = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
+const message = (error: unknown): string => {
+  if (error instanceof LimitError) {
+    return `${error._tag}: ${error.resource} exceeded ${error.limit} (actual ${error.actual})`;
+  }
+  if (
+    error instanceof Error &&
+    typeof error.message === 'string' &&
+    error.message.length > 0
+  ) {
+    return error.message;
+  }
+  if (
+    typeof error === 'object' &&
+    error !== null &&
+    '_tag' in error &&
+    typeof error._tag === 'string'
+  ) {
+    return error._tag;
+  }
+  return String(error);
+};
 
 const callOptions = (
   signal: AbortSignal,

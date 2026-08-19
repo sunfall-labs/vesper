@@ -192,23 +192,6 @@ export const resourceContext = (toolkit: unknown): string => {
   ].join('\n');
 };
 
-/** Add a resolved runtime toolkit to a statically-defined one. */
-export function append<
-  StaticTools extends Record<string, Tool.Any>,
-  DynamicTools extends Record<string, Tool.Any>,
->(
-  staticallyDefined: Toolkit.WithHandler<StaticTools>,
-  dynamic: Toolkit.WithHandler<DynamicTools> | undefined,
-): Toolkit.WithHandler<StaticTools & DynamicTools>;
-export function append(
-  staticallyDefined: Toolkit.WithHandler<Record<string, Tool.Any>>,
-  dynamic: Toolkit.WithHandler<Record<string, Tool.Any>> | undefined,
-): Toolkit.WithHandler<Record<string, Tool.Any>> {
-  return dynamic === undefined
-    ? staticallyDefined
-    : mergeRuntime(staticallyDefined, dynamic);
-}
-
 /** Merge resolved toolkits while rejecting ambiguous dispatch names. */
 export function merge<const Toolkits extends ReadonlyArray<unknown>>(
   ...toolkits: Toolkits & OnlyResolvedToolkits<Toolkits>
@@ -248,7 +231,14 @@ const mergeRuntime = (
       if (owners.has(name)) {
         throw new Error(`Dynamic tool name collision: ${JSON.stringify(name)}`);
       }
-      tools[name] = tool;
+      // Assignment treats `__proto__` specially on ordinary objects. Defining
+      // an own data property keeps every valid tool name inert and enumerable.
+      Object.defineProperty(tools, name, {
+        configurable: true,
+        enumerable: true,
+        value: tool,
+        writable: true,
+      });
       owners.set(name, toolkit);
     }
   }

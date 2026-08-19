@@ -1,5 +1,6 @@
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -76,6 +77,9 @@ const call = <Name extends keyof Tools>(
   name: Name,
   params: Tool.Parameters<Tools[Name]>,
   policy: Layer.Layer<WorkspaceTools.CommandPolicy> = WorkspaceTools.shellEnabledCommandPolicyLayer,
+  driverLayer: Layer.Layer<WorkspaceDriver.Service> = localLayer.pipe(
+    Layer.provide(NodeServices.layer),
+  ),
 ): Effect.Effect<Outcome> =>
   Effect.gen(function* () {
     const kit = yield* WorkspaceTools.toolkit;
@@ -97,7 +101,7 @@ const call = <Name extends keyof Tools>(
         WorkspaceTools.rootLayer(directory),
         policy,
         WorkspaceTools.defaultFilesystemPolicyLayer,
-        localLayer.pipe(Layer.provide(NodeServices.layer)),
+        driverLayer,
       ),
     ),
     Effect.catchCause((cause) =>
@@ -509,6 +513,53 @@ describe('write_file', () => {
     }),
   );
 
+  it.live('does not treat an unrelated stat failure as a missing file', () =>
+    Effect.gen(function* () {
+      const directory = workspace();
+      const statFailureLayer = Layer.effect(
+        WorkspaceDriver.Service,
+        Effect.map(WorkspaceDriver.Service, (driver) => ({
+          ...driver,
+          stat: (path: string) =>
+            Effect.fail(
+              new WorkspaceDriver.WorkspaceFailure({
+                operation: 'stat',
+                path,
+                code: 'EIO',
+                cause: new Error('probe failed'),
+              }),
+            ),
+        })),
+      ).pipe(Layer.provide(localLayer.pipe(Layer.provide(NodeServices.layer))));
+
+      expectFailure(
+        yield* call(
+          directory,
+          'write_file',
+          { path: 'new.txt', content: 'must not write' },
+          WorkspaceTools.shellEnabledCommandPolicyLayer,
+          statFailureLayer,
+        ),
+        'WorkspaceUnavailable',
+      );
+    }),
+  );
+
+  it.live(
+    'rejects content above the write ceiling without creating a file',
+    () =>
+      Effect.gen(function* () {
+        const directory = workspace();
+        const outcome = yield* call(directory, 'write_file', {
+          path: 'too-large.txt',
+          content: 'x'.repeat(WorkspaceTools.MAX_WRITABLE_BYTES + 1),
+        });
+
+        expectFailure(outcome, 'FileTooLarge');
+        expect(existsSync(join(directory, 'too-large.txt'))).toBe(false);
+      }),
+  );
+
   it.live('refuses to write outside the workspace', () =>
     Effect.gen(function* () {
       const directory = workspace();
@@ -544,6 +595,61 @@ describe('edit_file', () => {
         'const a = 1;\nconst b = 3;\n',
       );
     }),
+  );
+
+  it.live('serializes concurrent edits so one stale update is rejected', () =>
+    Effect.gen(function* () {
+      const directory = workspace();
+      writeFileSync(join(directory, 'f.txt'), 'TOKEN');
+
+      const outcomes = yield* Effect.all(
+        [
+          call(directory, 'edit_file', {
+            path: 'f.txt',
+            oldText: 'TOKEN',
+            newText: 'first',
+          }),
+          call(directory, 'edit_file', {
+            path: 'f.txt',
+            oldText: 'TOKEN',
+            newText: 'second',
+          }),
+        ],
+        { concurrency: 'unbounded' },
+      );
+
+      expect(outcomes.filter((outcome) => outcome.kind === 'ok')).toHaveLength(
+        1,
+      );
+      expect(
+        outcomes.filter(
+          (outcome) =>
+            outcome.kind === 'tool-failure' &&
+            outcome.tag === 'EditTargetMissing',
+        ),
+      ).toHaveLength(1);
+      expect(['first', 'second']).toContain(
+        readFileSync(join(directory, 'f.txt'), 'utf8'),
+      );
+    }),
+  );
+
+  it.live(
+    'rejects an edit whose resulting file exceeds the write ceiling',
+    () =>
+      Effect.gen(function* () {
+        const directory = workspace();
+        writeFileSync(join(directory, 'f.txt'), 'TOKEN');
+
+        const outcome = yield* call(directory, 'edit_file', {
+          path: 'f.txt',
+          oldText: 'TOKEN',
+          newText: 'x'.repeat(WorkspaceTools.MAX_WRITABLE_BYTES + 1),
+        });
+
+        expectFailure(outcome, 'FileTooLarge');
+        expect(readFileSync(join(directory, 'f.txt'), 'utf8')).toBe('TOKEN');
+      }),
   );
 
   it.live('fails without writing when the target is absent', () =>

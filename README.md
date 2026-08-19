@@ -12,7 +12,8 @@
   <a href="#quick-start">Quick start</a> ·
   <a href="#packages">Packages</a> ·
   <a href="#complete-example">Complete example</a> ·
-  <a href="./Design.md">Design</a>
+  <a href="./Design.md">Design</a> ·
+  <a href="./docs/releasing.md">Releasing</a>
 </p>
 
 Vesper is an agent loop built directly on `effect/unstable/ai`. Effect supplies
@@ -27,23 +28,37 @@ Vesper does not wrap provider SDKs or maintain a second provider registry.
 Official Effect AI packages provide `LanguageModel` directly.
 
 > [!IMPORTANT]
-> **Vesper is pre-1.0 and preparing its first alpha release.** Read the
+> **Vesper is pre-1.0. The current release is an early public alpha.** Read the
 > [maturity and deliberate constraints](#maturity-and-deliberate-constraints)
 > before adopting it. Migrating from the former durability methods? Start with
 > [Migrating to Conversation](docs/migrating-to-conversation.md).
+
+Vesper requires Node.js 22 or newer. The Effect packages in the examples are
+release candidates and must use the same `4.0.0-rc.109` version.
 
 ## Quick start
 
 ```bash
 npm install @sunfall/vesper-agent \
+            @sunfall/vesper-log \
             @effect/ai-anthropic@4.0.0-rc.109 \
             @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
 ```
 
+The following is a complete, in-memory example. It makes two real Anthropic
+requests and records the second run's durable continuation in memory; set
+`ANTHROPIC_API_KEY` before running it. For a credential-free example, run
+`nub run example:support-agent` from a checkout of this repository.
+
 ```ts
+import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
+import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
+import * as NodeRuntime from '@effect/platform-node/NodeRuntime';
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
-import { Effect } from 'effect';
+import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
+import { Config, Effect, Layer } from 'effect';
 import { Toolkit } from 'effect/unstable/ai';
 
 const support = Agent.make({
@@ -63,6 +78,31 @@ const program = Effect.gen(function* () {
 
   return { answer, durableAnswer };
 });
+
+const model = AnthropicLanguageModel.model('claude-sonnet-4-6').pipe(
+  Layer.provide(
+    AnthropicClient.layerConfig({
+      apiKey: Config.redacted('ANTHROPIC_API_KEY'),
+    }),
+  ),
+);
+const log = LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer));
+
+NodeRuntime.runMain(
+  program.pipe(
+    Effect.provide(model),
+    Effect.provide(log),
+    Effect.provide(
+      Layer.mergeAll(NodeServices.layer, NodeHttpClient.layerUndici),
+    ),
+  ),
+);
+```
+
+Save it as `index.ts` and run it with:
+
+```bash
+ANTHROPIC_API_KEY=... node --experimental-strip-types index.ts
 ```
 
 Provide an official Effect `LanguageModel` layer for both forms. Durable
@@ -98,7 +138,9 @@ separate reusable package and are only externalized when an
 - [Workspace composition](docs/workspace.md)
 - [Conversation migration guide](docs/migrating-to-conversation.md)
 - [Contributing and package layering](docs/contributing.md)
+- [Release procedure and version policy](docs/releasing.md)
 - [Benchmarks and operational probes](benchmarks/README.md)
+- [Changelog](CHANGELOG.md) · [Security and support](SECURITY.md)
 
 ## Complete example
 
@@ -453,16 +495,28 @@ recorded representation without changing the values the live model and tools
 see:
 
 ```ts
+import { RecordingPolicy } from '@sunfall/vesper-agent/recording-policy';
+import { Effect } from 'effect';
+
+const redactText = (value: unknown) =>
+  typeof value === 'string'
+    ? Effect.succeed('[redacted]')
+    : Effect.succeed(value);
+
 const conversation = Conversation.make(supportAgent, conversationId, {
-  prompt: (prompt) => Redaction.redactPrompt(prompt),
-  toolParameters: (params, call) => Redaction.redactTool(call.name, params),
-  toolResult: (result, outcome) => Redaction.redactTool(outcome.name, result),
-  externalRequest: (request, wait) =>
-    Redaction.redactExternalRequest(wait.wait, request),
-  signal: (signal) => Redaction.redactSignal(signal),
-  cause: (rendered) => Redaction.redactCause(rendered),
-});
+  prompt: redactText,
+  toolParameters: (value) => redactText(value),
+  toolResult: (value) => redactText(value),
+  externalRequest: (value) => redactText(value),
+  externalResult: (value) => redactText(value),
+  signal: (signal) => Effect.succeed({ ...signal, text: '[redacted]' }),
+  cause: () => Effect.succeed('[redacted cause]'),
+} satisfies RecordingPolicy.Policy);
 ```
+
+Recording policies are ordinary Effect functions; there is no built-in
+`Redaction` helper. Use `RecordingPolicy.preserving(schema, transform)` for
+schema-shaped values when the persisted value must retain its original type.
 
 Any Effect services those functions use are added to the returned agent's
 `Requires`; raw recording adds `LogStore.Service` and Effect's `Crypto` service
@@ -621,6 +675,10 @@ It never outranks a hard run budget.
 
 Signal reads are bounded by `maxSignalsPerBoundary`; a backlog emits
 `SignalBacklog` and remains after the durable cursor for a later boundary.
+Ingress rejects individual payloads over 256 KiB, but Vesper does not impose a
+conversation-wide signal count or storage quota. Authenticate and rate-limit
+public senders, and enforce retention or storage quotas at the application and
+log-store boundary.
 Oversized signals and steers over the run's cumulative byte budget emit
 `SignalRejected` and are persisted as rejected `SignalReceived` records, so
 advancing the cursor never silently discards them.
@@ -631,7 +689,10 @@ the delivered value transformed as well.
 
 Delivery is resumable and at-least-once. `SignalReceived` records the offset it
 consumed, so a signal queued before a run began is still delivered and one
-already acted on is not delivered twice.
+already acted on is not delivered twice during recovery. `send` does not take
+an idempotency key, so retrying after an ambiguous caller-side failure may
+append the same logical signal at a new offset; deduplicate at the application
+boundary when that matters.
 
 The drain is one bounded read from a cursor, deliberately. A production system
 this design came out of built the same mechanism twice on a durable workflow
@@ -752,7 +813,8 @@ reacts to the result. For a non-interactive run, use
 ### Real providers
 
 ```bash
-ANTHROPIC_API_KEY=... nub run example:compliance-relay
+ANTHROPIC_API_KEY=... nub run example:compliance-relay \
+  "Explain the refund options without making a promise."
 ```
 
 `examples/compliance-relay` streams an answer from one agent through a second
@@ -813,9 +875,10 @@ anything.
 
 ## Maturity and deliberate constraints
 
-There are no known untracked correctness gaps in the implemented interfaces.
-The remaining caveats are either operational evidence that only adoption can
-provide or explicit design constraints:
+The alpha's confidence comes from the deterministic tests, type-level checks,
+and the operational probes described below. It is not a production-support
+promise; the remaining caveats are either operational evidence that only
+adoption can provide or explicit design constraints:
 
 - **Extracted-form production use is still unproven.** The original system ran
   the loop, but this package layout and the consolidation onto one conversation

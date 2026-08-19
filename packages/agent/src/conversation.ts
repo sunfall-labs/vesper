@@ -14,17 +14,16 @@ import type { AgentEvents } from './event.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
 import { RecordingPolicy } from './recording-policy.js';
-import { append as appendSignal } from './internal/signal-store.js';
+import {
+  append as appendSignal,
+  Signal as SignalSchema,
+  type Signal as SignalType,
+} from './internal/signal-store.js';
 import { protocolOf } from './internal/protocol.js';
 
 /** Out-of-band input addressed to a durable conversation. */
-export interface Signal {
-  readonly kind: 'steer' | 'cancel';
-  /** Steering text, or a cancellation reason. */
-  readonly text: string;
-  /** User or service that sent the signal. */
-  readonly source: string;
-}
+export const Signal = SignalSchema;
+export type Signal = SignalType;
 
 /** How a new conversation path treats a tool currently awaiting external input. */
 export interface PathOptions {
@@ -146,7 +145,13 @@ export interface Instance<
   readonly followWaits: (
     after?: LogOffset.Offset,
   ) => Stream.Stream<WaitEnvelope, LogStore.LogStoreError, LogStore.Service>;
-  /** Persist an out-of-band steer or cancellation for the next run boundary. */
+  /**
+   * Persist an out-of-band steer or cancellation for the next run boundary.
+   *
+   * Payloads are limited to 256 KiB. Submission is durable and delivery is
+   * at-least-once, but `send` has no idempotency key: retrying after an
+   * ambiguous transport failure may append the same logical signal twice.
+   */
   readonly send: (
     signal: Signal,
   ) => Effect.Effect<

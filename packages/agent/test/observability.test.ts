@@ -1,59 +1,74 @@
-import { Effect, Metric } from 'effect';
+import { Effect, Metric, Stream } from 'effect';
+import { Toolkit, type Response } from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
+import { Agent } from '../src/agent.js';
 import * as Observability from '../src/internal/observability.js';
+import { ScriptedModel } from '../src/testing.js';
 
 describe('agent observability metrics', () => {
-  it.effect('records model calls and reported token usage', () =>
+  it.effect('records provider cache usage through Agent.stream', () =>
     Effect.gen(function* () {
-      const beforeCalls = yield* Metric.value(Observability.modelCalls);
-      const beforeInput = yield* Metric.value(Observability.modelInputTokens);
-      const beforeOutput = yield* Metric.value(Observability.modelOutputTokens);
-      const beforeUncached = yield* Metric.value(
-        Observability.modelUncachedInputTokens,
-      );
-      const beforeCacheRead = yield* Metric.value(
-        Observability.modelCacheReadTokens,
-      );
-      const beforeCacheWrite = yield* Metric.value(
-        Observability.modelCacheWriteTokens,
-      );
-
-      yield* Observability.modelCall;
-      yield* Observability.usage({
-        inputTokens: {
-          total: 13,
-          uncached: 4,
-          cacheRead: 7,
-          cacheWrite: 2,
-        },
-        outputTokens: { total: 5 },
+      const before = {
+        calls: yield* Metric.value(Observability.modelCalls),
+        input: yield* Metric.value(Observability.modelInputTokens),
+        output: yield* Metric.value(Observability.modelOutputTokens),
+        uncached: yield* Metric.value(Observability.modelUncachedInputTokens),
+        cacheRead: yield* Metric.value(Observability.modelCacheReadTokens),
+        cacheWrite: yield* Metric.value(Observability.modelCacheWriteTokens),
+      };
+      const model = ScriptedModel.make([
+        [
+          {
+            type: 'finish',
+            reason: 'stop',
+            usage: {
+              inputTokens: {
+                total: 13,
+                uncached: 4,
+                cacheRead: 7,
+                cacheWrite: 2,
+              },
+              outputTokens: { total: 5 },
+            },
+          },
+        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+      ]);
+      const agent = Agent.make({
+        name: 'observability-test',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
       });
+
+      yield* agent
+        .stream('hi')
+        .pipe(Stream.runDrain, Effect.provide(model.layer));
 
       expect(
         (yield* Metric.value(Observability.modelCalls)).count -
-          beforeCalls.count,
+          before.calls.count,
       ).toBe(1);
       expect(
         (yield* Metric.value(Observability.modelInputTokens)).count -
-          beforeInput.count,
+          before.input.count,
       ).toBe(13);
       expect(
         (yield* Metric.value(Observability.modelOutputTokens)).count -
-          beforeOutput.count,
+          before.output.count,
       ).toBe(5);
       expect(
         (yield* Metric.value(Observability.modelUncachedInputTokens)).count -
-          beforeUncached.count,
+          before.uncached.count,
       ).toBe(4);
       expect(
         (yield* Metric.value(Observability.modelCacheReadTokens)).count -
-          beforeCacheRead.count,
+          before.cacheRead.count,
       ).toBe(7);
       expect(
         (yield* Metric.value(Observability.modelCacheWriteTokens)).count -
-          beforeCacheWrite.count,
+          before.cacheWrite.count,
       ).toBe(2);
-    }),
+    }).pipe(Effect.provideService(Metric.MetricRegistry, new Map())),
   );
 });

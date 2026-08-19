@@ -198,6 +198,43 @@ describe('steering', () => {
   });
 
   it.effect(
+    'rejects oversized signal payloads at ingress with a typed error',
+    () =>
+      Effect.gen(function* () {
+        const id = LogVocabulary.ConversationId.make('oversized-signal');
+        const error = yield* Conversation.make(agent, id)
+          .send({
+            kind: 'steer',
+            text: 'x'.repeat(AgentSignals.MAX_SIGNAL_BYTES + 1),
+            source: 'operator',
+          })
+          .pipe(Effect.provide(testLogLayer), Effect.flip);
+
+        expect(error).toMatchObject({ reason: 'encoding' });
+        expect(error.detail).toContain('maximum is');
+      }),
+  );
+
+  it.effect('rejects malformed JavaScript signals with a typed error', () =>
+    Effect.gen(function* () {
+      const bound = Conversation.make(
+        agent,
+        LogVocabulary.ConversationId.make('malformed-signal'),
+      );
+      // @ts-expect-error typed callers must supply the signal text
+      const invalid = bound.send({ kind: 'steer', source: 'operator' });
+
+      const error = yield* invalid.pipe(
+        Effect.provide(testLogLayer),
+        Effect.flip,
+      );
+
+      expect(error).toMatchObject({ reason: 'encoding' });
+      expect(error.detail).toContain('signal must contain');
+    }),
+  );
+
+  it.effect(
     'records and emits an oversized signal rejection without injecting it',
     () =>
       Effect.gen(function* () {

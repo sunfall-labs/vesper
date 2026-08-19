@@ -842,7 +842,7 @@ export const make = <
       wiring.dynamicToolkit,
     );
     const runToolkit = Effect.map(toolkit, (staticallyDefined) =>
-      DynamicToolkit.append(staticallyDefined, wiring.dynamicToolkit),
+      withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
     );
 
     // A `Toolkit` already *is* an `Effect` producing a resolved toolkit, and
@@ -1902,6 +1902,23 @@ const dynamicContextFor = (instructions: string, toolkit: unknown): string => {
   const context = DynamicToolkit.resourceContext(toolkit);
   return context === '' ? instructions : `${instructions}\n\n${context}`;
 };
+
+/** Keep runtime toolkit composition out of DynamicToolkit's public interface. */
+function withDynamicToolkit<
+  StaticTools extends Record<string, Tool.Any>,
+  DynamicTools extends Record<string, Tool.Any>,
+>(
+  staticallyDefined: Toolkit.WithHandler<StaticTools>,
+  dynamic: Toolkit.WithHandler<DynamicTools> | undefined,
+): Toolkit.WithHandler<StaticTools & DynamicTools>;
+function withDynamicToolkit(
+  staticallyDefined: Toolkit.WithHandler<Record<string, Tool.Any>>,
+  dynamic: Toolkit.WithHandler<Record<string, Tool.Any>> | undefined,
+): Toolkit.WithHandler<Record<string, Tool.Any>> {
+  return dynamic === undefined
+    ? staticallyDefined
+    : DynamicToolkit.merge(staticallyDefined, dynamic);
+}
 
 const replaceSystemInstructions = (
   chat: Chat.Service,

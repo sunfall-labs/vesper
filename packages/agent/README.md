@@ -20,6 +20,11 @@ turns that actually started rather than planned turn boundaries.
 npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 ```
 
+Node.js 22 or newer is required. The snippets below assume the application has
+already provided Effect's `LanguageModel` service; see the repository
+[Quick Start](../../README.md#quick-start) for complete provider and runtime
+wiring.
+
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
@@ -29,6 +34,9 @@ Modules are exposed as explicit subpaths, including
 
 Use `dynamicTools` only for definitions genuinely discovered when a run starts,
 such as MCP servers or tenant-specific integrations:
+
+This is an API sketch: `discoverTools()` and `staticTools` stand for
+application-owned values. The MCP package provides a complete dynamic source.
 
 ```ts
 import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';
