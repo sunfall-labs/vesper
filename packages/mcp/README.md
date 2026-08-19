@@ -75,6 +75,80 @@ durable, independently keyed human decision, expose it through an
 application-owned typed tool handler and call `AgentWorkflow.wait` there; the
 generated MCP handler deliberately does not introduce a second approval flow.
 
+## Tool drift detection
+
+MCP metadata is trusted the first time a server advertises it — discovery has
+no prior definition to compare against. An application that wants to know
+when a server later changes a tool's description or schema out from under it
+(a "rug pull") can pin the fingerprints it currently trusts and ask Vesper to
+check future discoveries against them:
+
+```ts
+import { Mcp } from '@sunfall/vesper-mcp/mcp';
+import { Effect, Redacted } from 'effect';
+
+// Run once, out of band (a setup script, an admin command) to obtain the
+// current fingerprints, keyed by the server's own tool names.
+const pins = await Effect.runPromise(
+  Mcp.fingerprints({
+    name: 'linear',
+    url: 'https://mcp.linear.app/mcp',
+    auth: () => Redacted.make(getLinearToken()),
+  }).pipe(Effect.scoped),
+);
+// { "search_issues": "3f1c...ab", "create_issue": "9e02...4d" }
+
+const linear = Mcp.remote({
+  name: 'linear',
+  url: 'https://mcp.linear.app/mcp',
+  auth: () => Redacted.make(getLinearToken()),
+  toolDrift: { fingerprints: pins },
+});
+```
+
+A fingerprint is the SHA-256 of the tool's remote name, its rendered
+description, and its canonicalized input schema — the same canonicalization
+discovery already uses for prompt-cache stability, so key order never affects
+it. Only pinned tools are checked: a tool absent from `fingerprints` is
+trusted on first discovery, exactly as it is today, so adding `toolDrift`
+does not affect servers or tools you have not pinned. Omitting `toolDrift`
+entirely leaves discovery unchanged.
+
+When a pinned tool's current fingerprint no longer matches, `onDrift`
+decides what happens: `'reject'`, the default, excludes the drifted tool from
+the toolkit and logs a `Mcp.ToolDriftError`; `'warn'` logs the same error but
+keeps the tool available. Either way the decision is per tool — one server
+changing one tool does not take the rest of its catalog down.
+
+**What this does not cover.** Trust-on-first-discovery is inherent: nothing
+can detect drift in a tool Vesper has never fingerprinted before. Vesper also
+does not persist pins across runs or processes — `Mcp.fingerprints` only
+returns a value; storing it, and loading it back into `toolDrift.fingerprints`
+on the next run, is the application's job, since only it knows the right
+place (a config file, a secrets store, a database row next to the tenant that
+uses this server) and the right process (who reviews and approves a genuine
+definition change). A minimal file-backed example:
+
+```ts
+import { readFile, writeFile } from 'node:fs/promises';
+
+const pinsPath = './linear-tool-pins.json';
+
+const loadPins = async (): Promise<Record<string, string>> => {
+  try {
+    return JSON.parse(await readFile(pinsPath, 'utf8'));
+  } catch {
+    return {}; // first run: nothing pinned yet, nothing to drift-check
+  }
+};
+
+const savePins = (pins: Record<string, string>) =>
+  writeFile(pinsPath, JSON.stringify(pins, null, 2));
+
+// After a reviewed, intentional server change, re-run `Mcp.fingerprints` and
+// `savePins` the result to accept the new definitions as the trusted baseline.
+```
+
 ## Reusing connections
 
 Fresh scoped connections are the safe default. To reuse an initialized client
