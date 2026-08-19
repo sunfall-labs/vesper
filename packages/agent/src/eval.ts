@@ -1,4 +1,4 @@
-import { Clock, Effect, Schema, Stream } from 'effect';
+import { Cause, Clock, Effect, Exit, Schema, Stream } from 'effect';
 import type { Prompt, Tool } from 'effect/unstable/ai';
 
 import type { Agent } from './agent.js';
@@ -267,5 +267,329 @@ export const toolSucceeded = <Tools extends Record<string, Tool.Any>>(
       !result.part.isFailure &&
       !result.part.preliminary,
   );
+
+/** One named input a suite runs, with scorers specific to it. */
+export interface Case<
+  Tools extends Record<string, Tool.Any>,
+  Error = never,
+  Requires = never,
+> {
+  readonly name: string;
+  readonly input: Prompt.RawInput;
+  /** Combined with the suite's own scorers for this case only. */
+  readonly scorers?: ReadonlyArray<Scorer<Tools, Error, Requires>> | undefined;
+}
+
+export interface SuiteOptions {
+  /**
+   * How many cases run at once. Defaults to 1 (sequential).
+   *
+   * A suite's model layer is routinely a single `ScriptedModel`, whose
+   * request cursor is one shared, ordered sequence (see `testing.ts`).
+   * Cases racing that cursor would turn a deterministic fixture into a
+   * flaky one, so the safe default is sequential; raise this only when
+   * every case has its own model layer or the live provider genuinely
+   * tolerates concurrent calls.
+   */
+  readonly concurrency?: number | 'unbounded' | undefined;
+  /** Forwarded to every case's `evaluate` call. Defaults to 1. */
+  readonly passThreshold?: number | undefined;
+}
+
+/** A named collection of cases plus scorers shared by all of them. */
+export interface SuiteDefinition<
+  Tools extends Record<string, Tool.Any>,
+  Error = never,
+  Requires = never,
+> {
+  readonly name: string;
+  readonly cases: ReadonlyArray<Case<Tools, Error, Requires>>;
+  /** Applied to every case, alongside that case's own scorers. */
+  readonly scorers?: ReadonlyArray<Scorer<Tools, Error, Requires>> | undefined;
+  readonly options?: SuiteOptions | undefined;
+}
+
+/**
+ * One score as it appears in a persisted report.
+ *
+ * Schema-modelled so a suite report round-trips through whatever an
+ * application persists it as. `Score` above stays a plain interface because
+ * scorers construct it inline; this is its stable wire shape.
+ */
+export const ScoreReport = Schema.Struct({
+  name: Schema.String,
+  weight: Schema.Number,
+  value: Schema.Number,
+  detail: Schema.optionalKey(Schema.String),
+});
+export interface ScoreReport extends Schema.Struct.Type<
+  typeof ScoreReport.fields
+> {}
+
+/** One case's outcome in a persisted suite report. */
+export const CaseReport = Schema.Struct({
+  name: Schema.String,
+  score: Schema.Number,
+  passed: Schema.Boolean,
+  scores: Schema.Array(ScoreReport),
+  /** Present only when the case failed to run or score at all. */
+  failure: Schema.optionalKey(Schema.String),
+});
+export interface CaseReport extends Schema.Struct.Type<
+  typeof CaseReport.fields
+> {}
+
+/**
+ * The persisted result of running one suite.
+ *
+ * Schema-modelled for the same reason `Agent.Result` is: applications
+ * checkpoint it, diff it in CI, or hand it to whatever store they already
+ * have. Vesper does not persist it, and does not decide the store — see
+ * `AgentEval.compare` for the one thing this library does with a pair of
+ * them.
+ */
+export const SuiteReport = Schema.Struct({
+  suite: Schema.String,
+  cases: Schema.Array(CaseReport),
+  passed: Schema.Natural,
+  failed: Schema.Natural,
+  meanScore: Schema.Number,
+  startedAt: Schema.Int,
+  durationMillis: Schema.Number,
+});
+export interface SuiteReport extends Schema.Struct.Type<
+  typeof SuiteReport.fields
+> {}
+
+const asScoreReport = (score: Score): ScoreReport =>
+  score.detail === undefined
+    ? { name: score.name, weight: score.weight, value: score.value }
+    : {
+        name: score.name,
+        weight: score.weight,
+        value: score.value,
+        detail: score.detail,
+      };
+
+/**
+ * Run one case to a `CaseReport`, never failing the suite.
+ *
+ * `Effect.exit` catches both a typed run/scorer failure and a defect — the
+ * agent throwing, a handler dying — because "the case broke" and "the case
+ * returned InvalidScore" are the same fact from a suite's point of view: one
+ * case produced no usable score.
+ */
+const runCase = <
+  Tools extends Record<string, Tool.Any>,
+  Error,
+  Requires,
+  ScorerError,
+  ScorerRequires,
+>(
+  agent: EvalTarget<Tools, Error, Requires>,
+  suiteScorers: ReadonlyArray<Scorer<Tools, ScorerError, ScorerRequires>>,
+  testCase: Case<Tools, ScorerError, ScorerRequires>,
+  passThreshold: number,
+): Effect.Effect<CaseReport, never, Requires | ScorerRequires> =>
+  Effect.gen(function* () {
+    const scorers = [...suiteScorers, ...(testCase.scorers ?? [])];
+    const exit = yield* Effect.exit(
+      Effect.flatMap(run(agent, testCase.input), (capture) =>
+        evaluate(capture, scorers, { passThreshold }),
+      ),
+    );
+    if (Exit.isFailure(exit)) {
+      return {
+        name: testCase.name,
+        score: 0,
+        passed: false,
+        scores: [],
+        failure: Cause.pretty(exit.cause),
+      };
+    }
+    return {
+      name: testCase.name,
+      score: exit.value.score,
+      passed: exit.value.passed,
+      scores: exit.value.scores.map(asScoreReport),
+    };
+  });
+
+/**
+ * Run every case in a suite against one agent and score it.
+ *
+ * A case that fails to run at all — the agent dies, a scorer throws, a score
+ * violates the normalized contract — becomes a failed `CaseReport`, not a
+ * failed suite. The point of a suite is one complete picture of every case
+ * in a single pass; aborting on the first broken case would hide every
+ * result after it.
+ */
+export const suite = <
+  Tools extends Record<string, Tool.Any>,
+  Error,
+  Requires,
+  ScorerError = never,
+  ScorerRequires = never,
+>(
+  agent: EvalTarget<Tools, Error, Requires>,
+  definition: SuiteDefinition<Tools, ScorerError, ScorerRequires>,
+): Effect.Effect<SuiteReport, never, Requires | ScorerRequires> => {
+  const threshold = definition.options?.passThreshold ?? 1;
+  if (!normalized(threshold)) {
+    throw new RangeError('Eval passThreshold must be between 0 and 1');
+  }
+  const scorers = definition.scorers ?? [];
+  return Effect.gen(function* () {
+    const startedAt = yield* Clock.currentTimeMillis;
+    const started = yield* Clock.currentTimeNanos;
+    const cases = yield* Effect.forEach(
+      definition.cases,
+      (testCase) => runCase(agent, scorers, testCase, threshold),
+      { concurrency: definition.options?.concurrency ?? 1 },
+    );
+    const finished = yield* Clock.currentTimeNanos;
+    const passed = cases.filter((one) => one.passed).length;
+    const total = cases.reduce((sum, one) => sum + one.score, 0);
+    return {
+      suite: definition.name,
+      cases,
+      passed,
+      failed: cases.length - passed,
+      meanScore: cases.length === 0 ? 1 : total / cases.length,
+      startedAt,
+      durationMillis: Number(finished - started) / 1_000_000,
+    };
+  });
+};
+
+/** How one case's result changed between a baseline and a current report. */
+export const CaseDelta = Schema.Struct({
+  name: Schema.String,
+  status: Schema.Literals([
+    'new',
+    'removed',
+    'regressed',
+    'improved',
+    'unchanged',
+  ]),
+  /** Absent only when `status` is `new`. */
+  baselineScore: Schema.optionalKey(Schema.Number),
+  /** Absent only when `status` is `removed`. */
+  currentScore: Schema.optionalKey(Schema.Number),
+  /** Present only when the case ran in both reports. */
+  scoreDelta: Schema.optionalKey(Schema.Number),
+});
+export interface CaseDelta extends Schema.Struct.Type<
+  typeof CaseDelta.fields
+> {}
+
+/** The regression comparison between two suite reports. */
+export const Comparison = Schema.Struct({
+  baseline: Schema.String,
+  current: Schema.String,
+  /** `regressed` whenever any case's status is `regressed`. */
+  verdict: Schema.Literals(['pass', 'regressed']),
+  cases: Schema.Array(CaseDelta),
+  added: Schema.Natural,
+  removed: Schema.Natural,
+  regressed: Schema.Natural,
+  improved: Schema.Natural,
+  unchanged: Schema.Natural,
+});
+export interface Comparison extends Schema.Struct.Type<
+  typeof Comparison.fields
+> {}
+
+/** Scores within this of each other count as unchanged. */
+const SCORE_EPSILON = 1e-9;
+
+const deltaStatus = (
+  before: CaseReport,
+  after: CaseReport,
+): CaseDelta['status'] => {
+  if (before.passed !== after.passed) {
+    return before.passed ? 'regressed' : 'improved';
+  }
+  const delta = after.score - before.score;
+  if (delta < -SCORE_EPSILON) return 'regressed';
+  if (delta > SCORE_EPSILON) return 'improved';
+  return 'unchanged';
+};
+
+/**
+ * Diff two suite reports — one baseline, one current — into a per-case delta
+ * and an overall verdict.
+ *
+ * Pure: it reads only the two reports, so a CI pipeline can commit a
+ * baseline `SuiteReport`, run the suite again, and diff the two without
+ * re-running anything or owning storage for either one. A case missing from
+ * `current` is `removed` rather than `regressed` — dropped coverage is a
+ * different fact than a case that got worse — and a case absent from
+ * `baseline` is `new`.
+ */
+export const compare = (
+  baseline: SuiteReport,
+  current: SuiteReport,
+): Comparison => {
+  const before = new Map(baseline.cases.map((one) => [one.name, one]));
+  const after = new Map(current.cases.map((one) => [one.name, one]));
+  const names = new Set([...before.keys(), ...after.keys()]);
+
+  const cases: CaseDelta[] = [];
+  for (const name of names) {
+    const was = before.get(name);
+    const now = after.get(name);
+    if (was !== undefined && now !== undefined) {
+      cases.push({
+        name,
+        status: deltaStatus(was, now),
+        baselineScore: was.score,
+        currentScore: now.score,
+        scoreDelta: now.score - was.score,
+      });
+    } else if (was !== undefined) {
+      cases.push({ name, status: 'removed', baselineScore: was.score });
+    } else if (now !== undefined) {
+      cases.push({ name, status: 'new', currentScore: now.score });
+    }
+  }
+
+  let added = 0;
+  let removed = 0;
+  let regressed = 0;
+  let improved = 0;
+  let unchanged = 0;
+  for (const delta of cases) {
+    switch (delta.status) {
+      case 'new':
+        added++;
+        break;
+      case 'removed':
+        removed++;
+        break;
+      case 'regressed':
+        regressed++;
+        break;
+      case 'improved':
+        improved++;
+        break;
+      case 'unchanged':
+        unchanged++;
+        break;
+    }
+  }
+
+  return {
+    baseline: baseline.suite,
+    current: current.suite,
+    verdict: regressed > 0 ? 'regressed' : 'pass',
+    cases,
+    added,
+    removed,
+    regressed,
+    improved,
+    unchanged,
+  };
+};
 
 export * as AgentEval from './eval.js';

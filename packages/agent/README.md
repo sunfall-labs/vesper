@@ -180,6 +180,66 @@ Scores outside `0..1` fail with `InvalidEvalScore`. The input is deliberately
 not retained because prompts commonly contain secrets or customer data; keep a
 dataset identifier beside the capture when a case needs one.
 
+### Suites and regression compare
+
+`AgentEval.suite` runs a named collection of cases against one agent and
+scores each with `AgentEval.evaluate`. A case that fails to run at all — the
+agent dies, a scorer throws, a score violates the normalized contract —
+becomes a failed entry in the report rather than a failed suite Effect: the
+point of a suite is one complete picture of every case in a single pass.
+Cases run sequentially by default (`options.concurrency`), because a suite's
+model layer is routinely one `ScriptedModel` with a single ordered request
+cursor that concurrent cases would race.
+
+The result, `AgentEval.SuiteReport`, is `Schema`-modelled the same way
+`Agent.Result` is: applications persist it to a file, a DB, or CI artifact
+storage, on whatever schedule fits their own store. Vesper does not persist
+it and does not pick a store.
+
+```ts
+import { Effect, Schema } from 'effect';
+import { AgentEval } from '@sunfall/vesper-agent/eval';
+import { ScriptedModel } from '@sunfall/vesper-agent/testing';
+
+const program = Effect.gen(function* () {
+  const report = yield* AgentEval.suite(supportAgent, {
+    name: 'order-lookup',
+    cases: [
+      { name: 'known order', input: 'Where is order 1042?' },
+      { name: 'unknown order', input: 'Where is order 9999?' },
+    ],
+    scorers: [
+      AgentEval.check('looked up the order', (sample) =>
+        AgentEval.toolCalled(sample, 'lookup_order'),
+      ),
+    ],
+  }).pipe(Effect.provide(scriptedForOrders.layer));
+
+  const encoded = Schema.encodeSync(AgentEval.SuiteReport)(report);
+  yield* writeReportJson(encoded); // application-owned; Vesper does not persist
+
+  const baseline = yield* readBaselineReport(); // application-owned
+  const comparison = AgentEval.compare(baseline, report);
+  if (comparison.verdict === 'regressed') {
+    return yield* Effect.fail(new Error('eval suite regressed'));
+  }
+});
+```
+
+`AgentEval.compare(baseline, current)` is a pure function over two reports —
+no agent, no model layer, no I/O — so CI can commit a baseline `SuiteReport`
+and diff every run against it. Each case is classified `new`, `removed`,
+`regressed`, `improved`, or `unchanged` by score delta and pass/fail
+transition; a case missing from `current` is `removed`, not `regressed`,
+because dropped coverage and a case that got worse are different facts. The
+overall `verdict` is `regressed` whenever any case is.
+
+Out of scope, on purpose: Vesper does not sample live traffic into cases, does
+not ship a built-in LLM-judge scorer (write one with `AgentEval.makeScorer`
+against whatever model or rubric the application already trusts), does not
+persist reports or baselines, and has no watch mode. A suite is data plus a
+runner; scheduling, storage, and judging are the application's.
+
 ## Scripted model
 
 `ScriptedModel` is a deterministic adapter for Effect's existing
