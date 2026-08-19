@@ -2,8 +2,8 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Crypto, Effect, Stream } from 'effect';
-import type { Prompt } from 'effect/unstable/ai';
+import { Crypto, Effect, Schema, Stream } from 'effect';
+import { AiError, type Prompt } from 'effect/unstable/ai';
 
 import { Agent } from './agent.js';
 import {
@@ -272,6 +272,31 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             reason: 'already_resolved',
           });
         }
+        // A denial's result is what `dispatch.ts`'s `resolveIndeterminate`
+        // copies straight into the refusal `ToolOutcome` the model is shown,
+        // without ever entering the handler — the same encoded `AiError`
+        // shape `failureMode: 'return'` already uses for a framework-level
+        // failure, so it decodes through any tool's result schema, not only
+        // one that declared its own failure type. Encoded through `Schema`
+        // rather than built by hand: `AiError`'s wire shape is not one to
+        // keep in sync by inspection. Unused on approval; what runs the tool
+        // for real is the handler dispatch that follows, not this record.
+        const result =
+          decision === 'approve'
+            ? null
+            : yield* Schema.encodeUnknownEffect(AiError.AiError)(
+                new AiError.AiError({
+                  module: 'Conversation',
+                  method: 'resolveApproval',
+                  reason: new AiError.UnknownError({
+                    description:
+                      reason === undefined
+                        ? `Tool call ${normalizedId} was denied approval`
+                        : `Tool call ${normalizedId} was denied approval: ${reason}`,
+                    metadata: { toolCallId: normalizedId },
+                  }),
+                }),
+              ).pipe(Effect.orDie);
         yield* session.append([
           {
             _tag: 'ToolWaitCompleted',
@@ -280,16 +305,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             wait: ToolDispatch.APPROVAL_WAIT,
             token: suspended.token,
             outcome: decision === 'approve' ? 'success' : 'failure',
-            // Mirrors `Response`'s own `{type:'execution-denied', reason}`
-            // shape for a denied approval — see `dispatch.ts`'s
-            // `resolveIndeterminate`, which copies this straight into the
-            // refusal `ToolOutcome` the model is shown. Unused on approval;
-            // what runs the tool for real is the handler dispatch that
-            // follows, not this record.
-            result:
-              decision === 'approve'
-                ? null
-                : { type: 'approval-denied', reason },
+            result,
           },
         ]);
       }),

@@ -6,6 +6,7 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Crypto, Effect, Exit, Layer, Ref, Schema, Stream } from 'effect';
 import {
+  AiError,
   IdGenerator,
   LanguageModel,
   type Response,
@@ -279,16 +280,24 @@ describe('durable tool approval', () => {
         const outcomes = Array.from(records).flatMap((envelope) =>
           envelope.record._tag === 'ToolOutcome' ? [envelope.record] : [],
         );
-        expect(outcomes).toEqual([
-          {
-            _tag: 'ToolOutcome',
-            step: 1,
-            id: CALL_ID,
-            name: 'release',
-            outcome: 'failure',
-            result: { type: 'approval-denied', reason: 'not this week' },
-          },
-        ]);
+        expect(outcomes.length).toBe(1);
+        const [refusal] = outcomes;
+        expect(refusal).toMatchObject({
+          _tag: 'ToolOutcome',
+          step: 1,
+          id: CALL_ID,
+          name: 'release',
+          outcome: 'failure',
+        });
+
+        // The refusal is a genuine, decodable `AiError` — the same shape
+        // `failureMode: 'return'` already uses for a framework-level
+        // failure — not an ad hoc shape only this feature understands.
+        const decoded = yield* Schema.decodeUnknownEffect(AiError.AiError)(
+          refusal?.result,
+        );
+        expect(decoded._tag).toBe('AiError');
+        expect(decoded.reason.message).toContain('not this week');
       }),
     ),
   );
