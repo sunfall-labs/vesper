@@ -76,9 +76,16 @@ export interface Instance<
 > {
   /** Stable durable identity shared by runs, records, and signals. */
   readonly id: LogVocabulary.ConversationId;
-  /** Continue this conversation, starting it when no durable history exists. */
+  /**
+   * Continue this conversation, starting it when no durable history exists.
+   *
+   * Omitting `input` continues from durable state alone without appending a
+   * user message — the shape a run suspended on a tool approval resumes with
+   * after {@link resolveApproval}, where the decision, not a new prompt, is
+   * what there is to act on.
+   */
   readonly run: (
-    input: Prompt.RawInput,
+    input?: Prompt.RawInput,
   ) => Effect.Effect<
     Agent.Result,
     Error<A>,
@@ -86,7 +93,7 @@ export interface Instance<
   >;
   /** Stream the same durable continuation that {@link run} folds. */
   readonly stream: (
-    input: Prompt.RawInput,
+    input?: Prompt.RawInput,
   ) => Stream.Stream<
     AgentEvents.ObservedEvent<Agent.Tools<A>>,
     Error<A>,
@@ -216,8 +223,8 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
     );
   return {
     id,
-    run: (input) => foldToResult(streamFrom(input)),
-    stream: (input) => streamFrom(input),
+    run: (input) => foldToResult(streamFrom(input ?? [])),
+    stream: (input) => streamFrom(input ?? []),
     branchFrom: (at, input, options) =>
       foldToResult(
         streamFrom(input, {

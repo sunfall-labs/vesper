@@ -64,7 +64,6 @@ export interface SuspendedToolCall extends IndeterminateToolCall {
 
 export interface Snapshot {
   readonly recoveries: Map<string, Recovery>;
-  readonly completedWaitTokens: ReadonlySet<string>;
   readonly completedWaitOutcomes: ReadonlyMap<string, CompletedWait>;
   readonly pending: ReadonlyArray<IndeterminateToolCall>;
   readonly indeterminate: ReadonlyArray<IndeterminateToolCall>;
@@ -92,7 +91,6 @@ export const fold = (
     { readonly name: string; readonly id: string }
   >();
   const order: string[] = [];
-  const completedWaitTokens = new Set<string>();
   const completedWaitOutcomes = new Map<string, CompletedWait>();
   let running = false;
 
@@ -104,7 +102,6 @@ export const fold = (
       recoveries.clear();
       calls.clear();
       starts.clear();
-      completedWaitTokens.clear();
       completedWaitOutcomes.clear();
       order.length = 0;
       running = false;
@@ -140,7 +137,6 @@ export const fold = (
     },
     ToolWaitCompleted: (record) => {
       if (running) {
-        completedWaitTokens.add(record.token);
         completedWaitOutcomes.set(record.token, {
           outcome: record.outcome,
           result: record.result,
@@ -196,7 +192,6 @@ export const fold = (
 
   return {
     recoveries,
-    completedWaitTokens,
     completedWaitOutcomes,
     corruption:
       unmatchedSuspension !== undefined
@@ -287,7 +282,6 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       ),
     );
     const callbacks = new Map<string, Array<Effect.Effect<void>>>();
-    const completedWaitTokens = new Set(snapshot.completedWaitTokens);
     const completedWaitOutcomes = new Map(snapshot.completedWaitOutcomes);
 
     // These matchers close over the tracker state, not an individual append,
@@ -307,7 +301,6 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
         });
       },
       ToolWaitCompleted: (record) => {
-        completedWaitTokens.add(record.token);
         completedWaitOutcomes.set(record.token, {
           outcome: record.outcome,
           result: record.result,
@@ -428,7 +421,7 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       indeterminateToolCalls: snapshot.indeterminate,
       suspendedToolCalls: snapshot.suspended,
       recoveryCorruption: snapshot.corruption,
-      hasCompletedWait: (token) => completedWaitTokens.has(token),
+      hasCompletedWait: (token) => completedWaitOutcomes.has(token),
       completedWait: (token) =>
         Option.fromNullishOr(completedWaitOutcomes.get(token)),
       pendingToolState: Effect.map(Ref.get(pending), (current) => {

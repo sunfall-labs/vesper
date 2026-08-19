@@ -743,6 +743,50 @@ else. Ids are random per call in practice, so this is sound in practice and
 unfalsifiable from here; matching parameters would not help, because the log
 records decoded parameters and dispatch is handed encoded ones.
 
+### Tool approvals
+
+A tool marked with `effect/unstable/ai`'s own `Tool.setNeedsApproval` is
+suspended by `LanguageModel` before its handler is ever entered — that
+primitive is upstream, not Vesper's. Vesper's half is making the suspension
+durable: in a recorded conversation the run ends with `outcome: 'suspended'`
+and surfaces `pendingApprovals` (tool name, call id, decoded input), the
+suspension is recorded with the same `ToolSuspended`/`ToolWaitCompleted`
+family every durable wait uses, and `resolveApproval` records the decision —
+from this process or any other holding the same log.
+
+```ts
+const release = Tool.make('release', {
+  description: 'release a build to an environment',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ released: Schema.Boolean }),
+}).setNeedsApproval(true);
+
+const first = yield * conversation.run('release r1');
+if (first.outcome === 'suspended') {
+  for (const approval of first.pendingApprovals ?? []) {
+    yield * conversation.resolveApproval(approval.toolCallId, 'approve');
+  }
+}
+// No input: the decision, not a new user message, is what there is to act
+// on, so the continuation runs from durable state alone.
+const result = yield * conversation.run();
+```
+
+An approved call dispatches its handler for the first time on the next run; a
+denied call settles a refusal-style tool result without the handler ever
+running, and the model reacts to that the way it reacts to any returned tool
+failure. An undecided approval can never dispatch: a later `run` re-surfaces
+the same `suspended` result until a decision lands, a crash before the
+decision leaves exactly the recovery-index orphan described above, and
+resolving the same call twice is a typed `ApprovalResolutionError`. Unrecorded
+`agent.run` fails outright for a `needsApproval` tool — there is nowhere
+durable to record the decision such a run would wait on.
+
+This is the whole approval surface. `AgentWorkflow.wait` remains the tool for
+what it was built for — a handler that must durably wait for an arbitrary
+external event, with `WorkflowEngine` replay around it — not the entry fee
+for a yes-or-no on one tool call.
+
 ## Interception
 
 Spans observe. An interceptor intervenes.

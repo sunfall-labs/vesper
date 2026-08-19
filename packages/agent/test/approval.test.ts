@@ -233,7 +233,10 @@ describe('durable tool approval', () => {
         expect(ran.count).toBe(0);
 
         yield* conversation.resolveApproval(CALL_ID, 'approve');
-        const result = yield* conversation.run('release r1');
+        // No new input: the decision is what there is to act on, so the
+        // continuation runs from durable state alone rather than appending a
+        // second user message the person never said.
+        const result = yield* conversation.run();
 
         expect(ran.count).toBe(1);
         expect(result.outcome).toBe('success');

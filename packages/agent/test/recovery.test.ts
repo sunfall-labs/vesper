@@ -118,7 +118,9 @@ describe('tool recovery state', () => {
       token: 'workflow-token',
       request: { id: '42' },
     });
-    expect(snapshot.completedWaitTokens).toEqual(new Set(['workflow-token']));
+    expect(Array.from(snapshot.completedWaitOutcomes.keys())).toEqual([
+      'workflow-token',
+    ]);
   });
 
   it('turns an explicitly restarted wait into an automatic fresh dispatch', () => {
