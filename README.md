@@ -409,7 +409,10 @@ run. The limits bound cumulative spend; they do not cap any single request.
 Handlers attach as a method rather than a `Definition` field, mirroring
 `toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
 twice replaces the handlers rather than stacking a second set beneath them,
-which is also how `intercepting` behaves.
+which is also how `intercepting` behaves. Two interceptors that should both
+run are joined first with `Interception.compose`, which fixes their order
+explicitly — per-seam rules are on its doc comment — and hands `intercepting`
+one combined value, so attachment is still a single replace.
 
 ## Core concepts
 

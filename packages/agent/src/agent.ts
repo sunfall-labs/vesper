@@ -2929,7 +2929,13 @@ const addToolCallCounts = (
   calls: ReadonlyArray<Response.ToolCallPartEncoded>,
 ): Readonly<Record<string, number>> => {
   if (calls.length === 0) return current;
-  const next = { ...current };
+  // Tool names here come from the model's response, not the toolkit — a call
+  // to a nonexistent tool still lands in `toolCalls` — so `__proto__` is a
+  // possible key. On a default-prototype object that assignment hits the
+  // inherited accessor and silently drops the count; a null-prototype object
+  // makes it an ordinary own property.
+  const next: Record<string, number> = Object.create(null);
+  Object.assign(next, current);
   for (const call of calls) {
     next[call.name] = (next[call.name] ?? 0) + 1;
   }
