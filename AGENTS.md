@@ -22,10 +22,12 @@ nub run knip
 nub run benchmark
 ```
 
-Pass test filters after `--` when a focused run is needed:
+Pass test filters directly after the script name when a focused run is needed.
+Do not insert `--`; Vitest treats the remaining path as positional data and
+runs the full suite:
 
 ```bash
-nub run test -- packages/agent/test/workflow.test.ts
+nub run test packages/agent/test/workflow.test.ts
 ```
 
 Prefer the nearest existing Nub script over reproducing its implementation.
