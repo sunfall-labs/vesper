@@ -789,6 +789,54 @@ describe('an agent that is not intercepted', () => {
   );
 });
 
+// ------------------------------------------------------- replacing
+
+describe('calling intercepting a second time', () => {
+  it.effect(
+    'replaces the first interceptor outright — only the second’s seams fire',
+    () =>
+      Effect.gen(function* () {
+        const seen: string[] = [];
+        const ran = { count: 0 };
+
+        yield* run(
+          agentWith(ran)
+            .intercepting({
+              beforeTurn: () =>
+                Effect.sync(() => {
+                  seen.push('first:beforeTurn');
+                  return Interception.proceed;
+                }),
+              beforeToolCall: () =>
+                Effect.sync(() => {
+                  seen.push('first:beforeToolCall');
+                  return Interception.dispatch;
+                }),
+            })
+            .intercepting({
+              beforeTurn: () =>
+                Effect.sync(() => {
+                  seen.push('second:beforeTurn');
+                  return Interception.proceed;
+                }),
+            })
+            .run('hi'),
+        );
+
+        // Neither of the first interceptor's seams fire — not `beforeTurn`,
+        // which the second interceptor also declares, and not
+        // `beforeToolCall`, which the second does not declare at all. A
+        // stacking implementation would still run the first's
+        // `beforeToolCall`; a replacing one runs only what the live
+        // interceptor — the second — actually declared.
+        expect(seen).toEqual(['second:beforeTurn', 'second:beforeTurn']);
+        // With no `beforeToolCall` on the live interceptor, dispatch proceeds
+        // exactly as if none had ever been attached.
+        expect(ran.count).toBe(1);
+      }),
+  );
+});
+
 // ------------------------------------------------------- the requirement type
 
 class Policy extends Context.Service<Policy, { readonly allow: boolean }>()(
@@ -863,4 +911,338 @@ describe('the requirement channel', () => {
         ]);
       }),
   );
+});
+
+// ------------------------------------------------------- Interception.compose
+//
+// `compose` is the answer to "I want two opinions at one seam": it builds one
+// interceptor from two so `intercepting` still only ever replaces. Each block
+// below pins one seam's documented composition rule against the source, the
+// same way the seams themselves are pinned above.
+
+describe('Interception.compose', () => {
+  describe('beforeModelCall', () => {
+    it.effect('observes both operands, in order, on every call', () =>
+      Effect.gen(function* () {
+        const seen: string[] = [];
+        const ran = { count: 0 };
+
+        yield* run(
+          agentWith(ran)
+            .intercepting(
+              Interception.compose(
+                {
+                  beforeModelCall: (context) =>
+                    Effect.sync(() => {
+                      seen.push(`first:${context.attempt}`);
+                    }),
+                },
+                {
+                  beforeModelCall: (context) =>
+                    Effect.sync(() => {
+                      seen.push(`second:${context.attempt}`);
+                    }),
+                },
+              ),
+            )
+            .run('hi'),
+        );
+
+        expect(seen).toEqual([
+          'first:initial',
+          'second:initial',
+          'first:initial',
+          'second:initial',
+        ]);
+      }),
+    );
+
+    quiet(
+      'stops the second operand from running once the first fails',
+      ({ disableErrorReporting: _disableErrorReporting }) =>
+        runQuiet(
+          Effect.gen(function* () {
+            const seen: string[] = [];
+            const ran = { count: 0 };
+
+            const exit = yield* agentWith(ran)
+              .intercepting(
+                Interception.compose(
+                  { beforeModelCall: () => Effect.fail(refused) },
+                  {
+                    beforeModelCall: () =>
+                      Effect.sync(() => {
+                        seen.push('second');
+                      }),
+                  },
+                ),
+              )
+              .run('hi')
+              .pipe(
+                Effect.result,
+                Effect.provide(scripted([callingTurn, answeringTurn])),
+                Effect.scoped,
+              );
+
+            expect(exit._tag).toBe('Failure');
+            expect(seen).toEqual([]);
+          }),
+        ),
+    );
+  });
+
+  describe('beforeTurn', () => {
+    it.effect('feeds the first operand’s rewrite into the second', () =>
+      Effect.gen(function* () {
+        const prompts: string[] = [];
+        const ran = { count: 0 };
+
+        yield* run(
+          agentWith(ran)
+            .intercepting(
+              Interception.compose(
+                {
+                  beforeTurn: () =>
+                    Effect.succeed(Interception.proceedWith('from first')),
+                },
+                {
+                  beforeTurn: (context) =>
+                    Effect.sync(() =>
+                      Interception.proceedWith(
+                        `${JSON.stringify(context.input.content)} then second`,
+                      ),
+                    ),
+                },
+              ),
+            )
+            .run('the original question'),
+          [callingTurn, answeringTurn],
+          prompts,
+        );
+
+        // The second operand's context carried the first's rewrite, and its
+        // own rewrite — built from that — is what reached the provider.
+        expect(prompts[0]).toContain('from first');
+        expect(prompts[0]).toContain('then second');
+        expect(prompts[0]).not.toContain('the original question');
+      }),
+    );
+
+    it.effect(
+      'keeps the first operand’s rewrite when the second has none',
+      () =>
+        Effect.gen(function* () {
+          const prompts: string[] = [];
+          const ran = { count: 0 };
+
+          yield* run(
+            agentWith(ran)
+              .intercepting(
+                Interception.compose(
+                  {
+                    beforeTurn: () =>
+                      Effect.succeed(Interception.proceedWith('from first')),
+                  },
+                  { beforeTurn: () => Effect.succeed(Interception.proceed) },
+                ),
+              )
+              .run('the original question'),
+            [callingTurn, answeringTurn],
+            prompts,
+          );
+
+          expect(prompts[0]).toContain('from first');
+          expect(prompts[0]).not.toContain('the original question');
+        }),
+    );
+
+    it.effect(
+      'proceeds with the original input when neither operand rewrites',
+      () =>
+        Effect.gen(function* () {
+          const prompts: string[] = [];
+          const ran = { count: 0 };
+
+          yield* run(
+            agentWith(ran)
+              .intercepting(
+                Interception.compose(
+                  { beforeTurn: () => Effect.succeed(Interception.proceed) },
+                  { beforeTurn: () => Effect.succeed(Interception.proceed) },
+                ),
+              )
+              .run('the original question'),
+            [callingTurn, answeringTurn],
+            prompts,
+          );
+
+          expect(prompts[0]).toContain('the original question');
+        }),
+    );
+  });
+
+  describe('beforeToolCall', () => {
+    it.effect(
+      'uses the first operand’s answer without consulting the second',
+      () =>
+        Effect.gen(function* () {
+          const consulted: string[] = [];
+          const ran = { count: 0 };
+          const prompts: string[] = [];
+
+          yield* run(
+            agentWith(ran)
+              .intercepting(
+                Interception.compose(
+                  {
+                    beforeToolCall: () =>
+                      Effect.sync(() => {
+                        consulted.push('first');
+                        return Interception.refuse('denied by first');
+                      }),
+                  },
+                  {
+                    beforeToolCall: () =>
+                      Effect.sync(() => {
+                        consulted.push('second');
+                        return Interception.dispatch;
+                      }),
+                  },
+                ),
+              )
+              .run('hi'),
+            [callingTurn, answeringTurn],
+            prompts,
+          );
+
+          expect(consulted).toEqual(['first']);
+          expect(ran.count).toBe(0);
+          expect(prompts[1]).toContain('denied by first');
+        }),
+    );
+
+    it.effect('consults the second operand once the first dispatches', () =>
+      Effect.gen(function* () {
+        const consulted: string[] = [];
+        const ran = { count: 0 };
+        const prompts: string[] = [];
+
+        yield* run(
+          agentWith(ran)
+            .intercepting(
+              Interception.compose(
+                {
+                  beforeToolCall: () =>
+                    Effect.sync(() => {
+                      consulted.push('first');
+                      return Interception.dispatch;
+                    }),
+                },
+                {
+                  beforeToolCall: () =>
+                    Effect.sync(() => {
+                      consulted.push('second');
+                      return Interception.refuse('denied by second');
+                    }),
+                },
+              ),
+            )
+            .run('hi'),
+          [callingTurn, answeringTurn],
+          prompts,
+        );
+
+        expect(consulted).toEqual(['first', 'second']);
+        expect(ran.count).toBe(0);
+        expect(prompts[1]).toContain('denied by second');
+      }),
+    );
+
+    it.effect('dispatches when neither operand answers', () =>
+      Effect.gen(function* () {
+        const consulted: string[] = [];
+        const ran = { count: 0 };
+
+        yield* run(
+          agentWith(ran)
+            .intercepting(
+              Interception.compose(
+                {
+                  beforeToolCall: () =>
+                    Effect.sync(() => {
+                      consulted.push('first');
+                      return Interception.dispatch;
+                    }),
+                },
+                {
+                  beforeToolCall: () =>
+                    Effect.sync(() => {
+                      consulted.push('second');
+                      return Interception.dispatch;
+                    }),
+                },
+              ),
+            )
+            .run('hi'),
+        );
+
+        expect(consulted).toEqual(['first', 'second']);
+        expect(ran.count).toBe(1);
+      }),
+    );
+  });
+
+  describe('onIndeterminateToolCall', () => {
+    const indeterminate: ReadonlyArray<ConversationRecord.Record> = [
+      crashed[0]!,
+      crashed[1]!,
+      { _tag: 'ToolStarted', id: CALL_ID, name: 'lookup' },
+    ];
+
+    it.effect(
+      'has no neutral decision to fall through on, so only the first operand is consulted',
+      () =>
+        Effect.gen(function* () {
+          const consulted: string[] = [];
+          const ran = { count: 0 };
+
+          yield* run(
+            Effect.gen(function* () {
+              yield* seed(indeterminate);
+              yield* Conversation.make(
+                agentWith(ran).intercepting(
+                  Interception.compose(
+                    {
+                      onIndeterminateToolCall: () =>
+                        Effect.sync(() => {
+                          consulted.push('first');
+                          return Interception.reconcile({
+                            status: 'resolved-by-first',
+                          });
+                        }),
+                    },
+                    {
+                      onIndeterminateToolCall: () =>
+                        Effect.sync(() => {
+                          consulted.push('second');
+                          return Interception.retry;
+                        }),
+                    },
+                  ),
+                ),
+                CONVERSATION,
+              )
+                .run('hi')
+                .pipe(Effect.orDie);
+            }),
+          );
+
+          // The second operand never runs — not even to be overruled — because
+          // this seam has no "no opinion" value for the first to defer with.
+          expect(consulted).toEqual(['first']);
+          // Reconciled rather than retried: the handler did not run again.
+          expect(ran.count).toBe(0);
+        }),
+    );
+  });
 });

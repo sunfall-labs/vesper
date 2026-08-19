@@ -419,6 +419,29 @@ const _exactReplacement: Exact<
   HandledBase | SecondPolicy
 > = true;
 
+// `Interception.compose` unions the two operands' `R` rather than replacing
+// one with the other — the opposite of what a second `intercepting` call
+// does above — so both `FirstPolicy` and `SecondPolicy` surface on the
+// composed agent's requirement channel.
+const composed = handled.intercepting(
+  Interception.compose(firstInterceptor, secondInterceptor),
+);
+const _composedUnionsRequires: Exact<
+  Agent.Requires<typeof composed>,
+  HandledBase | FirstPolicy | SecondPolicy
+> = true;
+
+// And `compose`'s result is passed to a single `intercepting` call, so it is
+// still subject to replace-don't-stack: attaching a third interceptor drops
+// both composed services, the same as replacing any other interceptor.
+const replacedComposed = composed.intercepting({
+  beforeTurn: () => Effect.succeed(Interception.proceed),
+});
+const _composedReplaced: Exact<
+  Agent.Requires<typeof replacedComposed>,
+  HandledBase
+> = true;
+
 class StopService extends Context.Service<
   StopService,
   { readonly stop: true }
