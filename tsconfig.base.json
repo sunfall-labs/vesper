@@ -36,6 +36,9 @@
       "@sunfall/vesper-agent/interception": [
         "./packages/agent/src/interception.ts"
       ],
+      "@sunfall/vesper-agent/model-plan": [
+        "./packages/agent/src/model-plan.ts"
+      ],
       "@sunfall/vesper-agent/recording-policy": [
         "./packages/agent/src/recording-policy.ts"
       ],

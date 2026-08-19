@@ -63,6 +63,10 @@
       "types": "./dist/interception.d.ts",
       "default": "./dist/interception.js"
     },
+    "./model-plan": {
+      "types": "./dist/model-plan.d.ts",
+      "default": "./dist/model-plan.js"
+    },
     "./recording-policy": {
       "types": "./dist/recording-policy.d.ts",
       "default": "./dist/recording-policy.js"
