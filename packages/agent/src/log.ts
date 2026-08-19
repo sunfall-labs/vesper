@@ -123,6 +123,8 @@ export type Recovery = RecoveryState.Recovery;
 export type IndeterminateToolCall = RecoveryState.IndeterminateToolCall;
 /** A deliberately suspended call and its external wait identity. */
 export type SuspendedToolCall = RecoveryState.SuspendedToolCall;
+/** What an external actor durably decided for one wait's token. */
+export type CompletedWait = RecoveryState.CompletedWait;
 
 /** A signal this run has taken delivery of. */
 export interface Delivered {
@@ -333,6 +335,11 @@ export interface Session {
 
   /** @internal Whether an external wait result is already durably audited. */
   readonly hasCompletedWait: (token: string) => boolean;
+
+  /** @internal The durable decision recorded for one wait's token, if any. */
+  readonly completedWait: (
+    token: string,
+  ) => Option.Option<RecoveryState.CompletedWait>;
 
   /** @internal Why an open tool call prevents this run from settling. */
   readonly pendingToolState: Effect.Effect<RecoveryState.PendingToolState>;
@@ -1076,6 +1083,7 @@ const openWith = (
       suspendedToolCalls: toolRecovery.suspendedToolCalls,
       recoveryCorruption: toolRecovery.recoveryCorruption,
       hasCompletedWait: toolRecovery.hasCompletedWait,
+      completedWait: toolRecovery.completedWait,
       pendingToolState: toolRecovery.pendingToolState,
       hasPendingToolCalls: toolRecovery.hasPendingToolCalls,
       onToolSettled: toolRecovery.onToolSettled,

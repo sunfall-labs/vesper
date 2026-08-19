@@ -186,11 +186,20 @@ export interface Definition<
  * codec rather than a bare interface.
  */
 export const Result = Schema.Struct({
-  outcome: Schema.Literals(['success', 'cancelled']),
-  /** Concatenated text of the final turn. */
+  outcome: Schema.Literals(['success', 'cancelled', 'suspended']),
+  /** Concatenated text of the final turn. Empty when `outcome` is `suspended`. */
   text: Schema.String,
   steps: Schema.Natural,
   usage: Stop.Usage,
+  /**
+   * Tool calls durably parked on a `needsApproval` gate.
+   *
+   * Present only when `outcome` is `suspended`. Resolve each one through
+   * `Conversation.resolveApproval` and call `run` again to continue.
+   */
+  pendingApprovals: Schema.optionalKey(
+    Schema.Array(AgentEvents.PendingApproval),
+  ),
 });
 export interface Result extends Schema.Struct.Type<typeof Result.fields> {}
 
@@ -1034,10 +1043,14 @@ export const make = <
                       Effect.map((encodedPart) => ({ part, encodedPart })),
                     ),
               ),
-              Stream.tap(({ encodedPart }) =>
+              Stream.tap(({ part, encodedPart }) =>
                 Effect.gen(function* () {
                   seen.started = true;
-                  observe(seen, encodedPart);
+                  observe(
+                    seen,
+                    part as Response.StreamPart<RunTools>,
+                    encodedPart,
+                  );
                   if (encodedPart.type === 'finish') {
                     yield* Observability.usage(encodedPart.usage);
                   }
@@ -1457,6 +1470,21 @@ export const make = <
                 toolCallCounts: toolCallTotals,
               });
 
+              // A tool this turn called requires approval that is not yet
+              // durably decided. Nothing productive can follow: the model
+              // cannot be asked again with an unanswered tool call in its own
+              // last turn, so this outranks a steer exactly like a cancel
+              // does. Unlike a cancel, it needs somewhere durable to resolve
+              // from — an unrecorded run has nowhere to record the decision
+              // this would wait on, so it fails outright instead of
+              // returning a `Result` nothing can ever act on.
+              const pendingApprovals = seen.pendingApprovals;
+              if (pendingApprovals.length > 0 && session === undefined) {
+                return Stream.fail(
+                  approvalRequiresConversationError(pendingApprovals),
+                );
+              }
+
               // A steer, or a signal backlog this boundary could not fully
               // drain, outranks the stop condition for one more turn,
               // including a step ceiling — `Stop.maxSteps` is not a hard
@@ -1470,6 +1498,7 @@ export const make = <
               // cancel outranks everything.
               const stop =
                 cancelled ||
+                pendingApprovals.length > 0 ||
                 (wanted && steers.length === 0 && !drained.backlog);
               const completedSteps = seen.started ? step : step - 1;
 
@@ -1477,12 +1506,25 @@ export const make = <
                 ? Stream.concat(
                     announced,
                     Stream.make(
-                      AgentEventRuntime.completed(
-                        seen.text,
-                        completedSteps,
-                        totals,
-                        cancelled ? 'cancelled' : 'success',
-                      ),
+                      cancelled
+                        ? AgentEventRuntime.completed(
+                            seen.text,
+                            completedSteps,
+                            totals,
+                            'cancelled',
+                          )
+                        : pendingApprovals.length > 0
+                          ? AgentEventRuntime.suspended(
+                              completedSteps,
+                              totals,
+                              pendingApprovals,
+                            )
+                          : AgentEventRuntime.completed(
+                              seen.text,
+                              completedSteps,
+                              totals,
+                              'success',
+                            ),
                     ),
                   )
                 : Stream.concat(
@@ -1786,6 +1828,51 @@ export const make = <
                       ),
                     );
                   }
+
+                  // `resolveIndeterminate` settles every durable approval this
+                  // session already has a decision for, but it does not — and
+                  // must not — invent one for a call still waiting on
+                  // `Conversation.resolveApproval`. Re-check by identity
+                  // rather than trusting `suspendedToolCalls`, which is the
+                  // snapshot from when this session opened: the recovery
+                  // index it is read through here is the same one
+                  // `resolveIndeterminate` just updated.
+                  //
+                  // `input` here is `ToolSuspended.request` — the toolkit's
+                  // encoded form, the only one durable at this point — rather
+                  // than the freshly decoded value the first suspension
+                  // surfaced. They agree for any parameter schema without a
+                  // custom transform, which is the ordinary case; a caller
+                  // that needs the exact decoded value can always decode
+                  // `request` again against the tool's own schema.
+                  const stillPendingApprovals: AgentEvents.PendingApproval[] =
+                    session.suspendedToolCalls.flatMap((call) => {
+                      if (call.wait !== ToolDispatch.APPROVAL_WAIT) return [];
+                      const current = session.recovery(
+                        call.name,
+                        call.toolCallId,
+                      );
+                      return Option.isSome(current) &&
+                        current.value._tag === 'Suspended'
+                        ? [
+                            {
+                              toolCallId: call.toolCallId,
+                              toolName: call.name,
+                              input: call.request,
+                            },
+                          ]
+                        : [];
+                    });
+                  if (stillPendingApprovals.length > 0) {
+                    return Stream.make(
+                      AgentEventRuntime.suspended(
+                        0,
+                        wiring.initialUsage ?? { input: 0, output: 0 },
+                        stillPendingApprovals,
+                      ),
+                    );
+                  }
+
                   yield* Ref.set(
                     chat.history,
                     Prompt.concat(
@@ -2503,7 +2590,7 @@ const fromParts = <
                       session,
                     ),
                   )
-                : Effect.succeed(completed);
+                : Effect.succeed<Result>(completed);
             }),
           ),
   };
@@ -2516,6 +2603,10 @@ interface TurnState {
   usage: Response.FinishPartEncoded['usage'] | undefined;
   emitted: boolean;
   started: boolean;
+  /** Decoded call params seen this turn, keyed by tool call id. */
+  callsById: Map<string, { readonly name: string; readonly input: unknown }>;
+  /** `tool-approval-request` parts observed this turn, in provider order. */
+  pendingApprovals: AgentEvents.PendingApproval[];
 }
 
 const emptyTurnState = (): TurnState => ({
@@ -2524,19 +2615,49 @@ const emptyTurnState = (): TurnState => ({
   usage: undefined,
   emitted: false,
   started: false,
+  callsById: new Map(),
+  pendingApprovals: [],
 });
 
-const observe = (state: TurnState, part: Response.StreamPartEncoded): void => {
+/**
+ * Accumulate what the stop decision and the result need from one turn.
+ *
+ * Takes both the decoded and encoded sibling of the same part: `encoded` is
+ * what every existing accumulation here reads, and a `tool-approval-request`
+ * carries no parameters of its own — the params worth showing an approver are
+ * the same tool call's decoded ones, tracked from `decoded` as calls stream
+ * by and looked up when the matching approval request arrives.
+ */
+const observe = <Tools extends Record<string, Tool.Any>>(
+  state: TurnState,
+  decoded: Response.StreamPart<Tools>,
+  encoded: Response.StreamPartEncoded,
+): void => {
   state.emitted = true;
-  switch (part.type) {
+  switch (encoded.type) {
     case 'text-delta':
-      state.text += part.delta;
+      state.text += encoded.delta;
       break;
     case 'tool-call':
-      state.toolCalls.push(part);
+      state.toolCalls.push(encoded);
+      if (decoded.type === 'tool-call') {
+        state.callsById.set(decoded.id, {
+          name: decoded.name,
+          input: decoded.params,
+        });
+      }
       break;
+    case 'tool-approval-request': {
+      const call = state.callsById.get(encoded.toolCallId);
+      state.pendingApprovals.push({
+        toolCallId: encoded.toolCallId,
+        toolName: call?.name ?? '',
+        input: call?.input,
+      });
+      break;
+    }
     case 'finish':
-      state.usage = part.usage;
+      state.usage = encoded.usage;
       break;
     default:
       break;
@@ -2687,6 +2808,28 @@ const encodePart = <Tools extends Record<string, Tool.Any>>(
       return assertPartEncodingStrategy(part);
   }
 };
+
+const approvalRequiresConversationError = (
+  pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
+): AiError.AiError =>
+  new AiError.AiError({
+    module: 'Agent',
+    method: 'run',
+    reason: new AiError.InvalidRequestError({
+      description:
+        `Tool call${pendingApprovals.length === 1 ? '' : 's'} ` +
+        `${pendingApprovals.map((approval) => `"${approval.toolName}" (${approval.toolCallId})`).join(', ')} ` +
+        'require approval, which can only be resolved durably. Bind this ' +
+        'agent to a Conversation and call Conversation.resolveApproval ' +
+        'instead of running it directly.',
+      metadata: {
+        pendingApprovals: pendingApprovals.map((approval) => ({
+          toolCallId: approval.toolCallId,
+          toolName: approval.toolName,
+        })),
+      },
+    }),
+  });
 
 const normalizeProviderError = (
   error: unknown,

@@ -45,6 +45,32 @@ export class SuspendedConversationError extends Schema.TaggedError<SuspendedConv
   '@sunfall/vesper-agent/SuspendedConversationError',
 )('SuspendedConversationError', SuspendedConversationErrorFields) {}
 
+const ApprovalResolutionErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly conversationId: typeof ConversationId;
+  readonly toolCallId: typeof ToolCallId;
+  readonly reason: Schema.Literals<['not_found', 'already_resolved']>;
+} = {
+  message: Schema.String,
+  conversationId: ConversationId,
+  toolCallId: ToolCallId,
+  reason: Schema.Literals(['not_found', 'already_resolved']),
+};
+
+/**
+ * A `Conversation.resolveApproval` call could not be applied.
+ *
+ * `not_found` covers both an unknown tool call id and one that was never
+ * durably suspended on a `needsApproval` gate; both are indistinguishable to
+ * a caller and neither has a decision to make idempotent. `already_resolved`
+ * is the double-resolve case: a typed conflict rather than a silent no-op,
+ * so a second, differing decision cannot be mistaken for having taken
+ * effect.
+ */
+export class ApprovalResolutionError extends Schema.TaggedError<ApprovalResolutionError>(
+  '@sunfall/vesper-agent/ApprovalResolutionError',
+)('ApprovalResolutionError', ApprovalResolutionErrorFields) {}
+
 /** A conversation checkpoint could not be made durable. */
 export class DurabilityError extends Schema.TaggedError<DurabilityError>(
   '@sunfall/vesper-agent/DurabilityError',
