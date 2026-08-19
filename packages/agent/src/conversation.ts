@@ -331,7 +331,11 @@ export function make<A extends ConcreteAgent, const P extends object>(
   return bind(agent, conversationId, policy);
 }
 
-export { CompatibilityError, SuspendedConversationError };
+export {
+  ApprovalResolutionError,
+  CompatibilityError,
+  SuspendedConversationError,
+};
 export { DurabilityError } from './conversation-error.js';
 
 export * as Conversation from './conversation.js';
