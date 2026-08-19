@@ -92,7 +92,7 @@ const scripted = (
           Stream.unwrap(
             Effect.gen(function* () {
               const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
-              const turn = turns[Math.min(index, turns.length - 1)];
+              const turn = turns.at(Math.min(index, turns.length - 1));
               if (turn === undefined) {
                 throw new Error('missing scripted turn');
               }

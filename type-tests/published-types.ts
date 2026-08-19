@@ -61,14 +61,15 @@ type PersistedRevisionIsBranded = Expect<
   >
 >;
 
-export type PublishedTypeAssertions =
-  | McpSourceIsTyped
-  | McpRemoteSourceIsTyped
-  | McpCachedRequiresCache
-  | McpAuthRejectsPlainString
-  | McpAuthAcceptsRedacted
-  | McpNamesArePrefixed
-  | SuspendedConversationIdIsBranded
-  | SuspendedToolCallIdIsBranded
-  | WaitConversationIdIsBranded
-  | PersistedRevisionIsBranded;
+export type PublishedTypeAssertions = [
+  McpSourceIsTyped,
+  McpRemoteSourceIsTyped,
+  McpCachedRequiresCache,
+  McpAuthRejectsPlainString,
+  McpAuthAcceptsRedacted,
+  McpNamesArePrefixed,
+  SuspendedConversationIdIsBranded,
+  SuspendedToolCallIdIsBranded,
+  WaitConversationIdIsBranded,
+  PersistedRevisionIsBranded,
+];

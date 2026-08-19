@@ -239,11 +239,6 @@
       "count": 2
     }
   },
-  "packages/agent/test/approval.test.ts": {
-    "typescript/no-unnecessary-condition": {
-      "count": 1
-    }
-  },
   "packages/agent/test/assertions.test.ts": {
     "typescript/no-explicit-any": {
       "count": 1
@@ -292,9 +287,6 @@
     "effecttsgo/instance-of-schema": {
       "count": 1
     },
-    "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 1
-    },
     "typescript/no-unnecessary-condition": {
       "count": 2
     },
@@ -302,7 +294,7 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 2
+      "count": 1
     }
   },
   "packages/agent/test/concurrent-conversations.operational.test.ts": {
@@ -342,9 +334,6 @@
   "packages/agent/test/fork.test.ts": {
     "effecttsgo/new-promise": {
       "count": 1
-    },
-    "effecttsgo/unnecessary-fail-yieldable-error": {
-      "count": 1
     }
   },
   "packages/agent/test/interception-typing.test.ts": {
@@ -368,7 +357,7 @@
       "count": 1
     },
     "typescript/no-unnecessary-condition": {
-      "count": 2
+      "count": 1
     },
     "typescript/no-unsafe-argument": {
       "count": 1
@@ -383,9 +372,6 @@
     }
   },
   "packages/agent/test/prompt-transport.test.ts": {
-    "typescript/no-unnecessary-condition": {
-      "count": 3
-    },
     "typescript/no-unsafe-type-assertion": {
       "count": 1
     }
@@ -409,9 +395,6 @@
   "packages/agent/test/resume.test.ts": {
     "effecttsgo/redundant-or-die": {
       "count": 4
-    },
-    "typescript/no-unsafe-argument": {
-      "count": 1
     }
   },
   "packages/agent/test/settlement.test.ts": {
@@ -501,9 +484,6 @@
     }
   },
   "packages/agent/test/workflow.test.ts": {
-    "effecttsgo/instance-of-schema": {
-      "count": 1
-    },
     "effecttsgo/prefer-schema-over-json": {
       "count": 1
     },
@@ -579,7 +559,7 @@
       "count": 1
     },
     "typescript/no-unnecessary-condition": {
-      "count": 5
+      "count": 4
     },
     "typescript/strict-boolean-expressions": {
       "count": 2
@@ -736,9 +716,6 @@
     "effecttsgo/async-function": {
       "count": 13
     },
-    "effecttsgo/multiple-effect-provide": {
-      "count": 1
-    },
     "effecttsgo/new-promise": {
       "count": 2
     },
@@ -857,9 +834,6 @@
     }
   },
   "type-tests/published-types.ts": {
-    "typescript/no-duplicate-type-constituents": {
-      "count": 9
-    },
     "typescript/no-unnecessary-type-arguments": {
       "count": 1
     },

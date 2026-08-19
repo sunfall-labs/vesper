@@ -118,10 +118,7 @@ const seed = Effect.fn('test.seedCompatibility')(function* (
 const run = <A, E, R>(
   effect: Effect.Effect<A, E, R>,
   calls: { count: number },
-) =>
-  effect.pipe(
-    Effect.provide(Layer.merge(provider(calls), testLogLayer)),
-  ) as Effect.Effect<A, E>;
+) => effect.pipe(Effect.provide(Layer.merge(provider(calls), testLogLayer)));
 
 describe('durable compatibility', () => {
   it.effect.each([

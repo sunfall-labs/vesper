@@ -230,14 +230,12 @@ const failsOnceAfter = (
           Effect.gen(function* () {
             const value = yield* effect;
             if (!(yield* Ref.getAndSet(failed, true))) {
-              return yield* Effect.fail(
-                new LogStore.LogStoreError({
-                  path,
-                  operation,
-                  reason: 'storage',
-                  detail: `crashed after ${operation}`,
-                }),
-              );
+              return yield* new LogStore.LogStoreError({
+                path,
+                operation,
+                reason: 'storage',
+                detail: `crashed after ${operation}`,
+              });
             }
             return value;
           });

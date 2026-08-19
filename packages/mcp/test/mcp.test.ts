@@ -8,7 +8,7 @@ import {
   type Transport as ProtocolTransport,
 } from '@modelcontextprotocol/client';
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Fiber, Redacted, Stream } from 'effect';
+import { Effect, Fiber, Layer, Redacted, Stream } from 'effect';
 import { TestClock } from 'effect/testing';
 import { type Response as AiResponse, Tool, Toolkit } from 'effect/unstable/ai';
 
@@ -492,8 +492,12 @@ describe('Mcp', () => {
         yield* agent.run('Second.');
         expect(lifecycle).toEqual({ opened: 1, closed: 0 });
       }).pipe(
-        Effect.provide(model.layer),
-        Effect.provide(Mcp.layerConnectionCache({ idleTimeToLive: '1 hour' })),
+        Effect.provide(
+          Layer.merge(
+            model.layer,
+            Mcp.layerConnectionCache({ idleTimeToLive: '1 hour' }),
+          ),
+        ),
       );
 
       expect(lifecycle).toEqual({ opened: 1, closed: 1 });

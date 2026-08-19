@@ -65,7 +65,7 @@ const persist = (input: Prompt.RawInput) =>
       revision: LogVocabulary.AgentRevision.make('1'),
       input,
     });
-    const first = (yield* session.recorded)[0];
+    const first = (yield* session.recorded).at(0);
     if (first === undefined) {
       throw new Error('missing RunStarted record');
     }
@@ -111,7 +111,7 @@ describe('prompt transport', () => {
         input: filePrompt(bytes),
       });
       const sourceRecords = yield* source.recorded;
-      const sourceRecord = sourceRecords[0];
+      const sourceRecord = sourceRecords.at(0);
       if (sourceRecord === undefined) {
         throw new Error('missing source record');
       }
@@ -215,7 +215,7 @@ describe('prompt transport', () => {
             revision: LogVocabulary.AgentRevision.make('1'),
             input: filePrompt(bytes),
           });
-          const first = (yield* session.recorded)[0];
+          const first = (yield* session.recorded).at(0);
           if (first === undefined) {
             throw new Error('missing RunStarted record');
           }

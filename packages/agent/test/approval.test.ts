@@ -296,7 +296,7 @@ describe('durable tool approval', () => {
           envelope.record._tag === 'ToolOutcome' ? [envelope.record] : [],
         );
         expect(outcomes.length).toBe(1);
-        const [refusal] = outcomes;
+        const refusal = outcomes.at(0);
         expect(refusal).toMatchObject({
           _tag: 'ToolOutcome',
           step: 1,

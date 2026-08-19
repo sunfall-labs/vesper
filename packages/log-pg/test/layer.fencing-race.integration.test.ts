@@ -213,7 +213,7 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
 
         const page = await runOn(writerA, (log) => log.read(path));
         expect(page.records).toHaveLength(1);
-        const firstRecord = page.records[0];
+        const firstRecord = page.records.at(0);
         if (firstRecord === undefined) {
           throw new Error('race winner record missing');
         }

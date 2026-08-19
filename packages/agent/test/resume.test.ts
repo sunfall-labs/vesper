@@ -193,7 +193,7 @@ const rolesOf = (prompt: Prompt.Prompt) =>
 const textIn = (prompt: Prompt.Prompt): string =>
   JSON.stringify(prompt.content);
 
-const readAll = Effect.fn('test.readAll')(function* (path = PATH) {
+const readAll = Effect.fn('test.readAll')(function* (path: string = PATH) {
   const store = yield* LogStore.Service;
   const page = yield* store.read(path, { limit: 1000 });
   return page.records;

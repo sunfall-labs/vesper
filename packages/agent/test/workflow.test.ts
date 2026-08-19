@@ -372,10 +372,9 @@ describe('AgentWorkflow', () => {
         mapError: (error) => {
           mapped = error;
           return new WorkflowFailure({
-            message:
-              error instanceof LogStore.LogStoreError
-                ? error.reason
-                : String(error),
+            message: Schema.is(LogStore.LogStoreError)(error)
+              ? error.reason
+              : String(error),
           });
         },
       });
