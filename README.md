@@ -461,12 +461,29 @@ Skills here are values passed to `Agent.make`; there is no discovery from disk.
 ### Code mode
 
 `codeMode: true` replaces direct tool advertisement with one isolated `exec`
-tool: the model writes JavaScript that composes the toolkit's tools, the
-script runs in a `CodeExecutor`, and each nested call dispatches through the
-same gated toolkit an advertised call would — intercepted and metered, with
-only the script's `text(...)` output returning to the model. Enabling it puts
+tool. Its description contains a generated TypeScript SDK with the parameter
+and result type of every brokered tool. The model writes the body of an async
+function in erasable TypeScript; top-level `await` and `return` work, while
+imports and syntax that requires transformation do not. The isolated executor
+strips types before evaluation; the SDK and standard TypeScript globals are
+available, while host-specific APIs are not. Each nested call dispatches
+through the same gated toolkit an advertised call would — intercepted and
+metered. The `exec` result separates streamed text from structured data as
+`{ output, result? }`: `text(...)` appends to `output`, while a top-level
+`return` supplies a JSON `result`. An outer execution failure is
+`{ code: 'execution_failed', message }`.
+
+Declared tool failures and broker validation failures reject the nested call
+with a model-visible `ToolCallError`. Its `code` is `tool_failure`,
+`dispatch_failed`, or `approval_required`; `tool` identifies the nested tool,
+and `value` preserves a declared failure value when one exists. Scripts can
+catch that class and branch without parsing an error string.
+
+Enabling code mode puts
 `CodeExecutor.Service` on the agent's requirement channel, so a missing
-executor is a compile error like any other missing service.
+executor is a compile error like any other missing service. The bundled
+executor requires Node.js 22.13.0 or newer for native type stripping, but the
+execution substrate is not part of the model-visible contract.
 
 `codeMode: { except: ['release'] }` brokers everything _but_ the named tools,
 which stay directly advertised — gated, intercepted, metered, and, when
@@ -474,8 +491,9 @@ marked `Tool.setNeedsApproval`, durably approvable exactly as if code mode
 were off for them. That is the intended pairing: a broad toolkit behind
 `exec` for composition, with the one or two consequential tools kept on the
 provider seam where the approval machinery lives. A brokered tool that
-requires approval is refused inside `exec` with a typed failure rather than
-silently executed, and the excepted names are checked against the toolkit at
+requires approval is rejected by `Agent.make` unless it is excepted. A
+dynamically resolved approval tool fails closed with `approval_required`
+rather than executing. Excepted names are checked against the toolkit at
 compile time — a misspelling is a type error, not a tool that never matches.
 
 ### Compaction and the context window

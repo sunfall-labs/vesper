@@ -11,6 +11,7 @@ import {
 import { AiError, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { CodeExecutor } from './code-executor.js';
+import { renderCodeSdk } from './code-sdk.js';
 import * as AgentLog from './log.js';
 import { ResumeProjection } from './resume-projection.js';
 
@@ -46,8 +47,14 @@ const execTool = (description: string) =>
   Tool.make(TOOL_NAME, {
     description,
     parameters: Schema.Struct({ source: Schema.String }),
-    success: Schema.String,
-    failure: Schema.String,
+    success: Schema.Struct({
+      output: Schema.String,
+      result: Schema.optionalKey(Schema.Json),
+    }),
+    failure: Schema.Struct({
+      code: Schema.Literal('execution_failed'),
+      message: Schema.String,
+    }),
     failureMode: 'return',
   });
 
@@ -64,7 +71,8 @@ export type ExecTools = {
  * ordinary session gating, interception, metering, and provider-mediated
  * approval, exactly as if code mode were off for them. Naming a tool the
  * toolkit does not define is a compile error, the same way `Stop.toolCalled`
- * checks its name.
+ * checks its name. `Agent.make` rejects any known approval-gated tool omitted
+ * from `except`; dynamically resolved approval tools fail closed at dispatch.
  *
  * Only the agent's own toolkit names can be excepted. Generated tools —
  * delegation, skills, `read_attachment` — are brokered like everything else.
@@ -306,6 +314,26 @@ const descriptor = (tool: Tool.Any): CodeExecutor.ToolDescriptor => ({
   result: jsonValue(Tool.getJsonSchemaFromSchema(tool.successSchema)),
 });
 
+const toolFailureMessage = (
+  name: string,
+  value: CodeExecutor.JsonValue,
+): string => {
+  if (typeof value === 'string') return value;
+  if (isJsonRecord(value) && typeof value.message === 'string') {
+    return value.message;
+  }
+  return `Tool "${name}" failed`;
+};
+
+const failedToolResponse = (
+  event: CodeExecutor.ToolCall,
+  error: CodeExecutor.ToolFailure,
+): CodeExecutor.ToolFailureResponse => ({
+  id: event.id,
+  outcome: 'failure',
+  error,
+});
+
 const invoke = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
   event: CodeExecutor.ToolCall,
@@ -324,12 +352,10 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
       );
     }
     if (tool.needsApproval !== undefined && tool.needsApproval !== false) {
-      return yield* Effect.fail(
-        aiError(
-          'nestedToolCall',
-          `Tool "${event.name}" requires provider-mediated approval and is unavailable in code mode`,
-        ),
-      );
+      return failedToolResponse(event, {
+        code: 'approval_required',
+        message: `Tool "${event.name}" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except`,
+      });
     }
     const name = event.name as Extract<keyof Tools, string>;
     const input = event.input as Tool.Parameters<Tools[typeof name]>;
@@ -340,23 +366,41 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
         aiError('nestedToolCall', `Tool "${event.name}" returned no result`),
       );
     }
-    return {
-      id: event.id,
-      outcome: result.value.isFailure ? 'failure' : 'success',
-      value: jsonValue(result.value.encodedResult),
-    };
-  });
+    const value = jsonValue(result.value.encodedResult);
+    return result.value.isFailure
+      ? failedToolResponse(event, {
+          code: 'tool_failure',
+          message: toolFailureMessage(event.name, value),
+          value,
+        })
+      : ({
+          id: event.id,
+          outcome: 'success',
+          value,
+        } satisfies CodeExecutor.ToolSuccessResponse);
+  }).pipe(
+    Effect.result,
+    Effect.map((result) =>
+      result._tag === 'Success'
+        ? result.success
+        : failedToolResponse(event, {
+            code: 'dispatch_failed',
+            message: result.failure.message,
+          }),
+    ),
+  );
 
 const catalogDescription = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
 ): string => {
-  const catalog = Object.values(toolkit.tools)
-    .map((tool) => `${tool.name}: ${Tool.getDescription(tool) ?? ''}`)
-    .join('\n');
+  const tools = Object.values(toolkit.tools).map(descriptor);
   return [
-    'Execute JavaScript that composes the hidden tools below.',
-    'Only values passed to text(...) are returned.',
-    catalog,
+    'Execute erasable TypeScript that composes the hidden tools below.',
+    'The source is the body of an async function, so top-level await and return work.',
+    'Imports and TypeScript syntax that requires transformation are unavailable.',
+    'Use the SDK and standard TypeScript globals; host-specific APIs are unavailable.',
+    'Values passed to text(...) become output; return a JSON value for a structured result.',
+    renderCodeSdk(tools),
   ].join('\n');
 };
 
@@ -479,6 +523,7 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                 let nextState:
                   | Readonly<Record<string, CodeExecutor.JsonValue>>
                   | undefined;
+                let result: CodeExecutor.JsonValue | undefined;
                 yield* execution.events.pipe(
                   Stream.mapEffect(
                     (event) => {
@@ -498,6 +543,7 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                           return Effect.sync(() => {
                             completed = true;
                             nextState = event.state;
+                            result = event.result;
                           });
                         case 'Failure':
                           return Effect.fail(aiError('execute', event.message));
@@ -523,8 +569,16 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                   .pipe(
                     Effect.mapError((error) => aiError('state', error.message)),
                   );
-                return output.join('');
-              }).pipe(Effect.mapError((error) => error.message)),
+                return {
+                  output: output.join(''),
+                  ...(result === undefined ? {} : { result }),
+                };
+              }).pipe(
+                Effect.mapError((error) => ({
+                  code: 'execution_failed' as const,
+                  message: error.message,
+                })),
+              ),
             ),
         }),
       ),

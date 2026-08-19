@@ -2177,6 +2177,18 @@ const validateGeneratedToolNames = (
   if (resultOverflow) reserve(ResultOverflow.TOOL_NAME, 'resultOverflow');
   if (CodeMode.isEnabled(codeMode)) {
     reserve(CodeMode.TOOL_NAME, 'codeMode');
+    const excepted = new Set(codeMode === true ? [] : codeMode.except);
+    for (const [name, tool] of Object.entries(own.tools)) {
+      if (
+        tool.needsApproval !== undefined &&
+        tool.needsApproval !== false &&
+        !excepted.has(name)
+      ) {
+        throw new Error(
+          `Agent codeMode brokers approval-gated tool "${name}"; add it to codeMode.except`,
+        );
+      }
+    }
     if (codeMode !== true) {
       // The compile-time `keyof Tools & string` check on `except` degrades
       // to this when the array is built dynamically, the same trade

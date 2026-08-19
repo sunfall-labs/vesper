@@ -22,6 +22,131 @@ const request = (
 });
 
 describe('node code executor', () => {
+  it.effect('returns a structured JSON completion value', () =>
+    Effect.gen(function* () {
+      const executor = yield* CodeExecutor.Service;
+      const execution = yield* executor.start(
+        request(`
+          text("working")
+          return { answer: 42, nested: [true, null] }
+        `),
+      );
+      const events = yield* Stream.runCollect(execution.events);
+
+      expect(Array.from(events)).toEqual([
+        { _tag: 'Output', value: 'working' },
+        {
+          _tag: 'Completion',
+          state: {},
+          result: { answer: 42, nested: [true, null] },
+        },
+      ]);
+    }).pipe(Effect.provide(NodeCodeExecutor.layer())),
+  );
+
+  it.effect('executes erasable TypeScript against the declared SDK', () =>
+    Effect.gen(function* () {
+      const executor = yield* CodeExecutor.Service;
+      const execution = yield* executor.start(
+        request(`
+          type Echo = { readonly value: string }
+          const result: Echo = await tools.echo({ value: "typed" } satisfies Echo)
+          text(result.value)
+        `),
+      );
+      const events = yield* execution.events.pipe(
+        Stream.tap((event) =>
+          event._tag === 'ToolCall'
+            ? execution.respond({
+                id: event.id,
+                outcome: 'success',
+                value: event.input,
+              })
+            : Effect.void,
+        ),
+        Stream.runCollect,
+      );
+
+      expect(Array.from(events)).toEqual([
+        {
+          _tag: 'ToolCall',
+          id: '1',
+          name: 'echo',
+          input: { value: 'typed' },
+        },
+        { _tag: 'Output', value: 'typed' },
+        { _tag: 'Completion', state: {} },
+      ]);
+    }).pipe(Effect.provide(NodeCodeExecutor.layer())),
+  );
+
+  it.effect('exposes structured nested failures as ToolCallError', () =>
+    Effect.gen(function* () {
+      const executor = yield* CodeExecutor.Service;
+      const execution = yield* executor.start(
+        request(`
+          try {
+            await tools.echo({ value: "fail" })
+          } catch (error) {
+            if (!(error instanceof ToolCallError)) throw error
+            return {
+              name: error.name,
+              code: error.code,
+              tool: error.tool,
+              message: error.message,
+              value: error.value,
+            }
+          }
+        `),
+      );
+      const events = yield* execution.events.pipe(
+        Stream.tap((event) =>
+          event._tag === 'ToolCall'
+            ? execution.respond({
+                id: event.id,
+                outcome: 'failure',
+                error: {
+                  code: 'tool_failure',
+                  message: 'Echo refused the value',
+                  value: { reason: 'refused' },
+                },
+              })
+            : Effect.void,
+        ),
+        Stream.runCollect,
+      );
+
+      expect(Array.from(events).at(-1)).toEqual({
+        _tag: 'Completion',
+        state: {},
+        result: {
+          name: 'ToolCallError',
+          code: 'tool_failure',
+          tool: 'echo',
+          message: 'Echo refused the value',
+          value: { reason: 'refused' },
+        },
+      });
+    }).pipe(Effect.provide(NodeCodeExecutor.layer())),
+  );
+
+  it.effect('rejects TypeScript syntax that requires transformation', () =>
+    Effect.gen(function* () {
+      const executor = yield* CodeExecutor.Service;
+      const execution = yield* executor.start(
+        request('enum Answer { Yes = "yes" }; text(Answer.Yes)'),
+      );
+      const events = yield* Stream.runCollect(execution.events);
+
+      expect(Array.from(events)).toEqual([
+        {
+          _tag: 'Failure',
+          message: 'TypeScript source must use erasable syntax',
+        },
+      ]);
+    }).pipe(Effect.provide(NodeCodeExecutor.layer())),
+  );
+
   it.effect('runs code in a standalone host and brokers nested tools', () =>
     Effect.gen(function* () {
       const executor = yield* CodeExecutor.Service;
@@ -146,6 +271,16 @@ describe('node code executor', () => {
         }),
       );
       expect(Array.from(yield* Stream.runCollect(output.events))).toEqual([
+        { _tag: 'Failure', message: 'Code output exceeds 4 bytes' },
+      ]);
+
+      const structured = yield* executor.start(
+        request('return { value: "12345" }', {
+          ...CodeExecutor.defaultLimits,
+          maxOutputBytes: 4,
+        }),
+      );
+      expect(Array.from(yield* Stream.runCollect(structured.events))).toEqual([
         { _tag: 'Failure', message: 'Code output exceeds 4 bytes' },
       ]);
 

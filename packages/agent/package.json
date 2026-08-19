@@ -27,7 +27,7 @@
   ],
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.13.0"
   },
   "sideEffects": false,
   "exports": {

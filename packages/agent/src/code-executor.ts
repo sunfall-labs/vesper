@@ -36,6 +36,7 @@ export const defaultLimits: Limits = Object.freeze({
 
 /** Everything an executor needs; it receives no application services. */
 export interface Request {
+  /** The body of an async function, written in erasable TypeScript. */
   readonly source: string;
   readonly tools: ReadonlyArray<ToolDescriptor>;
   readonly state: Readonly<Record<string, JsonValue>>;
@@ -57,6 +58,7 @@ export interface Output {
 export interface Completion {
   readonly _tag: 'Completion';
   readonly state: Readonly<Record<string, JsonValue>>;
+  readonly result?: JsonValue;
 }
 
 export interface Failure {
@@ -66,11 +68,30 @@ export interface Failure {
 
 export type Event = ToolCall | Output | Completion | Failure;
 
-export interface ToolResponse {
+export type ToolFailureCode =
+  | 'tool_failure'
+  | 'approval_required'
+  | 'dispatch_failed';
+
+export interface ToolFailure {
+  readonly code: ToolFailureCode;
+  readonly message: string;
+  readonly value?: JsonValue;
+}
+
+export interface ToolSuccessResponse {
   readonly id: string;
-  readonly outcome: 'success' | 'failure';
+  readonly outcome: 'success';
   readonly value: JsonValue;
 }
+
+export interface ToolFailureResponse {
+  readonly id: string;
+  readonly outcome: 'failure';
+  readonly error: ToolFailure;
+}
+
+export type ToolResponse = ToolSuccessResponse | ToolFailureResponse;
 
 export class ExecutorError extends Error {
   readonly _tag = 'CodeExecutorError';
