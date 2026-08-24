@@ -20,6 +20,8 @@ export interface Options {
   readonly hostUrl?: URL;
 }
 
+type Runtime = 'bun' | 'deno' | 'node';
+
 const defaultHostUrl = new URL(
   '../host/code-sandbox-host.mjs',
   import.meta.url,
@@ -29,6 +31,64 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeJson = Schema.decodeUnknownSync(
   Schema.fromJsonString(Schema.Unknown),
 );
+
+const runtime = (): Runtime => {
+  if ('deno' in process.versions) {
+    return 'deno';
+  }
+  if ('bun' in process.versions) {
+    return 'bun';
+  }
+  return 'node';
+};
+
+const hostArguments = (
+  hostPath: string,
+  heapMiB: number,
+): Effect.Effect<ReadonlyArray<string>, CodeExecutor.ExecutorError> => {
+  switch (runtime()) {
+    case 'bun':
+      return Effect.succeed(['--smol', hostPath]);
+    case 'deno':
+      return Effect.succeed([
+        'run',
+        '--no-config',
+        '--no-prompt',
+        `--allow-read=${hostPath}`,
+        `--v8-flags=--max-old-space-size=${String(heapMiB)}`,
+        hostPath,
+      ]);
+    case 'node': {
+      const permissionFlag = process.allowedNodeEnvironmentFlags.has(
+        '--permission',
+      )
+        ? '--permission'
+        : process.allowedNodeEnvironmentFlags.has('--experimental-permission')
+          ? '--experimental-permission'
+          : undefined;
+      return permissionFlag === undefined
+        ? Effect.fail(
+            new CodeExecutor.ExecutorError(
+              'unavailable',
+              'This Node.js runtime cannot enforce sandbox host permissions',
+            ),
+          )
+        : Effect.succeed([
+            permissionFlag,
+            `--allow-fs-read=${hostPath}`,
+            `--max-old-space-size=${String(heapMiB)}`,
+            hostPath,
+          ]);
+    }
+    default:
+      return Effect.fail(
+        new CodeExecutor.ExecutorError(
+          'unavailable',
+          'This JavaScript runtime cannot start the code sandbox host',
+        ),
+      );
+  }
+};
 
 const isEvent = (value: unknown): value is CodeExecutor.Event => {
   if (typeof value !== 'object' || value === null || !('_tag' in value)) {
@@ -100,36 +160,13 @@ const start = (
       Math.floor(request.limits.maxHeapBytes / (1024 * 1024)),
     );
     const hostPath = fileURLToPath(options.hostUrl ?? defaultHostUrl);
-    const permissionFlag = process.allowedNodeEnvironmentFlags.has(
-      '--permission',
-    )
-      ? '--permission'
-      : process.allowedNodeEnvironmentFlags.has('--experimental-permission')
-        ? '--experimental-permission'
-        : undefined;
-    if (permissionFlag === undefined) {
-      return yield* Effect.fail(
-        new CodeExecutor.ExecutorError(
-          'unavailable',
-          'This Node.js runtime cannot enforce sandbox host permissions',
-        ),
-      );
-    }
+    const arguments_ = yield* hostArguments(hostPath, heapMiB);
     const child = yield* Effect.try({
       try: () =>
-        spawn(
-          process.execPath,
-          [
-            permissionFlag,
-            `--allow-fs-read=${hostPath}`,
-            `--max-old-space-size=${String(heapMiB)}`,
-            hostPath,
-          ],
-          {
-            env: {},
-            stdio: ['pipe', 'pipe', 'pipe'],
-          },
-        ),
+        spawn(process.execPath, arguments_, {
+          env: {},
+          stdio: ['pipe', 'pipe', 'pipe'],
+        }),
       catch: (cause) =>
         new CodeExecutor.ExecutorError(
           'unavailable',
@@ -282,7 +319,7 @@ const start = (
     };
   });
 
-/** A credential-free, separate-process TypeScript executor for Node.js. */
+/** A credential-free, separate-process TypeScript executor for Node.js, Bun, and Deno. */
 export const layer = (
   options: Options = {},
 ): Layer.Layer<CodeExecutor.Service> =>

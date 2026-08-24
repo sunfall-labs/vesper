@@ -505,8 +505,12 @@ catch that class and branch without parsing an error string.
 Enabling code mode puts
 `CodeExecutor.Service` on the agent's requirement channel, so a missing
 executor is a compile error like any other missing service. The bundled
-executor requires Node.js 22.13.0 or newer for native type stripping, but the
-execution substrate is not part of the model-visible contract.
+executor runs natively on Node.js 22.13.0 or newer, Bun, and Deno. Deno callers
+must grant permission to run the Deno executable; the sandbox subprocess gets
+only read access to its own host module. Bun uses its native TypeScript
+transpiler and `node:vm` implementation, and runs the sandbox subprocess in
+`--smol` mode. The execution substrate is not part of the model-visible
+contract.
 
 `codeMode: { except: ['release'] }` brokers everything _but_ the named tools,
 which stay directly advertised — gated, intercepted, metered, and, when

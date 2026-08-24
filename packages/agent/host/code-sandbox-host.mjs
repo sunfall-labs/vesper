@@ -1,4 +1,4 @@
-import { stripTypeScriptTypes } from 'node:module';
+import * as nodeModule from 'node:module';
 import { createInterface } from 'node:readline';
 import vm from 'node:vm';
 
@@ -8,11 +8,28 @@ import vm from 'node:vm';
 /** @typedef {{id: string, outcome: 'success', value: unknown} | {id: string, outcome: 'failure', error: unknown}} ToolResponse */
 /** @typedef {{type: 'execute', request: ExecuteRequest} | {type: 'tool_response', response: ToolResponse}} HostMessage */
 /** @typedef {{resolve: (value: unknown) => void, reject: (reason: unknown) => void}} Waiter */
+/** @typedef {new (options: {loader: 'ts', target: 'bun'}) => {transformSync: (source: string) => string}} BunTranspilerConstructor */
+/** @typedef {{Bun?: {Transpiler: BunTranspilerConstructor}}} RuntimeGlobals */
 
 const reader = createInterface({ input: process.stdin });
 /** @type {Map<string, Waiter>} */
 const pending = new Map();
 let running = false;
+
+/** @param {string} source @returns {string} */
+const stripTypes = (source) => {
+  if ('bun' in process.versions) {
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the runtime tag guarantees Bun's global
+    const { Bun: bun } = /** @type {RuntimeGlobals} */ (globalThis);
+    if (bun === undefined) {
+      throw new TypeError('Bun transpiler is unavailable');
+    }
+    return new bun.Transpiler({ loader: 'ts', target: 'bun' }).transformSync(
+      source,
+    );
+  }
+  return nodeModule.stripTypeScriptTypes(source, { mode: 'strip' });
+};
 
 /** @param {unknown} event */
 const send = (event) => process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -228,9 +245,8 @@ const execute = async (request) => {
   /** @type {string} */
   let source;
   try {
-    source = stripTypeScriptTypes(
+    source = stripTypes(
       `"use strict"; (async () => {\n${request.source}\n})()`,
-      { mode: 'strip' },
     );
   } catch {
     throw new Error('TypeScript source must use erasable syntax');
