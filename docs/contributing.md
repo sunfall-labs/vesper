@@ -230,8 +230,9 @@ the log makes
 
 **A run's log claim is a value, not an ambient.** `AgentLog.Session` is what
 child sessions, signal delivery, and resuming tool dispatch all reach through,
-and it is threaded lexically: `agent.ts`'s `entryFor(session)` builds the loop
-around one, and an internal symbol protocol hands it across a delegation
+and it is threaded lexically: the loop that `agent.ts`'s `make` builds through
+`internal/loop.ts`'s `makeEntry` closes over one per run, and an internal
+symbol protocol hands it across a delegation
 boundary without exposing a public session/runtime invocation method.
 It is deliberately not a `Context.Reference` defaulting to "not recording".
 Effect's guidance is not to hide persistence behind a defaulted reference, and
