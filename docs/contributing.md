@@ -1,9 +1,10 @@
 # Contributing
 
 Rules for changing anything under `packages/`. [`../README.md`](../README.md)
-is how the library works, [`../Design.md`](../Design.md) is why it is shaped
-this way and what is deliberately missing, [`../CONTEXT.md`](../CONTEXT.md) is
-the vocabulary.
+is the front door, the [agent guide](../packages/agent/README.md) and
+[`conversations.md`](conversations.md) are how the library works,
+[`../Design.md`](../Design.md) is why it is shaped this way and what is
+deliberately missing, [`../CONTEXT.md`](../CONTEXT.md) is the vocabulary.
 
 ## The gate
 

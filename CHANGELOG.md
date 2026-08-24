@@ -5,6 +5,20 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Restructured the documentation for progressive disclosure. The root README
+  is now the front door — positioning, quick start, packages, compile-time
+  guarantees, and maturity — with each deep topic summarized under "Going
+  deeper" and linked to its one canonical home. The agent guide
+  (`packages/agent/README.md`) gained the run semantics, run-policy, subagent
+  and skill, code-mode, compaction, and interception sections that previously
+  lived in the root README, and its previously unheaded durability paragraphs
+  now live under proper headings there or in the new
+  [`docs/conversations.md`](docs/conversations.md), the operational guide to
+  the durable conversation log (recording, resumption, settlement, signals,
+  crash recovery, approvals). The complete support-agent walkthrough moved
+  beside its source as `examples/support-agent/README.md`. No behavior
+  changed.
+
 - Added `@sunfall/vesper-agent/model-plan`, a typed adapter from Effect's
   native `ExecutionPlan` to the ordinary `LanguageModel` layer consumed by an
   agent. Plans preserve provider-layer requirements, retry and fall back only

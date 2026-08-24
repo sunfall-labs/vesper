@@ -13,10 +13,6 @@ Child sessions validate against the child definition, not the parent revision.
 Compatibility failures use the tagged `Conversation.CompatibilityError`
 channel, included by `Conversation.Error<A>` alongside the agent and store
 failures for that bound definition.
-`Agent.Result.outcome` is `success`, `cancelled`, or `suspended` (a durable
-tool approval is still waiting on a decision; see [Tool
-approval](#tool-approval)), and `steps` counts model turns that actually
-started rather than planned turn boundaries.
 
 ```bash
 npm install @sunfall/vesper-agent effect@4.0.0-rc.109
@@ -24,13 +20,140 @@ npm install @sunfall/vesper-agent effect@4.0.0-rc.109
 
 Node.js 22.13.0 or newer is required. The snippets below assume the application
 has already provided Effect's `LanguageModel` service; see the repository
-[Quick Start](../../README.md#quick-start) for complete provider and runtime
-wiring.
+[Quick Start](https://github.com/sunfall-labs/vesper#quick-start) for complete
+provider and runtime wiring.
 
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
 `/testing`, plus `/workflow`, `/dynamic-toolkit`, and `/model-plan`.
+
+## Running an agent
+
+`stream` is the primitive and `run` is a fold of it, so a streaming consumer
+and a blocking one take the same path through the loop. `streamIn` and `runIn`
+are the same two against a `Chat` the caller already holds. A run stops when
+its `stopWhen` condition holds; the default is "the model asked for no tools",
+and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
+`toolCalledTimes`, `any`, `all`. `Result.outcome` is `success`, `cancelled`,
+or `suspended` — a tool call durably waiting on approval, covered in
+[Tool approval](#tool-approval). `steps` counts model turns that actually
+started, so a queued cancellation can return zero while an in-flight
+cancellation preserves its partial text, usage, and one started turn.
+
+Handlers attach as a method rather than a `Definition` field, mirroring
+`toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
+twice replaces the handlers rather than stacking a second set beneath them,
+which is also how `intercepting` behaves. Two interceptors that should both
+run are joined first with `Interception.compose`, which fixes their order
+explicitly — per-seam rules are on its doc comment — and hands `intercepting`
+one combined value, so attachment is still a single replace.
+
+## Run policy and budgets
+
+Every root run has hard production defaults for model/turn/token/delegation,
+deadline, concurrency, and signal budgets. Set `Definition.runPolicy` to make
+application limits stricter or larger; it is the hard boundary and cannot be
+overridden mid-run. Its runtime is created once per root run and passed into
+every descendant, so delegation cannot reset turn, model-call, token,
+deadline, depth, breadth, or concurrent-child accounting by opening another
+agent loop.
+
+Stop conditions are soft stops: a pending steer, or a signal backlog a turn
+boundary could not fully drain, outranks a positive stop decision for one
+more turn — so `Stop.maxSteps(N)` is not a hard ceiling once a conversation
+takes signal traffic. `runPolicy.maxTurns` is the ceiling that holds
+regardless.
+
+`maxInputTokens` and `maxOutputTokens` are checked after each turn's usage is
+known, not before a request is sent — there is no way to ask a provider
+whether a turn will fit a budget before making it — so a run can overshoot
+either ceiling by up to one turn's usage before the check after it fails the
+run. The limits bound cumulative spend; they do not cap any single request.
+
+Requested tool concurrency, including `unbounded`, is clamped to
+`maxToolConcurrency`, which covers the complete pull-based lifetime of each
+leaf-tool handler stream, including recovery retries, and is shared by parent
+and child loops. Delegation handlers use the separate child limits and never
+hold a leaf permit while waiting for a child.
+
+## Subagents and skills
+
+A subagent is an agent definition compiled to a tool named `task_<child>` on
+its parent, so delegation composes through the ordinary toolkit machinery.
+Delegation depth defaults to 4 and is controlled by
+`RunPolicy.Limits.maxDelegationDepth` with the other shared hard limits.
+
+A skill is a `{ name, description, instructions }` value. The catalog — names
+and one-line descriptions — is appended to the agent's instructions so the
+system prefix stays byte-identical across turns and stays cacheable, and the
+bodies load through a `load_skill` tool. The parameter schema is a literal
+union of the skill names, so asking for one that does not exist fails
+validation rather than returning an empty string the model may not notice.
+
+Skills here are values passed to `Agent.make`; there is no discovery from disk.
+
+## Code mode
+
+`codeMode: true` replaces direct tool advertisement with one isolated `exec`
+tool. Its description contains a generated TypeScript SDK with the parameter
+and result type of every brokered tool. The model writes the body of an async
+function in erasable TypeScript; top-level `await` and `return` work, while
+imports and syntax that requires transformation do not. The isolated executor
+strips types before evaluation; the SDK and standard TypeScript globals are
+available, while host-specific APIs are not. Each nested call dispatches
+through the same gated toolkit an advertised call would — intercepted and
+metered. The `exec` result separates streamed text from structured data as
+`{ output, result? }`: `text(...)` appends to `output`, while a top-level
+`return` supplies a JSON `result`. An outer execution failure is
+`{ code: 'execution_failed', message }`.
+
+Declared tool failures and broker validation failures reject the nested call
+with a model-visible `ToolCallError`. Its `code` is `tool_failure`,
+`dispatch_failed`, or `approval_required`; `tool` identifies the nested tool,
+and `value` preserves a declared failure value when one exists. Scripts can
+catch that class and branch without parsing an error string.
+
+Enabling code mode puts
+`CodeExecutor.Service` on the agent's requirement channel, so a missing
+executor is a compile error like any other missing service. The bundled
+executor requires Node.js 22.13.0 or newer for native type stripping, but the
+execution substrate is not part of the model-visible contract.
+
+`codeMode: { except: ['release'] }` brokers everything _but_ the named tools,
+which stay directly advertised — gated, intercepted, metered, and, when
+marked `Tool.setNeedsApproval`, durably approvable exactly as if code mode
+were off for them. That is the intended pairing: a broad toolkit behind
+`exec` for composition, with the one or two consequential tools kept on the
+provider seam where the approval machinery lives. A brokered tool that
+requires approval is rejected by `Agent.make` unless it is excepted. A
+dynamically resolved approval tool fails closed with `approval_required`
+rather than executing. Excepted names are checked against the toolkit at
+compile time — a misspelling is a type error, not a tool that never matches.
+
+## Compaction and the context window
+
+Compaction replaces old history with a model-written summary. There are two
+triggers. The reactive one fires when the provider rejects the request as too
+long, retries the turn once against the compacted history, and is the one that
+actually saves runs. The proactive one fires from a token estimate before a
+turn that would not have fit — but only when the caller sets
+`Compaction.Policy.contextWindow`, because the loop targets the `LanguageModel`
+tag and that tag does not carry a window. A policy configured without
+`contextWindow` is not an error — the reactive trigger still protects the
+run — but it means proactive compaction never fires, silently, for the whole
+run. The agent logs an `Effect.logWarning` once per run when that happens, so
+the gap shows up in logs instead of only in a postmortem.
+
+The estimate comes from `ContextWindow.Service`, a `Context.Reference` whose
+default counts four characters per token. Applications can install
+`ContextWindow.usageAnchored`, which takes the latest turn's reported usage as
+exact and estimates only messages after that assistant response, so guesswork
+is bounded by one turn's text rather than the whole conversation.
+
+Compaction splits on whole messages rather than tokens, so a tool call is never
+cut away from its result, and the agent's own system message always survives
+into the resulting history.
 
 ## Model fallback
 
@@ -123,7 +246,8 @@ context.
 Do not use dynamic discovery for permissions, approvals, feature flags, or
 temporary availability. Keep those tool definitions stable and check current
 state in the typed handler. Reserve `beforeToolCall` for policy that genuinely
-spans multiple tools, such as a tenant-wide denylist or dry-run mode. If an
+spans multiple tools, such as a tenant-wide denylist or dry-run mode (see
+[Interception](#interception)). If an
 external state change should proactively reach a recorded conversation, send a
 durable `steer`; it is appended at the next turn boundary instead of rewriting
 the cacheable prefix.
@@ -188,7 +312,8 @@ pointer, not the payload, and a resumed conversation is rebuilt from that
 pointer. Recovering a call an earlier crashed run had already settled
 decodes a spilled result by its pointer shape rather than the tool's own
 schema — the one deliberate exception to "recovered `ToolOutcome` values
-must decode through the current tool result schema" above.
+must decode through the current tool result schema" (see
+[Durable conversations](#durable-conversations)).
 
 The attachment itself outlives nothing on its own: `AttachmentStore` has no
 delete API, so retention and garbage collection of spilled content are the
@@ -456,11 +581,11 @@ An unrecorded `agent.run(...)` fails outright with a typed `AiError` instead
 of returning a suspension nothing can ever resolve — approval requires a
 `Conversation`.
 
+This is the whole approval surface, and it needed no workflow engine at all.
 Reach for `AgentWorkflow.wait` instead when the external step is not a plain
 human approve/deny — a webhook, a job, anything with its own typed request
 and result — or when the handler needs to do other durable work around the
-wait. Tool approval is the special case that needed no workflow engine at
-all.
+wait.
 
 ## Effect Workflow
 
@@ -763,60 +888,111 @@ cancelled, branched, or forked. Low-level `Conversation.branchFrom` and
 `Conversation.forkFrom` require `{ pendingWait: 'restart' }`; omitting it
 returns a typed `SuspendedConversationError` instead of guessing.
 
-Every root run has hard production defaults for model/turn/token/delegation,
-deadline, concurrency, and signal budgets. Set `Definition.runPolicy` to make
-application limits stricter or larger; descendants share the root runtime and
-cannot reset it by opening another agent loop. `StopCondition`s remain soft.
+## Interception
 
-Recording persists raw values by default. Pass an effectful
-`RecordingPolicy.Policy` as the third argument to
-`Conversation.make(agent, id, policy)` to redact only
-the persisted prompt, tool parameters/results, external wait requests and
-results, delivered signals, and rendered failure causes. Its Effect services appear
-exactly in `Agent.Requires`.
-The separate incoming signal stream is explicitly raw so a resumed run can
-deliver the same value; transform signals before `send` when required.
+Spans observe. An interceptor intervenes.
 
-Steers remain turn-boundary input. For recorded runs, a valid cancel in the
-next bounded signal page also interrupts an in-flight provider stream when no
-real tool or delegation handler has started in that turn. The change feed is
-only a wake-up: the boundary drain remains the sole cursor, budget, ordering,
-and `SignalReceived` authority. Once dispatch commits at the turn's atomic gate,
-cancellation waits for durable tool outcomes and the normal boundary.
-Watcher read failures are logged and disable only responsive interruption for
-that provider call; cancellation remains available at the boundary. Boundary
-drain persistence failures remain fatal so delivery state cannot diverge.
+```ts
+const guarded = supportAgent.intercepting({
+  beforeToolCall: (call) =>
+    Effect.gen(function* () {
+      const policy = yield* TenantToolPolicy;
+      return (yield* policy.allows(call.name))
+        ? Interception.dispatch
+        : Interception.refuse(`${call.name} is disabled for this tenant`);
+    }),
+});
+```
 
-Recorded tool execution writes `ToolStarted` immediately before entering a real
-tool or delegation handler. If recovery finds a start without `ToolOutcome`, it
-resolves the original recorded name, id, and params before the next model call.
-Configure `onIndeterminateToolCall` to explicitly Retry or Answer after
-application-specific reconciliation. Either result is durably recorded and the
-prompt is rebuilt with it; without that seam, the run fails safely before the
-provider is called and remains orphaned.
+Typed handlers are the default authority for one operation's current
+availability, authorization, and durable approval. The interceptor above is
+for policy that deliberately spans the toolkit; it is not a second per-tool
+handler API.
 
-`maxToolConcurrency` covers the complete pull-based lifetime of each leaf-tool
-handler stream, including recovery retries, and is shared by parent and child
-loops. Delegation handlers use the separate child limits and never hold a leaf
-permit while waiting for a child.
+Four seams, named rather than general, each with a type that admits exactly
+what it is for:
 
-Settled runs write a resume aggregate inside `RunSettled`: compatibility
-identity, cumulative physical usage, durable signal cursor, latest completed
-result, and latest usable turn usage. A compacted resume pages backwards only
-through its live active suffix and compaction boundary; lifetime records remain
-solely in the append-only conversation log. Old records remain schema-decodable
-so rejection is actionable, but missing compatibility metadata is not silently
-self-upgraded. Uncompacted prompts, fork prefix copies, active branch targets
-older than the available compaction boundary, and orphan records after the
-latest anchor remain proportional to the records they genuinely require.
-Existing history is compatibility-validated before producer acquisition, so an
-incompatible resume, branch, or fork cannot fence a live compatible session.
-The claim is compare-and-acquire bound to the validated epoch and head; a race
-re-reads and revalidates in a small bounded retry loop before any epoch bump.
+| seam                      | observe | change the input | answer instead | fail |
+| ------------------------- | ------- | ---------------- | -------------- | ---- |
+| `beforeTurn`              | yes     | yes              | no             | yes  |
+| `beforeModelCall`         | yes     | no               | no             | yes  |
+| `beforeToolCall`          | yes     | no               | yes            | yes  |
+| `onIndeterminateToolCall` | yes     | no               | answer/retry   | yes  |
 
-Recovered `ToolOutcome` values and indeterminate-call reconciliation answers
-must decode through the current tool result schema. Decode failure is an
-actionable `AiError`, never an unknown value presented as typed success.
+The alternative — a service holding one `(Effect) => Effect` applied wherever
+the loop does something interesting — was rejected. It has no name and no
+contract, so a reader of the loop has to assume every seam may do everything,
+and the type says nothing that could be checked. `interception.ts` gives the
+reasoning for each cell, including the two that look like omissions:
+`beforeTurn` cannot end a run (that is `stopWhen`, and a second way to do it
+would record `success` for a run nobody completed) and `beforeModelCall` cannot
+rewrite the prompt, because only the turn's input is a value here and the rest
+is `Chat`'s history.
+
+An agent that never calls `intercepting` requires exactly what it required
+before and takes the same branch through the loop; an agent that does requires
+whatever its interceptor's seams require. Calling it again replaces the
+interceptor rather than stacking a second one, because two opinions at one seam
+need an order and every order is wrong for somebody.
+
+Tool advertisement and tool enforcement are deliberately separate. Static
+tool, skill, and subagent definitions stay model-visible and cache-stable while
+typed handlers read current Effect state on every call. `beforeToolCall` is the
+cross-cutting override for policy spanning multiple tools. Either decision is
+authoritative; hiding a definition is not a security mechanism. Use
+`dynamicTools` only when schemas genuinely must be discovered at the beginning
+of a run, such as an MCP catalog.
+
+### When the log and an interceptor disagree
+
+Both have a view of a tool call, so the order is fixed: a completed recovery
+outcome, an indeterminate-resolution callback, `beforeToolCall`, then the tool.
+A call an unsettled earlier run already completed is served from the log and
+the interceptor is **not**
+consulted — that call already ran, and refusing it now would show the model a
+refusal for work that actually happened. Stated as a limit: an interceptor
+cannot revoke permission for a tool call a crashed run completed. Settling the
+run empties the index; refusing does not.
+
+The other direction is the same rule: a call the interceptor answered is
+recorded as an ordinary `ToolOutcome`, so a later run recovers the substituted
+answer rather than re-asking. What the log says happened is what happened.
+
+An interceptor belongs to the agent it was attached to. A subagent is its own
+loop and does not inherit its parent's — but the delegation itself is a tool
+call, so `beforeToolCall` sees `task_<child>` like anything else.
+
+## Durable conversations
+
+`Conversation.make(agent, id)` binds a definition to durable history: every
+run is recorded as it happens, resumes from the log, and can be branched,
+forked, steered, and suspended on a durable approval. The operational
+semantics — what the log guarantees, and what a reader of it can rely on —
+live in the
+[durable-conversation guide](https://github.com/sunfall-labs/vesper/blob/main/docs/conversations.md).
+The short version:
+
+- Recording persists raw values by default. Pass an effectful
+  `RecordingPolicy.Policy` as the third argument to
+  `Conversation.make(agent, id, policy)` to redact only the persisted prompt,
+  tool parameters/results, external wait requests and results, delivered
+  signals, and rendered failure causes. Its Effect services appear exactly in
+  `Agent.Requires`. The separate incoming signal stream is explicitly raw so
+  a resumed run can deliver the same value; transform signals before `send`
+  when required.
+- Steers remain turn-boundary input, and a valid cancel can interrupt an
+  in-flight provider stream before any real tool or delegation handler has
+  started in that turn. The boundary drain remains the sole cursor, budget,
+  ordering, and `SignalReceived` authority.
+- Recovery never silently re-runs a tool call. A recorded `ToolStarted`
+  without a `ToolOutcome` requires the `onIndeterminateToolCall` interceptor
+  to explicitly Retry or Answer after application-specific reconciliation,
+  and recovered results must decode through the current tool result schema —
+  decode failure is an actionable `AiError`, never an unknown value presented
+  as typed success.
+- Settled runs write a bounded resume aggregate into `RunSettled`, so a
+  compacted resume pages backwards only through its live active suffix, and
+  existing history is compatibility-validated before producer acquisition.
 
 See the [Vesper repository](https://github.com/sunfall-labs/vesper#readme) for
 usage, package status, and the complete API walkthrough.
