@@ -70,34 +70,10 @@
     }
   },
   "packages/agent/src/agent.ts": {
-    "effecttsgo/any-unknown-in-error-context": {
-      "count": 4
-    },
-    "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 8
-    },
-    "typescript/consistent-return": {
-      "count": 1
-    },
-    "typescript/no-duplicate-type-constituents": {
-      "count": 2
-    },
-    "typescript/no-unnecessary-condition": {
-      "count": 1
-    },
     "typescript/no-unnecessary-type-arguments": {
       "count": 1
     },
     "typescript/no-unnecessary-type-parameters": {
-      "count": 1
-    },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
-    },
-    "typescript/no-unsafe-type-assertion": {
-      "count": 10
-    },
-    "typescript/switch-exhaustiveness-check": {
       "count": 1
     }
   },
@@ -170,12 +146,58 @@
       "count": 1
     }
   },
-  "packages/agent/src/log.ts": {
+  "packages/agent/src/internal/fork-seed.ts": {
+    "typescript/consistent-return": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/internal/loop.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 9
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 7
+    },
     "typescript/consistent-return": {
       "count": 1
     },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 9
+    },
+    "typescript/switch-exhaustiveness-check": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/internal/part-encoding.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
+  "packages/agent/src/internal/provider-error.ts": {
+    "typescript/no-duplicate-type-constituents": {
+      "count": 2
+    },
     "typescript/no-unnecessary-condition": {
-      "count": 5
+      "count": 1
+    }
+  },
+  "packages/agent/src/internal/resume-read.ts": {
+    "typescript/no-unnecessary-condition": {
+      "count": 2
+    }
+  },
+  "packages/agent/src/internal/session-open.ts": {
+    "typescript/no-unnecessary-condition": {
+      "count": 3
     }
   },
   "packages/agent/src/model-plan.ts": {

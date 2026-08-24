@@ -45,7 +45,7 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 // | `rebuild` / `lastCompaction` / `keptFrom` / `fold` | `history.ts` | active path | private to the two above; they receive an already-filtered array and never filter themselves |
 // | `usageFrom`              | `history.ts`         | **full log**| tokens spent on a branch that was abandoned were still spent. Scoping this to the path makes a branched conversation under-report its own cost, and the number never comes back |
 // | `Recovery.fold`          | `recovery.ts`        | active path | crash recovery serves a dead run's tool state back to its successor. If the user branched *away* from the crashed run, those recoveries answer tool calls that are no longer in the prompt — the successor would be handed results or indeterminate calls for questions it never asked |
-// | `deliveredThrough`       | `log.ts`             | **full log**| the signal-delivery cursor. A steer is delivered at most once, and the record of taking it may sit on a branch that was later abandoned. Scoping this to the path rewinds the cursor and **re-delivers a steer the agent already acted on** — the one failure this cursor exists to prevent |
+// | `deliveredThrough`       | `internal/resume-read.ts` | **full log**| the signal-delivery cursor. A steer is delivered at most once, and the record of taking it may sit on a branch that was later abandoned. Scoping this to the path rewinds the cursor and **re-delivers a steer the agent already acted on** — the one failure this cursor exists to prevent |
 // | `activePath`             | here                 | **full log**| it is the filter; it has to see what it is filtering |
 //
 // The two full-log rows are not an oversight to be tidied up later. Resume

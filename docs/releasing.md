@@ -3,7 +3,10 @@
 Vesper is pre-1.0. The six publishable `@sunfall/vesper-*` packages are released
 together at the same version so their generated types and sibling dependencies
 stay compatible. The `effect` peer dependency is currently pinned to
-`4.0.0-rc.109`; update that family deliberately as one change.
+`4.0.0-rc.109`; update that family deliberately as one change. The pin appears
+in the install commands of the root and package READMEs and in two prose
+statements (the root README and this file); find every markdown occurrence
+with `grep -rn '4.0.0-rc' --include='*.md' .` when bumping it.
 
 ## Before a release
 

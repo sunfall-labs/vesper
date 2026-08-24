@@ -5,6 +5,34 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Split the two largest agent source files along their internal seams, with
+  no public-API or behavior change. `agent.ts` (3,207 lines) keeps the
+  `Agent.*` surface, `make`'s compile step, and the method attachment; the
+  turn loop moved to `internal/loop.ts`, part encoding to
+  `internal/part-encoding.ts`, and provider-error normalization to
+  `internal/provider-error.ts`. `log.ts` (1,861 lines) keeps the `AgentLog.*`
+  surface — `Session`, `open`, `fork`, and the stream-addressing re-exports —
+  while the claim machinery moved to `internal/session-open.ts`, bounded
+  history reads to `internal/resume-read.ts`, compatibility validation to
+  `internal/compatibility.ts`, and fork identity and prefix seeding to
+  `internal/fork-seed.ts`. Every durable string, span name, and rationale
+  comment moved verbatim; the `Agent` and `AgentLog` namespaces are
+  unchanged. No behavior changed.
+
+- Restructured the documentation for progressive disclosure. The root README
+  is now the front door — positioning, quick start, packages, compile-time
+  guarantees, and maturity — with each deep topic summarized under "Going
+  deeper" and linked to its one canonical home. The agent guide
+  (`packages/agent/README.md`) gained the run semantics, run-policy, subagent
+  and skill, code-mode, compaction, and interception sections that previously
+  lived in the root README, and its previously unheaded durability paragraphs
+  now live under proper headings there or in the new
+  [`docs/conversations.md`](docs/conversations.md), the operational guide to
+  the durable conversation log (recording, resumption, settlement, signals,
+  crash recovery, approvals). The complete support-agent walkthrough moved
+  beside its source as `examples/support-agent/README.md`. No behavior
+  changed.
+
 - Added `@sunfall/vesper-agent/model-plan`, a typed adapter from Effect's
   native `ExecutionPlan` to the ordinary `LanguageModel` layer consumed by an
   agent. Plans preserve provider-layer requirements, retry and fall back only
