@@ -1,11 +1,21 @@
 import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
 import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
+import {
+  OpenRouterClient,
+  OpenRouterLanguageModel,
+} from '@effect/ai-openrouter';
 import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Compaction } from '@sunfall/vesper-agent/compaction';
 import { ModelPlan } from '@sunfall/vesper-agent/model-plan';
 import { Effect, ExecutionPlan, Layer, Schema, Stream } from 'effect';
-import { AiError, Tool, Toolkit, type LanguageModel } from 'effect/unstable/ai';
+import {
+  AiError,
+  LanguageModel,
+  Prompt,
+  Tool,
+  Toolkit,
+} from 'effect/unstable/ai';
 import {
   HttpClient,
   HttpClientError,
@@ -189,6 +199,79 @@ const openAiSuccess = sse(
   { type: 'response.completed', response: openAiResponse, sequence_number: 5 },
 );
 
+const openRouterSuccess =
+  sse(
+    {
+      id: 'gen_fixture',
+      object: 'chat.completion.chunk',
+      created: 1_700_000_000,
+      model: 'openrouter-fixture',
+      choices: [
+        {
+          index: 0,
+          delta: { role: 'assistant', content: 'rout' },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      id: 'gen_fixture',
+      object: 'chat.completion.chunk',
+      created: 1_700_000_000,
+      model: 'openrouter-fixture',
+      choices: [
+        {
+          index: 0,
+          delta: { content: 'er' },
+          finish_reason: 'stop',
+        },
+      ],
+    },
+  ) + 'data: [DONE]\n\n';
+
+const openRouterNumericStringToolCall =
+  sse(
+    {
+      id: 'gen_tool_fixture',
+      object: 'chat.completion.chunk',
+      created: 1_700_000_000,
+      model: 'openrouter-fixture',
+      choices: [
+        {
+          index: 0,
+          delta: {
+            role: 'assistant',
+            tool_calls: [
+              {
+                index: 0,
+                id: 'call_charge_fixture',
+                type: 'function',
+                function: {
+                  name: 'charge_card',
+                  arguments: '{"amountCents":"4999"}',
+                },
+              },
+            ],
+          },
+          finish_reason: null,
+        },
+      ],
+    },
+    {
+      id: 'gen_tool_fixture',
+      object: 'chat.completion.chunk',
+      created: 1_700_000_000,
+      model: 'openrouter-fixture',
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: 'tool_calls',
+        },
+      ],
+    },
+  ) + 'data: [DONE]\n\n';
+
 const lookup = Tool.make('lookup', {
   description: 'look up a deterministic value',
   parameters: Schema.Struct({ key: Schema.String }),
@@ -204,6 +287,18 @@ const agent = Agent.make({
   instructions: 'Answer using the lookup tool when needed.',
   toolkit,
   compaction: false,
+});
+
+const chargeCard = Tool.make('charge_card', {
+  description: "Charge the customer's card, in cents.",
+  parameters: Schema.Struct({
+    amountCents: Schema.Union([Schema.Finite, Schema.FiniteFromString]),
+  }),
+  success: Schema.Struct({ authorization: Schema.String }),
+});
+const chargeToolkit = Toolkit.make(chargeCard);
+const chargeHandlers = chargeToolkit.toLayer({
+  charge_card: () => Effect.succeed({ authorization: 'approved' }),
 });
 
 const anthropicLayer = (
@@ -230,6 +325,16 @@ const openAiLayer = (
         apiUrl: 'https://openai.invalid/v1',
         transformClient,
       }),
+    ),
+    Layer.provide(http),
+  );
+
+const openRouterLayer = (http: Layer.Layer<HttpClient.HttpClient>) =>
+  OpenRouterLanguageModel.model('openrouter-fixture', {
+    max_tokens: 64,
+  }).pipe(
+    Layer.provide(
+      OpenRouterClient.layer({ apiUrl: 'https://openrouter.invalid/v1' }),
     ),
     Layer.provide(http),
   );
@@ -405,6 +510,105 @@ describe('official Effect provider seam', () => {
         expect(observed.completed).toMatchObject({
           usage: { input: 17, output: 9 },
         });
+      }),
+  );
+
+  it.effect(
+    'replays assistant text through the native OpenRouter chat contract',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([{ status: 200, body: openRouterSuccess }]);
+        const prompt = Prompt.make([
+          Prompt.makeMessage('system', {
+            content: 'Remember the corrected shipment id.',
+          }),
+          Prompt.makeMessage('user', {
+            content: [Prompt.makePart('text', { text: 'The id is ALPHA.' })],
+          }),
+          Prompt.makeMessage('assistant', {
+            content: [Prompt.makePart('text', { text: 'The id is ALPHA.' })],
+          }),
+          Prompt.makeMessage('user', {
+            content: [
+              Prompt.makePart('text', {
+                text: 'Correction: the id is BETA.',
+              }),
+            ],
+          }),
+        ]);
+
+        const parts = yield* LanguageModel.streamText({ prompt }).pipe(
+          Stream.runCollect,
+          Effect.provide(openRouterLayer(fake.layer)),
+        );
+        const request = present(fake.requests[0]);
+        const body = present(requestJson(request));
+
+        expect(request.url).toBe(
+          'https://openrouter.invalid/v1/chat/completions',
+        );
+        expect(body).toMatchObject({
+          model: 'openrouter-fixture',
+          stream: true,
+          messages: [
+            {
+              role: 'system',
+              content: [
+                {
+                  type: 'text',
+                  text: 'Remember the corrected shipment id.',
+                },
+              ],
+            },
+            { role: 'user', content: 'The id is ALPHA.' },
+            { role: 'assistant', content: 'The id is ALPHA.' },
+            { role: 'user', content: 'Correction: the id is BETA.' },
+          ],
+        });
+        expect(
+          Array.from(parts)
+            .filter((part) => part.type === 'text-delta')
+            .map((part) => part.delta)
+            .join(''),
+        ).toBe('router');
+      }),
+  );
+
+  it.effect(
+    'decodes numeric-string OpenRouter tool arguments before handler dispatch',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([
+          { status: 200, body: openRouterNumericStringToolCall },
+        ]);
+
+        const parts = yield* LanguageModel.streamText({
+          prompt: 'Charge 4999 cents.',
+          toolkit: chargeToolkit,
+        }).pipe(
+          Stream.runCollect,
+          Effect.provide(
+            Layer.merge(openRouterLayer(fake.layer), chargeHandlers),
+          ),
+        );
+
+        expect(
+          Array.from(parts).find((part) => part.type === 'tool-call'),
+        ).toMatchObject({
+          name: 'charge_card',
+          params: { amountCents: 4999 },
+        });
+        expect(
+          Array.from(parts).find((part) => part.type === 'tool-result'),
+        ).toMatchObject({
+          name: 'charge_card',
+          result: { authorization: 'approved' },
+        });
+        expect(
+          yield* Schema.encodeEffect(chargeCard.parametersSchema)({
+            amountCents: 4999,
+          }),
+        ).toEqual({ amountCents: 4999 });
       }),
   );
 

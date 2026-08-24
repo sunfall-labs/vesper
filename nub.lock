@@ -12,6 +12,9 @@ catalogs:
     '@effect/ai-openai':
       specifier: 4.0.0-rc.109
       version: 4.0.0-rc.109
+    '@effect/ai-openrouter':
+      specifier: 4.0.0-rc.109
+      version: 4.0.0-rc.109
     '@effect/platform-node':
       specifier: 4.0.0-rc.109
       version: 4.0.0-rc.109
@@ -146,6 +149,9 @@ importers:
       '@effect/ai-openai':
         specifier: 'catalog:'
         version: 4.0.0-rc.109(effect@4.0.0-rc.109)
+      '@effect/ai-openrouter':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.109(effect@4.0.0-rc.109)
       '@effect/platform-node':
         specifier: 'catalog:'
         version: 4.0.0-rc.109(@opentelemetry/api@1.9.0)(effect@4.0.0-rc.109)(redis@6.2.1)
@@ -171,6 +177,9 @@ importers:
         specifier: 'catalog:'
         version: 4.0.0-rc.109(effect@4.0.0-rc.109)
       '@effect/ai-openai':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.109(effect@4.0.0-rc.109)
+      '@effect/ai-openrouter':
         specifier: 'catalog:'
         version: 4.0.0-rc.109(effect@4.0.0-rc.109)
       '@sunfall/vesper-agent':
@@ -429,6 +438,11 @@ packages:
 
   '@effect/ai-openai@4.0.0-rc.109':
     resolution: {integrity: sha512-S0lPmZROva8G6CDVAPYVAbztMnTQe+WO/TY9hXDdN4w/OdhcFN1YMVCX70gV8CrqHMZU7XPkghE9ZkA5Dw+4GA==}
+    peerDependencies:
+      effect: ^4.0.0-rc.109
+
+  '@effect/ai-openrouter@4.0.0-rc.109':
+    resolution: {integrity: sha512-vwC3IFJQ1JYcTAzlTxrR9glk+jV6JFZWxT4ABP5inYTriX3sMNQKw3tsPs8fNIzMgoTtpCG8ppewd66nulTNdg==}
     peerDependencies:
       effect: ^4.0.0-rc.109
 
@@ -3366,6 +3380,10 @@ snapshots:
       effect: 4.0.0-rc.109
 
   '@effect/ai-openai@4.0.0-rc.109(effect@4.0.0-rc.109)':
+    dependencies:
+      effect: 4.0.0-rc.109
+
+  '@effect/ai-openrouter@4.0.0-rc.109(effect@4.0.0-rc.109)':
     dependencies:
       effect: 4.0.0-rc.109
 

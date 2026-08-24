@@ -359,6 +359,24 @@ describe('compact', () => {
     }),
   );
 
+  it.effect('does not replace history with an empty summary', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider({ summaryText: '' });
+      const chat = yield* Chat.fromPrompt(terse);
+
+      const error = yield* compact(chat, policy).pipe(
+        Effect.provide(models.layer),
+        Effect.flip,
+      );
+
+      expect(error.reason).toMatchObject({
+        _tag: 'InvalidOutputError',
+        description: 'Compaction model returned no text',
+      });
+      expect(yield* Ref.get(chat.history)).toEqual(terse);
+    }),
+  );
+
   // Spending a model call to paraphrase recent history as itself is pure
   // waste, and it loses fidelity for nothing.
   it.effect('does nothing when there is no older history to summarize', () =>

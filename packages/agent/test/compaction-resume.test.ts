@@ -158,6 +158,102 @@ const scripted = () =>
   });
 
 describe('a conversation that compacted, resumed', () => {
+  it.effect('aligns proactive compaction with the current resumed input', () =>
+    Effect.gen(function* () {
+      const proactivePolicy = {
+        ...POLICY,
+        contextWindow: 100,
+        keepRecentTokens: 0,
+      };
+      const proactiveAgent = Agent.make({
+        name: 'proactive',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: proactivePolicy,
+      });
+      const proactive = Conversation.make(
+        proactiveAgent,
+        LogVocabulary.ConversationId.make('compacted-proactive'),
+        proactivePolicy,
+      );
+      const models = fakeProvider({
+        turns: [turnOf('first', BULK), turnOf('second', 'second answer')],
+      });
+
+      const observed = yield* run(
+        Effect.gen(function* () {
+          yield* proactive.run('question one');
+          const second = yield* proactive
+            .run('question two')
+            .pipe(Effect.result);
+          const summariesAfterSecond = models.summaries.length;
+          const third = yield* proactive
+            .run('question three')
+            .pipe(Effect.result);
+          const records = Array.from(
+            yield* proactive.records().pipe(Stream.runCollect),
+          );
+          return { second, third, summariesAfterSecond, records };
+        }),
+        models.layer,
+      );
+
+      expect(observed.second).toMatchObject({
+        _tag: 'Success',
+        success: { text: 'second answer' },
+      });
+      expect(observed.third).toMatchObject({ _tag: 'Success' });
+      expect(observed.summariesAfterSecond).toBe(1);
+      expect(models.summaries).toHaveLength(1);
+      const lastAsked = models.asked.at(-1);
+      if (lastAsked === undefined) {
+        throw new Error('missing resumed provider prompt');
+      }
+      expect(textIn(lastAsked)).toContain('question two');
+      expect(textIn(AgentHistory.messagesFrom(observed.records))).toContain(
+        'question three',
+      );
+    }),
+  );
+
+  it.effect('compacts again when the summary still exceeds the threshold', () =>
+    Effect.gen(function* () {
+      const policy = {
+        ...POLICY,
+        contextWindow: 100,
+        keepRecentTokens: 0,
+      };
+      const verbose = Agent.make({
+        name: 'verbose-summary',
+        revision: '1',
+        instructions: 'be terse',
+        toolkit: Toolkit.make(),
+        compaction: policy,
+      });
+      const verboseConversation = Conversation.make(
+        verbose,
+        LogVocabulary.ConversationId.make('compacted-verbose-summary'),
+        policy,
+      );
+      const models = fakeProvider({
+        summaryText: 'S'.repeat(800),
+        turns: [turnOf('first', BULK), turnOf('second', 'answer')],
+      });
+
+      yield* run(
+        Effect.gen(function* () {
+          yield* verboseConversation.run('question one');
+          yield* verboseConversation.run('question two');
+          yield* verboseConversation.run('question three');
+        }),
+        models.layer,
+      );
+
+      expect(models.summaries).toHaveLength(2);
+    }),
+  );
+
   it.effect(
     'records what the summary said and where the kept history starts',
     () =>
