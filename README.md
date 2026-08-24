@@ -985,8 +985,10 @@ OpenRouter's free router still requires an account API key and is subject to
 free-tier availability and rate limits. Select a specific free model with
 `--model <model-id>:free` when deterministic model routing matters.
 
-Neither example has been run against a live provider since the persistence
-mechanisms were pruned to one.
+OpenRouter is composed through Effect's native `@effect/ai-openrouter`
+provider, which uses OpenRouter's chat contract and preserves its reasoning
+metadata across replayed turns. The provider contract test locks down that
+replay shape independently of the live smoke test.
 
 ## Development
 

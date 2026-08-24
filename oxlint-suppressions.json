@@ -48,9 +48,6 @@
     "effecttsgo/prefer-schema-over-json": {
       "count": 4
     },
-    "effecttsgo/schema-number": {
-      "count": 2
-    },
     "typescript/no-unnecessary-boolean-literal-compare": {
       "count": 1
     },

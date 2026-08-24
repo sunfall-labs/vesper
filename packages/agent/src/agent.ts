@@ -1271,8 +1271,10 @@ export const make = <
           return undefined;
         }
 
+        const history = yield* Ref.get(chat.history);
+        const effectivePrompt = Prompt.concat(history, Prompt.make(input));
         const over = yield* CompactionRuntime.shouldCompact(
-          Prompt.concat(yield* Ref.get(chat.history), Prompt.make(input)),
+          effectivePrompt,
           compaction.contextWindow,
           compaction,
           yield* Ref.get(lastTurn),
@@ -1281,8 +1283,24 @@ export const make = <
         if (!over) {
           return undefined;
         }
-        const summarized = yield* compactWithBudget(chat, compaction);
-        if (summarized !== undefined && runtime !== undefined) {
+        // Compact the same prompt the estimator measured. In a recorded run,
+        // `RunStarted` has already persisted this turn's input; leaving it out
+        // of the live Chat makes durable reconstruction one message longer
+        // than the compaction split. The input stays in the compacted history,
+        // so the provider call below uses `Prompt.empty` rather than appending
+        // it a second time.
+        yield* Ref.set(chat.history, effectivePrompt);
+        const summarized = yield* compactWithBudget(chat, compaction).pipe(
+          Effect.onError(() => Ref.set(chat.history, history)),
+        );
+        if (summarized === undefined) {
+          // `compact` can decline when there is no old history to summarize.
+          // Restore the original shape so the ordinary provider call remains
+          // responsible for appending this turn's input.
+          yield* Ref.set(chat.history, history);
+          return undefined;
+        }
+        if (runtime !== undefined) {
           yield* runtime.addUsage(summarized.usage);
         }
         return summarized;
@@ -1364,6 +1382,8 @@ export const make = <
               addStopUsage(current, ahead.usage),
             );
           }
+          const modelInput: Prompt.RawInput =
+            ahead === undefined ? input : Prompt.empty;
 
           // A turn's outcome is only knowable once its parts have gone by, but
           // the stop decision needs it. Accumulating through a `tap` while the
@@ -1385,7 +1405,7 @@ export const make = <
             chat,
             initial,
             step,
-            input,
+            modelInput,
             'initial',
             arbitration,
           );
@@ -1441,7 +1461,10 @@ export const make = <
                           // on it being exactly right, so it is not assumed.
                           yield* Ref.set(
                             chat.history,
-                            Prompt.concat(historyBefore, Prompt.make(input)),
+                            Prompt.concat(
+                              historyBefore,
+                              Prompt.make(modelInput),
+                            ),
                           );
                           const summarized = yield* compactWithBudget(
                             chat,

@@ -1,10 +1,5 @@
 import { Effect, Ref } from 'effect';
-import {
-  LanguageModel,
-  Prompt,
-  type AiError,
-  type Chat,
-} from 'effect/unstable/ai';
+import { AiError, LanguageModel, Prompt, type Chat } from 'effect/unstable/ai';
 
 import { Compaction } from '../compaction.js';
 import { ContextWindow } from '../context-window.js';
@@ -171,6 +166,17 @@ export const compact = Effect.fn('Agent.compact')(function* (
     ]),
   });
   yield* Observability.usage(summary.usage);
+
+  if (summary.text.trim().length === 0) {
+    return yield* new AiError.AiError({
+      module: 'Agent',
+      method: 'compact',
+      reason: new AiError.InvalidOutputError({
+        description: 'Compaction model returned no text',
+      }),
+    });
+  }
+
   yield* Observability.compaction;
 
   yield* Ref.set(

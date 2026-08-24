@@ -111,7 +111,11 @@ const scripted = (calls: ReadonlyArray<Call>, prompts: string[] = []) =>
     Effect.gen(function* () {
       const made = yield* Ref.make(0);
       return yield* LanguageModel.make({
-        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+        generateText: () =>
+          Effect.succeed<Response.PartEncoded[]>([
+            { type: 'text', text: 'SUMMARY' },
+            finish(),
+          ]),
         streamText: (options) =>
           Stream.unwrap(
             Effect.gen(function* () {

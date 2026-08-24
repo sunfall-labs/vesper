@@ -68,6 +68,8 @@ export const turnOf = (
 ];
 
 export interface ProviderOptions {
+  /** Text returned by the summarization call. Defaults to `SUMMARY`. */
+  readonly summaryText?: string;
   /**
    * Turns to serve in order, the last repeating once exhausted.
    *
@@ -110,7 +112,10 @@ export const fakeProvider = (options: ProviderOptions = {}) => {
           Effect.sync(() => {
             summaries.push(opts.prompt);
             return [
-              { type: 'text' as const, text: 'SUMMARY' },
+              {
+                type: 'text' as const,
+                text: options.summaryText ?? 'SUMMARY',
+              },
               finish(10, 4),
             ] satisfies Response.PartEncoded[];
           }),
