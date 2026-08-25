@@ -9,6 +9,13 @@ meaning in `effect/unstable/ai`, that meaning wins.
 **Loop** — repeated turns until a `StopCondition` holds. The loop is what
 `effect/unstable/ai` does not provide and `@sunfall/vesper-agent` adds.
 
+**Incomplete finish** — a provider finish reason of `length`,
+`content-filter`, or `error`. The raw finish and any partial text remain
+observable, but the turn cannot produce a successful result or compaction;
+a recorded run writes failed settlement without a `Completed` record. Effect
+AI begins automatic tool resolution before it emits its deferred finish part,
+so this classification cannot retract a tool handler that already started.
+
 **Soft stop** — a `StopCondition` asking the loop to finish. A steer may defer
 it for another turn.
 

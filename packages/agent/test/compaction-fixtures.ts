@@ -38,9 +38,13 @@ export const message = (role: 'user' | 'assistant', text: string) => ({
  * it was billed, and the loop is supposed to hand precisely that to the next
  * estimate.
  */
-export const finish = (input: number, output: number) => ({
+export const finish = (
+  input: number,
+  output: number,
+  reason: Response.FinishReason = 'stop',
+): Response.FinishPartEncoded => ({
   type: 'finish' as const,
-  reason: 'stop' as const,
+  reason,
   usage: {
     inputTokens: { total: input, uncached: input, cacheRead: 0, cacheWrite: 0 },
     outputTokens: { total: output },
@@ -70,6 +74,8 @@ export const turnOf = (
 export interface ProviderOptions {
   /** Text returned by the summarization call. Defaults to `SUMMARY`. */
   readonly summaryText?: string;
+  /** Finish reason reported by the summarization call. Defaults to `stop`. */
+  readonly summaryFinishReason?: Response.FinishReason;
   /**
    * Turns to serve in order, the last repeating once exhausted.
    *
@@ -116,7 +122,7 @@ export const fakeProvider = (options: ProviderOptions = {}) => {
                 type: 'text' as const,
                 text: options.summaryText ?? 'SUMMARY',
               },
-              finish(10, 4),
+              finish(10, 4, options.summaryFinishReason),
             ] satisfies Response.PartEncoded[];
           }),
         streamText: (opts: LanguageModelNamespace.ProviderOptions) =>

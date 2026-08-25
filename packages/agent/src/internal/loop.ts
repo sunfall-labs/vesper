@@ -30,6 +30,7 @@ import * as Observability from './observability.js';
 import { encodePart } from './part-encoding.js';
 import {
   approvalRequiresConversationError,
+  incompleteOutputError,
   normalizeProviderError,
 } from './provider-error.js';
 
@@ -830,6 +831,17 @@ export const makeEntry = <
                 );
               }
 
+              const incomplete =
+                seen.finishReason === undefined
+                  ? undefined
+                  : incompleteOutputError('streamText', seen.finishReason);
+              if (incomplete !== undefined) {
+                return Stream.concat(
+                  Stream.make(AgentEventRuntime.turnFinished(step, totals)),
+                  Stream.fail(incomplete),
+                );
+              }
+
               // The turn boundary is where out-of-band input lands. Draining
               // here rather than racing it against the provider stream is what
               // keeps a steer from arriving in the middle of a tool call, and
@@ -1562,6 +1574,7 @@ interface TurnState {
   text: string;
   toolCalls: Response.ToolCallPartEncoded[];
   usage: Response.FinishPartEncoded['usage'] | undefined;
+  finishReason: Response.FinishReason | undefined;
   emitted: boolean;
   started: boolean;
   /** Decoded call params seen this turn, keyed by tool call id. */
@@ -1574,6 +1587,7 @@ const emptyTurnState = (): TurnState => ({
   text: '',
   toolCalls: [],
   usage: undefined,
+  finishReason: undefined,
   emitted: false,
   started: false,
   callsById: new Map(),
@@ -1619,6 +1633,7 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
     }
     case 'finish':
       state.usage = encoded.usage;
+      state.finishReason = encoded.reason;
       break;
     default:
       break;

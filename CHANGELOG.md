@@ -5,6 +5,18 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Provider finishes explicitly marked `length`, `content-filter`, or `error`
+  no longer settle an agent run as a successful answer. The raw finish and
+  partial text remain stream-visible; blocking runs fail with
+  `AiError.InvalidOutputError`, and recorded runs preserve the partial text but
+  write failed settlement without a `Completed` record. Compaction rejects the
+  same incomplete finishes before replacing history, and its default prompt
+  now produces a structured continuation checkpoint covering goal,
+  constraints, progress, decisions, next steps, and critical context.
+  Compatibility: callers that treated token-capped or filtered fragments as
+  successful results must now handle the typed failure or raise the provider's
+  output limit. Custom compaction instructions remain supported unchanged.
+
 - Split the two largest agent source files along their internal seams, with
   no public-API or behavior change. `agent.ts` (3,207 lines) keeps the
   `Agent.*` surface, `make`'s compile step, and the method attachment; the
