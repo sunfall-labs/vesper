@@ -1,0 +1,61 @@
+{
+  "name": "@sunfall/vesper-log-sqlite",
+  "version": "0.1.0-alpha.1",
+  "description": "SQLite adapter for the Vesper append-only conversation log.",
+  "keywords": [
+    "effect",
+    "event-sourcing",
+    "sqlite",
+    "typescript"
+  ],
+  "homepage": "https://github.com/sunfall-labs/vesper#readme",
+  "bugs": {
+    "url": "https://github.com/sunfall-labs/vesper/issues"
+  },
+  "license": "MIT",
+  "author": "Andrew Lee",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sunfall-labs/vesper.git",
+    "directory": "packages/log-sqlite"
+  },
+  "files": [
+    "dist",
+    "migrations",
+    "LICENSE"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "sideEffects": false,
+  "exports": {
+    "./layer": {
+      "types": "./dist/layer.d.ts",
+      "default": "./dist/layer.js"
+    },
+    "./layer-native": {
+      "types": "./dist/layer-native.d.ts",
+      "default": "./dist/layer-native.js"
+    },
+    "./migrations/001-initial.sql": "./migrations/001-initial.sql"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
+  },
+  "dependencies": {
+    "@sunfall/vesper-log": "0.1.0-alpha.1"
+  },
+  "peerDependencies": {
+    "effect": "4.0.0-rc.109"
+  },
+  "devDependencies": {
+    "@effect/platform-node": "catalog:",
+    "@effect/vitest": "catalog:",
+    "effect": "catalog:",
+    "vitest": "^4.1.9"
+  }
+}
