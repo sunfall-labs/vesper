@@ -266,7 +266,7 @@ non-interactive run, use `nub run example:approval-cli --decision approve` or
 This is the `Effect Workflow`-backed form, for an external step with its own
 request/result shape. For a plain approve/deny gate on one tool, with no
 workflow engine at all, see
-[Tool approval](packages/agent/README.md#tool-approval).
+[Tool interactions](packages/agent/README.md#tool-interactions).
 
 ### Real providers
 

@@ -18,6 +18,7 @@ import type { AgentEvents } from '../event.js';
 import { AgentHistory } from '../history.js';
 import { DynamicToolkit } from '../dynamic-toolkit.js';
 import type { Interception } from '../interception.js';
+import { Interaction } from '../interaction.js';
 import type * as AgentLog from '../log.js';
 import { ResultOverflow } from '../result-overflow.js';
 import type { RunPolicy } from '../run-policy.js';
@@ -30,8 +31,8 @@ import { AgentEventRuntime } from './event.js';
 import * as Observability from './observability.js';
 import { encodePart } from './part-encoding.js';
 import {
-  approvalRequiresConversationError,
   incompleteOutputError,
+  interactionRequiresConversationError,
   normalizeProviderError,
 } from './provider-error.js';
 
@@ -462,6 +463,7 @@ export const makeEntry = <
                     seen,
                     part as Response.StreamPart<RunTools>,
                     encodedPart,
+                    resolvedToolkit,
                   );
                   if (encodedPart.type === 'finish') {
                     yield* Observability.usage(encodedPart.usage);
@@ -472,15 +474,22 @@ export const makeEntry = <
                 }),
               ),
               Stream.map(
-                ({ part, encodedPart }): AgentEvents.Event<ModelTools> => ({
-                  _tag: 'Part',
-                  step,
-                  // Effect's mapped tool-part union is not idempotent under
-                  // this compiled intersection, although the toolkit value is
-                  // exactly the one Chat used to decode the part.
-                  part: part as Response.StreamPart<ModelTools>,
-                  encodedPart,
-                }),
+                ({ part, encodedPart }): AgentEvents.Event<ModelTools> => {
+                  const interaction =
+                    encodedPart.type === 'tool-approval-request'
+                      ? seen.callsById.get(encodedPart.toolCallId)?.interaction
+                      : undefined;
+                  return {
+                    _tag: 'Part',
+                    step,
+                    // Effect's mapped tool-part union is not idempotent under
+                    // this compiled intersection, although the toolkit value is
+                    // exactly the one Chat used to decode the part.
+                    part: part as Response.StreamPart<ModelTools>,
+                    encodedPart,
+                    ...(interaction === undefined ? {} : { interaction }),
+                  };
+                },
               ),
             );
           const model =
@@ -941,16 +950,16 @@ export const makeEntry = <
               // from — an unrecorded run has nowhere to record the decision
               // this would wait on, so it fails outright instead of
               // returning a `Result` nothing can ever act on.
-              const pendingApprovals = seen.pendingApprovals;
-              if (pendingApprovals.length > 0 && session === undefined) {
+              const pendingInteractions = seen.pendingInteractions;
+              if (pendingInteractions.length > 0 && session === undefined) {
                 return Stream.fail(
-                  approvalRequiresConversationError(pendingApprovals),
+                  interactionRequiresConversationError(pendingInteractions),
                 );
               }
 
               const prepared =
                 cancelled ||
-                pendingApprovals.length > 0 ||
+                pendingInteractions.length > 0 ||
                 nextTurn === undefined
                   ? TurnControl.keep
                   : yield* nextTurn({
@@ -981,7 +990,7 @@ export const makeEntry = <
               // cancel outranks everything.
               const stop =
                 cancelled ||
-                pendingApprovals.length > 0 ||
+                pendingInteractions.length > 0 ||
                 (policyWantsStop && steers.length === 0 && !drained.backlog);
               const completedSteps = seen.started ? step : step - 1;
 
@@ -997,12 +1006,12 @@ export const makeEntry = <
                             'cancelled',
                             seen.started ? response : undefined,
                           )
-                        : pendingApprovals.length > 0
+                        : pendingInteractions.length > 0
                           ? AgentEventRuntime.suspended(
                               completedSteps,
                               seen.text,
                               totals,
-                              pendingApprovals,
+                              pendingInteractions,
                               seen.started ? response : undefined,
                             )
                           : AgentEventRuntime.completed(
@@ -1367,13 +1376,13 @@ export const makeEntry = <
                   // index it is read through here is the same one
                   // `resolveIndeterminate` just updated.
                   const approvalWaits = session.suspendedToolCalls.filter(
-                    (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
+                    (call) => call.wait === ToolDispatch.INTERACTION_WAIT,
                   );
                   // The toolkit is resolved once, and only when an approval
                   // wait exists at all: resolution may include dynamic
                   // sources whose work is real (an MCP discovery
                   // round-trip), and almost every run has nothing suspended.
-                  const stillPendingApprovals: AgentEvents.PendingApproval[] =
+                  const stillPendingInteractions: AgentEvents.PendingInteraction[] =
                     approvalWaits.length === 0
                       ? []
                       : yield* Effect.gen(function* () {
@@ -1392,9 +1401,10 @@ export const makeEntry = <
                                 current.value._tag !== 'Suspended'
                               ) {
                                 return Effect.succeed<
-                                  ReadonlyArray<AgentEvents.PendingApproval>
+                                  ReadonlyArray<AgentEvents.PendingInteraction>
                                 >([]);
                               }
+                              const pendingRecovery = current.value;
                               // Re-decoded against the tool's current
                               // parameter schema rather than surfaced from
                               // the durable encoded form: a caller
@@ -1407,11 +1417,16 @@ export const makeEntry = <
                                   call.name,
                                   call.request,
                                 ),
-                                (decodedInput) => [
+                                (
+                                  decodedInput,
+                                ): ReadonlyArray<AgentEvents.PendingInteraction> => [
                                   {
                                     toolCallId: call.toolCallId,
                                     toolName: call.name,
-                                    input: decodedInput,
+                                    kind:
+                                      pendingRecovery.interaction?.name ??
+                                      'approval',
+                                    request: decodedInput,
                                   },
                                 ],
                               );
@@ -1419,7 +1434,7 @@ export const makeEntry = <
                           );
                           return batches.flat();
                         });
-                  if (stillPendingApprovals.length > 0) {
+                  if (stillPendingInteractions.length > 0) {
                     return Stream.make(
                       AgentEventRuntime.suspended(
                         0,
@@ -1428,7 +1443,7 @@ export const makeEntry = <
                         // to preserve.
                         '',
                         wiring.initialUsage ?? { input: 0, output: 0 },
-                        stillPendingApprovals,
+                        stillPendingInteractions,
                       ),
                     );
                   }
@@ -1646,9 +1661,16 @@ interface TurnState {
   emitted: boolean;
   started: boolean;
   /** Decoded call params seen this turn, keyed by tool call id. */
-  callsById: Map<string, { readonly name: string; readonly input: unknown }>;
-  /** `tool-approval-request` parts observed this turn, in provider order. */
-  pendingApprovals: AgentEvents.PendingApproval[];
+  callsById: Map<
+    string,
+    {
+      readonly name: string;
+      readonly input: unknown;
+      readonly interaction?: Interaction.Metadata;
+    }
+  >;
+  /** External interaction requests observed this turn, in provider order. */
+  pendingInteractions: AgentEvents.PendingInteraction[];
 }
 
 const emptyTurnState = (): TurnState => ({
@@ -1662,7 +1684,7 @@ const emptyTurnState = (): TurnState => ({
   emitted: false,
   started: false,
   callsById: new Map(),
-  pendingApprovals: [],
+  pendingInteractions: [],
 });
 
 /**
@@ -1678,6 +1700,7 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
   state: TurnState,
   decoded: Response.StreamPart<PartTools>,
   encoded: Response.StreamPartEncoded,
+  toolkit: { readonly tools: Record<string, Tool.Any> },
 ): void => {
   state.emitted = true;
   state.parts.push(decoded);
@@ -1691,9 +1714,15 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
     case 'tool-call':
       state.toolCalls.push(encoded);
       if (decoded.type === 'tool-call') {
+        const tool = toolkit.tools[decoded.name];
+        const interaction =
+          tool === undefined
+            ? undefined
+            : Option.getOrUndefined(Interaction.metadata(tool));
         state.callsById.set(decoded.id, {
           name: decoded.name,
           input: decoded.params,
+          ...(interaction === undefined ? {} : { interaction }),
         });
       }
       break;
@@ -1704,10 +1733,11 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
       break;
     case 'tool-approval-request': {
       const call = state.callsById.get(encoded.toolCallId);
-      state.pendingApprovals.push({
+      state.pendingInteractions.push({
         toolCallId: encoded.toolCallId,
         toolName: call?.name ?? '',
-        input: call?.input,
+        kind: call?.interaction?.name ?? 'approval',
+        request: call?.input,
       });
       break;
     }

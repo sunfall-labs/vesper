@@ -40,8 +40,8 @@ and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
 `Result.response` is Effect AI's canonical `Prompt.Prompt` for the final turn,
 including reasoning and structured tool calls/results; Vesper does not define a
 second response protocol. `Result.outcome` is `success`, `cancelled`, or
-`suspended` — a tool call durably waiting on approval, covered in
-[Tool approval](#tool-approval). `steps` counts model turns that actually
+`suspended` — a tool call durably waiting on an external interaction, covered
+in [Tool interactions](#tool-interactions). `steps` counts model turns that actually
 started, so a queued cancellation can return zero while an in-flight
 cancellation preserves its partial text, usage, and one started turn.
 
@@ -627,28 +627,32 @@ Direct state operations expose this error. Declare `failure: AgentState.Error`
 when a tool handler lets mutation failures escape; state failures are never
 converted to defects.
 
-## Tool approval
+## Tool interactions
 
-Mark a tool with `effect/unstable/ai`'s own option — not a Vesper one:
+Approval is the yes/no specialization. `Interaction.approval` is the explicit
+Vesper spelling; existing tools using Effect AI's `setNeedsApproval` remain
+equivalent and compatible:
 
 ```ts
 const release = Tool.make('release', {
   parameters: Schema.Struct({ id: Schema.String }),
   success: Schema.Struct({ released: Schema.Boolean }),
-}).setNeedsApproval(true); // or a function of (params, context)
+}).pipe(Interaction.approval);
 ```
 
 When the model calls it, `LanguageModel` suspends before the handler is ever
 entered and emits a `tool-approval-request` part instead of dispatching. A
 recorded run turns that into a durable `ToolSuspended` — the same record
 family `AgentWorkflow.wait` uses below — and ends with `Result.outcome ===
-'suspended'` and `pendingApprovals: { toolCallId, toolName, input }[]`. No
+'suspended'` and `pendingInteractions`. No
 Effect Workflow, no `AgentWorkflow.durable`, and the handler has not run.
 
 ```ts
 const result = yield * conversation.run('release r1');
 // result.outcome === 'suspended'
-// result.pendingApprovals === [{ toolCallId, toolName: 'release', input: { id: 'r1' } }]
+// result.pendingInteractions === [
+//   { toolCallId, toolName: 'release', kind: 'approval', request: { id: 'r1' } },
+// ]
 
 yield * conversation.resolveApproval(toolCallId, 'approve');
 // or: conversation.resolveApproval(toolCallId, 'deny', 'not this week')
@@ -665,18 +669,48 @@ framework-level failure — without ever entering the handler. Calling it
 again for the same `toolCallId` fails with typed
 `Conversation.ApprovalResolutionError` instead of silently applying, or
 discarding, a second decision. Asking again before it is resolved (another
-`run` call) re-surfaces the same `pendingApprovals` rather than calling the
+`run` call) re-surfaces the same `pendingInteractions` rather than calling the
 model with an unanswered tool call.
+
+For typed input rather than authorization, make the external answer the tool
+result:
+
+```ts
+const question = Interaction.answer(
+  Tool.make('question', {
+    parameters: Schema.Struct({
+      question: Schema.NonEmptyString,
+      options: Schema.NullOr(Schema.Array(Schema.NonEmptyString)),
+    }),
+    success: Schema.Struct({ answer: Schema.NonEmptyString }),
+  }),
+);
+
+const questionAgent = Agent.make({
+  // ...
+  toolkit: Toolkit.make(question),
+}).withHandlers({ question: () => Interaction.unreachable });
+
+yield *
+  conversation.resolveInteraction(question, toolCallId, {
+    answer: 'the typed response',
+  });
+yield * conversation.run();
+```
+
+`Interaction.answer` brands the tool at the type level, so `resolve` cannot be
+called with an ordinary or approval-only tool. It encodes through the tool's
+success schema before appending anything. The next run records that encoded
+answer as the successful `ToolOutcome` without entering the guard handler.
 
 An unrecorded `agent.run(...)` fails outright with a typed `AiError` instead
 of returning a suspension nothing can ever resolve — approval requires a
 `Conversation`.
 
-This is the whole approval surface, and it needed no workflow engine at all.
-Reach for `AgentWorkflow.wait` instead when the external step is not a plain
-human approve/deny — a webhook, a job, anything with its own typed request
-and result — or when the handler needs to do other durable work around the
-wait.
+Neither native interaction needs a workflow engine. Reach for
+`AgentWorkflow.wait` when a handler has already started and must durably wait
+for a webhook, job, or other external event while doing replayable work around
+the wait.
 
 ## Effect Workflow
 

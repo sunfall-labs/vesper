@@ -53,6 +53,9 @@
       "@sunfall/vesper-agent/interception": [
         "./packages/agent/src/interception.ts"
       ],
+      "@sunfall/vesper-agent/interaction": [
+        "./packages/agent/src/interaction.ts"
+      ],
       "@sunfall/vesper-agent/model-plan": [
         "./packages/agent/src/model-plan.ts"
       ],

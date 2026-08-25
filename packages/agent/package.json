@@ -63,6 +63,10 @@
       "types": "./dist/interception.d.ts",
       "default": "./dist/interception.js"
     },
+    "./interaction": {
+      "types": "./dist/interaction.d.ts",
+      "default": "./dist/interaction.js"
+    },
     "./model-plan": {
       "types": "./dist/model-plan.d.ts",
       "default": "./dist/model-plan.js"

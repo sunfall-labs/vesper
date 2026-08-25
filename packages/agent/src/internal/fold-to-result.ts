@@ -43,7 +43,7 @@ export const foldToResult = <
         text: terminal.text,
         steps: terminal.step,
         usage: terminal.usage,
-        pendingApprovals: terminal.pendingApprovals,
+        pendingInteractions: terminal.pendingInteractions,
         ...(terminal.response === undefined
           ? {}
           : { response: terminal.response }),

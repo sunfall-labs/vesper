@@ -15,7 +15,7 @@ import type { Interception } from './interception.js';
 import type * as AgentLog from './log.js';
 import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
-import { APPROVAL_WAIT } from './recovery.js';
+import { INTERACTION_WAIT } from './recovery.js';
 import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
@@ -23,11 +23,11 @@ import { RunPolicyRuntime } from './run-policy-runtime.js';
 type RunError = AiError.AiError | RunPolicy.RunPolicyExhausted;
 
 /**
- * The reserved `ToolSuspended.wait` name for a tool's own `needsApproval`
- * gate. Declared in `recovery.ts` — see its doc for why — and re-exported
+ * The reserved `ToolSuspended.wait` name for native pre-handler interactions.
+ * Declared in `recovery.ts` — see its doc for why — and re-exported
  * here because this is where `resolveIndeterminate` uses it.
  */
-export { APPROVAL_WAIT };
+export { INTERACTION_WAIT } from './recovery.js';
 
 const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
 
@@ -195,10 +195,33 @@ export const resolveIndeterminate = <
       // handler for the first time.
       if (
         recovery.value._tag === 'Suspended' &&
-        recovery.value.wait === APPROVAL_WAIT
+        recovery.value.wait === INTERACTION_WAIT
       ) {
         const decided = options.session.completedWait(recovery.value.token);
         if (Option.isNone(decided)) {
+          continue;
+        }
+        // An answer interaction is a tool whose externally supplied value is
+        // the result. Settle it atomically without entering the unreachable
+        // handler. Approval's dispatch mode deliberately falls through: a
+        // successful decision authorizes the ordinary handler to run.
+        if (recovery.value.interaction?.mode === 'answer') {
+          yield* options.session.append([
+            {
+              _tag: 'ToolResumed',
+              id: call.toolCallId,
+              name: call.name,
+              token: recovery.value.token,
+            },
+            {
+              _tag: 'ToolOutcome',
+              step: call.step,
+              id: call.toolCallId,
+              name: call.name,
+              outcome: decided.value.outcome,
+              result: decided.value.result,
+            },
+          ]);
           continue;
         }
         if (decided.value.outcome === 'failure') {

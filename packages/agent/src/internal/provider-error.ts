@@ -37,23 +37,24 @@ export const incompleteOutputError = (
   });
 };
 
-export const approvalRequiresConversationError = (
-  pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
+export const interactionRequiresConversationError = (
+  pendingInteractions: ReadonlyArray<AgentEvents.PendingInteraction>,
 ): AiError.AiError =>
   new AiError.AiError({
     module: 'Agent',
     method: 'run',
     reason: new AiError.InvalidRequestError({
       description:
-        `Tool call${pendingApprovals.length === 1 ? '' : 's'} ` +
-        `${pendingApprovals.map((approval) => `"${approval.toolName}" (${approval.toolCallId})`).join(', ')} ` +
-        'require approval, which can only be resolved durably. Bind this ' +
-        'agent to a Conversation and call Conversation.resolveApproval ' +
+        `Tool call${pendingInteractions.length === 1 ? '' : 's'} ` +
+        `${pendingInteractions.map((interaction) => `"${interaction.toolName}" (${interaction.toolCallId})`).join(', ')} ` +
+        'require an external interaction, which can only be resolved durably. Bind this ' +
+        'agent to a Conversation and resolve the interaction ' +
         'instead of running it directly.',
       metadata: {
-        pendingApprovals: pendingApprovals.map((approval) => ({
-          toolCallId: approval.toolCallId,
-          toolName: approval.toolName,
+        pendingInteractions: pendingInteractions.map((interaction) => ({
+          toolCallId: interaction.toolCallId,
+          toolName: interaction.toolName,
+          kind: interaction.kind,
         })),
       },
     }),
