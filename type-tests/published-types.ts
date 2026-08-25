@@ -34,7 +34,7 @@ type McpAuthRejectsPlainString = Expect<
   Equal<string extends Mcp.Auth ? true : false, false>
 >;
 type McpAuthAcceptsRedacted = Expect<
-  Equal<Redacted.Redacted<string> extends Mcp.Auth ? true : false, true>
+  Equal<Redacted.Redacted extends Mcp.Auth ? true : false, true>
 >;
 type McpNamesArePrefixed = Expect<
   Equal<keyof Mcp.Tools, `mcp__${string}__${string}`>

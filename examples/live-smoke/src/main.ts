@@ -284,7 +284,7 @@ const absorb = <Tools extends Record<string, Tool.Any>>(
       trace.toolResults.push({
         id: part.id,
         name: part.name,
-        isFailure: part.isFailure === true,
+        isFailure: part.isFailure,
         result: part.result,
       });
       return;

@@ -48,9 +48,6 @@
     "effecttsgo/prefer-schema-over-json": {
       "count": 4
     },
-    "typescript/no-unnecessary-boolean-literal-compare": {
-      "count": 1
-    },
     "typescript/restrict-template-expressions": {
       "count": 26
     },
@@ -64,15 +61,9 @@
     },
     "effecttsgo/return-effect-in-gen": {
       "count": 3
-    },
-    "typescript/no-unnecessary-type-arguments": {
-      "count": 2
     }
   },
   "packages/agent/src/agent.ts": {
-    "typescript/no-unnecessary-type-arguments": {
-      "count": 1
-    },
     "typescript/no-unnecessary-type-parameters": {
       "count": 1
     }
@@ -106,12 +97,6 @@
     "typescript/no-unnecessary-condition": {
       "count": 1
     },
-    "typescript/no-unnecessary-type-arguments": {
-      "count": 1
-    },
-    "typescript/no-unnecessary-type-assertion": {
-      "count": 2
-    },
     "typescript/no-unsafe-type-assertion": {
       "count": 6
     }
@@ -128,9 +113,6 @@
     },
     "typescript/no-unnecessary-condition": {
       "count": 2
-    },
-    "typescript/no-unnecessary-type-arguments": {
-      "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
       "count": 4
@@ -183,9 +165,6 @@
     }
   },
   "packages/agent/src/internal/provider-error.ts": {
-    "typescript/no-duplicate-type-constituents": {
-      "count": 2
-    },
     "typescript/no-unnecessary-condition": {
       "count": 1
     }
@@ -252,9 +231,6 @@
       "count": 1
     },
     "typescript/no-redundant-type-constituents": {
-      "count": 2
-    },
-    "typescript/no-unnecessary-type-arguments": {
       "count": 2
     }
   },
@@ -395,9 +371,6 @@
   "packages/agent/test/recording-policy.test.ts": {
     "effecttsgo/prefer-schema-over-json": {
       "count": 2
-    },
-    "typescript/no-unnecessary-type-arguments": {
-      "count": 1
     }
   },
   "packages/agent/test/result-overflow.test.ts": {
@@ -592,9 +565,6 @@
       "count": 1
     },
     "effecttsgo/process-env": {
-      "count": 1
-    },
-    "typescript/no-confusing-void-expression": {
       "count": 1
     },
     "typescript/no-unnecessary-condition": {
@@ -797,9 +767,6 @@
     "typescript/no-unnecessary-condition": {
       "count": 2
     },
-    "typescript/no-unnecessary-type-assertion": {
-      "count": 2
-    },
     "typescript/no-unsafe-type-assertion": {
       "count": 2
     }
@@ -847,9 +814,6 @@
     }
   },
   "type-tests/published-types.ts": {
-    "typescript/no-unnecessary-type-arguments": {
-      "count": 1
-    },
     "typescript/no-unnecessary-type-parameters": {
       "count": 2
     }
