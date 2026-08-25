@@ -1,7 +1,7 @@
 # `@sunfall/vesper-workspace`
 
-A filesystem and shell behind one swappable Effect service, plus the six tools
-an agent needs to work in that filesystem. `WorkspaceAgent` is the explicit
+A filesystem and shell behind one swappable Effect service, plus the coding
+tools an agent needs to work in that filesystem. `WorkspaceAgent` is the explicit
 adapter from those standalone tools to an agent toolkit; the agent package does
 not install workspace access implicitly.
 
@@ -21,6 +21,12 @@ import { Effect, Layer } from 'effect';
 import { Toolkit } from 'effect/unstable/ai';
 
 const workspace = WorkspaceAgent.standard;
+const interactiveWorkspace = WorkspaceTools.makeToolkit({
+  apply_patch: true,
+  edit_file: true,
+  run_shell: true,
+  write_file: true,
+});
 const workspaceWithApplicationTools = WorkspaceAgent.compose(
   Toolkit.make(lookupIssue),
 );
@@ -44,8 +50,9 @@ agent
 The layers are explicit: `layer` installs the standard tool handlers and
 default shell policy, `rootLayer` selects the visible workspace root, and the
 driver layer selects where filesystem and shell operations run. Use
-`WorkspaceTools` directly only for advanced lower-level toolkit, handler, root,
-or command-policy wiring.
+`WorkspaceTools.makeToolkit` plus `WorkspaceTools.makeLayer` when an
+application needs the same handlers with approval gates; approval is encoded
+on the Vesper tool definitions and does not require an adapter layer.
 
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-workspace/agent`, `/driver`, `/layer-local`, and `/tools`.

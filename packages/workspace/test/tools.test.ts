@@ -211,7 +211,7 @@ const schemaFor = (name: string): Record<string, unknown> => {
   if (tool === undefined) {
     throw new Error(`no tool named ${name}`);
   }
-  return ToolNamespace.getJsonSchema(tool) as Record<string, unknown>;
+  return ToolNamespace.getJsonSchema(tool);
 };
 
 // ------------------------------------------------------------------- typing
@@ -303,12 +303,72 @@ it('states its requirements in the type', () => {
   expect(new Set(Object.keys(WorkspaceTools.toolkit.tools))).toEqual(
     new Set([
       'edit_file',
+      'apply_patch',
       'list_files',
       'read_file',
       'run_shell',
       'search_files',
       'write_file',
     ]),
+  );
+});
+
+it('builds the same workspace toolkit with application-owned approval gates', () => {
+  const toolkit = WorkspaceTools.makeToolkit({
+    apply_patch: true,
+    edit_file: true,
+    run_shell: true,
+    write_file: true,
+  });
+
+  expect(toolkit.tools.read_file.needsApproval ?? false).toBe(false);
+  expect(toolkit.tools.write_file.needsApproval).toBe(true);
+  expect(toolkit.tools.edit_file.needsApproval).toBe(true);
+  expect(toolkit.tools.run_shell.needsApproval).toBe(true);
+  expect(toolkit.tools.apply_patch.needsApproval).toBe(true);
+
+  // The handlers stay attached to the selected toolkit without an adapter
+  // layer or a second set of definitions.
+  expect(WorkspaceTools.makeLayer(toolkit)).toBeDefined();
+});
+
+describe('apply_patch', () => {
+  it.live(
+    'applies add, update, move, and delete operations through the driver',
+    () =>
+      Effect.gen(function* () {
+        const directory = workspace();
+        mkdirSync(join(directory, 'src'), { recursive: true });
+        writeFileSync(
+          join(directory, 'src/original.ts'),
+          'const before = 1;\n',
+        );
+        writeFileSync(join(directory, 'src/delete.ts'), 'remove me\n');
+
+        const result = expectOk(
+          yield* call(directory, 'apply_patch', {
+            patchText: [
+              '*** Begin Patch',
+              '*** Add File: added.txt',
+              '+hello',
+              '*** Update File: src/original.ts',
+              '*** Move to: src/moved.ts',
+              '@@',
+              '-const before = 1;',
+              '+const after = 2;',
+              '*** Delete File: src/delete.ts',
+              '*** End Patch',
+            ].join('\n'),
+          }),
+        );
+
+        expect(result['filesApplied']).toBe(3);
+        expect(readFileSync(join(directory, 'src/moved.ts'), 'utf8')).toBe(
+          'const after = 2;\n',
+        );
+        expect(existsSync(join(directory, 'src/original.ts'))).toBe(false);
+        expect(existsSync(join(directory, 'added.txt'))).toBe(true);
+      }),
   );
 });
 
@@ -1453,9 +1513,7 @@ describe('the JSON schema these tools advertise', () => {
   });
 
   it('offers a model no string alternative anywhere in its parameters', () => {
-    for (const name of Object.keys(
-      WorkspaceTools.toolkit.tools as Record<string, Tool.Any>,
-    )) {
+    for (const name of Object.keys(WorkspaceTools.toolkit.tools)) {
       expect(JSON.stringify(schemaFor(name))).not.toContain('Infinity');
     }
   });

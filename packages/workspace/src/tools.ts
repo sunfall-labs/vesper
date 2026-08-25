@@ -1,13 +1,25 @@
 import { Context, Effect, Layer, Schema, Semaphore } from 'effect';
 import { Tool, Toolkit } from 'effect/unstable/ai';
 
+import { ApplyPatchTool, applyPatchHandler } from './apply-patch.js';
 import { WorkspaceDriver } from './driver.js';
 import { WorkspaceGlob } from './glob.js';
 import { WorkspaceOutput } from './output.js';
 import { WorkspacePath } from './path.js';
+import { FilesystemPolicy, Root } from './workspace-context.js';
 
-// The harness toolkit: six tools an agent needs before it can do anything at
-// all — read, write, edit, list, search, run.
+export {
+  defaultFilesystemPolicyLayer,
+  FilesystemPolicy,
+  type FilesystemPolicyConfig,
+  filesystemPolicyLayer,
+  Root,
+  rootLayer,
+  unrestrictedFilesystemPolicyLayer,
+} from './workspace-context.js';
+
+// The harness toolkit: the coding tools an agent needs before it can do
+// anything at all — read, write, edit, patch, list, search, run.
 //
 // They are built on `WorkspaceDriver`, not beside it. Every byte read and
 // every command run goes through the service, so the layer that decides
@@ -34,34 +46,6 @@ import { WorkspacePath } from './path.js';
 // Output truncation stays behind `WorkspaceOutput`, where file reads and shell
 // results can share byte and line budgets without coupling this package to a
 // provider or an agent runtime.
-
-// ----------------------------------------------------------------- the root
-
-/**
- * The directory the toolkit treats as the workspace.
- *
- * A separate service rather than a constructor argument, for the same reason
- * the driver is: it belongs in the requirement channel. An agent whose tools
- * can reach the filesystem should not compile until someone has said *which*
- * filesystem and *which* directory.
- *
- * **Containment here is lexical and preflight.** Paths are resolved and
- * checked against this root before they reach the driver, which stops a model
- * that wandered — not code that meant to leave. The no-symlink policy probes
- * existing components immediately before the operation, but cannot close a
- * filesystem TOCTOU race with another process or with an enabled shell tool.
- * When the application explicitly permits symlinks, one inside the root is
- * followed wherever it points; `run_shell` executes a command string nothing
- * inspects. See the boundary note in `driver.ts`; this narrows what the tools
- * address, and the driver's substrate is still what confines.
- */
-export class Root extends Context.Service<Root, { readonly path: string }>()(
-  '@sunfall/vesper-workspace/WorkspaceRoot',
-) {}
-
-/** The workspace root as a layer, for wiring. */
-export const rootLayer = (path: string): Layer.Layer<Root> =>
-  Layer.succeed(Root, { path });
 
 export interface CommandPolicyConfig {
   readonly defaultTimeoutMs: number;
@@ -116,29 +100,6 @@ export const shellEnabledCommandPolicyLayer: Layer.Layer<CommandPolicy> =
     maxTimeoutMs: DEFAULT_MAX_COMMAND_TIMEOUT_MS,
     allowShell: true,
   });
-
-/** Filesystem policy for model-addressed paths. */
-export interface FilesystemPolicyConfig {
-  /** Follow links only when the application explicitly opts in. */
-  readonly allowSymlinks: boolean;
-}
-
-export class FilesystemPolicy extends Context.Service<
-  FilesystemPolicy,
-  FilesystemPolicyConfig
->()('@sunfall/vesper-workspace/FilesystemPolicy') {}
-
-export const filesystemPolicyLayer = (
-  config: FilesystemPolicyConfig,
-): Layer.Layer<FilesystemPolicy> => Layer.succeed(FilesystemPolicy, config);
-
-/** Safe default: a model cannot turn a workspace path into a link traversal. */
-export const defaultFilesystemPolicyLayer: Layer.Layer<FilesystemPolicy> =
-  filesystemPolicyLayer({ allowSymlinks: false });
-
-/** Explicit opt-in for legacy host-local link-following behavior. */
-export const unrestrictedFilesystemPolicyLayer: Layer.Layer<FilesystemPolicy> =
-  filesystemPolicyLayer({ allowSymlinks: true });
 
 /** Directory names the walk does not descend into, and reports skipping. */
 export const IGNORED_DIRECTORIES: ReadonlyArray<string> = [
@@ -912,7 +873,52 @@ const runShellTool = Tool.make('run_shell', {
 });
 
 /**
- * The six tools, ready to hand to an agent.
+ * Approval switches for the workspace's mutating or host-authoritative tools.
+ *
+ * The approval decision itself belongs to the application (usually the TUI),
+ * while the workspace owns the tool definitions. Keeping this as a toolkit
+ * option means an application can use the exact same handlers and schemas in
+ * an interactive or unattended run without wrapping tools or duplicating
+ * their definitions.
+ */
+export interface ApprovalConfig {
+  readonly apply_patch?: boolean;
+  readonly edit_file?: boolean;
+  readonly run_shell?: boolean;
+  readonly write_file?: boolean;
+}
+
+type ToolConfig = {
+  readonly parameters: Schema.Constraint;
+  readonly success: Schema.Constraint;
+  readonly failure: Schema.Constraint;
+  readonly failureMode: Tool.FailureMode;
+};
+
+const withApproval = <
+  Name extends string,
+  Config extends ToolConfig,
+  Requirements,
+>(
+  tool: Tool.Tool<Name, Config, Requirements>,
+  needsApproval: boolean,
+): Tool.Tool<Name, Config, Requirements> =>
+  tool.setNeedsApproval(needsApproval);
+
+/** Build the standard workspace toolkit with optional approval gates. */
+export const makeToolkit = (approval: ApprovalConfig = {}) =>
+  Toolkit.make(
+    readFileTool,
+    withApproval(ApplyPatchTool, approval.apply_patch ?? false),
+    withApproval(writeFileTool, approval.write_file ?? false),
+    withApproval(editFileTool, approval.edit_file ?? false),
+    listFilesTool,
+    searchFilesTool,
+    withApproval(runShellTool, approval.run_shell ?? false),
+  );
+
+/**
+ * The standard workspace tools, ready to hand to an agent.
  *
  * ```ts
  * const agent = Agent.make({
@@ -926,14 +932,7 @@ const runShellTool = Tool.make('run_shell', {
  * `Root` and `WorkspaceDriver.Service` ride along in the agent's requirement
  * channel from there; {@link layer} supplies the handlers and nothing else.
  */
-export const toolkit = Toolkit.make(
-  readFileTool,
-  writeFileTool,
-  editFileTool,
-  listFilesTool,
-  searchFilesTool,
-  runShellTool,
-);
+export const toolkit = makeToolkit();
 
 // -------------------------------------------------------------- the handlers
 
@@ -1328,15 +1327,31 @@ const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
  * );
  * ```
  */
-export const layer: Layer.Layer<
-  Tool.HandlersFor<Toolkit.Tools<typeof toolkit>>
-> = toolkit.toLayer({
+const handlers = {
+  apply_patch: applyPatchHandler,
   read_file: handleRead,
   write_file: handleWrite,
   edit_file: handleEdit,
   list_files: handleList,
   search_files: handleSearch,
   run_shell: handleRun,
-});
+};
+
+/** Build handlers for a toolkit returned by {@link makeToolkit}. */
+export const makeLayer = (
+  selected: Toolkit.Toolkit<Toolkit.Tools<typeof toolkit>>,
+): Layer.Layer<Tool.HandlersFor<Toolkit.Tools<typeof toolkit>>> =>
+  selected.toLayer(handlers);
+
+export const layer: Layer.Layer<
+  Tool.HandlersFor<Toolkit.Tools<typeof toolkit>>
+> = makeLayer(toolkit);
+
+export {
+  ApplyPatchTool,
+  applyPatchHandler,
+  makeApplyPatchTool,
+  PatchRejected,
+} from './apply-patch.js';
 
 export * as WorkspaceTools from './tools.js';
