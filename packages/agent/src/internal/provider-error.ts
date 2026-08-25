@@ -1,12 +1,41 @@
 import { Predicate } from 'effect';
-import { AiError } from 'effect/unstable/ai';
+import { AiError, type Response } from 'effect/unstable/ai';
 
 import { Compaction } from '../compaction.js';
 import type { AgentEvents } from '../event.js';
 
 // Failure normalization at the provider seam. Everything a raw provider error
-// can be is folded into `AiError` here, including the context-overflow
-// classification reactive compaction keys on.
+// or explicitly incomplete finish can be is folded into `AiError` here,
+// including the context-overflow classification reactive compaction keys on.
+
+type OutputMethod = 'streamText' | 'compact';
+
+const incompleteReasons: Readonly<
+  Partial<Record<Response.FinishReason, string>>
+> = {
+  length: 'generation reached its output token limit',
+  'content-filter': 'generation was stopped by the provider content filter',
+  error: 'the provider reported a generation error',
+};
+
+/** Convert an explicitly incomplete finish into the loop's typed failure. */
+export const incompleteOutputError = (
+  method: OutputMethod,
+  reason: Response.FinishReason,
+): AiError.AiError | undefined => {
+  const description = incompleteReasons[reason];
+  if (description === undefined) {
+    return undefined;
+  }
+  return new AiError.AiError({
+    module: method === 'compact' ? 'Compaction' : 'Agent',
+    method,
+    reason: new AiError.InvalidOutputError({
+      description: `${method === 'compact' ? 'Compaction' : 'Model'} output was incomplete because ${description}`,
+      metadata: { finishReason: reason },
+    }),
+  });
+};
 
 export const approvalRequiresConversationError = (
   pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,

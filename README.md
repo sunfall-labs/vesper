@@ -232,7 +232,8 @@ approvable — via `codeMode: { except: [...] }`.
 A reactive trigger retries a too-long request against a model-written summary;
 a proactive trigger fires from a token estimate when the caller supplies a
 `contextWindow`. Splits are on whole messages, so a tool call is never cut
-away from its result.
+away from its result. The default summary is a structured continuation
+checkpoint, and truncated summaries never replace history.
 
 **[Interception](packages/agent/README.md#interception).** Four named seams —
 `beforeTurn`, `beforeModelCall`, `beforeToolCall`, `onIndeterminateToolCall` —

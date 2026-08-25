@@ -38,10 +38,18 @@ export const defaultPolicy: Policy = {
   keepRecentTokens: 8_000,
   system: defaultSystem,
   instructions:
-    'Summarize the conversation so far. Preserve decisions made, facts ' +
-    'established, file paths, identifiers, and any task still outstanding. ' +
-    'Omit pleasantries and superseded reasoning. Write it for a reader who ' +
-    'must continue the work with no other context.',
+    'Create a structured context checkpoint for another model to continue ' +
+    'the work. Use this exact format:\n\n' +
+    '## Goal\n[What the user is trying to accomplish.]\n\n' +
+    '## Constraints & Preferences\n- [Requirements and preferences, or "(none)".]\n\n' +
+    '## Progress\n### Done\n- [x] [Completed work.]\n\n' +
+    '### In Progress\n- [ ] [Current work.]\n\n' +
+    '### Blocked\n- [Anything preventing progress, or "(none)".]\n\n' +
+    '## Key Decisions\n- **[Decision]**: [Brief rationale.]\n\n' +
+    '## Next Steps\n1. [Ordered continuation steps.]\n\n' +
+    '## Critical Context\n- [Facts and references needed to continue, or "(none)".]\n\n' +
+    'Keep every section concise. Preserve exact file paths, function names, ' +
+    'identifiers, and error messages. Omit pleasantries and superseded reasoning.',
 };
 
 /** Provider constraint used for a prompt that no longer fits. */

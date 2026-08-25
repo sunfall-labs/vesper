@@ -4,6 +4,7 @@ import { AiError, LanguageModel, Prompt, type Chat } from 'effect/unstable/ai';
 import { Compaction } from '../compaction.js';
 import { ContextWindow } from '../context-window.js';
 import * as Observability from './observability.js';
+import { incompleteOutputError } from './provider-error.js';
 
 // Compaction: replace old history with a summary when the conversation
 // outgrows the context window.
@@ -166,6 +167,11 @@ export const compact = Effect.fn('Agent.compact')(function* (
     ]),
   });
   yield* Observability.usage(summary.usage);
+
+  const incomplete = incompleteOutputError('compact', summary.finishReason);
+  if (incomplete !== undefined) {
+    return yield* incomplete;
+  }
 
   if (summary.text.trim().length === 0) {
     return yield* new AiError.AiError({

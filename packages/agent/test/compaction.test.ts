@@ -16,7 +16,11 @@ import {
   overflow,
   turnOf,
 } from './compaction-fixtures.js';
-import { defaultSystem, isContextOverflow } from '../src/compaction.js';
+import {
+  defaultPolicy,
+  defaultSystem,
+  isContextOverflow,
+} from '../src/compaction.js';
 import { ContextWindow } from '../src/context-window.js';
 import {
   compact,
@@ -121,6 +125,27 @@ const captureWarnings = () => {
   );
   return { messages, layer: Logger.layer([logger]) };
 };
+
+describe('defaultPolicy', () => {
+  it('asks for a structured continuation checkpoint', () => {
+    for (const heading of [
+      '## Goal',
+      '## Constraints & Preferences',
+      '## Progress',
+      '### Done',
+      '### In Progress',
+      '### Blocked',
+      '## Key Decisions',
+      '## Next Steps',
+      '## Critical Context',
+    ]) {
+      expect(defaultPolicy.instructions).toContain(heading);
+    }
+    expect(defaultPolicy.instructions).toContain(
+      'Preserve exact file paths, function names, identifiers, and error messages.',
+    );
+  });
+});
 
 describe('estimateTokens', () => {
   it('counts text across message shapes', () => {
@@ -372,6 +397,25 @@ describe('compact', () => {
       expect(error.reason).toMatchObject({
         _tag: 'InvalidOutputError',
         description: 'Compaction model returned no text',
+      });
+      expect(yield* Ref.get(chat.history)).toEqual(terse);
+    }),
+  );
+
+  it.effect('does not replace history with a truncated summary', () =>
+    Effect.gen(function* () {
+      const models = fakeProvider({ summaryFinishReason: 'length' });
+      const chat = yield* Chat.fromPrompt(terse);
+
+      const error = yield* compact(chat, policy).pipe(
+        Effect.provide(models.layer),
+        Effect.flip,
+      );
+
+      expect(error.reason).toMatchObject({
+        _tag: 'InvalidOutputError',
+        description:
+          'Compaction output was incomplete because generation reached its output token limit',
       });
       expect(yield* Ref.get(chat.history)).toEqual(terse);
     }),

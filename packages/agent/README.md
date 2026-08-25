@@ -41,6 +41,14 @@ or `suspended` — a tool call durably waiting on approval, covered in
 started, so a queued cancellation can return zero while an in-flight
 cancellation preserves its partial text, usage, and one started turn.
 
+A provider finish reason of `length`, `content-filter`, or `error` is an
+incomplete finish, not a successful answer. The raw finish and partial text
+remain visible on `stream`; `run` fails with `AiError.InvalidOutputError`. A
+recorded conversation preserves the partial text for audit and writes failed
+settlement without a `Completed` record. Effect AI begins automatic tool
+resolution before emitting its deferred finish part, so this check cannot
+retract a tool handler that already started.
+
 Handlers attach as a method rather than a `Definition` field, mirroring
 `toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
 twice replaces the handlers rather than stacking a second set beneath them,
@@ -153,7 +161,10 @@ is bounded by one turn's text rather than the whole conversation.
 
 Compaction splits on whole messages rather than tokens, so a tool call is never
 cut away from its result, and the agent's own system message always survives
-into the resulting history.
+into the resulting history. The default policy asks for a structured
+continuation checkpoint with goal, constraints, progress, decisions, next
+steps, and critical context. A summary with an incomplete finish is rejected
+before it can replace history.
 
 ## Model fallback
 

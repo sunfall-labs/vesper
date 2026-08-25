@@ -4,7 +4,12 @@ import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { type Crypto, Effect, Layer, Stream } from 'effect';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import {
+  AiError,
+  LanguageModel,
+  type Response,
+  Toolkit,
+} from 'effect/unstable/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -19,22 +24,15 @@ const testLogLayer = Layer.mergeAll(
 // A turn the provider cut off at the output cap, rather than one the model
 // chose to end.
 //
-// These are **characterization** tests. They pin what the loop does today with
-// `finish.reason: 'length'`, which is: nothing. `observe` reads `usage` off the
-// finish part and ignores `reason`; `Stop.State` has no field for it; neither
-// `Completed` nor `TurnFinished` carries one; and `partRecords` writes no
-// record for a finish part at all. So a truncated turn satisfies the default
-// stop condition — it requested no tools — and the run settles as a success
-// holding half a sentence.
+// Completion integrity for a turn the provider cut off at its output cap.
 //
-// The one place it *is* visible is the live event stream, because the raw
-// finish part travels through as a `Part` event. That asymmetry is the whole
-// point of the trio below: a UI watching the stream can see the truncation, and
-// a caller using `run`, a stop condition, or a resumed conversation cannot. If
-// that is ever fixed, these fail — which is the intent. They are here so the
-// gap is a recorded decision rather than an oversight nobody had written down.
+// The raw finish part remains visible to a streaming observer, but the turn
+// must not cross the loop's completion interface as a successful answer. The
+// partial text remains an audit fact in a recorded conversation; settlement
+// says the run failed and no `Completed` record claims the fragment is an
+// answer.
 
-const finish = (reason: 'stop' | 'length') => ({
+const finish = (reason: Response.FinishReason) => ({
   type: 'finish' as const,
   reason,
   usage: {
@@ -45,7 +43,7 @@ const finish = (reason: 'stop' | 'length') => ({
 
 const ANSWER = 'the answer was cut';
 
-const scripted = (reason: 'stop' | 'length') =>
+const scripted = (reason: Response.FinishReason) =>
   Layer.effect(
     LanguageModel.LanguageModel,
     LanguageModel.make({
@@ -76,7 +74,7 @@ const run = <A, E>(
     E,
     Crypto.Crypto | LogStore.Service | LanguageModel.LanguageModel
   >,
-  reason: 'stop' | 'length',
+  reason: Response.FinishReason,
 ): Effect.Effect<A> =>
   effect.pipe(
     Effect.orDie,
@@ -84,13 +82,13 @@ const run = <A, E>(
     Effect.scoped,
   );
 
-/** The recorded conversation, stripped of what varies between two runs. */
+/** The recorded conversation and run exit, stripped of storage envelopes. */
 const conversationOf = (reason: 'stop' | 'length') =>
   run(
     Effect.gen(function* () {
-      yield* Conversation.make(agent, CONVERSATION)
+      const exit = yield* Conversation.make(agent, CONVERSATION)
         .run('hi')
-        .pipe(Effect.orDie);
+        .pipe(Effect.exit);
       const store = yield* LogStore.Service;
       const page = yield* store
         .read(
@@ -98,9 +96,12 @@ const conversationOf = (reason: 'stop' | 'length') =>
           { limit: 100 },
         )
         .pipe(Effect.orDie);
-      return page.records.map(
-        (envelope: ConversationRecord.Envelope) => envelope.record,
-      );
+      return {
+        exit,
+        records: page.records.map(
+          (envelope: ConversationRecord.Envelope) => envelope.record,
+        ),
+      };
     }),
     reason,
   );
@@ -110,6 +111,9 @@ describe('a turn the provider truncated at the output cap', () => {
     Effect.gen(function* () {
       const reasons = yield* run(
         agent.stream('hi').pipe(
+          Stream.takeUntil(
+            (event) => event._tag === 'Part' && event.part.type === 'finish',
+          ),
           Stream.filter(
             (event) => event._tag === 'Part' && event.part.type === 'finish',
           ),
@@ -130,62 +134,63 @@ describe('a turn the provider truncated at the output cap', () => {
     }),
   );
 
-  // Everything below is the gap. A caller that used `run` — which is most of
-  // them — gets a `Result` that says the agent answered, and the half sentence
-  // it stopped on is the answer.
-  it.effect('settles the run as a success, holding the partial answer', () =>
-    Effect.gen(function* () {
-      const outcome = yield* run(
-        Effect.gen(function* () {
-          const result = yield* Conversation.make(agent, CONVERSATION)
-            .run('hi')
-            .pipe(Effect.orDie);
+  it.effect.each([
+    [
+      'length',
+      'Model output was incomplete because generation reached its output token limit',
+    ],
+    [
+      'content-filter',
+      'Model output was incomplete because generation was stopped by the provider content filter',
+    ],
+    [
+      'error',
+      'Model output was incomplete because the provider reported a generation error',
+    ],
+  ] as const)(
+    'fails instead of returning a partial %s answer',
+    ([reason, description]) =>
+      Effect.gen(function* () {
+        const error = yield* agent
+          .run('hi')
+          .pipe(Effect.provide(scripted(reason)), Effect.flip);
 
-          const store = yield* LogStore.Service;
-          const page = yield* store
-            .read(
-              AgentLog.pathFor(LogVocabulary.ConversationId.make(CONVERSATION)),
-              { limit: 100 },
-            )
-            .pipe(Effect.orDie);
-
-          return {
-            result,
-            settled: page.records.flatMap((envelope) =>
-              envelope.record._tag === 'RunSettled' ? [envelope.record] : [],
-            ),
-          };
-        }),
-        'length',
-      );
-
-      expect(outcome.result).toMatchObject({ text: ANSWER, steps: 1 });
-      expect(outcome.settled).toMatchObject([
-        { outcome: 'success', detail: '' },
-      ]);
-    }),
+        expect(AiError.isAiError(error)).toBe(true);
+        if (AiError.isAiError(error)) {
+          expect(error.reason).toMatchObject({
+            _tag: 'InvalidOutputError',
+            description,
+            metadata: { finishReason: reason },
+          });
+        }
+      }),
   );
 
-  // The strongest statement of the gap, and the one that fails first if
-  // anybody threads the reason through: two runs that differ only in whether
-  // the provider said it had finished produce byte-identical conversations.
   it.effect(
-    'records a conversation indistinguishable from a complete answer',
+    'records failed settlement without claiming the fragment is complete',
     () =>
       Effect.gen(function* () {
         const truncated = yield* conversationOf('length');
         const complete = yield* conversationOf('stop');
 
-        expect(truncated).toEqual(complete);
-        // Not a comparison of a value with itself: both are real recorded runs,
-        // and this is the record set they agree on.
-        expect(truncated.map((record) => record._tag)).toEqual([
+        expect(truncated.exit._tag).toBe('Failure');
+        expect(complete.exit._tag).toBe('Success');
+        expect(truncated.records.map((record) => record._tag)).toEqual([
+          'RunStarted',
+          'Text',
+          'TurnFinished',
+          'RunSettled',
+        ]);
+        expect(complete.records.map((record) => record._tag)).toEqual([
           'RunStarted',
           'Text',
           'TurnFinished',
           'Completed',
           'RunSettled',
         ]);
+        expect(
+          truncated.records.find((record) => record._tag === 'RunSettled'),
+        ).toMatchObject({ outcome: 'failure' });
       }),
   );
 });
