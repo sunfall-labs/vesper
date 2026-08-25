@@ -61,7 +61,7 @@ export const approvalRequiresConversationError = (
 
 export const normalizeProviderError = (
   error: unknown,
-  partMetadata?: Record<string, unknown> | undefined,
+  partMetadata?: Record<string, unknown>,
 ): AiError.AiError => {
   if (AiError.isAiError(error)) {
     return error;
@@ -90,7 +90,7 @@ export const normalizeProviderError = (
 
 const describeProviderError = (
   error: unknown,
-  partMetadata?: Record<string, unknown> | undefined,
+  partMetadata?: Record<string, unknown>,
 ): {
   readonly description: string;
   readonly metadata: Record<string, unknown>;

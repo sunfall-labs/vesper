@@ -38,6 +38,8 @@ export type GenerateStep =
 /** A scripted model plus an inspectable record of every provider request. */
 export interface Handle {
   readonly layer: Layer.Layer<LanguageModel.LanguageModel>;
+  /** Build the same service directly, for policies that select a later model. */
+  readonly service: Effect.Effect<LanguageModel.Service>;
   readonly requests: Effect.Effect<ReadonlyArray<Request>>;
   readonly remaining: Effect.Effect<{
     readonly generate: number;
@@ -95,38 +97,37 @@ export const make = (
   const generated = options.generate ?? [];
   const repeatLast = options.repeatLast ?? false;
 
-  const layer = Layer.effect(
-    LanguageModel.LanguageModel,
-    LanguageModel.make({
-      generateText: (providerOptions) =>
-        Effect.suspend(() => {
-          const index = generateIndex++;
-          requests.push(requestOf('generateText', index, providerOptions));
-          const step = at(generated, index, repeatLast);
-          if (step === undefined) {
-            return Effect.fail(unexpected('generateText', index));
-          }
-          return step instanceof AiError.AiError
-            ? Effect.fail(step)
-            : Effect.succeed(Array.from(step));
-        }),
-      streamText: (providerOptions) =>
-        Stream.suspend(() => {
-          const index = streamIndex++;
-          requests.push(requestOf('streamText', index, providerOptions));
-          const step = at(turns, index, repeatLast);
-          if (step === undefined) {
-            return Stream.fail(unexpected('streamText', index));
-          }
-          return step instanceof AiError.AiError
-            ? Stream.fail(step)
-            : Stream.fromIterable(step);
-        }),
-    }),
-  );
+  const service = LanguageModel.make({
+    generateText: (providerOptions) =>
+      Effect.suspend(() => {
+        const index = generateIndex++;
+        requests.push(requestOf('generateText', index, providerOptions));
+        const step = at(generated, index, repeatLast);
+        if (step === undefined) {
+          return Effect.fail(unexpected('generateText', index));
+        }
+        return step instanceof AiError.AiError
+          ? Effect.fail(step)
+          : Effect.succeed(Array.from(step));
+      }),
+    streamText: (providerOptions) =>
+      Stream.suspend(() => {
+        const index = streamIndex++;
+        requests.push(requestOf('streamText', index, providerOptions));
+        const step = at(turns, index, repeatLast);
+        if (step === undefined) {
+          return Stream.fail(unexpected('streamText', index));
+        }
+        return step instanceof AiError.AiError
+          ? Stream.fail(step)
+          : Stream.fromIterable(step);
+      }),
+  });
+  const layer = Layer.effect(LanguageModel.LanguageModel, service);
 
   return {
     layer,
+    service,
     requests: Effect.sync(() => Array.from(requests)),
     remaining: Effect.sync(() => ({
       generate: Math.max(0, generated.length - generateIndex),

@@ -197,6 +197,9 @@ describe('how a run settles', () => {
               text: 'done',
               steps: 1,
               usage: { input: 5, output: 2 },
+              response: {
+                content: [{ role: 'assistant', content: 'done', options: {} }],
+              },
             },
             latestTurnUsage: { input: 5, output: 2 },
           },

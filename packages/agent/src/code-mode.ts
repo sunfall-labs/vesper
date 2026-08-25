@@ -39,7 +39,7 @@ export interface StateHandle {
 }
 
 const capturedContext: Effect.Effect<Context.Context<unknown>> = Effect.map(
-  Effect.context<never>(),
+  Effect.context(),
   (context) => Context.makeUnsafe<unknown>(context.mapUnsafe),
 );
 
@@ -460,9 +460,7 @@ export const split = <
     },
     excepted: {
       tools: excepted as Pick<Tools, Names>,
-      handle: resolved.handle as Toolkit.WithHandler<
-        Pick<Tools, Names>
-      >['handle'],
+      handle: resolved.handle,
     },
   };
 };
@@ -485,7 +483,7 @@ export const merge = <
   const tools = {
     ...excepted.tools,
     ...visible.tools,
-  } as Merged;
+  };
   // Each handle is widened once to the name-erased shape so the router can
   // dispatch on advertised-name membership, then the router is named as the
   // merged handle — the same membership the `tools` spread above encodes,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Ref, Schema, Stream } from 'effect';
-import { type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { Prompt, type Response, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { AgentEvents } from '../src/event.js';
@@ -17,6 +17,14 @@ const call = (name: string): Response.ToolCallPartEncoded => ({
   id: 'c1',
   name,
   params: {},
+});
+
+const toolResult = (isFailure: boolean): Response.ToolResultPartEncoded => ({
+  type: 'tool-result',
+  id: 'c1',
+  name: 'finish',
+  result: isFailure ? { message: 'invalid' } : { value: 42 },
+  isFailure,
 });
 
 const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
@@ -57,6 +65,11 @@ const searchCall = (
 const state = (over: Partial<Stop.State<Record<string, never>>> = {}) => ({
   step: 1,
   toolCalls: [] as ReadonlyArray<Response.ToolCallPartEncoded>,
+  toolResults: [] as ReadonlyArray<Response.ToolResultPartEncoded>,
+  response: Prompt.empty,
+  finishReason: 'stop' as const,
+  text: '',
+  reasoning: '',
   usage: { input: 0, output: 0 },
   toolCallCounts: {} as Readonly<Record<string, number>>,
   ...over,
@@ -132,6 +145,102 @@ describe('stop conditions', () => {
         }),
       ).toBe(false);
     }),
+  );
+
+  it.effect(
+    'distinguishes a successful terminal result from a failed call',
+    () =>
+      Effect.gen(function* () {
+        expect(
+          yield* decide(Stop.toolSucceeded('finish'), {
+            toolResults: [toolResult(false)],
+          }),
+        ).toBe(true);
+        expect(
+          yield* decide(Stop.toolSucceeded('finish'), {
+            toolResults: [toolResult(true)],
+          }),
+        ).toBe(false);
+        expect(
+          yield* decide(Stop.toolFailed('finish'), {
+            toolResults: [toolResult(true)],
+          }),
+        ).toBe(true);
+      }),
+  );
+
+  it.effect(
+    'stops on the successful result of an ordinary Effect AI tool',
+    () =>
+      Effect.gen(function* () {
+        const attempts = yield* Ref.make(0);
+        const submit = Tool.make('submit', {
+          description: 'Submit the final structured answer.',
+          parameters: Schema.Struct({ value: Schema.Finite }),
+          success: Schema.Struct({ accepted: Schema.Boolean }),
+          failure: Schema.Struct({ reason: Schema.String }),
+          failureMode: 'return',
+        });
+        const terminal = Agent.make({
+          name: 'terminal-result',
+          revision: '1',
+          instructions: 'Submit a valid answer.',
+          toolkit: Toolkit.make(submit),
+          stopWhen: Stop.toolSucceeded('submit'),
+        }).withHandlers({
+          submit: () =>
+            Ref.getAndUpdate(attempts, (count) => count + 1).pipe(
+              Effect.flatMap((count) =>
+                count === 0
+                  ? Effect.fail({ reason: 'try again' })
+                  : Effect.succeed({ accepted: true }),
+              ),
+            ),
+        });
+        const model = ScriptedModel.make([
+          [
+            {
+              type: 'tool-call',
+              id: 'bad',
+              name: 'submit',
+              params: { value: 1 },
+            },
+            finish('tool-calls'),
+          ],
+          [
+            {
+              type: 'tool-call',
+              id: 'good',
+              name: 'submit',
+              params: { value: 2 },
+            },
+            finish('tool-calls'),
+          ],
+        ]);
+
+        const result = yield* terminal
+          .run('go')
+          .pipe(Effect.provide(model.layer));
+        const requests = yield* model.requests;
+
+        expect(requests).toHaveLength(2);
+        expect(result.steps).toBe(2);
+        expect(result.response?.content[0]).toMatchObject({
+          role: 'assistant',
+          content: [{ type: 'tool-call', id: 'good', name: 'submit' }],
+        });
+        expect(result.response?.content[1]).toMatchObject({
+          role: 'tool',
+          content: [
+            {
+              type: 'tool-result',
+              id: 'good',
+              name: 'submit',
+              isFailure: false,
+            },
+          ],
+        });
+      }),
   );
 
   // `toolCallCounts` is cumulative across the whole run, unlike `toolCalls`

@@ -2,8 +2,8 @@ import { Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
 import {
   AiError,
   Chat,
+  LanguageModel,
   Prompt,
-  type LanguageModel,
   type Response,
   type Tool,
   type Toolkit,
@@ -24,6 +24,7 @@ import type { RunPolicy } from '../run-policy.js';
 import { RunPolicyRuntime } from '../run-policy-runtime.js';
 import type { Stop } from '../stop.js';
 import { AgentState } from '../state.js';
+import { TurnControl } from '../turn-control.js';
 import { CompactionRuntime } from './compaction.js';
 import { AgentEventRuntime } from './event.js';
 import * as Observability from './observability.js';
@@ -166,6 +167,7 @@ export interface LoopDefinition<
   RuntimeTools extends Record<string, Tool.Any>,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any>,
   StopR,
+  TurnControlR,
   StateDefinition extends AgentState.AnyDefinition | undefined,
   CodeModeOption extends boolean | { readonly except: ReadonlyArray<string> },
 > {
@@ -190,6 +192,15 @@ export interface LoopDefinition<
     >,
     StopR
   >;
+  readonly nextTurn:
+    | TurnControl.Policy<
+        CodeMode.ModelTools<
+          VisibleTools<RuntimeTools, DynamicToolkit.Tools<DynamicSources>>,
+          CodeModeOption
+        >,
+        TurnControlR
+      >
+    | undefined;
   readonly runPolicy: RunPolicy.Limits;
 }
 
@@ -205,6 +216,7 @@ export const makeEntry = <
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any>,
   BaseRequires,
   StopR,
+  TurnControlR,
   StateDefinition extends AgentState.AnyDefinition | undefined,
   CodeModeOption extends boolean | { readonly except: ReadonlyArray<string> },
 >(
@@ -212,6 +224,7 @@ export const makeEntry = <
     RuntimeTools,
     DynamicSources,
     StopR,
+    TurnControlR,
     StateDefinition,
     CodeModeOption
   >,
@@ -227,6 +240,7 @@ export const makeEntry = <
     delegationToolNames,
     instructions,
     loader,
+    nextTurn,
     overflow,
     runPolicy,
     stopWhen,
@@ -634,7 +648,7 @@ export const makeEntry = <
     ): Stream.Stream<
       AgentEvents.Event<ModelTools>,
       RunFailure,
-      WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+      WithOwnHandlers<RuntimeTools> | StopR | TurnControlR | InterceptorR
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
@@ -906,9 +920,15 @@ export const makeEntry = <
                 Stream.make(AgentEventRuntime.turnFinished(step, totals)),
               );
 
+              const response = outputOf(seen);
               const wanted = yield* stopWhen({
                 step,
                 toolCalls: seen.toolCalls,
+                response,
+                toolResults: seen.toolResults,
+                finishReason: seen.finishReason,
+                text: seen.text,
+                reasoning: seen.reasoning,
                 usage: totals,
                 toolCallCounts: toolCallTotals,
               });
@@ -928,6 +948,26 @@ export const makeEntry = <
                 );
               }
 
+              const prepared =
+                cancelled ||
+                pendingApprovals.length > 0 ||
+                nextTurn === undefined
+                  ? TurnControl.keep
+                  : yield* nextTurn({
+                      step,
+                      toolCalls: seen.toolCalls,
+                      response,
+                      toolResults: seen.toolResults,
+                      finishReason: seen.finishReason,
+                      text: seen.text,
+                      reasoning: seen.reasoning,
+                      usage: totals,
+                      toolCallCounts: toolCallTotals,
+                      wouldStop: wanted,
+                    });
+
+              const policyWantsStop = Option.isNone(prepared) && wanted;
+
               // A steer, or a signal backlog this boundary could not fully
               // drain, outranks the stop condition for one more turn,
               // including a step ceiling — `Stop.maxSteps` is not a hard
@@ -942,7 +982,7 @@ export const makeEntry = <
               const stop =
                 cancelled ||
                 pendingApprovals.length > 0 ||
-                (wanted && steers.length === 0 && !drained.backlog);
+                (policyWantsStop && steers.length === 0 && !drained.backlog);
               const completedSteps = seen.started ? step : step - 1;
 
               return stop
@@ -955,6 +995,7 @@ export const makeEntry = <
                             completedSteps,
                             totals,
                             'cancelled',
+                            seen.started ? response : undefined,
                           )
                         : pendingApprovals.length > 0
                           ? AgentEventRuntime.suspended(
@@ -962,12 +1003,14 @@ export const makeEntry = <
                               seen.text,
                               totals,
                               pendingApprovals,
+                              seen.started ? response : undefined,
                             )
                           : AgentEventRuntime.completed(
                               seen.text,
                               completedSteps,
                               totals,
                               'success',
+                              response,
                             ),
                     ),
                   )
@@ -976,13 +1019,16 @@ export const makeEntry = <
                     // Later turns continue the stored conversation; the tool
                     // results `streamText` appended are already in history, so
                     // nothing new is supplied unless a steer arrived.
-                    turn(
-                      chat,
-                      usage,
-                      toolCallCounts,
-                      lastTurn,
-                      step + 1,
-                      steeringInput(steers),
+                    continueTurn(
+                      prepared,
+                      turn(
+                        chat,
+                        usage,
+                        toolCallCounts,
+                        lastTurn,
+                        step + 1,
+                        continuationInput(prepared, steers),
+                      ),
                     ),
                   );
             }),
@@ -990,7 +1036,7 @@ export const makeEntry = <
 
           const responsiveCancel =
             session === undefined
-              ? Effect.never
+              ? undefined
               : session
                   .signalPages(
                     runtime?.limits.maxSignalsPerBoundary ??
@@ -1039,9 +1085,13 @@ export const makeEntry = <
                   AgentEventRuntime.turnStarted(step),
                   AgentEventRuntime.compacted(step, ahead),
                 );
+          const cancellable =
+            responsiveCancel === undefined
+              ? guarded
+              : guarded.pipe(Stream.interruptWhen(responsiveCancel));
 
           return opened.pipe(
-            Stream.concat(guarded.pipe(Stream.interruptWhen(responsiveCancel))),
+            Stream.concat(cancellable),
             Stream.concat(decide),
             Stream.withSpan('Agent.turn', {
               attributes: {
@@ -1056,7 +1106,7 @@ export const makeEntry = <
       ) as Stream.Stream<
         AgentEvents.Event<ModelTools>,
         RunFailure,
-        WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+        WithOwnHandlers<RuntimeTools> | StopR | TurnControlR | InterceptorR
       >;
 
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
@@ -1084,7 +1134,10 @@ export const makeEntry = <
             ) as Stream.Stream<
               AgentEvents.Event<ModelTools>,
               RunFailure,
-              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+              | WithOwnHandlers<RuntimeTools>
+              | StopR
+              | TurnControlR
+              | InterceptorR
             >;
           }
           if (
@@ -1103,7 +1156,10 @@ export const makeEntry = <
             return entryFor(nextWiring).streamIn(chat, input) as Stream.Stream<
               AgentEvents.Event<ModelTools>,
               RunFailure,
-              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+              | WithOwnHandlers<RuntimeTools>
+              | StopR
+              | TurnControlR
+              | InterceptorR
             >;
           }
           if (runtime === undefined) {
@@ -1114,7 +1170,10 @@ export const makeEntry = <
             ) as Stream.Stream<
               AgentEvents.Event<ModelTools>,
               RunFailure,
-              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+              | WithOwnHandlers<RuntimeTools>
+              | StopR
+              | TurnControlR
+              | InterceptorR
             >;
           }
           if (session !== undefined && (yield* session.hasPendingToolCalls)) {
@@ -1405,14 +1464,20 @@ export const makeEntry = <
                   }).streamIn(chat, effective) as Stream.Stream<
                     AgentEvents.Event<ModelTools>,
                     RunFailure,
-                    WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+                    | WithOwnHandlers<RuntimeTools>
+                    | StopR
+                    | TurnControlR
+                    | InterceptorR
                   >;
                 }),
               ),
             ) as Stream.Stream<
               AgentEvents.Event<ModelTools>,
               RunFailure,
-              WithOwnHandlers<RuntimeTools> | StopR | InterceptorR
+              | WithOwnHandlers<RuntimeTools>
+              | StopR
+              | TurnControlR
+              | InterceptorR
             >;
           }
           // The only point every path above funnels through exactly once
@@ -1572,7 +1637,10 @@ const replaceSystemInstructions = (
 
 interface TurnState {
   text: string;
+  reasoning: string;
+  parts: Response.AnyPart[];
   toolCalls: Response.ToolCallPartEncoded[];
+  toolResults: Response.ToolResultPartEncoded[];
   usage: Response.FinishPartEncoded['usage'] | undefined;
   finishReason: Response.FinishReason | undefined;
   emitted: boolean;
@@ -1585,7 +1653,10 @@ interface TurnState {
 
 const emptyTurnState = (): TurnState => ({
   text: '',
+  reasoning: '',
+  parts: [],
   toolCalls: [],
+  toolResults: [],
   usage: undefined,
   finishReason: undefined,
   emitted: false,
@@ -1609,9 +1680,13 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
   encoded: Response.StreamPartEncoded,
 ): void => {
   state.emitted = true;
+  state.parts.push(decoded);
   switch (encoded.type) {
     case 'text-delta':
       state.text += encoded.delta;
+      break;
+    case 'reasoning-delta':
+      state.reasoning += encoded.delta;
       break;
     case 'tool-call':
       state.toolCalls.push(encoded);
@@ -1620,6 +1695,11 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
           name: decoded.name,
           input: decoded.params,
         });
+      }
+      break;
+    case 'tool-result':
+      if (encoded.preliminary !== true) {
+        state.toolResults.push(encoded);
       }
       break;
     case 'tool-approval-request': {
@@ -1639,6 +1719,33 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
       break;
   }
 };
+
+const outputOf = (state: TurnState): Prompt.Prompt =>
+  Prompt.fromResponseParts(state.parts);
+
+const continuationInput = (
+  continuation: Option.Option<TurnControl.Continuation>,
+  steers: ReadonlyArray<{ readonly text: string }>,
+): Prompt.RawInput =>
+  Prompt.concat(
+    Option.isSome(continuation)
+      ? Prompt.make(continuation.value.input)
+      : Prompt.empty,
+    Prompt.make(steeringInput(steers)),
+  );
+
+/** Apply a model override without narrowing the caller's requirement type. */
+const continueTurn = <A, E, R>(
+  continuation: Option.Option<TurnControl.Continuation>,
+  stream: Stream.Stream<A, E, R>,
+): Stream.Stream<A, E, R> =>
+  Option.isSome(continuation) && continuation.value.model !== undefined
+    ? Stream.provideService(
+        stream,
+        LanguageModel.LanguageModel,
+        continuation.value.model,
+      )
+    : stream;
 
 const addUsage = (
   current: Stop.Usage,

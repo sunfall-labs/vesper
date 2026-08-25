@@ -1,5 +1,5 @@
 import { Effect, Schema } from 'effect';
-import type { Response, Tool } from 'effect/unstable/ai';
+import type { Prompt, Response, Tool } from 'effect/unstable/ai';
 
 // When to stop looping. Kept as a first-class value rather than a boolean
 // option because the interesting policies are compositions: "stop when the
@@ -23,6 +23,13 @@ export interface State<Tools extends Record<string, Tool.Any>> {
   readonly step: number;
   /** Tool calls the turn just requested. */
   readonly toolCalls: ReadonlyArray<Response.ToolCallPartEncoded>;
+  /** Canonical response messages built by Effect AI from the turn's parts. */
+  readonly response: Prompt.Prompt;
+  /** Authoritative final results; preliminary progress is never included. */
+  readonly toolResults: ReadonlyArray<Response.ToolResultPartEncoded>;
+  readonly finishReason: Response.FinishReason | undefined;
+  readonly text: string;
+  readonly reasoning: string;
   /** Cumulative token usage across every step of this run. */
   readonly usage: Usage;
   /**
@@ -122,6 +129,30 @@ export const toolCalled =
   ): StopCondition<Tools> =>
   (state) =>
     Effect.succeed(state.toolCalls.some((call) => call.name === name));
+
+/** Stop once a named tool has completed successfully. */
+export const toolSucceeded =
+  <Tools extends Record<string, Tool.Any>>(
+    name: keyof Tools & string,
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed(
+      state.toolResults.some(
+        (result) => result.name === name && !result.isFailure,
+      ),
+    );
+
+/** Stop once a named tool has completed with a model-visible failure. */
+export const toolFailed =
+  <Tools extends Record<string, Tool.Any>>(
+    name: keyof Tools & string,
+  ): StopCondition<Tools> =>
+  (state) =>
+    Effect.succeed(
+      state.toolResults.some(
+        (result) => result.name === name && result.isFailure,
+      ),
+    );
 
 /**
  * Stop once a named tool has been called `times` times in total across the

@@ -26,7 +26,8 @@ provider and runtime wiring.
 Modules are exposed as explicit subpaths, including
 `@sunfall/vesper-agent/agent`, `/conversation`, `/run-policy`,
 `/recording-policy`, `/eval`, `/stop`, `/skill`, `/state`, `/interception`, and
-`/testing`, plus `/workflow`, `/dynamic-toolkit`, and `/model-plan`.
+`/testing`, plus `/turn-control`, `/workflow`, `/dynamic-toolkit`, and
+`/model-plan`.
 
 ## Running an agent
 
@@ -35,11 +36,49 @@ and a blocking one take the same path through the loop. `streamIn` and `runIn`
 are the same two against a `Chat` the caller already holds. A run stops when
 its `stopWhen` condition holds; the default is "the model asked for no tools",
 and `Stop` composes `maxSteps`, `maxOutputTokens`, `toolCalled`,
-`toolCalledTimes`, `any`, `all`. `Result.outcome` is `success`, `cancelled`,
-or `suspended` — a tool call durably waiting on approval, covered in
+`toolSucceeded`, `toolFailed`, `toolCalledTimes`, `any`, and `all`.
+`Result.response` is Effect AI's canonical `Prompt.Prompt` for the final turn,
+including reasoning and structured tool calls/results; Vesper does not define a
+second response protocol. `Result.outcome` is `success`, `cancelled`, or
+`suspended` — a tool call durably waiting on approval, covered in
 [Tool approval](#tool-approval). `steps` counts model turns that actually
 started, so a queued cancellation can return zero while an in-flight
 cancellation preserves its partial text, usage, and one started turn.
+
+Structured completion and give-up are ordinary Effect AI tools. Define their
+parameters and results with `Tool.make`, attach typed handlers as usual, and
+stop only after the terminal handler succeeds:
+
+```ts
+import { Effect, Schema } from 'effect';
+import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { Stop } from '@sunfall/vesper-agent/stop';
+
+const submitAnswer = Tool.make('submit_answer', {
+  description: 'Submit the final answer when it is ready.',
+  parameters: Schema.Struct({ answer: Schema.String }),
+  success: Schema.Void,
+});
+
+const agent = Agent.make({
+  name: 'answerer',
+  revision: '1',
+  instructions: 'Use submit_answer for the final answer.',
+  toolkit: Toolkit.make(submitAnswer),
+  stopWhen: Stop.toolSucceeded('submit_answer'),
+}).withHandlers({
+  submit_answer: () => Effect.void,
+});
+```
+
+A `give_up` tool is the same pattern with a typed `reason`. Compose it with
+`Stop.any`; there is no Vesper-specific finish schema or parser to keep in sync
+with Effect AI.
+
+Preliminary tool results remain live stream progress. They are omitted from
+`Stop.State.toolResults`, canonical response history, and durable settlement;
+the authoritative final result follows through those boundaries exactly once.
 
 A provider finish reason of `length`, `content-filter`, or `error` is an
 incomplete finish, not a successful answer. The raw finish and partial text
@@ -56,6 +95,47 @@ which is also how `intercepting` behaves. Two interceptors that should both
 run are joined first with `Interception.compose`, which fixes their order
 explicitly — per-seam rules are on its doc comment — and hands `intercepting`
 one combined value, so attachment is still a single replace.
+
+## Turn control and follow-ups
+
+`stopWhen` owns termination. `nextTurn` is the smaller seam that may supply one
+more Effect AI `Prompt.RawInput` after seeing the complete turn, or select an
+Effect `LanguageModel.Service` for later turns. Returning
+`TurnControl.keep` preserves the stop decision; returning
+`TurnControl.continueWith(...)` continues. The state includes `wouldStop`, so a
+policy can act only when the model would otherwise be done.
+
+Application follow-ups use an Effect `Queue`; the inert agent definition does
+not hide a mutable message array:
+
+```ts
+import { Effect, Queue } from 'effect';
+import { Toolkit } from 'effect/unstable/ai';
+import { Agent } from '@sunfall/vesper-agent/agent';
+import { TurnControl } from '@sunfall/vesper-agent/turn-control';
+
+const program = Effect.gen(function* () {
+  const followUps = yield* Queue.bounded<string>(16);
+  const agent = Agent.make({
+    name: 'reviewer',
+    revision: '1',
+    instructions: 'Review the requested work.',
+    toolkit: Toolkit.make(),
+    nextTurn: TurnControl.followUps(followUps),
+  });
+
+  yield* Queue.offer(followUps, 'Now check the edge cases.');
+  return yield* agent.run('Draft the implementation.');
+});
+```
+
+By default queued inputs are taken one per turn; pass `{ mode: 'all' }` to
+drain the current batch into one prompt. Queue capacity and backpressure remain
+ordinary Effect concerns. Dynamic reasoning settings and model selection stay
+at Effect's `LanguageModel` provider seam: a custom `nextTurn` policy may return
+the service in `continueWith`, but Vesper adds no model registry or parallel
+configuration type. Broader prompt transformation belongs in a wrapped Effect
+`LanguageModel`, where every AI operation observes the same rule.
 
 ## Run policy and budgets
 

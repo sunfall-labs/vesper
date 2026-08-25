@@ -177,15 +177,13 @@ interface OptionsBase<
   readonly idempotencyKey: (payload: Payload['Type']) => string;
   readonly error: Error;
   readonly mapError: (error: AgentError) => Error['Type'];
-  readonly suspendedRetrySchedule?:
-    | Schedule.Schedule<unknown, unknown>
-    | undefined;
+  readonly suspendedRetrySchedule?: Schedule.Schedule<unknown> | undefined;
 }
 
 /** Options for the ordinary plain-text workflow request. */
 export interface Options<
   Tag extends string,
-  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request<string>>,
+  Payload extends Workflow.AnyStructSchema & Schema.Schema<Request>,
   Error extends Schema.Top,
   AgentError,
 > extends OptionsBase<Tag, Payload, Error, AgentError> {

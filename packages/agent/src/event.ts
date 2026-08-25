@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import type { Response, Tool } from 'effect/unstable/ai';
+import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
 
 import { Stop } from './stop.js';
 
@@ -39,6 +39,8 @@ export const Lifecycle = Schema.TaggedUnion({
     text: Schema.String,
     steps: Schema.Natural,
     usage: Stop.Usage,
+    /** Full final turn; absent only when no provider turn ran. */
+    response: Schema.optionalKey(Prompt.Prompt),
   },
   /**
    * The run ended durably parked on one or more `needsApproval` gates
@@ -65,6 +67,8 @@ export const Lifecycle = Schema.TaggedUnion({
     text: Schema.String,
     usage: Stop.Usage,
     pendingApprovals: Schema.Array(PendingApproval),
+    /** Partial turn that reached the approval boundary. */
+    response: Schema.optionalKey(Prompt.Prompt),
   },
   /**
    * An out-of-band instruction reached the run and was acted on.

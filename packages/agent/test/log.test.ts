@@ -118,6 +118,18 @@ const agent = Agent.make({
   lookup: ({ id }) => Effect.succeed({ status: `shipped:${id}` }),
 });
 
+const progressAgent = Agent.make({
+  name: 'progress-test',
+  revision: '1',
+  instructions: 'be terse',
+  toolkit: Toolkit.make(lookup),
+}).withHandlers({
+  lookup: ({ id }, context) =>
+    context
+      .preliminary({ status: `checking:${id}` })
+      .pipe(Effect.as({ status: `shipped:${id}` })),
+});
+
 const transformedLookup = Tool.make('transformed_lookup', {
   description: 'look an order up at a specific time',
   parameters: Schema.Struct({ at: Schema.DateFromString }),
@@ -294,6 +306,57 @@ describe('recording a run', () => {
     }),
   );
 
+  it.effect(
+    'streams preliminary tool progress without recording it as settled',
+    () =>
+      Effect.gen(function* () {
+        const conversationId = LogVocabulary.ConversationId.make(
+          'preliminary-result-conversation',
+        );
+        const observed = yield* run(
+          Effect.gen(function* () {
+            const conversation = Conversation.make(
+              progressAgent,
+              conversationId,
+            );
+            const progress = yield* conversation.stream('hi').pipe(
+              Stream.filter(
+                (event) =>
+                  event._tag === 'Part' && event.part.type === 'tool-result',
+              ),
+              Stream.runCollect,
+            );
+            const records = yield* readAll(AgentLog.pathFor(conversationId));
+            return { progress, records };
+          }),
+        );
+
+        const liveResults = Array.from(observed.progress).flatMap((event) =>
+          event._tag === 'Part' && event.part.type === 'tool-result'
+            ? [event.part]
+            : [],
+        );
+        const durableResults = observed.records.flatMap(({ record }) =>
+          record._tag === 'ToolOutcome' ? [record] : [],
+        );
+
+        expect(liveResults.map((result) => result.preliminary)).toEqual([
+          true,
+          false,
+        ]);
+        expect(durableResults).toEqual([
+          {
+            _tag: 'ToolOutcome',
+            step: 1,
+            id: 'call-1',
+            name: 'lookup',
+            outcome: 'success',
+            result: { status: 'shipped:42' },
+          },
+        ]);
+      }),
+  );
+
   it.effect('persists transformed tool parameters in encoded form', () =>
     Effect.gen(function* () {
       const written = yield* runTransformed(
@@ -344,6 +407,27 @@ describe('recording a run', () => {
         }),
       );
     }),
+  );
+
+  it.effect(
+    'restores the same canonical response from durable completion',
+    () =>
+      Effect.gen(function* () {
+        const conversationId = LogVocabulary.ConversationId.make(
+          'durable-response-conversation',
+        );
+        const observed = yield* run(
+          Effect.gen(function* () {
+            const conversation = Conversation.make(agent, conversationId);
+            const first = yield* conversation.run('where is order 42?');
+            const restored = yield* conversation.run('this is not sent');
+            return { first, restored };
+          }),
+        );
+
+        expect(observed.first.response?.content).toHaveLength(1);
+        expect(observed.restored.response).toEqual(observed.first.response);
+      }),
   );
 
   // The ordering rule that replaced `@sunfall/vesper-durable`'s "withhold `finish`

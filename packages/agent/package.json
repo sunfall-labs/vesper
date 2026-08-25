@@ -87,6 +87,10 @@
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     },
+    "./turn-control": {
+      "types": "./dist/turn-control.d.ts",
+      "default": "./dist/turn-control.js"
+    },
     "./skill": {
       "types": "./dist/skill.d.ts",
       "default": "./dist/skill.js"
