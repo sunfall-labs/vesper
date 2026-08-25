@@ -152,12 +152,12 @@ export const Record = Schema.TaggedUnion({
     name: Schema.String,
   },
   /**
-   * A tool handler deliberately yielded to an external actor.
+   * A tool call deliberately yielded to an external actor.
    *
-   * Unlike a bare `ToolStarted`, this is safe to enter again: the workflow
-   * engine owns the handler's replay and returns recorded activity results
-   * until it reaches the named durable wait. `token` addresses that wait and
-   * `request` is the application-owned value presented to the actor.
+   * Workflow waits enter a replay-safe handler before this record. Native
+   * interactions suspend at dispatch before a handler and carry their mode in
+   * `interaction`. `token` addresses the wait and `request` is the value
+   * presented to the actor.
    */
   ToolSuspended: {
     id: LogVocabulary.ToolCallId,
@@ -168,6 +168,16 @@ export const Record = Schema.TaggedUnion({
     token: Schema.String,
     /** Schema-encoded application request shown outside the agent run. */
     request: Schema.Unknown,
+    /**
+     * Native pre-dispatch interaction semantics. An absent value denotes
+     * either an implicit Effect AI approval or a workflow-owned wait.
+     */
+    interaction: Schema.optionalKey(
+      Schema.Struct({
+        name: Schema.NonEmptyString,
+        mode: Schema.Literals(['dispatch', 'answer']),
+      }),
+    ),
   },
   /**
    * Effect Workflow deliberately re-entered a previously suspended handler.

@@ -197,7 +197,7 @@ const suspended: ConversationRecord.Record = {
   _tag: 'ToolSuspended',
   id: CALL_ID,
   name: 'release',
-  wait: ToolDispatch.APPROVAL_WAIT,
+  wait: ToolDispatch.INTERACTION_WAIT,
   token: APPROVAL_ID,
   request: { id: 'r1' },
 };
@@ -222,8 +222,13 @@ describe('durable tool approval', () => {
         // suspended result rather than discarded, since it is often exactly
         // what an approver should be shown.
         expect(result.text).toBe('Releasing r1.');
-        expect(result.pendingApprovals).toEqual([
-          { toolCallId: CALL_ID, toolName: 'release', input: { id: 'r1' } },
+        expect(result.pendingInteractions).toEqual([
+          {
+            toolCallId: CALL_ID,
+            toolName: 'release',
+            kind: 'approval',
+            request: { id: 'r1' },
+          },
         ]);
         expect(ran.count).toBe(0);
 
@@ -340,8 +345,13 @@ describe('durable tool approval', () => {
           if (result.outcome !== 'suspended') {
             throw new Error('expected the recovered run to remain suspended');
           }
-          expect(result.pendingApprovals).toEqual([
-            { toolCallId: CALL_ID, toolName: 'release', input: { id: 'r1' } },
+          expect(result.pendingInteractions).toEqual([
+            {
+              toolCallId: CALL_ID,
+              toolName: 'release',
+              kind: 'approval',
+              request: { id: 'r1' },
+            },
           ]);
         }),
         unreachableModel,

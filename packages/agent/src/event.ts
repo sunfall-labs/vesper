@@ -15,15 +15,17 @@ import { Stop } from './stop.js';
 // exhaustively match, and so the whole event stream can be serialized —
 // which is what a transport (SSE, a Slack bridge, a durable stream) needs.
 
-/** One tool call parked on a durable, unresolved `needsApproval` gate. */
-export const PendingApproval = Schema.Struct({
+/** One tool call parked on a durable, unresolved external interaction. */
+export const PendingInteraction = Schema.Struct({
   toolCallId: Schema.String,
   toolName: Schema.String,
-  /** The tool's decoded call parameters, for display to an approver. */
-  input: Schema.Unknown,
+  /** Application-facing interaction kind, such as `approval` or `question`. */
+  kind: Schema.NonEmptyString,
+  /** The tool's decoded call parameters, for presentation to the user. */
+  request: Schema.Unknown,
 });
-export interface PendingApproval extends Schema.Struct.Type<
-  typeof PendingApproval.fields
+export interface PendingInteraction extends Schema.Struct.Type<
+  typeof PendingInteraction.fields
 > {}
 
 export const Lifecycle = Schema.TaggedUnion({
@@ -43,31 +45,31 @@ export const Lifecycle = Schema.TaggedUnion({
     response: Schema.optionalKey(Prompt.Prompt),
   },
   /**
-   * The run ended durably parked on one or more `needsApproval` gates
+   * The run ended durably parked on one or more external interactions
    * instead of reaching {@link Completed}.
    *
    * Terminal like `Completed`, but deliberately a different case rather
    * than a third `outcome` literal on it: nothing here is a finished
    * answer, and a recording sink that wrote a `Completed` record for this
-   * would claim a run had an answer it does not have. A resolved approval
+   * would claim a run had an answer it does not have. A resolved interaction
    * is not replayed as a second `Suspended` — see `ToolSuspended` and
    * `ToolWaitCompleted` in `@sunfall/vesper-log/record`, which are what a
    * resumed conversation actually recovers from.
    *
    * Only reachable from a recorded `Conversation`; an unrecorded run fails
-   * instead, since there is nowhere to durably resolve the approval from.
+   * instead, since there is nowhere to durably resolve the interaction from.
    */
   Suspended: {
     step: Schema.Natural,
     /**
-     * Whatever the model said before its approval-gated tool call. Often the
-     * stated intent behind the request — worth showing to the approver, and
+     * Whatever the model said before its interaction tool call. Often the
+     * stated intent behind the request — worth showing to the user, and
      * gone if not carried here: the suspended run's turn never completes.
      */
     text: Schema.String,
     usage: Stop.Usage,
-    pendingApprovals: Schema.Array(PendingApproval),
-    /** Partial turn that reached the approval boundary. */
+    pendingInteractions: Schema.Array(PendingInteraction),
+    /** Partial turn that reached the interaction boundary. */
     response: Schema.optionalKey(Prompt.Prompt),
   },
   /**
@@ -194,6 +196,13 @@ export type Event<Tools extends Record<string, Tool.Any>> =
        * can make the two representations differ.
        */
       readonly encodedPart: Response.StreamPartEncoded;
+      /** Durable interaction semantics for a tool approval request part. */
+      readonly interaction?:
+        | {
+            readonly name: string;
+            readonly mode: 'dispatch' | 'answer';
+          }
+        | undefined;
     };
 
 /** Public events, including results that could not be schema-decoded. */
@@ -204,6 +213,12 @@ export type ObservedEvent<Tools extends Record<string, Tool.Any>> =
       readonly step: number;
       readonly part: StreamPart<Tools>;
       readonly encodedPart: Response.StreamPartEncoded;
+      readonly interaction?:
+        | {
+            readonly name: string;
+            readonly mode: 'dispatch' | 'answer';
+          }
+        | undefined;
     };
 
 export const isPart = <Tools extends Record<string, Tool.Any>>(

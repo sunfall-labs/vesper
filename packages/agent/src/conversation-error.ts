@@ -71,6 +71,25 @@ export class ApprovalResolutionError extends Schema.TaggedError<ApprovalResoluti
   '@sunfall/vesper-agent/ApprovalResolutionError',
 )('ApprovalResolutionError', ApprovalResolutionErrorFields) {}
 
+/** An externally answered interaction could not be completed. */
+const InteractionResolutionErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly conversationId: typeof ConversationId;
+  readonly toolCallId: typeof ToolCallId;
+  readonly interaction: typeof Schema.String;
+  readonly reason: Schema.Literals<['not_found', 'already_resolved']>;
+} = {
+  message: Schema.String,
+  conversationId: ConversationId,
+  toolCallId: ToolCallId,
+  interaction: Schema.String,
+  reason: Schema.Literals(['not_found', 'already_resolved']),
+};
+
+export class InteractionResolutionError extends Schema.TaggedError<InteractionResolutionError>(
+  '@sunfall/vesper-agent/InteractionResolutionError',
+)('InteractionResolutionError', InteractionResolutionErrorFields) {}
+
 /** A conversation checkpoint could not be made durable. */
 export class DurabilityError extends Schema.TaggedError<DurabilityError>(
   '@sunfall/vesper-agent/DurabilityError',

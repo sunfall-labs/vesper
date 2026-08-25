@@ -302,18 +302,19 @@ an interceptor cannot revoke permission for a tool call a crashed run already
 completed — is covered in the agent guide's
 [When the log and an interceptor disagree](../packages/agent/README.md#when-the-log-and-an-interceptor-disagree).
 
-## Tool approvals
+## Tool interactions
 
-A tool marked with `effect/unstable/ai`'s own `Tool.setNeedsApproval` is
+An `Interaction.approval` tool (or an implicit approval marked directly with
+Effect AI's `Tool.setNeedsApproval`) is
 suspended by `LanguageModel` before its handler is ever entered — that
 primitive is upstream, not Vesper's. Vesper's half is making the suspension
 durable: in a recorded conversation the run ends with `outcome: 'suspended'`
-and surfaces `pendingApprovals` (tool name, call id, decoded input), the
+and surfaces `pendingInteractions` (kind, tool name, call id, decoded request), the
 suspension is recorded with the same `ToolSuspended`/`ToolWaitCompleted`
 family every durable wait uses, and `resolveApproval` records the decision —
 from this process or any other holding the same log. The API walkthrough,
 with the approve/deny code, is the agent guide's
-[Tool approval](../packages/agent/README.md#tool-approval) section.
+[Tool interactions](../packages/agent/README.md#tool-interactions) section.
 
 An approved call dispatches its handler for the first time on the next run; a
 denied call settles a refusal-style tool result without the handler ever
@@ -325,9 +326,12 @@ resolving the same call twice is a typed `ApprovalResolutionError`. Unrecorded
 `agent.run` fails outright for a `needsApproval` tool — there is nowhere
 durable to record the decision such a run would wait on.
 
-This is the whole approval surface. `AgentWorkflow.wait` remains the tool for
-what it was built for — a handler that must durably wait for an arbitrary
-external event, with `WorkflowEngine` replay around it — not the entry fee
-for a yes-or-no on one tool call. The
+`Interaction.answer` uses the same pre-handler suspension, but its schema-typed
+external response becomes the successful tool result instead of authorizing a
+handler. Both modes recover solely from the conversation log.
+
+`AgentWorkflow.wait` remains the tool for what it was built for — a handler
+that must durably wait for an arbitrary external event, with `WorkflowEngine`
+replay around it. The
 [Durable approval locally](../README.md#durable-approval-locally) example
 demonstrates the `AgentWorkflow`-backed alternative.

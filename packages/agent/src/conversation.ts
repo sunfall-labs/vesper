@@ -3,16 +3,18 @@ import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Schema, Stream, type Crypto } from 'effect';
-import { AiError, type Prompt } from 'effect/unstable/ai';
+import { AiError, type Prompt, type Tool } from 'effect/unstable/ai';
 
 import type { Agent } from './agent.js';
 import {
   ApprovalResolutionError,
   CompatibilityError,
+  InteractionResolutionError,
   SuspendedConversationError,
 } from './conversation-error.js';
 import { ToolDispatch } from './dispatch.js';
 import type { AgentEvents } from './event.js';
+import { Interaction } from './interaction.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
 import type { RecordingPolicy } from './recording-policy.js';
@@ -77,6 +79,40 @@ export const isWaitEnvelope = (
 };
 
 type ConcreteAgent = Agent.Any;
+
+interface NativeInteractionState {
+  readonly suspended:
+    | { readonly name: string; readonly token: string }
+    | undefined;
+  readonly resolved: boolean;
+}
+
+const nativeInteractionState = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+  toolCallId: LogVocabulary.ToolCallId,
+  accepts: (record: ConversationRecord.RecordOf<'ToolSuspended'>) => boolean,
+): NativeInteractionState => {
+  let suspended: NativeInteractionState['suspended'];
+  let resolved = false;
+  for (const { record } of history) {
+    if (
+      record._tag === 'ToolSuspended' &&
+      record.id === toolCallId &&
+      record.wait === ToolDispatch.INTERACTION_WAIT &&
+      accepts(record)
+    ) {
+      suspended = { name: record.name, token: record.token };
+      resolved = false;
+    } else if (
+      suspended !== undefined &&
+      record._tag === 'ToolWaitCompleted' &&
+      record.token === suspended.token
+    ) {
+      resolved = true;
+    }
+  }
+  return { suspended, resolved };
+};
 
 /** Recoverable failures from continuing a durable conversation. */
 export type Error<A extends ConcreteAgent> =
@@ -208,6 +244,28 @@ export interface Instance<
     | LogStore.LogStoreError,
     LogStore.Service | Crypto.Crypto
   >;
+  /**
+   * Validate, encode, and durably complete a pre-dispatch interaction with
+   * the tool's typed success value.
+   */
+  readonly resolveInteraction: <
+    Name extends string,
+    C extends Interaction.ToolConfig,
+    ToolRequires,
+  >(
+    tool: Tool.Tool<Name, C, ToolRequires> & Interaction.Answer,
+    toolCallId: string,
+    result: C['success']['Type'],
+  ) => Effect.Effect<
+    void,
+    | Schema.SchemaError
+    | InteractionResolutionError
+    | CompatibilityError
+    | SuspendedConversationError
+    | AgentLog.DurabilityError
+    | LogStore.LogStoreError,
+    LogStore.Service | Crypto.Crypto | C['success']['EncodingServices']
+  >;
 }
 
 const bind = <A extends ConcreteAgent, PolicyRequires = never>(
@@ -285,27 +343,11 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
         // suspension. The history keeps both records for as long as the
         // suspension itself is visible, so the two answers cannot go blind
         // independently.
-        let suspended:
-          | { readonly name: string; readonly token: string }
-          | undefined;
-        let resolved = false;
-        for (const envelope of session.history) {
-          const record = envelope.record;
-          if (
-            record._tag === 'ToolSuspended' &&
-            record.id === normalizedId &&
-            record.wait === ToolDispatch.APPROVAL_WAIT
-          ) {
-            suspended = { name: record.name, token: record.token };
-            resolved = false;
-          } else if (
-            suspended !== undefined &&
-            record._tag === 'ToolWaitCompleted' &&
-            record.token === suspended.token
-          ) {
-            resolved = true;
-          }
-        }
+        const { suspended, resolved } = nativeInteractionState(
+          session.history,
+          normalizedId,
+          (record) => record.interaction?.mode !== 'answer',
+        );
         if (suspended === undefined) {
           return yield* new ApprovalResolutionError({
             message: `No tool call ${normalizedId} is durably waiting for approval in conversation ${id}`,
@@ -352,10 +394,65 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             _tag: 'ToolWaitCompleted',
             id: normalizedId,
             name: suspended.name,
-            wait: ToolDispatch.APPROVAL_WAIT,
+            wait: ToolDispatch.INTERACTION_WAIT,
             token: suspended.token,
             outcome: decision === 'approve' ? 'success' : 'failure',
             result,
+          },
+        ]);
+      }),
+    resolveInteraction: (tool, toolCallId, result) =>
+      Effect.gen(function* () {
+        const interaction = Interaction.metadata(tool);
+        if (
+          interaction._tag === 'None' ||
+          interaction.value.mode !== 'answer'
+        ) {
+          return yield* Effect.die(
+            new Error(`Tool "${tool.name}" is not an answer interaction`),
+          );
+        }
+        const encodedResult = yield* Schema.encodeUnknownEffect(
+          tool.successSchema,
+        )(result);
+        const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
+        const session = yield* AgentLog.open(id, {
+          compatibility: { agent: agent.name, revision: agent.revision },
+        });
+        const { suspended, resolved } = nativeInteractionState(
+          session.history,
+          normalizedId,
+          (record) =>
+            record.interaction?.mode === 'answer' &&
+            record.interaction.name === interaction.value.name,
+        );
+        if (suspended === undefined) {
+          return yield* new InteractionResolutionError({
+            message: `No tool call ${normalizedId} is durably waiting for interaction "${interaction.value.name}" in conversation ${id}`,
+            conversationId: id,
+            toolCallId: normalizedId,
+            interaction: interaction.value.name,
+            reason: 'not_found',
+          });
+        }
+        if (resolved) {
+          return yield* new InteractionResolutionError({
+            message: `Tool call ${normalizedId} in conversation ${id} was already resolved`,
+            conversationId: id,
+            toolCallId: normalizedId,
+            interaction: interaction.value.name,
+            reason: 'already_resolved',
+          });
+        }
+        return yield* session.append([
+          {
+            _tag: 'ToolWaitCompleted',
+            id: normalizedId,
+            name: suspended.name,
+            wait: ToolDispatch.INTERACTION_WAIT,
+            token: suspended.token,
+            outcome: 'success',
+            result: encodedResult,
           },
         ]);
       }),
@@ -384,6 +481,7 @@ export function make<A extends ConcreteAgent, const P extends object>(
 export {
   ApprovalResolutionError,
   CompatibilityError,
+  InteractionResolutionError,
   SuspendedConversationError,
 };
 export { DurabilityError } from './conversation-error.js';

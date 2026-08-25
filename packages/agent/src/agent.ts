@@ -236,12 +236,12 @@ export const Result = Schema.Union([
     outcome: Schema.Literal('suspended'),
     ...ResultFields,
     /**
-     * Tool calls durably parked on a `needsApproval` gate.
+     * Tool calls durably parked on an external interaction.
      *
      * Present only when `outcome` is `suspended`. Resolve each one through
-     * `Conversation.resolveApproval` and call `run` again to continue.
+     * Resolve each interaction and call `run` again to continue.
      */
-    pendingApprovals: Schema.Array(AgentEvents.PendingApproval),
+    pendingInteractions: Schema.Array(AgentEvents.PendingInteraction),
   }),
 ]);
 export type Result = typeof Result.Type;

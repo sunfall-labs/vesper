@@ -5,20 +5,20 @@ import { Effect, Option, Ref } from 'effect';
 import { AgentBranch } from './branch.js';
 
 /**
- * The reserved `ToolSuspended.wait` name for a tool's own `needsApproval`
- * gate, as opposed to an application-defined `AgentWorkflow.wait`.
+ * The reserved `ToolSuspended.wait` name for a native pre-handler interaction,
+ * as opposed to an application-defined `AgentWorkflow.wait`.
  *
- * A durable approval never runs `AgentWorkflow.wait`'s handler-resumption
+ * A native interaction never runs `AgentWorkflow.wait`'s handler-resumption
  * replay: the call is suspended by `effect/unstable/ai`'s `LanguageModel`
  * *before* any handler is entered, so its `ToolSuspended` has no matching
  * `ToolStarted` — the one shape {@link fold} otherwise treats as corruption.
- * Resuming it means either genuinely dispatching the handler for the first
- * time (approved) or settling a refusal without ever entering it (denied);
+ * Resuming it means either dispatching the handler for the first time
+ * (approval) or settling the tool directly (answer or denial);
  * see `dispatch.ts`'s `resolveIndeterminate` for where that decision is
  * made. Declared here, and re-exported from `dispatch.ts`, because this is
  * the fold that has to know about it.
  */
-export const APPROVAL_WAIT = '@sunfall/vesper-agent/approval';
+export const INTERACTION_WAIT = '@sunfall/vesper-agent/interaction';
 
 /** How a tool call ended, as a previous run recorded it. */
 export interface Settled {
@@ -42,6 +42,10 @@ export type Recovery =
       readonly wait: string;
       readonly token: string;
       readonly request: unknown;
+      readonly interaction?: {
+        readonly name: string;
+        readonly mode: 'dispatch' | 'answer';
+      };
     }
   | ({ readonly _tag: 'Settled' } & Settled);
 
@@ -134,6 +138,9 @@ export const fold = (
           wait: record.wait,
           token: record.token,
           request: record.request,
+          ...(record.interaction === undefined
+            ? {}
+            : { interaction: record.interaction }),
         });
       }
     },
@@ -187,7 +194,7 @@ export const fold = (
   const unmatchedSuspension = [...recoveries].flatMap(
     ([key, recovery]): ReadonlyArray<SuspendedRecovery> =>
       recovery._tag === 'Suspended' &&
-      recovery.wait !== APPROVAL_WAIT &&
+      recovery.wait !== INTERACTION_WAIT &&
       !starts.has(key)
         ? [recovery]
         : [],
@@ -303,6 +310,9 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
           wait: record.wait,
           token: record.token,
           request: record.request,
+          ...(record.interaction === undefined
+            ? {}
+            : { interaction: record.interaction }),
         });
       },
       ToolWaitCompleted: (record) => {

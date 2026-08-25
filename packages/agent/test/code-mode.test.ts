@@ -916,11 +916,12 @@ describe('code mode tool broker', () => {
         if (suspended.outcome !== 'suspended') {
           throw new Error('expected the approval-gated tool to suspend');
         }
-        expect(suspended.pendingApprovals).toEqual([
+        expect(suspended.pendingInteractions).toEqual([
           {
             toolCallId: 'release-call',
             toolName: 'release',
-            input: { id: 'r1' },
+            kind: 'approval',
+            request: { id: 'r1' },
           },
         ]);
         expect(released).toBe(0);

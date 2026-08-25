@@ -30,14 +30,14 @@ export const suspended = (
   step: number,
   text: string,
   usage: Stop.Usage,
-  pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
+  pendingInteractions: ReadonlyArray<AgentEvents.PendingInteraction>,
   response?: Prompt.Prompt,
 ): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.Suspended.make({
     step,
     text,
     usage,
-    pendingApprovals,
+    pendingInteractions,
     ...(response === undefined ? {} : { response }),
   });
 

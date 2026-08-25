@@ -230,6 +230,7 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
       pending,
       lifecycleEvent.step,
       lifecycleEvent.encodedPart,
+      lifecycleEvent.interaction,
     );
   }
 
@@ -306,6 +307,7 @@ const partRecords = (
   pending: Pending,
   step: number,
   encoded: Response.StreamPartEncoded,
+  interaction?: { readonly name: string; readonly mode: 'dispatch' | 'answer' },
 ): ReadonlyArray<ConversationRecord.Record> => {
   switch (encoded.type) {
     case 'text-delta':
@@ -358,9 +360,10 @@ const partRecords = (
           _tag: 'ToolSuspended',
           id: LogVocabulary.ToolCallId.make(encoded.toolCallId),
           name: call?.name ?? '',
-          wait: ToolDispatch.APPROVAL_WAIT,
+          wait: ToolDispatch.INTERACTION_WAIT,
           token: encoded.approvalId,
           request: call?.params,
+          ...(interaction === undefined ? {} : { interaction }),
         },
       ];
     }
