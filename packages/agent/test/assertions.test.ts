@@ -19,6 +19,7 @@ import type { RunPolicy } from '../src/run-policy.js';
 import { Stop } from '../src/stop.js';
 import { AgentState } from '../src/state.js';
 import type { Subagent } from '../src/subagent.js';
+import { TurnControl } from '../src/turn-control.js';
 
 // The eight narrowing assertions.
 //
@@ -450,6 +451,10 @@ class OtherStopService extends Context.Service<
   OtherStopService,
   { readonly otherStop: true }
 >()('assertions-test/OtherStopService') {}
+class TurnControlService extends Context.Service<
+  TurnControlService,
+  { readonly next: true }
+>()('assertions-test/TurnControlService') {}
 
 const serviceStop: Stop.StopCondition<
   Record<string, never>,
@@ -470,6 +475,18 @@ const stopped = Agent.make({
 const _exactStop: Exact<
   Agent.Requires<typeof stopped>,
   LanguageModel.LanguageModel | StopService | OtherStopService
+> = true;
+
+const controlled = Agent.make({
+  name: 'controlled',
+  revision: '1',
+  instructions: 'x',
+  toolkit: Toolkit.make(),
+  nextTurn: () => Effect.as(TurnControlService, TurnControl.keep),
+});
+const _exactTurnControl: Exact<
+  Agent.Requires<typeof controlled>,
+  LanguageModel.LanguageModel | TurnControlService
 > = true;
 
 const compiled = Agent.make({

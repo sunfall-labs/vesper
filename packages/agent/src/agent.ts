@@ -38,6 +38,7 @@ import { RunPolicy } from './run-policy.js';
 import type { RunPolicyRuntime } from './run-policy-runtime.js';
 import * as AgentSkill from './skill.js';
 import { Stop } from './stop.js';
+import type { TurnControl } from './turn-control.js';
 import type { AgentState } from './state.js';
 import { Subagent } from './subagent.js';
 import { SubagentRuntime } from './subagent-runtime.js';
@@ -104,6 +105,7 @@ export interface Definition<
   Children extends ReadonlyArray<Child> = readonly [],
   Skills extends ReadonlyArray<AgentSkill.Skill> = readonly [],
   StopR = never,
+  TurnControlR = never,
   StateDefinition extends AgentState.AnyDefinition | undefined = undefined,
   DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
   OverflowPolicy extends ResultOverflow.Policy | undefined = undefined,
@@ -132,6 +134,21 @@ export interface Definition<
       CodeModeOption
     >,
     StopR
+  >;
+  /**
+   * Refine the next boundary after `stopWhen` has made its ordinary decision.
+   * Returning a continuation supplies follow-up input or a new Effect
+   * LanguageModel service; `Option.none` preserves the ordinary decision.
+   */
+  readonly nextTurn?: TurnControl.Policy<
+    CodeMode.ModelTools<
+      VisibleTools<
+        CompiledTools<AgentTools, Children, Skills, OverflowPolicy>,
+        DynamicToolkit.Tools<DynamicSources>
+      >,
+      CodeModeOption
+    >,
+    TurnControlR
   >;
   /** Concurrency for resolving the tool calls within one turn. */
   readonly concurrency?: number | 'unbounded';
@@ -197,23 +214,37 @@ export interface Definition<
  * to a workflow, or return over a transport, and every one of those needs a
  * codec rather than a bare interface.
  */
-export const Result = Schema.Struct({
-  outcome: Schema.Literals(['success', 'cancelled', 'suspended']),
+const ResultFields = {
   /** Concatenated text of the final turn. Empty when `outcome` is `suspended`. */
   text: Schema.String,
   steps: Schema.Natural,
   usage: Stop.Usage,
-  /**
-   * Tool calls durably parked on a `needsApproval` gate.
-   *
-   * Present only when `outcome` is `suspended`. Resolve each one through
-   * `Conversation.resolveApproval` and call `run` again to continue.
-   */
-  pendingApprovals: Schema.optionalKey(
-    Schema.Array(AgentEvents.PendingApproval),
-  ),
-});
-export interface Result extends Schema.Struct.Type<typeof Result.fields> {}
+  /** Full final turn; absent only when no provider call ran. */
+  response: Schema.optionalKey(Prompt.Prompt),
+} as const;
+
+export const Result = Schema.Union([
+  Schema.Struct({
+    outcome: Schema.Literal('success'),
+    ...ResultFields,
+  }),
+  Schema.Struct({
+    outcome: Schema.Literal('cancelled'),
+    ...ResultFields,
+  }),
+  Schema.Struct({
+    outcome: Schema.Literal('suspended'),
+    ...ResultFields,
+    /**
+     * Tool calls durably parked on a `needsApproval` gate.
+     *
+     * Present only when `outcome` is `suspended`. Resolve each one through
+     * `Conversation.resolveApproval` and call `run` again to continue.
+     */
+    pendingApprovals: Schema.Array(AgentEvents.PendingApproval),
+  }),
+]);
+export type Result = typeof Result.Type;
 
 /**
  * Every service a run needs, given a toolkit.
@@ -529,7 +560,7 @@ export interface Child<
  * @category utility types
  * @since 0.1.0
  */
-export interface Any extends Child<string> {
+export interface Any extends Child {
   readonly [TypeId]: TypeId;
 }
 
@@ -765,6 +796,7 @@ export const make = <
   const Children extends ReadonlyArray<Child> = readonly [],
   const Skills extends ReadonlyArray<AgentSkill.Skill> = readonly [],
   StopR = never,
+  TurnControlR = never,
   const StateDefinition extends AgentState.AnyDefinition | undefined =
     undefined,
   const DynamicSources extends ReadonlyArray<DynamicToolkit.Any> = readonly [],
@@ -777,6 +809,7 @@ export const make = <
     Children,
     Skills,
     StopR,
+    TurnControlR,
     StateDefinition,
     DynamicSources,
     OverflowPolicy,
@@ -791,6 +824,7 @@ export const make = <
   | Subagent.Services<Children>
   | ResultOverflow.Services<OverflowPolicy>
   | StopR
+  | TurnControlR
   | DynamicToolkit.Services<DynamicSources>
   | CodeMode.Requires<CodeModeOption>
   | (StateDefinition extends AgentState.AnyDefinition
@@ -802,6 +836,7 @@ export const make = <
   | Subagent.Services<Children>
   | ResultOverflow.Services<OverflowPolicy>
   | StopR
+  | TurnControlR
   | DynamicToolkit.Services<DynamicSources>
   | CodeMode.Requires<CodeModeOption>
   | (StateDefinition extends AgentState.AnyDefinition
@@ -832,6 +867,7 @@ export const make = <
     | Subagent.Services<Children>
     | ResultOverflow.Services<OverflowPolicy>
     | StopR
+    | TurnControlR
     | DynamicToolkit.Services<DynamicSources>
     | CodeMode.Requires<CodeModeOption>
     | (StateDefinition extends AgentState.AnyDefinition
@@ -941,6 +977,7 @@ export const make = <
     DynamicSources,
     BaseRequires,
     StopR,
+    TurnControlR,
     StateDefinition,
     CodeModeOption
   >({
@@ -959,6 +996,7 @@ export const make = <
     compaction,
     compactionWarning,
     stopWhen,
+    nextTurn: definition.nextTurn,
     runPolicy,
   });
 
@@ -1261,6 +1299,7 @@ const fromParts = <
                     output: prior.output + event.usage.output,
                   },
                   event.outcome,
+                  event.response,
                 )
               : event,
           ),
@@ -1439,7 +1478,21 @@ const fromParts = <
                       session,
                     ),
                   )
-                : Effect.succeed<Result>(completed);
+                : Effect.gen(function* () {
+                    const response =
+                      completed.response === undefined
+                        ? undefined
+                        : yield* Schema.decodeEffect(Prompt.Prompt)(
+                            completed.response,
+                          ).pipe(Effect.orDie);
+                    return {
+                      outcome: completed.outcome,
+                      text: completed.text,
+                      steps: completed.steps,
+                      usage: completed.usage,
+                      ...(response === undefined ? {} : { response }),
+                    } satisfies Result;
+                  });
             }),
           ),
   };

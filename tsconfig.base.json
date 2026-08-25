@@ -28,6 +28,9 @@
     ],
     "types": ["node"],
     "paths": {
+      "@sunfall/vesper-workspace/apply-patch": [
+        "./packages/workspace/src/apply-patch.ts"
+      ],
       "@sunfall/vesper-agent/agent": ["./packages/agent/src/agent.ts"],
       "@sunfall/vesper-agent/context-window": [
         "./packages/agent/src/context-window.ts"
@@ -62,6 +65,9 @@
       "@sunfall/vesper-agent/stop": ["./packages/agent/src/stop.ts"],
       "@sunfall/vesper-agent/state": ["./packages/agent/src/state.ts"],
       "@sunfall/vesper-agent/testing": ["./packages/agent/src/testing.ts"],
+      "@sunfall/vesper-agent/turn-control": [
+        "./packages/agent/src/turn-control.ts"
+      ],
       "@sunfall/vesper-agent/skill": ["./packages/agent/src/skill.ts"],
       "@sunfall/vesper-agent/result-overflow": [
         "./packages/agent/src/result-overflow.ts"
@@ -84,6 +90,12 @@
       ],
       "@sunfall/vesper-log-pg/layer": ["./packages/log-pg/src/layer.ts"],
       "@sunfall/vesper-log-pg/client": ["./packages/log-pg/src/client.ts"],
+      "@sunfall/vesper-log-sqlite/layer": [
+        "./packages/log-sqlite/src/layer.ts"
+      ],
+      "@sunfall/vesper-log-sqlite/layer-native": [
+        "./packages/log-sqlite/src/layer-native.ts"
+      ],
       "@sunfall/vesper-workspace/driver": [
         "./packages/workspace/src/driver.ts"
       ],

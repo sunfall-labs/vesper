@@ -57,6 +57,8 @@ const CompletedValue = Schema.Struct({
   text: Schema.String,
   steps: Count,
   usage: Usage,
+  /** Encoded Effect AI Prompt containing the final turn's response messages. */
+  response: Schema.optionalKey(Schema.Unknown),
 });
 
 const ResumeState = Schema.Struct({
@@ -337,6 +339,8 @@ export const Record = Schema.TaggedUnion({
     text: Schema.String,
     steps: Count,
     usage: Usage,
+    /** Encoded Effect AI Prompt containing the final turn's response messages. */
+    response: Schema.optionalKey(Schema.Unknown),
   },
 
   /** A complete, schema-versioned snapshot of application conversation state. */

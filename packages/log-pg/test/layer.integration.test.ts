@@ -166,7 +166,9 @@ describeIntegration('LogStore Postgres backend', () => {
           ),
         ).pipe(
           Effect.tap((outcome) =>
-            Effect.sync(() => expect(outcome._tag).toBe('Failure')),
+            Effect.sync(() => {
+              expect(outcome._tag).toBe('Failure');
+            }),
           ),
         ),
       { timeout: 30_000 },

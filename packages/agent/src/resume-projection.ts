@@ -1,4 +1,6 @@
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { Schema } from 'effect';
+import { Prompt } from 'effect/unstable/ai';
 
 import { AgentBranch } from './branch.js';
 import type { Stop } from './stop.js';
@@ -8,7 +10,11 @@ export interface Completed {
   readonly outcome: 'success' | 'cancelled';
   readonly steps: number;
   readonly usage: Stop.Usage;
+  readonly response?: Prompt.PromptEncoded;
 }
+
+const decodeResponse = (response: unknown): Prompt.PromptEncoded =>
+  Schema.decodeUnknownSync(Schema.toEncoded(Prompt.Prompt))(response);
 
 export interface Active {
   readonly completed: Completed | undefined;
@@ -39,7 +45,15 @@ export const update = (
     case 'Completed':
       return {
         ...current,
-        completed: { ...record, outcome: record.outcome ?? 'success' },
+        completed: {
+          text: record.text,
+          steps: record.steps,
+          usage: record.usage,
+          outcome: record.outcome ?? 'success',
+          ...(record.response === undefined
+            ? {}
+            : { response: decodeResponse(record.response) }),
+        },
       };
     case 'Compacted':
       return { ...current, compactedSinceTurn: true };
@@ -64,8 +78,17 @@ export const update = (
               record.resume.completed === undefined
                 ? undefined
                 : {
-                    ...record.resume.completed,
+                    text: record.resume.completed.text,
+                    steps: record.resume.completed.steps,
+                    usage: record.resume.completed.usage,
                     outcome: record.resume.completed.outcome ?? 'success',
+                    ...(record.resume.completed.response === undefined
+                      ? {}
+                      : {
+                          response: decodeResponse(
+                            record.resume.completed.response,
+                          ),
+                        }),
                   },
             latestTurnUsage: record.resume.latestTurnUsage,
           };

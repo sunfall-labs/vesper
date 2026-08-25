@@ -99,7 +99,7 @@ describe('recording policy', () => {
     () =>
       Effect.gen(function* () {
         const filtered = yield* Effect.gen(function* () {
-          const context = yield* Effect.context<never>();
+          const context = yield* Effect.context();
           const runtime = RecordingPolicyRuntime.compile(
             {
               toolParameters: () => Effect.succeed({ redacted: 'params' }),

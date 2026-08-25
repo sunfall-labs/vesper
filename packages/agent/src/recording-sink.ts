@@ -2,8 +2,8 @@ import { LogOffset } from '@sunfall/vesper-log/offset';
 import { FORMAT_VERSION } from '@sunfall/vesper-log/record';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Cause, Effect, Exit, Option, Stream } from 'effect';
-import type { Response, Tool } from 'effect/unstable/ai';
+import { Cause, Effect, Exit, Option, Schema, Stream } from 'effect';
+import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
 
 import { AgentEvents } from './event.js';
 import { ToolDispatch } from './dispatch.js';
@@ -285,6 +285,11 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
           text: event.text,
           steps: event.steps,
           usage: event.usage,
+          ...(event.response === undefined
+            ? {}
+            : {
+                response: Schema.encodeSync(Prompt.Prompt)(event.response),
+              }),
         },
       ];
     },
@@ -326,6 +331,11 @@ const partRecords = (
         },
       ];
     case 'tool-result':
+      // Preliminary results are progress events, not conversation history and
+      // not evidence that execution settled. The final result will follow.
+      if (encoded.preliminary === true) {
+        return [];
+      }
       return [
         ...flush(pending),
         {

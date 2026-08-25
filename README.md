@@ -211,8 +211,10 @@ summary and the link is the whole story.
 the primitive and `run` is a fold of it, so a streaming consumer and a
 blocking one take the same path through the loop. A run stops when its
 `stopWhen` condition holds — `Stop` composes `maxSteps`, `toolCalled`, `any`,
-`all`, and friends — and `Result.outcome` is `success`, `cancelled`, or
-`suspended`. Hard, shared run budgets are separate:
+`all`, and result-aware terminal tools through `toolSucceeded`. Follow-ups and
+per-turn model selection use the small `nextTurn` seam while prompts, tools,
+responses, schemas, and model services remain Effect AI values. `Result.outcome`
+is `success`, `cancelled`, or `suspended`. Hard, shared run budgets are separate:
 [run policy](packages/agent/README.md#run-policy-and-budgets) is the ceiling
 delegation cannot reset.
 

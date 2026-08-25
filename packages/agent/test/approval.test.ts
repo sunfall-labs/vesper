@@ -215,6 +215,9 @@ describe('durable tool approval', () => {
         const result = yield* conversation.run('release r1');
 
         expect(result.outcome).toBe('suspended');
+        if (result.outcome !== 'suspended') {
+          throw new Error('expected the run to suspend for approval');
+        }
         // The model's stated intent before the gate — preserved on the
         // suspended result rather than discarded, since it is often exactly
         // what an approver should be shown.
@@ -334,6 +337,9 @@ describe('durable tool approval', () => {
           const result = yield* conversation.run('anything');
 
           expect(result.outcome).toBe('suspended');
+          if (result.outcome !== 'suspended') {
+            throw new Error('expected the recovered run to remain suspended');
+          }
           expect(result.pendingApprovals).toEqual([
             { toolCallId: CALL_ID, toolName: 'release', input: { id: 'r1' } },
           ]);

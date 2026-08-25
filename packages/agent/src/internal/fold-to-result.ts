@@ -32,6 +32,9 @@ export const foldToResult = <
         text: terminal.text,
         steps: terminal.steps,
         usage: terminal.usage,
+        ...(terminal.response === undefined
+          ? {}
+          : { response: terminal.response }),
       } satisfies Agent.Result;
     }
     if (terminal?._tag === 'Suspended') {
@@ -41,6 +44,9 @@ export const foldToResult = <
         steps: terminal.step,
         usage: terminal.usage,
         pendingApprovals: terminal.pendingApprovals,
+        ...(terminal.response === undefined
+          ? {}
+          : { response: terminal.response }),
       } satisfies Agent.Result;
     }
 

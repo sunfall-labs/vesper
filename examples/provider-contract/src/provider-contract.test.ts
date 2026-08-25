@@ -366,9 +366,7 @@ const fallbackProviderLayer = (
     ),
   );
 
-const runAgent = (
-  model: Layer.Layer<LanguageModel.LanguageModel, never, never>,
-) =>
+const runAgent = (model: Layer.Layer<LanguageModel.LanguageModel>) =>
   agent
     .stream('Find sun')
     .pipe(
@@ -378,7 +376,7 @@ const runAgent = (
     );
 
 const failureOf = (
-  model: Layer.Layer<LanguageModel.LanguageModel, never, never>,
+  model: Layer.Layer<LanguageModel.LanguageModel>,
 ): Effect.Effect<AiError.AiError> =>
   Effect.gen(function* () {
     const result = yield* agent

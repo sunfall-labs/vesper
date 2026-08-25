@@ -8,6 +8,7 @@ const packages = [
   'attachments',
   'log',
   'log-pg',
+  'log-sqlite',
   'mcp',
   'workspace',
 ] as const;

@@ -30,6 +30,10 @@
   },
   "sideEffects": false,
   "exports": {
+    "./apply-patch": {
+      "types": "./dist/apply-patch.d.ts",
+      "default": "./dist/apply-patch.js"
+    },
     "./agent": {
       "types": "./dist/agent.d.ts",
       "default": "./dist/agent.js"

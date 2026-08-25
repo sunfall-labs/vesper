@@ -913,6 +913,9 @@ describe('code mode tool broker', () => {
           .run('release r1')
           .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
         expect(suspended.outcome).toBe('suspended');
+        if (suspended.outcome !== 'suspended') {
+          throw new Error('expected the approval-gated tool to suspend');
+        }
         expect(suspended.pendingApprovals).toEqual([
           {
             toolCallId: 'release-call',

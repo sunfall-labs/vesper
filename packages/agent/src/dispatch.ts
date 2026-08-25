@@ -37,7 +37,7 @@ const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
 // can consume the services they declare without each decoder asserting its
 // entire Effect type.
 const capturedContext: Effect.Effect<Context.Context<unknown>> = Effect.map(
-  Effect.context<never>(),
+  Effect.context(),
   (context) => context as Context.Context<unknown>,
 );
 
