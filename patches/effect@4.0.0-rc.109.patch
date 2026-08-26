@@ -1,8 +1,119 @@
+diff --git a/dist/unstable/ai/Chat.d.ts b/dist/unstable/ai/Chat.d.ts
+--- a/dist/unstable/ai/Chat.d.ts
++++ b/dist/unstable/ai/Chat.d.ts
+@@ -257,17 +257,17 @@
+     readonly streamText: {
+         <Options extends NoExcessProperties<LanguageModel.GenerateTextOptions<{}>, Options>>(options: Options & {
+             readonly toolkit?: undefined;
+-        } & LanguageModel.GenerateTextOptions<{}>): Stream.Stream<Response.StreamPart<{}>, LanguageModel.ExtractError<Options>, LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>>;
++        } & LanguageModel.GenerateTextOptions<{}>): Stream.Stream<Response.ModelStreamPart<{}>, LanguageModel.ExtractError<Options>, LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>>;
+         <Tools extends Record<string, Tool.Any>, Options extends NoExcessProperties<LanguageModel.GenerateTextOptions<Tools> & {
+             readonly toolkit: LanguageModel.ToolkitInput<Tools>;
+         }, Options>>(options: Options & LanguageModel.GenerateTextOptions<Tools> & {
+             readonly toolkit: LanguageModel.ToolkitInput<Tools>;
+-        }): Stream.Stream<Response.StreamPart<Tools>, LanguageModel.ExtractError<Options>, LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>>;
++        }): Stream.Stream<Response.ModelStreamPart<Tools>, LanguageModel.ExtractError<Options>, LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>>;
+         <Options extends {
+             readonly toolkit: LanguageModel.ToolkitOption<any>;
+         } & NoExcessProperties<LanguageModel.GenerateTextOptions<any>, Options>>(options: Options & LanguageModel.GenerateTextOptions<LanguageModel.ExtractTools<Options>> & {
+             readonly toolkit: Options["toolkit"];
+-        }): Stream.Stream<Response.StreamPart<LanguageModel.ExtractTools<Options>>, LanguageModel.ExtractError<Options>, LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>>;
++        }): Stream.Stream<Response.ModelStreamPart<LanguageModel.ExtractTools<Options>>, LanguageModel.ExtractError<Options>, LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>>;
+     };
+     /**
+      * Generate a structured object using a language model and schema.
+@@ -615,4 +615,4 @@
+     readonly storeId: string;
+ }) => Layer.Layer<Persistence, never, BackingPersistence>;
+ export {};
+-//# sourceMappingURL=Chat.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=Chat.d.ts.map
+diff --git a/dist/unstable/ai/LanguageModel.d.ts b/dist/unstable/ai/LanguageModel.d.ts
+--- a/dist/unstable/ai/LanguageModel.d.ts
++++ b/dist/unstable/ai/LanguageModel.d.ts
+@@ -85,17 +85,17 @@
+      * Generate text using the language model with streaming output.
+      */
+     readonly streamText: {
+-        <Options extends NoExcessProperties<GenerateTextOptionsWithoutToolkit, Options>>(options: Options & GenerateTextOptionsWithoutToolkit): Stream.Stream<Response.StreamPart<{}>, ExtractError<Options>, ExtractServices<Options>>;
++        <Options extends NoExcessProperties<GenerateTextOptionsWithoutToolkit, Options>>(options: Options & GenerateTextOptionsWithoutToolkit): Stream.Stream<Response.ModelStreamPart<{}>, ExtractError<Options>, ExtractServices<Options>>;
+         <Tools extends Record<string, Tool.Any>, Options extends NoExcessProperties<GenerateTextOptions<Tools> & {
+             readonly toolkit: ToolkitInput<Tools>;
+         }, Options>>(options: Options & GenerateTextOptions<Tools> & {
+             readonly toolkit: ToolkitInput<Tools>;
+-        }): Stream.Stream<Response.StreamPart<Tools>, ExtractError<Options>, ExtractServices<Options>>;
++        }): Stream.Stream<Response.ModelStreamPart<Tools>, ExtractError<Options>, ExtractServices<Options>>;
+         <Options extends {
+             readonly toolkit: ToolkitOption<any>;
+         } & NoExcessProperties<GenerateTextOptions<any>, Options>>(options: Options & GenerateTextOptions<ExtractTools<Options>> & {
+             readonly toolkit: Options["toolkit"];
+-        }): Stream.Stream<Response.StreamPart<ExtractTools<Options>>, ExtractError<Options>, ExtractServices<Options>>;
++        }): Stream.Stream<Response.ModelStreamPart<ExtractTools<Options>>, ExtractError<Options>, ExtractServices<Options>>;
+     };
+ }
+ /**
+@@ -251,8 +251,8 @@
+  * @since 4.0.0
+  */
+ export declare class GenerateTextResponse<Tools extends Record<string, Tool.Any>> {
+-    readonly content: Array<Response.Part<Tools>>;
+-    constructor(content: Array<Response.Part<Tools>>);
++    readonly content: Array<Response.ModelPart<Tools>>;
++    constructor(content: Array<Response.ModelPart<Tools>>);
+     /**
+      * Extracts and concatenates all text parts from the response.
+      */
+@@ -268,11 +268,11 @@
+     /**
+      * Returns all tool call parts from the response.
+      */
+-    get toolCalls(): Array<Response.ToolCallParts<Tools>>;
++    get toolCalls(): Array<Response.ToolCallPart<string, unknown>>;
+     /**
+      * Returns all tool result parts from the response.
+      */
+-    get toolResults(): Array<Response.ToolResultParts<Tools>>;
++    get toolResults(): Array<Response.ToolResultParts<Tools> | Response.UnrecognizedToolResultPart>;
+     /**
+      * The reason why text generation finished.
+      */
+@@ -307,7 +307,7 @@
+      * The parsed structured object that conforms to the provided schema.
+      */
+     readonly value: A;
+-    constructor(value: A, content: Array<Response.Part<Tools>>);
++    constructor(value: A, content: Array<Response.ModelPart<Tools>>);
+ }
+ /**
+  * The supported toolkit option shapes for language model operations.
+@@ -633,17 +633,17 @@
+  * @since 4.0.0
+  */
+ export declare const streamText: {
+-    <Options extends NoExcessProperties<GenerateTextOptionsWithoutToolkit, Options>>(options: Options & GenerateTextOptionsWithoutToolkit): Stream.Stream<Response.StreamPart<{}>, ExtractError<Options>, ExtractServices<Options> | LanguageModel>;
++    <Options extends NoExcessProperties<GenerateTextOptionsWithoutToolkit, Options>>(options: Options & GenerateTextOptionsWithoutToolkit): Stream.Stream<Response.ModelStreamPart<{}>, ExtractError<Options>, ExtractServices<Options> | LanguageModel>;
+     <Tools extends Record<string, Tool.Any>, Options extends NoExcessProperties<GenerateTextOptions<Tools> & {
+         readonly toolkit: ToolkitInput<Tools>;
+     }, Options>>(options: Options & GenerateTextOptions<Tools> & {
+         readonly toolkit: ToolkitInput<Tools>;
+-    }): Stream.Stream<Response.StreamPart<Tools>, ExtractError<Options>, ExtractServices<Options> | LanguageModel>;
++    }): Stream.Stream<Response.ModelStreamPart<Tools>, ExtractError<Options>, ExtractServices<Options> | LanguageModel>;
+     <Options extends {
+         readonly toolkit: ToolkitOption<any>;
+     } & NoExcessProperties<GenerateTextOptions<any>, Options>>(options: Options & GenerateTextOptions<ExtractTools<Options>> & {
+         readonly toolkit: Options["toolkit"];
+-    }): Stream.Stream<Response.StreamPart<ExtractTools<Options>>, ExtractError<Options>, ExtractServices<Options> | LanguageModel>;
++    }): Stream.Stream<Response.ModelStreamPart<ExtractTools<Options>>, ExtractError<Options>, ExtractServices<Options> | LanguageModel>;
+ };
+ export {};
+-//# sourceMappingURL=LanguageModel.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=LanguageModel.d.ts.map
 diff --git a/dist/unstable/ai/LanguageModel.js b/dist/unstable/ai/LanguageModel.js
-index baa9a25a98866054381239b77a83bfa5419752ba..d1a1aebed91cebbc47091a76a121bb36fd1bd64f 100644
 --- a/dist/unstable/ai/LanguageModel.js
 +++ b/dist/unstable/ai/LanguageModel.js
-@@ -496,7 +496,9 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (params) {
+@@ -496,7 +496,9 @@
        }
      }
      // Construct the response schema with the tools from the toolkit
@@ -13,7 +124,18 @@ index baa9a25a98866054381239b77a83bfa5419752ba..d1a1aebed91cebbc47091a76a121bb36
      // If tool call resolution is disabled, return the response without
      // resolving the tool calls that were generated
      if (options.disableToolCallResolution === true) {
-@@ -684,7 +686,9 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (params) {
+@@ -673,7 +675,9 @@
+     // If tool call resolution is disabled, return the response without
+     // resolving the tool calls that were generated
+     if (options.disableToolCallResolution === true) {
+-      const schema = Schema.NonEmptyArray(Response.StreamPart(toolkit));
++      const schema = Schema.NonEmptyArray(Response.StreamPart(toolkit, {
++        relaxParams: true
++      }));
+       const decodeParts = Schema.decodeEffect(schema);
+       return streamWithNonIncrementalFallback().pipe(Stream.mapArrayEffect(parts => decodeParts(parts).pipe(tracker ? Effect.tap(decodedParts => {
+         for (const part of decodedParts) {
+@@ -684,7 +688,9 @@
          return Effect.void;
        }) : identity)));
      }
@@ -24,37 +146,194 @@ index baa9a25a98866054381239b77a83bfa5419752ba..d1a1aebed91cebbc47091a76a121bb36
      const decodeParts = Schema.decodeEffect(ResponseSchema);
      // Queue for decoded parts and tool results
      const queue = yield* Queue.make();
+@@ -700,8 +706,12 @@
+     const toolCallSemaphore = concurrency === "unbounded" ? undefined : yield* Semaphore.make(concurrency);
+     // Helper function to handle tool calls with approval logic
+     const handleToolCall = Effect.fnUntraced(function* (part) {
+-      const tool = toolkit.tools[part.name];
+-      if (!tool) return;
++      if (!Object.hasOwn(toolkit.tools, part.name)) {
++        yield* Queue.offer(queue, yield* unknownToolResult(part, toolkit));
++        return;
++      }
++      const name = part.name;
++      const tool = toolkit.tools[name];
+       const needsApproval = yield* isApprovalNeeded(tool, part, providerOptions.prompt.content);
+       if (needsApproval) {
+         const idGen = yield* IdGenerator;
+@@ -713,10 +723,10 @@
+         yield* Queue.offer(queue, approvalPart);
+         return;
+       }
+-      yield* toolkit.handle(part.name, part.params, part.id).pipe(Stream.unwrap, Stream.runForEach(result => {
++      yield* toolkit.handle(name, part.params, part.id).pipe(Stream.unwrap, Stream.runForEach(result => {
+         const toolResultPart = Response.makePart("tool-result", {
+           id: part.id,
+-          name: part.name,
++          name,
+           providerExecuted: false,
+           ...result
+         });
+@@ -1003,8 +1013,8 @@
+   if (Predicate.isUndefined(tool.needsApproval)) {
+     return false;
+   }
++  const params = yield* Schema.decodeUnknownEffect(tool.parametersSchema)(toolCall.params);
+   if (typeof tool.needsApproval === "function") {
+-    const params = yield* Schema.decodeUnknownEffect(tool.parametersSchema)(toolCall.params);
+     const result = tool.needsApproval(params, {
+       toolCallId: toolCall.id,
+       messages
+@@ -1082,15 +1092,16 @@
+   const approvedToolCallIds = new Set(approved.map(approval => approval.toolCallId));
+   const deniedByToolCallId = new Map(denied.map(denial => [denial.toolCallId, denial]));
+   const streams = toolCalls.map(toolCall => Effect.gen(function* () {
+-    const tool = toolkit.tools[toolCall.name];
+-    if (!tool) {
+-      return Stream.empty;
++    if (!Object.hasOwn(toolkit.tools, toolCall.name)) {
++      return Stream.succeed(yield* unknownToolResult(toolCall, toolkit));
+     }
++    const name = toolCall.name;
++    const tool = toolkit.tools[name];
+     if (deniedByToolCallId.has(toolCall.id)) {
+       const denial = deniedByToolCallId.get(toolCall.id);
+-      return Stream.succeed(Response.makePart("tool-result", {
++      return Stream.succeed(Response.toolResultPart({
+         id: toolCall.id,
+-        name: toolCall.name,
++        name,
+         providerExecuted: false,
+         isFailure: true,
+         result: {
+@@ -1105,9 +1116,9 @@
+       }));
+     }
+     if (approvedToolCallIds.has(toolCall.id)) {
+-      return toolkit.handle(toolCall.name, toolCall.params, toolCall.id).pipe(Stream.unwrap, Stream.map(result => Response.makePart("tool-result", {
++      return toolkit.handle(name, toolCall.params, toolCall.id).pipe(Stream.unwrap, Stream.map(result => Response.toolResultPart({
+         id: toolCall.id,
+-        name: toolCall.name,
++        name,
+         providerExecuted: false,
+         ...result
+       })));
+@@ -1116,14 +1127,14 @@
+     if (needsApproval) {
+       const generator = yield* IdGenerator;
+       const approvalId = yield* generator.generateId();
+-      return Stream.succeed(Response.makePart("tool-approval-request", {
++      return Stream.succeed(Response.toolApprovalRequestPart({
+         approvalId,
+         toolCallId: toolCall.id
+       }));
+     }
+-    return toolkit.handle(toolCall.name, toolCall.params, toolCall.id).pipe(Stream.unwrap, Stream.map(result => Response.makePart("tool-result", {
++    return toolkit.handle(name, toolCall.params, toolCall.id).pipe(Stream.unwrap, Stream.map(result => Response.toolResultPart({
+       id: toolCall.id,
+-      name: toolCall.name,
++      name,
+       providerExecuted: false,
+       ...result
+     })));
+@@ -1132,6 +1143,26 @@
+     concurrency
+   });
+ };
++const unknownToolResult = /*#__PURE__*/Effect.fnUntraced(function* (toolCall, toolkit) {
++  const error = AiError.make({
++    module: "Toolkit",
++    method: `${toolCall.name}.handle`,
++    reason: new AiError.ToolNotFoundError({
++      toolName: toolCall.name,
++      availableTools: Object.keys(toolkit.tools)
++    })
++  });
++  const encodedResult = yield* Schema.encodeUnknownEffect(AiError.AiError)(error).pipe(Effect.orDie);
++  return Response.toolResultPart({
++    id: toolCall.id,
++    name: toolCall.name,
++    providerExecuted: false,
++    result: error,
++    encodedResult,
++    isFailure: true,
++    preliminary: false
++  });
++});
+ // =============================================================================
+ // Utilities
+ // =============================================================================
+@@ -1183,4 +1214,4 @@
+     });
+   }
+ };
+-//# sourceMappingURL=LanguageModel.js.map
+\ No newline at end of file
++//# sourceMappingURL=LanguageModel.js.map
 diff --git a/dist/unstable/ai/Response.d.ts b/dist/unstable/ai/Response.d.ts
-index 3e6a5bb4dcbc5cf5c386c5885a06f54d4bc3b7e7..da8fd6ce2e80e0c51c521280f8524e4fe07562f2 100644
 --- a/dist/unstable/ai/Response.d.ts
 +++ b/dist/unstable/ai/Response.d.ts
-@@ -100,7 +100,9 @@ export type PartEncoded = TextPartEncoded | ReasoningPartEncoded | ReasoningDelt
+@@ -12,6 +12,7 @@
+  */
+ import type * as DateTime from "../../DateTime.ts";
+ import * as Schema from "../../Schema.ts";
++import type * as AiError from "./AiError.ts";
+ import type * as Tool from "./Tool.ts";
+ import type * as Toolkit from "./Toolkit.ts";
+ declare const PartTypeId: "~effect/ai/Content/Part";
+@@ -87,6 +88,10 @@
+  * @since 4.0.0
+  */
+ export type Part<Tools extends Record<string, Tool.Any>> = TextPart | ReasoningPart | ToolCallParts<Tools> | ToolResultParts<Tools> | ToolApprovalRequestPart | FilePart | DocumentSourcePart | UrlSourcePart | ResponseMetadataPart | FinishPart;
++/** A framework failure for a model-authored tool name outside the toolkit. */
++export type UnrecognizedToolResultPart = ToolResultPart<string, never, AiError.AiError>;
++/** Model output whose tool calls have not crossed Toolkit validation. */
++export type ModelPart<Tools extends Record<string, Tool.Any>> = Exclude<Part<Tools>, ToolCallParts<Tools> | ToolResultParts<Tools>> | ToolCallPart<string, unknown> | ToolResultParts<Tools> | UnrecognizedToolResultPart;
+ /**
+  * Encoded representation of non-streaming response parts for serialization.
+  *
+@@ -100,7 +105,9 @@
   * @category schemas
   * @since 4.0.0
   */
 -export declare const Part: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T) => Schema.Codec<Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, PartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
-+export declare const Part: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T, options?: {
-+    readonly relaxParams?: boolean;
-+}) => Schema.Codec<Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, PartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
++export declare const Part: <T extends Toolkit.Any | Toolkit.WithHandler<any>, const RelaxParams extends boolean = false>(toolkit: T, options?: {
++    readonly relaxParams?: RelaxParams;
++}) => Schema.Codec<true extends RelaxParams ? ModelPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>> : Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, PartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
  /**
   * A type for representing streaming response parts with tool-specific typing.
   *
-@@ -121,7 +123,9 @@ export type StreamPartEncoded = TextStartPartEncoded | TextDeltaPartEncoded | Te
+@@ -108,6 +115,8 @@
+  * @since 4.0.0
+  */
+ export type StreamPart<Tools extends Record<string, Tool.Any>> = TextStartPart | TextDeltaPart | TextEndPart | ReasoningStartPart | ReasoningDeltaPart | ReasoningEndPart | ToolParamsStartPart | ToolParamsDeltaPart | ToolParamsEndPart | ToolCallParts<Tools> | ToolResultParts<Tools> | ToolApprovalRequestPart | FilePart | DocumentSourcePart | UrlSourcePart | ResponseMetadataPart | FinishPart | ErrorPart;
++/** Streaming model output whose tool calls have not crossed Toolkit validation. */
++export type ModelStreamPart<Tools extends Record<string, Tool.Any>> = Exclude<StreamPart<Tools>, ToolCallParts<Tools> | ToolResultParts<Tools>> | ToolCallPart<string, unknown> | ToolResultParts<Tools> | UnrecognizedToolResultPart;
+ /**
+  * Encoded representation of streaming response parts for serialization.
+  *
+@@ -121,7 +130,9 @@
   * @category schemas
   * @since 4.0.0
   */
 -export declare const StreamPart: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T) => Schema.Codec<StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, StreamPartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
-+export declare const StreamPart: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T, options?: {
-+    readonly relaxParams?: boolean;
-+}) => Schema.Codec<StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, StreamPartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
++export declare const StreamPart: <T extends Toolkit.Any | Toolkit.WithHandler<any>, const RelaxParams extends boolean = false>(toolkit: T, options?: {
++    readonly relaxParams?: RelaxParams;
++}) => Schema.Codec<true extends RelaxParams ? ModelStreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>> : StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, StreamPartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
  /**
   * Utility type that extracts tool call parts from a set of tools.
   *
+@@ -1881,4 +1892,4 @@
+     readonly metadata: Schema.withDecodingDefault<Schema.$Record<Schema.String, Schema.Codec<Schema.Json>>>;
+ }>;
+ export {};
+-//# sourceMappingURL=Response.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=Response.d.ts.map
 diff --git a/dist/unstable/ai/Response.js b/dist/unstable/ai/Response.js
-index 6cb3604fbbec3a5b4518cbff0cf37a89095b3cb2..01815e86fe7c09726b4fda27563d288e47f25d67 100644
 --- a/dist/unstable/ai/Response.js
 +++ b/dist/unstable/ai/Response.js
-@@ -59,11 +59,11 @@ export const AllParts = toolkit => {
+@@ -59,7 +59,7 @@
   * @category schemas
   * @since 4.0.0
   */
@@ -63,12 +342,16 @@ index 6cb3604fbbec3a5b4518cbff0cf37a89095b3cb2..01815e86fe7c09726b4fda27563d288e
    const toolCalls = [];
    const toolResults = [];
    for (const tool of Object.values(toolkit.tools)) {
--    const toolCall = ToolCallPart(tool.name, tool.parametersSchema);
-+    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema);
-     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema);
+@@ -68,7 +68,7 @@
      toolCalls.push(toolCall);
      toolResults.push(toolResult);
-@@ -76,11 +76,11 @@ export const Part = toolkit => {
+   }
+-  return Schema.Union([TextPart, ReasoningPart, ToolApprovalRequestPart, FilePart, DocumentSourcePart, UrlSourcePart, ResponseMetadataPart, FinishPart, ...toolCalls, ...toolResults]);
++  return Schema.Union([TextPart, ReasoningPart, ToolApprovalRequestPart, FilePart, DocumentSourcePart, UrlSourcePart, ResponseMetadataPart, FinishPart, ...(options?.relaxParams === true ? [RelaxedToolCallPart] : toolCalls), ...toolResults]);
+ };
+ /**
+  * Creates a Schema for streaming response parts based on a toolkit.
+@@ -76,7 +76,7 @@
   * @category schemas
   * @since 4.0.0
   */
@@ -77,32 +360,196 @@ index 6cb3604fbbec3a5b4518cbff0cf37a89095b3cb2..01815e86fe7c09726b4fda27563d288e
    const toolCalls = [];
    const toolResults = [];
    for (const tool of Object.values(toolkit.tools)) {
--    const toolCall = ToolCallPart(tool.name, tool.parametersSchema);
-+    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema);
-     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema);
+@@ -85,7 +85,7 @@
      toolCalls.push(toolCall);
      toolResults.push(toolResult);
+   }
+-  return Schema.Union([TextStartPart, TextDeltaPart, TextEndPart, ReasoningStartPart, ReasoningDeltaPart, ReasoningEndPart, ToolParamsStartPart, ToolParamsDeltaPart, ToolParamsEndPart, ToolApprovalRequestPart, FilePart, DocumentSourcePart, UrlSourcePart, ResponseMetadataPart, FinishPart, ErrorPart, ...toolCalls, ...toolResults]);
++  return Schema.Union([TextStartPart, TextDeltaPart, TextEndPart, ReasoningStartPart, ReasoningDeltaPart, ReasoningEndPart, ToolParamsStartPart, ToolParamsDeltaPart, ToolParamsEndPart, ToolApprovalRequestPart, FilePart, DocumentSourcePart, UrlSourcePart, ResponseMetadataPart, FinishPart, ErrorPart, ...(options?.relaxParams === true ? [RelaxedToolCallPart] : toolCalls), ...toolResults]);
+ };
+ // =============================================================================
+ // Base Part
+@@ -104,6 +104,16 @@
+   })),
+   metadata: /*#__PURE__*/ProviderMetadata.pipe(/*#__PURE__*/Schema.withDecodingDefault(/*#__PURE__*/Effect.succeed({})))
+ });
++const RelaxedToolCallPart = /*#__PURE__*/Schema.Struct({
++  ...BasePart.fields,
++  type: /*#__PURE__*/Schema.Literal("tool-call"),
++  id: Schema.String,
++  name: Schema.String,
++  params: /*#__PURE__*/Schema.Unknown.pipe(/*#__PURE__*/Schema.withDecodingDefaultKey(/*#__PURE__*/Effect.succeed({}))),
++  providerExecuted: /*#__PURE__*/Schema.Boolean.pipe(/*#__PURE__*/Schema.withDecodingDefaultKey(/*#__PURE__*/Effect.succeed(false)))
++}).annotate({
++  identifier: "RelaxedToolCallPart"
++});
+ /**
+  * Creates a new response content part of the specified type.
+  *
+@@ -657,4 +667,4 @@
+ }).annotate({
+   identifier: "ErrorPart"
+ });
+-//# sourceMappingURL=Response.js.map
+\ No newline at end of file
++//# sourceMappingURL=Response.js.map
+diff --git a/dist/unstable/ai/Tool.d.ts b/dist/unstable/ai/Tool.d.ts
+--- a/dist/unstable/ai/Tool.d.ts
++++ b/dist/unstable/ai/Tool.d.ts
+@@ -637,13 +637,13 @@
+ export type FailureEncoded<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failure"]["Encoded"] : never;
+ /**
+  * A utility type for the actual failure value that can appear in tool results.
+- * When `failureMode` is `"return"`, this includes both user-defined failures
+- * and `AiError`.
++ * Includes framework failures such as parameter validation errors regardless
++ * of the handler's `failureMode`.
+  *
+  * @category utility types
+  * @since 4.0.0
+  */
+-export type FailureResult<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failureMode"] extends "return" ? _Config["failure"]["Type"] | AiError.AiError : _Config["failure"]["Type"] : never;
++export type FailureResult<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failure"]["Type"] | AiError.AiError : never;
+ /**
+  * The encoded version of `FailureResult`.
+  *
+@@ -650,7 +650,7 @@
+  * @category utility types
+  * @since 4.0.0
+  */
+-export type FailureResultEncoded<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failureMode"] extends "return" ? _Config["failure"]["Encoded"] | AiError.AiErrorEncoded : _Config["failure"]["Encoded"] : never;
++export type FailureResultEncoded<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failure"]["Encoded"] | AiError.AiErrorEncoded : never;
+ /**
+  * A utility type to extract the type of the tool call result whether it
+  * succeeds or fails.
+@@ -657,12 +657,13 @@
+  *
+  * **Details**
+  *
+- * When `failureMode` is `"return"`, the result may also be an `AiError`.
++ * The result may include an `AiError` synthesized by the framework even when
++ * handler failures use the error channel.
+  *
+  * @category utility types
+  * @since 4.0.0
+  */
+-export type Result<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failureMode"] extends "return" ? Success<T> | Failure<T> | AiError.AiError : Success<T> | Failure<T> : never;
++export type Result<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? Success<T> | Failure<T> | AiError.AiError : never;
+ /**
+  * A utility type to extract the encoded type of the tool call result whether
+  * it succeeds or fails.
+@@ -669,12 +670,13 @@
+  *
+  * **Details**
+  *
+- * When `failureMode` is `"return"`, the result may also be an encoded `AiError`.
++ * The encoded result may include an `AiError` synthesized by the framework
++ * even when handler failures use the error channel.
+  *
+  * @category utility types
+  * @since 4.0.0
+  */
+-export type ResultEncoded<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? _Config["failureMode"] extends "return" ? SuccessEncoded<T> | FailureEncoded<T> | AiError.AiErrorEncoded : SuccessEncoded<T> | FailureEncoded<T> : never;
++export type ResultEncoded<T> = T extends Tool<infer _Name, infer _Config, infer _Requirements> ? SuccessEncoded<T> | FailureEncoded<T> | AiError.AiErrorEncoded : never;
+ /**
+  * A utility type to extract the requirements of a `Tool` call handler.
+  *
+@@ -716,28 +718,35 @@
+  * @category models
+  * @since 4.0.0
+  */
+-export interface HandlerResult<Tool extends Any> {
++export type HandlerResult<Tool extends Any> = {
+     /**
+-     * The result of executing the handler for a particular tool.
++     * The successful result of executing the handler.
+      */
+-    readonly result: Result<Tool>;
++    readonly result: Success<Tool>;
+     /**
+-     * The pre-encoded tool call result of executing the handler for a particular
+-     * tool as a JSON-serializable value. The encoded result can be incorporated
+-     * into subsequent requests to the large language model.
++     * The pre-encoded tool result that can be sent to a language model.
+      */
+     readonly encodedResult: unknown;
++    readonly isFailure: false;
+     /**
+-     * Whether the result of executing the tool call handler was an error or not.
++     * Whether this is an intermediate result rather than the final result.
++     */
++    readonly preliminary: boolean;
++} | {
++    /**
++     * The declared or framework-generated failure from executing the handler.
++     */
++    readonly result: FailureResult<Tool>;
++    /**
++     * The pre-encoded tool failure that can be sent to a language model.
+      */
+-    readonly isFailure: boolean;
++    readonly encodedResult: unknown;
++    readonly isFailure: true;
+     /**
+-     * Whether this is a preliminary (intermediate) result or the final result.
+-     * Preliminary results represent progress updates; only the final result
+-     * should be used as the authoritative output.
++     * Failures are always terminal.
+      */
+-    readonly preliminary: boolean;
+-}
++    readonly preliminary: false;
++};
+ /**
+  * Tagged union for incremental handler output.
+  *
+@@ -1425,4 +1434,4 @@
+  */
+ export declare const EmptyParams: EmptyParams;
+ export {};
+-//# sourceMappingURL=Tool.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=Tool.d.ts.map
+diff --git a/dist/unstable/ai/Toolkit.d.ts b/dist/unstable/ai/Toolkit.d.ts
+--- a/dist/unstable/ai/Toolkit.d.ts
++++ b/dist/unstable/ai/Toolkit.d.ts
+@@ -160,7 +160,7 @@
+     /**
+      * Parameters to pass to the tool handler.
+      */
+-    params: Tool.Parameters<Tools[Name]>,
++    params: unknown,
+     /**
+      * The unique identifier of the tool call.
+      */
+@@ -299,4 +299,4 @@
+  */
+ ...toolkits: Toolkits) => Toolkit<MergedTools<Toolkits>>;
+ export {};
+-//# sourceMappingURL=Toolkit.d.ts.map
+\ No newline at end of file
++//# sourceMappingURL=Toolkit.d.ts.map
 diff --git a/dist/unstable/ai/Toolkit.js b/dist/unstable/ai/Toolkit.js
-index d51f3213d28a69f145b4c17479f9c5bb37b5c639..15b951ce26c508cf039d8ad071aa624b7be297f9 100644
 --- a/dist/unstable/ai/Toolkit.js
 +++ b/dist/unstable/ai/Toolkit.js
-@@ -56,7 +56,8 @@ const Proto = {
+@@ -56,7 +56,9 @@
          }
          // Fetch cached schemas / handlers for the tool
          const schemas = getSchemas(tool);
 -        // Decode the tool call parameters which will be passed to the handler
 +        // Decode the tool call parameters which will be passed to the handler.
-+        // When decoding fails, respect the tool's failureMode before propagating.
++        // Invalid model input is a framework failure, not a handler failure:
++        // always return it to the model so it can correct the call.
          const decodedParams = yield* schemas.decodeParameters(params).pipe(Effect.mapError(cause => AiError.make({
            module: "Toolkit",
            method: `${name}.handle`,
-@@ -65,7 +66,18 @@ const Proto = {
+@@ -65,7 +67,18 @@
              toolParams: params,
              description: cause.message
            })
 -        })));
 +        })), Effect.matchEffect({
-+          onFailure: error => tool.failureMode === "error" ? Effect.fail(error) : schemas.encodeResult(error).pipe(Effect.map(encodedResult => Stream.succeed({
++          onFailure: error => Schema.encodeUnknownEffect(AiError.AiError)(error).pipe(Effect.map(encodedResult => Stream.succeed({
 +            result: error,
 +            encodedResult,
 +            isFailure: true,
@@ -116,85 +563,784 @@ index d51f3213d28a69f145b4c17479f9c5bb37b5c639..15b951ce26c508cf039d8ad071aa624b
          // Setup the handler context
          const queue = yield* Queue.make();
          const context = {
+@@ -281,4 +294,4 @@
+   }
+   return makeProto(tools);
+ };
+-//# sourceMappingURL=Toolkit.js.map
+\ No newline at end of file
++//# sourceMappingURL=Toolkit.js.map
+diff --git a/src/unstable/ai/Chat.ts b/src/unstable/ai/Chat.ts
+--- a/src/unstable/ai/Chat.ts
++++ b/src/unstable/ai/Chat.ts
+@@ -304,7 +304,7 @@
+     <Options extends NoExcessProperties<LanguageModel.GenerateTextOptions<{}>, Options>>(
+       options: Options & { readonly toolkit?: undefined } & LanguageModel.GenerateTextOptions<{}>
+     ): Stream.Stream<
+-      Response.StreamPart<{}>,
++      Response.ModelStreamPart<{}>,
+       LanguageModel.ExtractError<Options>,
+       LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>
+     >
+@@ -319,7 +319,7 @@
+         readonly toolkit: LanguageModel.ToolkitInput<Tools>
+       }
+     ): Stream.Stream<
+-      Response.StreamPart<Tools>,
++      Response.ModelStreamPart<Tools>,
+       LanguageModel.ExtractError<Options>,
+       LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>
+     >
+@@ -332,7 +332,7 @@
+         readonly toolkit: Options["toolkit"]
+       }
+     ): Stream.Stream<
+-      Response.StreamPart<LanguageModel.ExtractTools<Options>>,
++      Response.ModelStreamPart<LanguageModel.ExtractTools<Options>>,
+       LanguageModel.ExtractError<Options>,
+       LanguageModel.LanguageModel | LanguageModel.ExtractServices<Options>
+     >
 diff --git a/src/unstable/ai/LanguageModel.ts b/src/unstable/ai/LanguageModel.ts
-index 0f5f544b0b0a884aa49ca631715bf7b5cdcd231f..f0414d972575632c9974c089094730913a02f4a1 100644
 --- a/src/unstable/ai/LanguageModel.ts
 +++ b/src/unstable/ai/LanguageModel.ts
-@@ -1167,7 +1167,7 @@ export const make: (params: {
- 
+@@ -160,7 +160,7 @@
+     <Options extends NoExcessProperties<GenerateTextOptionsWithoutToolkit, Options>>(
+       options: Options & GenerateTextOptionsWithoutToolkit
+     ): Stream.Stream<
+-      Response.StreamPart<{}>,
++      Response.ModelStreamPart<{}>,
+       ExtractError<Options>,
+       ExtractServices<Options>
+     >
+@@ -174,7 +174,7 @@
+     >(
+       options: Options & GenerateTextOptions<Tools> & { readonly toolkit: ToolkitInput<Tools> }
+     ): Stream.Stream<
+-      Response.StreamPart<Tools>,
++      Response.ModelStreamPart<Tools>,
+       ExtractError<Options>,
+       ExtractServices<Options>
+     >
+@@ -186,7 +186,7 @@
+     >(
+       options: Options & GenerateTextOptions<ExtractTools<Options>> & { readonly toolkit: Options["toolkit"] }
+     ): Stream.Stream<
+-      Response.StreamPart<ExtractTools<Options>>,
++      Response.ModelStreamPart<ExtractTools<Options>>,
+       ExtractError<Options>,
+       ExtractServices<Options>
+     >
+@@ -365,9 +365,9 @@
+  * @since 4.0.0
+  */
+ export class GenerateTextResponse<Tools extends Record<string, Tool.Any>> {
+-  readonly content: Array<Response.Part<Tools>>
++  readonly content: Array<Response.ModelPart<Tools>>
+
+-  constructor(content: Array<Response.Part<Tools>>) {
++  constructor(content: Array<Response.ModelPart<Tools>>) {
+     this.content = content
+   }
+
+@@ -407,7 +407,7 @@
+   /**
+    * Returns all tool call parts from the response.
+    */
+-  get toolCalls(): Array<Response.ToolCallParts<Tools>> {
++  get toolCalls(): Array<Response.ToolCallPart<string, unknown>> {
+     return this.content.filter((part) => part.type === "tool-call")
+   }
+
+@@ -414,7 +414,9 @@
+   /**
+    * Returns all tool result parts from the response.
+    */
+-  get toolResults(): Array<Response.ToolResultParts<Tools>> {
++  get toolResults(): Array<
++    Response.ToolResultParts<Tools> | Response.UnrecognizedToolResultPart
++  > {
+     return this.content.filter((part) => part.type === "tool-result")
+   }
+
+@@ -479,7 +481,7 @@
+    */
+   readonly value: A
+
+-  constructor(value: A, content: Array<Response.Part<Tools>>) {
++  constructor(value: A, content: Array<Response.ModelPart<Tools>>) {
+     super(content)
+     this.value = value
+   }
+@@ -920,7 +922,7 @@
+   >(
+     options: Options & GenerateTextOptions<Tools>
+   ) => Stream.Stream<
+-    Response.StreamPart<Tools>,
++    Response.ModelStreamPart<Tools>,
+     ExtractError<Options>,
+     ExtractServices<Options>
+   > = Effect.fnUntraced(
+@@ -956,7 +958,7 @@
+
+       // Otherwise aggregate generated content and apply the span transformer
+       // when the stream is finished
+-      const content: Array<Response.StreamPart<Tools>> = []
++      const content: Array<Response.ModelStreamPart<Tools>> = []
+       return stream.pipe(
+         Stream.mapArray((parts) => {
+           content.push(...parts)
+@@ -992,7 +994,7 @@
+     options: Options & GenerateTextOptions<Tools>,
+     providerOptions: Mutable<ProviderOptions>
+   ) => Effect.Effect<
+-    Array<Response.Part<Tools>>,
++    Array<Response.ModelPart<Tools>>,
+     AiError.AiError | Schema.SchemaError,
+     IdGenerator
+   > = Effect.fnUntraced(function*<
+@@ -1064,7 +1066,7 @@
+           tracker.markParts(providerOptions.prompt.content, responseMetadata.id)
+         }
+       }
+-      return content as Array<Response.Part<Tools>>
++      return content
+     }
+
+     // If there is a toolkit resolve and apply it to the provider options
+@@ -1102,7 +1104,7 @@
+           tracker.markParts(providerOptions.prompt.content, responseMetadata.id)
+         }
+       }
+-      return content as Array<Response.Part<Tools>>
++      return content as Array<Response.ModelPart<Tools>>
+     }
+
+     // Pre-resolve pending tool approvals before calling the LLM
+@@ -1167,7 +1169,7 @@
+
      // Construct the response schema with the tools from the toolkit
      const ResponseSchema = Schema.mutable(
 -      Schema.Array(Response.Part(toolkit))
 +      Schema.Array(Response.Part(toolkit, { relaxParams: true }))
      )
- 
+
      // If tool call resolution is disabled, return the response without
-@@ -1469,7 +1469,7 @@ export const make: (params: {
-       >
+@@ -1181,7 +1183,7 @@
+           tracker.markParts(providerOptions.prompt.content, responseMetadata.id)
+         }
+       }
+-      return content as Array<Response.Part<Tools>>
++      return content
      }
- 
+
+     const rawContent = yield* generateWithNonIncrementalFallback()
+@@ -1211,7 +1213,7 @@
+     }
+
+     // Return the content merged with the tool call results
+-    return [...content, ...toolResults] as Array<Response.Part<Tools>>
++    return [...content, ...toolResults]
+   })
+
+   const streamContent: <
+@@ -1222,7 +1224,7 @@
+     providerOptions: Mutable<ProviderOptions>
+   ) => Effect.Effect<
+     Stream.Stream<
+-      Response.StreamPart<Tools>,
++      Response.ModelStreamPart<Tools>,
+       AiError.AiError | Schema.SchemaError,
+       IdGenerator
+     >,
+@@ -1308,7 +1310,7 @@
+           )
+         )
+       ) as Stream.Stream<
+-        Response.StreamPart<Tools>,
++        Response.ModelStreamPart<Tools>,
+         AiError.AiError | Schema.SchemaError,
+         IdGenerator
+       >
+@@ -1357,7 +1359,7 @@
+           )
+         )
+       ) as Stream.Stream<
+-        Response.StreamPart<Tools>,
++        Response.ModelStreamPart<Tools>,
+         AiError.AiError | Schema.SchemaError,
+         IdGenerator
+       >
+@@ -1364,7 +1366,7 @@
+     }
+
+     // Pre-resolve pending tool approvals before calling the LLM
+-    let preResolvedStreamParts: Array<Response.StreamPart<Tools>> = []
++    let preResolvedStreamParts: Array<Response.ModelStreamPart<Tools>> = []
+
+     if (hasPendingApprovals) {
+       for (const approval of pendingApproved) {
+@@ -1445,7 +1447,7 @@
+     // If tool call resolution is disabled, return the response without
+     // resolving the tool calls that were generated
+     if (options.disableToolCallResolution === true) {
+-      const schema = Schema.NonEmptyArray(Response.StreamPart(toolkit))
++      const schema = Schema.NonEmptyArray(Response.StreamPart(toolkit, { relaxParams: true }))
+       const decodeParts = Schema.decodeEffect(schema)
+       return streamWithNonIncrementalFallback().pipe(
+         Stream.mapArrayEffect((parts) =>
+@@ -1462,24 +1464,20 @@
+               identity
+           )
+         )
+-      ) as Stream.Stream<
+-        Response.StreamPart<Tools>,
+-        AiError.AiError | Schema.SchemaError,
+-        IdGenerator
+-      >
++      )
+     }
+
 -    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit))
 +    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit, { relaxParams: true }))
      const decodeParts = Schema.decodeEffect(ResponseSchema)
- 
+
      // Queue for decoded parts and tool results
+     const queue = yield* Queue.make<
+-      Response.StreamPart<Tools>,
++      Response.ModelStreamPart<Tools>,
+       | AiError.AiError
+       | Cause.Done
+       | Schema.SchemaError
+     >()
+-    const deferredFinishParts: Array<Response.StreamPart<Tools>> = []
++    const deferredFinishParts: Array<Response.ModelStreamPart<Tools>> = []
+
+     // Emit pre-resolved tool results so Chat.streamText persists them to
+     // history. This ensures collectToolApprovals({ excludeResolved }) can
+@@ -1496,8 +1494,12 @@
+
+     // Helper function to handle tool calls with approval logic
+     const handleToolCall = Effect.fnUntraced(function*(part: Response.ToolCallPartEncoded) {
+-      const tool = toolkit.tools[part.name]
+-      if (!tool) return
++      if (!hasTool(toolkit.tools, part.name)) {
++        yield* Queue.offer(queue, yield* unknownToolResult(part, toolkit))
++        return
++      }
++      const name = part.name
++      const tool = toolkit.tools[name]
+
+       const needsApproval = yield* isApprovalNeeded(
+         tool,
+@@ -1516,12 +1518,12 @@
+         return
+       }
+
+-      yield* toolkit.handle(part.name, part.params as any, part.id).pipe(
++      yield* toolkit.handle(name, part.params, part.id).pipe(
+         Stream.unwrap,
+         Stream.runForEach((result) => {
+           const toolResultPart = Response.makePart("tool-result", {
+             id: part.id,
+-            name: part.name,
++            name,
+             providerExecuted: false,
+             ...result
+           }) as Response.StreamPart<Tools>
+@@ -1543,7 +1545,7 @@
+           }
+           // Defer finish parts until all tool handlers complete. This guarantees
+           // tool results are emitted before finish in streaming mode.
+-          const immediateParts: Array<Response.StreamPart<Tools>> = []
++          const immediateParts: Array<Response.ModelStreamPart<Tools>> = []
+           for (const part of parts) {
+             if (part.type === "finish") {
+               deferredFinishParts.push(part)
+@@ -1796,7 +1798,7 @@
+   >(
+     options: Options & GenerateTextOptionsWithoutToolkit
+   ): Stream.Stream<
+-    Response.StreamPart<{}>,
++    Response.ModelStreamPart<{}>,
+     ExtractError<Options>,
+     ExtractServices<Options> | LanguageModel
+   >
+@@ -1807,7 +1809,7 @@
+   >(
+     options: Options & GenerateTextOptions<Tools> & { readonly toolkit: ToolkitInput<Tools> }
+   ): Stream.Stream<
+-    Response.StreamPart<Tools>,
++    Response.ModelStreamPart<Tools>,
+     ExtractError<Options>,
+     ExtractServices<Options> | LanguageModel
+   >
+@@ -1819,12 +1821,12 @@
+   >(
+     options: Options & GenerateTextOptions<ExtractTools<Options>> & { readonly toolkit: Options["toolkit"] }
+   ): Stream.Stream<
+-    Response.StreamPart<ExtractTools<Options>>,
++    Response.ModelStreamPart<ExtractTools<Options>>,
+     ExtractError<Options>,
+     ExtractServices<Options> | LanguageModel
+   >
+ } = (options: GenerateTextOptions<any>): Stream.Stream<
+-  Response.StreamPart<{}>,
++  Response.ModelStreamPart<{}>,
+   AiError.AiError,
+   LanguageModel
+ > =>
+@@ -1989,11 +1991,11 @@
+     return false
+   }
+
++  const params: Tool.Parameters<T> = yield* Schema.decodeUnknownEffect(
++    tool.parametersSchema
++  )(toolCall.params)
++
+   if (typeof tool.needsApproval === "function") {
+-    const params = yield* Schema.decodeUnknownEffect(tool.parametersSchema)(
+-      toolCall.params
+-    ) as any
+-
+     const result = tool.needsApproval(params, {
+       toolCallId: toolCall.id,
+       messages
+@@ -2036,7 +2038,7 @@
+
+     const resultStream = yield* toolkit.handle(
+       toolCall.name,
+-      toolCall.params as any,
++      toolCall.params,
+       approval.toolCallId
+     )
+
+@@ -2089,14 +2091,25 @@
+ // Tool Call Resolution
+ // =============================================================================
+
++interface ToolExecutionDenied {
++  readonly type: "execution-denied"
++  readonly reason?: string | undefined
++}
++
+ type ToolResolutionResult<Tools extends Record<string, Tool.Any>> =
+   | Response.ToolResultPart<
+     Tool.Name<Tools[keyof Tools]>,
+     Tool.Success<Tools[keyof Tools]>,
+-    Tool.Failure<Tools[keyof Tools]>
++    Tool.FailureResult<Tools[keyof Tools]> | ToolExecutionDenied
+   >
++  | Response.UnrecognizedToolResultPart
+   | Response.ToolApprovalRequestPart
+
++const hasTool = <Tools extends Record<string, Tool.Any>>(
++  tools: Tools,
++  name: string
++): name is keyof Tools & string => Object.hasOwn(tools, name)
++
+ const resolveToolCalls = <Tools extends Record<string, Tool.Any>>(
+   content: ReadonlyArray<Response.AllPartsEncoded>,
+   toolkit: Toolkit.WithHandler<Tools>,
+@@ -2128,37 +2141,38 @@
+
+   const streams = toolCalls.map((toolCall) =>
+     Effect.gen(function*() {
+-      const tool = toolkit.tools[toolCall.name]
+-      if (!tool) {
+-        return Stream.empty
++      if (!hasTool(toolkit.tools, toolCall.name)) {
++        return Stream.succeed(yield* unknownToolResult(toolCall, toolkit))
+       }
++      const name = toolCall.name
++      const tool = toolkit.tools[name]
+
+       if (deniedByToolCallId.has(toolCall.id)) {
+         const denial = deniedByToolCallId.get(toolCall.id)!
+         return Stream.succeed(
+-          Response.makePart("tool-result", {
++          Response.toolResultPart({
+             id: toolCall.id,
+-            name: toolCall.name,
++            name,
+             providerExecuted: false,
+             isFailure: true,
+             result: { type: "execution-denied", reason: denial.reason },
+             encodedResult: { type: "execution-denied", reason: denial.reason },
+             preliminary: false
+-          }) as ToolResolutionResult<Tools>
++          })
+         )
+       }
+
+       if (approvedToolCallIds.has(toolCall.id)) {
+-        return toolkit.handle(toolCall.name, toolCall.params as any, toolCall.id).pipe(
++        return toolkit.handle(name, toolCall.params, toolCall.id).pipe(
+           Stream.unwrap,
+           Stream.map(
+             (result) =>
+-              Response.makePart("tool-result", {
++              Response.toolResultPart({
+                 id: toolCall.id,
+-                name: toolCall.name,
++                name,
+                 providerExecuted: false,
+                 ...result
+-              }) as ToolResolutionResult<Tools>
++              })
+           )
+         )
+       }
+@@ -2168,23 +2182,23 @@
+         const generator = yield* IdGenerator
+         const approvalId = yield* generator.generateId()
+         return Stream.succeed(
+-          Response.makePart("tool-approval-request", {
++          Response.toolApprovalRequestPart({
+             approvalId,
+             toolCallId: toolCall.id
+-          }) as ToolResolutionResult<Tools>
++          })
+         )
+       }
+
+-      return toolkit.handle(toolCall.name, toolCall.params as any, toolCall.id).pipe(
++      return toolkit.handle(name, toolCall.params, toolCall.id).pipe(
+         Stream.unwrap,
+         Stream.map(
+           (result) =>
+-            Response.makePart("tool-result", {
++            Response.toolResultPart({
+               id: toolCall.id,
+-              name: toolCall.name,
++              name,
+               providerExecuted: false,
+               ...result
+-            }) as ToolResolutionResult<Tools>
++            })
+         )
+       )
+     }).pipe(Stream.unwrap)
+@@ -2193,6 +2207,30 @@
+   return Stream.mergeAll(streams, { concurrency })
+ }
+
++const unknownToolResult = Effect.fnUntraced(function*<Tools extends Record<string, Tool.Any>>(
++  toolCall: Response.ToolCallPartEncoded,
++  toolkit: Toolkit.WithHandler<Tools>
++) {
++  const error = AiError.make({
++    module: "Toolkit",
++    method: `${toolCall.name}.handle`,
++    reason: new AiError.ToolNotFoundError({
++      toolName: toolCall.name,
++      availableTools: Object.keys(toolkit.tools)
++    })
++  })
++  const encodedResult = yield* Schema.encodeUnknownEffect(AiError.AiError)(error).pipe(Effect.orDie)
++  return Response.toolResultPart({
++    id: toolCall.id,
++    name: toolCall.name,
++    providerExecuted: false,
++    result: error,
++    encodedResult,
++    isFailure: true,
++    preliminary: false
++  })
++})
++
+ // =============================================================================
+ // Utilities
+ // =============================================================================
 diff --git a/src/unstable/ai/Response.ts b/src/unstable/ai/Response.ts
-index fab6fa0ce51e702307f0c90ed1cdaa199735d165..a1f1575714d14fa31446944f674853d35d9e3bda 100644
 --- a/src/unstable/ai/Response.ts
 +++ b/src/unstable/ai/Response.ts
-@@ -263,7 +263,8 @@ export type PartEncoded =
+@@ -16,6 +16,7 @@
+ import * as Predicate from "../../Predicate.ts"
+ import * as Schema from "../../Schema.ts"
+ import * as SchemaTransformation from "../../SchemaTransformation.ts"
++import type * as AiError from "./AiError.ts"
+ import type * as Tool from "./Tool.ts"
+ import type * as Toolkit from "./Toolkit.ts"
+
+@@ -237,6 +238,28 @@
+   | FinishPart
+
+ /**
++ * A tool result synthesized by the framework for a tool name that was not in
++ * the requested toolkit.
++ *
++ * @category models
++ * @since 4.0.0
++ */
++export type UnrecognizedToolResultPart = ToolResultPart<string, never, AiError.AiError>
++
++/**
++ * Non-streaming model output before tool calls cross the toolkit validation
++ * boundary. Model-authored tool names and parameters are untrusted.
++ *
++ * @category models
++ * @since 4.0.0
++ */
++export type ModelPart<Tools extends Record<string, Tool.Any>> =
++  | Exclude<Part<Tools>, ToolCallParts<Tools> | ToolResultParts<Tools>>
++  | ToolCallPart<string, unknown>
++  | ToolResultParts<Tools>
++  | UnrecognizedToolResultPart
++
++/**
+  * Encoded representation of non-streaming response parts for serialization.
+  *
+  * @category models
+@@ -262,10 +285,15 @@
+  * @category schemas
   * @since 4.0.0
   */
- export const Part = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
+-export const Part = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
 -  toolkit: T
++export const Part = <
++  T extends Toolkit.Any | Toolkit.WithHandler<any>,
++  const RelaxParams extends boolean = false
++>(
 +  toolkit: T,
-+  options?: { readonly relaxParams?: boolean }
++  options?: { readonly relaxParams?: RelaxParams }
  ): Schema.Codec<
-   Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
+-  Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
++  true extends RelaxParams ? ModelPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>
++    : Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
    PartEncoded,
-@@ -273,7 +274,7 @@ export const Part = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
-   const toolCalls: Array<Schema.Top> = []
-   const toolResults: Array<Schema.Top> = []
-   for (const tool of Object.values(toolkit.tools as Record<string, Tool.Any>)) {
--    const toolCall = ToolCallPart(tool.name, tool.parametersSchema)
-+    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema)
-     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema)
-     toolCalls.push(toolCall)
-     toolResults.push(toolResult)
-@@ -355,7 +356,8 @@ export type StreamPartEncoded =
+   Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>,
+   Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>
+@@ -287,7 +315,7 @@
+     UrlSourcePart,
+     ResponseMetadataPart,
+     FinishPart,
+-    ...toolCalls,
++    ...(options?.relaxParams === true ? [RelaxedToolCallPart] : toolCalls),
+     ...toolResults
+   ]) as any
+ }
+@@ -323,6 +351,19 @@
+   | ErrorPart
+
+ /**
++ * Streaming model output before tool calls cross the toolkit validation
++ * boundary. Model-authored tool names and parameters are untrusted.
++ *
++ * @category models
++ * @since 4.0.0
++ */
++export type ModelStreamPart<Tools extends Record<string, Tool.Any>> =
++  | Exclude<StreamPart<Tools>, ToolCallParts<Tools> | ToolResultParts<Tools>>
++  | ToolCallPart<string, unknown>
++  | ToolResultParts<Tools>
++  | UnrecognizedToolResultPart
++
++/**
+  * Encoded representation of streaming response parts for serialization.
+  *
+  * @category models
+@@ -354,10 +395,15 @@
+  * @category schemas
   * @since 4.0.0
   */
- export const StreamPart = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
+-export const StreamPart = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
 -  toolkit: T
++export const StreamPart = <
++  T extends Toolkit.Any | Toolkit.WithHandler<any>,
++  const RelaxParams extends boolean = false
++>(
 +  toolkit: T,
-+  options?: { readonly relaxParams?: boolean }
++  options?: { readonly relaxParams?: RelaxParams }
  ): Schema.Codec<
-   StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
+-  StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
++  true extends RelaxParams ? ModelStreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>
++    : StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
    StreamPartEncoded,
-@@ -365,7 +367,7 @@ export const StreamPart = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
-   const toolCalls: Array<Schema.Top> = []
-   const toolResults: Array<Schema.Top> = []
-   for (const tool of Object.values(toolkit.tools as Record<string, Tool.Any>)) {
--    const toolCall = ToolCallPart(tool.name, tool.parametersSchema)
-+    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema)
-     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema)
-     toolCalls.push(toolCall)
-     toolResults.push(toolResult)
+   Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>,
+   Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>
+@@ -387,7 +433,7 @@
+     ResponseMetadataPart,
+     FinishPart,
+     ErrorPart,
+-    ...toolCalls,
++    ...(options?.relaxParams === true ? [RelaxedToolCallPart] : toolCalls),
+     ...toolResults
+   ]) as any
+ }
+@@ -489,6 +535,15 @@
+   )
+ })
+
++const RelaxedToolCallPart = Schema.Struct({
++  ...BasePart.fields,
++  type: Schema.Literal("tool-call"),
++  id: Schema.String,
++  name: Schema.String,
++  params: Schema.Unknown.pipe(Schema.withDecodingDefaultKey(Effect.succeed({}))),
++  providerExecuted: Schema.Boolean.pipe(Schema.withDecodingDefaultKey(Effect.succeed(false)))
++}).annotate({ identifier: "RelaxedToolCallPart" })
++
+ /**
+  * Creates a new response content part of the specified type.
+  *
+diff --git a/src/unstable/ai/Tool.ts b/src/unstable/ai/Tool.ts
+--- a/src/unstable/ai/Tool.ts
++++ b/src/unstable/ai/Tool.ts
+@@ -819,8 +819,8 @@
+
+ /**
+  * A utility type for the actual failure value that can appear in tool results.
+- * When `failureMode` is `"return"`, this includes both user-defined failures
+- * and `AiError`.
++ * Includes framework failures such as parameter validation errors regardless
++ * of the handler's `failureMode`.
+  *
+  * @category utility types
+  * @since 4.0.0
+@@ -829,8 +829,7 @@
+   infer _Name,
+   infer _Config,
+   infer _Requirements
+-> ? _Config["failureMode"] extends "return" ? _Config["failure"]["Type"] | AiError.AiError
+-  : _Config["failure"]["Type"]
++> ? _Config["failure"]["Type"] | AiError.AiError
+   : never
+
+ /**
+@@ -843,8 +842,7 @@
+   infer _Name,
+   infer _Config,
+   infer _Requirements
+-> ? _Config["failureMode"] extends "return" ? _Config["failure"]["Encoded"] | AiError.AiErrorEncoded
+-  : _Config["failure"]["Encoded"]
++> ? _Config["failure"]["Encoded"] | AiError.AiErrorEncoded
+   : never
+
+ /**
+@@ -853,7 +851,8 @@
+  *
+  * **Details**
+  *
+- * When `failureMode` is `"return"`, the result may also be an `AiError`.
++ * The result may include an `AiError` synthesized by the framework even when
++ * handler failures use the error channel.
+  *
+  * @category utility types
+  * @since 4.0.0
+@@ -862,8 +861,7 @@
+   infer _Name,
+   infer _Config,
+   infer _Requirements
+-> ? _Config["failureMode"] extends "return" ? Success<T> | Failure<T> | AiError.AiError
+-  : Success<T> | Failure<T>
++> ? Success<T> | Failure<T> | AiError.AiError
+   : never
+
+ /**
+@@ -872,7 +870,8 @@
+  *
+  * **Details**
+  *
+- * When `failureMode` is `"return"`, the result may also be an encoded `AiError`.
++ * The encoded result may include an `AiError` synthesized by the framework
++ * even when handler failures use the error channel.
+  *
+  * @category utility types
+  * @since 4.0.0
+@@ -881,8 +880,7 @@
+   infer _Name,
+   infer _Config,
+   infer _Requirements
+-> ? _Config["failureMode"] extends "return" ? SuccessEncoded<T> | FailureEncoded<T> | AiError.AiErrorEncoded
+-  : SuccessEncoded<T> | FailureEncoded<T>
++> ? SuccessEncoded<T> | FailureEncoded<T> | AiError.AiErrorEncoded
+   : never
+
+ /**
+@@ -951,28 +949,37 @@
+  * @category models
+  * @since 4.0.0
+  */
+-export interface HandlerResult<Tool extends Any> {
+-  /**
+-   * The result of executing the handler for a particular tool.
+-   */
+-  readonly result: Result<Tool>
+-  /**
+-   * The pre-encoded tool call result of executing the handler for a particular
+-   * tool as a JSON-serializable value. The encoded result can be incorporated
+-   * into subsequent requests to the large language model.
+-   */
+-  readonly encodedResult: unknown
+-  /**
+-   * Whether the result of executing the tool call handler was an error or not.
+-   */
+-  readonly isFailure: boolean
+-  /**
+-   * Whether this is a preliminary (intermediate) result or the final result.
+-   * Preliminary results represent progress updates; only the final result
+-   * should be used as the authoritative output.
+-   */
+-  readonly preliminary: boolean
+-}
++export type HandlerResult<Tool extends Any> =
++  | {
++    /**
++     * The successful result of executing the handler.
++     */
++    readonly result: Success<Tool>
++    /**
++     * The pre-encoded tool result that can be sent to a language model.
++     */
++    readonly encodedResult: unknown
++    readonly isFailure: false
++    /**
++     * Whether this is an intermediate result rather than the final result.
++     */
++    readonly preliminary: boolean
++  }
++  | {
++    /**
++     * The declared or framework-generated failure from executing the handler.
++     */
++    readonly result: FailureResult<Tool>
++    /**
++     * The pre-encoded tool failure that can be sent to a language model.
++     */
++    readonly encodedResult: unknown
++    readonly isFailure: true
++    /**
++     * Failures are always terminal.
++     */
++    readonly preliminary: false
++  }
+
+ /**
+  * Tagged union for incremental handler output.
 diff --git a/src/unstable/ai/Toolkit.ts b/src/unstable/ai/Toolkit.ts
-index 1cedb040c6540884c03f58265ca7d0bd4b88f24f..169f4a7a602eb2ddf49ef67b10cc823b82fc2c91 100644
 --- a/src/unstable/ai/Toolkit.ts
 +++ b/src/unstable/ai/Toolkit.ts
-@@ -293,7 +293,8 @@ const Proto = {
+@@ -208,7 +208,7 @@
+     /**
+      * Parameters to pass to the tool handler.
+      */
+-    params: Tool.Parameters<Tools[Name]>,
++    params: unknown,
+     /**
+      * The unique identifier of the tool call.
+      */
+@@ -293,7 +293,9 @@
          // Fetch cached schemas / handlers for the tool
          const schemas = getSchemas(tool)
- 
+
 -        // Decode the tool call parameters which will be passed to the handler
 +        // Decode the tool call parameters which will be passed to the handler.
-+        // When decoding fails, respect the tool's failureMode before propagating.
++        // Invalid model input is a framework failure, not a handler failure:
++        // always return it to the model so it can correct the call.
          const decodedParams = yield* schemas.decodeParameters(params).pipe(
            Effect.mapError((cause) =>
              AiError.make({
-@@ -305,8 +306,26 @@ const Proto = {
+@@ -305,15 +307,36 @@
                  description: cause.message
                })
              })
@@ -202,23 +1348,47 @@ index 1cedb040c6540884c03f58265ca7d0bd4b88f24f..169f4a7a602eb2ddf49ef67b10cc823b
 +          ),
 +          Effect.matchEffect({
 +            onFailure: (error) =>
-+              tool.failureMode === "error"
-+                ? Effect.fail(error)
-+                : schemas.encodeResult(error).pipe(
-+                  Effect.map((encodedResult) =>
-+                    Stream.succeed({ result: error, encodedResult, isFailure: true, preliminary: false }) as Stream.Stream<
-+                      { readonly result: any; readonly encodedResult: any; readonly isFailure: boolean; readonly preliminary: boolean },
-+                      never
-+                    >
-+                  ),
-+                  Effect.orDie
++              Schema.encodeUnknownEffect(AiError.AiError)(error).pipe(
++                Effect.map((encodedResult) =>
++                  Stream.succeed({ result: error, encodedResult, isFailure: true, preliminary: false } as const)
 +                ),
++                Effect.orDie
++              ),
 +            onSuccess: Effect.succeed
 +          })
          )
 +        if (Stream.isStream(decodedParams)) {
 +          return decodedParams
 +        }
- 
+
          // Setup the handler context
-         const queue = yield* Queue.make<{
+-        const queue = yield* Queue.make<{
+-          readonly result: any
+-          readonly isFailure: boolean
+-          readonly preliminary: boolean
+-        }, Cause.Done>()
++        const queue = yield* Queue.make<
++          | {
++            readonly result: any
++            readonly isFailure: false
++            readonly preliminary: boolean
++          }
++          | {
++            readonly result: any
++            readonly isFailure: true
++            readonly preliminary: false
++          },
++          Cause.Done
++        >()
+         const context: HandlerContext<any> = {
+           toolCallId,
+           preliminary: (result) =>
+@@ -377,7 +400,7 @@
+             const normalizedError = normalizeError(error)
+             return tool.failureMode === "error"
+               ? Stream.fail(normalizedError)
+-              : Stream.succeed({ result: normalizedError, isFailure: true, preliminary: false })
++              : Stream.succeed({ result: normalizedError, isFailure: true, preliminary: false } as const)
+           }),
+           Stream.mapEffect(Effect.fnUntraced(function*(output) {
+             const encodedResult = yield* encodeResult(output.result)

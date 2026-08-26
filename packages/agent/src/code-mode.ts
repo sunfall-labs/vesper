@@ -342,6 +342,11 @@ const failedToolResponse = (
   error,
 });
 
+const hasTool = <Tools extends Record<string, Tool.Any>>(
+  tools: Tools,
+  name: string,
+): name is keyof Tools & string => Object.hasOwn(tools, name);
+
 const invoke = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
   event: CodeExecutor.ToolCall,
@@ -351,13 +356,19 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
   Tool.HandlerServices<Tools[keyof Tools]>
 > =>
   Effect.gen(function* () {
-    const tool = Object.hasOwn(toolkit.tools, event.name)
-      ? toolkit.tools[event.name]
-      : undefined;
+    const requestedName: string = event.name;
+    if (!hasTool(toolkit.tools, requestedName)) {
+      return yield* aiError(
+        'nestedToolCall',
+        `Unknown code-mode tool "${String(requestedName)}"`,
+      );
+    }
+    const name = requestedName;
+    const tool = toolkit.tools[name];
     if (tool === undefined) {
       return yield* aiError(
         'nestedToolCall',
-        `Unknown code-mode tool "${event.name}"`,
+        `Code-mode tool "${name}" has no runtime definition`,
       );
     }
     if (tool.needsApproval !== undefined && tool.needsApproval !== false) {
@@ -366,9 +377,7 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
         message: `Tool "${event.name}" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except`,
       });
     }
-    const name = event.name as Extract<keyof Tools, string>;
-    const input = event.input as Tool.Parameters<Tools[typeof name]>;
-    const stream = yield* toolkit.handle(name, input, event.id);
+    const stream = yield* toolkit.handle(name, event.input, event.id);
     const result = yield* Stream.runLast(stream);
     if (Option.isNone(result)) {
       return yield* aiError(

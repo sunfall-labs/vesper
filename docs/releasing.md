@@ -32,6 +32,13 @@ npx @nubjs/nub@0.7.5 install
    included when the PostgreSQL package changes, and that the public export
    maps still point at built files.
 
+Publishing is deliberately blocked while the root has `patchedDependencies`.
+The current Effect patch makes invalid and unknown model tool calls recoverable
+before approval or handler dispatch; dependency patches are not inherited by
+registry consumers. Land that behavior upstream, upgrade the pinned Effect
+family, remove the patch, and let the packed-consumer behavior check pass on the
+released dependency before publishing Vesper.
+
 The packed-consumer check installs every generated tarball into a clean
 temporary project, imports every runtime export, reads exported assets, and
 typechecks every public module from its published declarations. It is part of

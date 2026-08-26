@@ -28,6 +28,7 @@
     "typecheck": "nub run check:package-paths && nub run check:unsafe-casts && nub run -r --filter './packages/*' --filter './examples/*' --if-present typecheck && nub run typecheck:types",
     "check:package-paths": "node scripts/check-package-paths.mjs",
     "check:packed-consumer": "node scripts/check-packed-consumer.mjs",
+    "check:publish-ready": "node scripts/check-publish-ready.mjs",
     "audit:packed-consumer": "node scripts/check-packed-consumer.mjs --audit",
     "check:published-types": "node scripts/check-published-types.mjs && tsc -p tsconfig.published-types.json --noEmit --pretty false",
     "check:unsafe-casts": "node scripts/check-unsafe-casts.mjs",
@@ -39,8 +40,8 @@
     "lint:fix": "oxlint . --fix --no-error-on-unmatched-pattern",
     "lint:prune": "oxlint . --prune-suppressions --no-error-on-unmatched-pattern && oxfmt oxlint-suppressions.json --write",
     "prepare": "effect-tsgo patch --oxlint",
-    "publish:npm": "nub publish --filter \"@sunfall/vesper-*\" --access public --provenance --tag alpha",
-    "publish:npm:dry-run": "nub publish --filter \"@sunfall/vesper-*\" --access public --tag alpha --dry-run --no-git-checks",
+    "publish:npm": "nub run check:publish-ready && nub publish --filter \"@sunfall/vesper-*\" --access public --provenance --tag alpha",
+    "publish:npm:dry-run": "nub run check:publish-ready && nub publish --filter \"@sunfall/vesper-*\" --access public --tag alpha --dry-run --no-git-checks",
     "verify": "nub run build && nub run check:packed-consumer && nub run verify:static && nub run test",
     "verify:serial": "nub run build && nub run check:packed-consumer && nub run verify:static --max-processes 1 && nub run test",
     "verify:static": "concurrently --group --timings --names format,lint,typecheck,knip \"nub run format:check\" \"nub run lint\" \"nub run typecheck\" \"nub run knip\""

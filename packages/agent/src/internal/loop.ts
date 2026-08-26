@@ -29,7 +29,7 @@ import { TurnControl } from '../turn-control.js';
 import { CompactionRuntime } from './compaction.js';
 import { AgentEventRuntime } from './event.js';
 import * as Observability from './observability.js';
-import { encodePart, type ModelStreamPart } from './part-encoding.js';
+import { encodePart } from './part-encoding.js';
 import {
   incompleteOutputError,
   interactionRequiresConversationError,
@@ -436,7 +436,7 @@ export const makeEntry = <
                   ? Effect.fail(
                       normalizeProviderError(part.error, part.metadata),
                     )
-                  : encodePart(part, resolvedToolkit).pipe(
+                  : encodePart(part).pipe(
                       Effect.map((encodedPart) => ({ part, encodedPart })),
                     ),
               ),
@@ -461,10 +461,7 @@ export const makeEntry = <
                   return {
                     _tag: 'Part',
                     step,
-                    // Effect's mapped tool-part union is not idempotent under
-                    // this compiled intersection, although the toolkit value is
-                    // exactly the one Chat used to decode the part.
-                    part: part as Response.StreamPart<ModelTools>,
+                    part,
                     encodedPart,
                     ...(interaction === undefined ? {} : { interaction }),
                   };
@@ -1675,7 +1672,7 @@ const emptyTurnState = (): TurnState => ({
  */
 const observe = <PartTools extends Record<string, Tool.Any>>(
   state: TurnState,
-  part: ModelStreamPart<PartTools>,
+  part: Response.ModelStreamPart<PartTools>,
   encoded: Response.StreamPartEncoded,
   toolkit: { readonly tools: Record<string, Tool.Any> },
 ): void => {
@@ -1691,7 +1688,9 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
     case 'tool-call':
       state.toolCalls.push(encoded);
       if (part.type === 'tool-call') {
-        const tool = toolkit.tools[part.name];
+        const tool = Object.hasOwn(toolkit.tools, part.name)
+          ? toolkit.tools[part.name]
+          : undefined;
         const interaction =
           tool === undefined
             ? undefined

@@ -32,8 +32,19 @@ const Question = Interaction.answer(
       options: Schema.NullOr(Schema.Array(Schema.NonEmptyString)),
     }),
     success: Schema.Struct({ answer: Schema.NonEmptyString }),
+    failureMode: 'return',
   }),
 );
+
+const compileTimeAssertions = () => {
+  const failFastQuestion = Tool.make('fail_fast_question', {
+    parameters: Schema.Struct({ question: Schema.String }),
+    success: Schema.Struct({ answer: Schema.String }),
+  });
+  // @ts-expect-error external interactions must return malformed model input
+  Interaction.answer(failFastQuestion);
+};
+void compileTimeAssertions;
 
 const agent = Agent.make({
   name: 'interaction-test',

@@ -3,7 +3,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Layer, Schema, Stream } from 'effect';
-import { type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, type Response, Tool, Toolkit } from 'effect/unstable/ai';
 
 import { Agent } from '../src/agent.js';
 import { CodeExecutor } from '../src/code-executor.js';
@@ -556,18 +556,26 @@ describe('code mode tool broker', () => {
           .run('go')
           .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
 
-        expect(yield* executor.responses).toEqual([
-          {
-            id: 'nested-invalid',
-            outcome: 'failure',
-            error: {
-              code: 'dispatch_failed',
-              message: expect.stringContaining(
-                "Invalid parameters for tool 'lookup'",
-              ),
-            },
-          },
-        ]);
+        const responses = yield* executor.responses;
+        expect(responses).toHaveLength(1);
+        const response = responses.at(0);
+        if (response === undefined) {
+          throw new Error('expected one nested tool response');
+        }
+        expect(response.outcome).toBe('failure');
+        if (response.outcome !== 'failure') {
+          throw new Error('expected a nested tool failure');
+        }
+        expect(response.error.code).toBe('tool_failure');
+        const error = yield* Schema.decodeUnknownEffect(AiError.AiError)(
+          response.error.value,
+        );
+        expect(error.reason._tag).toBe('ToolParameterValidationError');
+        if (error.reason._tag !== 'ToolParameterValidationError') {
+          throw new Error('expected ToolParameterValidationError');
+        }
+        expect(error.reason.toolName).toBe('lookup');
+        expect(error.reason.toolParams).toEqual({ id: 42 });
       }),
   );
 

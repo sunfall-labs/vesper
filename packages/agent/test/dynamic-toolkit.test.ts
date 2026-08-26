@@ -210,13 +210,16 @@ describe('Agent dynamic tools', () => {
           ['mcp__linear__search_issues'],
           ['mcp__linear__search_issues'],
         ]);
-        expect(JSON.stringify(requests[1]?.prompt)).toContain(
-          'Linear is temporarily unavailable.',
-        );
+        const returned = requests[1]?.prompt.content
+          .flatMap((message) =>
+            message.role === 'tool' ? message.content : [],
+          )
+          .find((part) => part.type === 'tool-result');
+        expect(returned?.result).toBe('Linear is temporarily unavailable.');
       }),
   );
 
-  it.effect('rejects a model-emitted tool that was not advertised', () =>
+  it.effect('returns a model-emitted tool that was not advertised', () =>
     Effect.gen(function* () {
       let calls = 0;
       const source = DynamicToolkit.make(
@@ -248,26 +251,39 @@ describe('Agent dynamic tools', () => {
           },
           finish('tool-calls'),
         ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+        [
+          { type: 'text-start', id: 'answer' },
+          {
+            type: 'text-delta',
+            id: 'answer',
+            delta: 'I used the advertised tool list.',
+          },
+          { type: 'text-end', id: 'answer' },
+          finish(),
+        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
       ]);
 
       const result = yield* agent
-        .stream('Create it.')
-        .pipe(Stream.runDrain, Effect.provide(model.layer), Effect.result);
+        .run('Create it.')
+        .pipe(Effect.provide(model.layer));
       const requests = yield* model.requests;
 
-      expect(result._tag).toBe('Failure');
-      if (result._tag === 'Failure') {
-        expect(result.failure).toMatchObject({
-          reason: { _tag: 'InvalidOutputError' },
-        });
-      }
+      expect(result.text).toBe('I used the advertised tool list.');
       expect(calls).toBe(0);
-      expect(requests).toHaveLength(1);
+      expect(requests).toHaveLength(2);
       expect(requests[0]?.tools).toEqual(['mcp__linear__search_issues']);
       expect(requests[0]?.toolDefinitions).toHaveLength(1);
       expect(requests[0]?.toolDefinitions[0]?.name).toBe(
         'mcp__linear__search_issues',
       );
+      const returned = requests[1]?.prompt.content
+        .flatMap((message) => (message.role === 'tool' ? message.content : []))
+        .find((part) => part.type === 'tool-result');
+      expect(returned?.name).toBe('mcp__linear__create_issue');
+      const error = yield* Schema.decodeUnknownEffect(AiError.AiError)(
+        returned?.result,
+      );
+      expect(error.reason._tag).toBe('ToolNotFoundError');
     }),
   );
 

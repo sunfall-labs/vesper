@@ -3,6 +3,7 @@ import {
   Exit,
   Option,
   Ref,
+  Result,
   Schema,
   Stream,
   SubscriptionRef,
@@ -49,6 +50,38 @@ const preserveRunPolicy = <T extends Tool.Any, E, R>(
       ? Effect.fail(result.result)
       : Effect.succeed(result),
   );
+
+const settleRejectedCall = (
+  session: AgentLog.Session,
+  call: AgentLog.IndeterminateToolCall,
+  recovery: Exclude<AgentLog.Recovery, { readonly _tag: 'Settled' }>,
+  error: AiError.AiError,
+): Effect.Effect<void, AgentLog.DurabilityError> =>
+  Effect.gen(function* () {
+    const encodedError = yield* Schema.encodeUnknownEffect(AiError.AiError)(
+      error,
+    ).pipe(Effect.orDie);
+    yield* session.append([
+      ...(recovery._tag === 'Suspended'
+        ? [
+            {
+              _tag: 'ToolResumed' as const,
+              id: call.toolCallId,
+              name: call.name,
+              token: recovery.token,
+            },
+          ]
+        : []),
+      {
+        _tag: 'ToolOutcome',
+        step: call.step,
+        id: call.toolCallId,
+        name: call.name,
+        outcome: 'failure',
+        result: encodedError,
+      },
+    ]);
+  });
 
 // The tool-dispatch seam: consult the log before running a tool.
 //
@@ -286,15 +319,32 @@ export const resolveIndeterminate = <
       }
 
       if (!hasTool(resolved.tools, call.name)) {
-        return yield* unknownToolError(call.name);
+        yield* settleRejectedCall(
+          options.session,
+          call,
+          recovery.value,
+          unknownModelToolError(
+            call.name,
+            Object.keys(resolved.tools),
+            'resolveIndeterminateToolCall',
+          ),
+        );
+        continue;
       }
 
-      const params = yield* decodeParameters(
-        resolved,
-        services,
-        call.name,
-        call.params,
+      const decodedParams = yield* Effect.result(
+        decodeParameters(resolved, services, call.name, call.params),
       );
+      if (Result.isFailure(decodedParams)) {
+        yield* settleRejectedCall(
+          options.session,
+          call,
+          recovery.value,
+          decodedParams.failure,
+        );
+        continue;
+      }
+      const params = decodedParams.success;
       const permit = yield* options.arbitration.commit;
       if (Option.isNone(permit)) {
         return yield* Effect.void;
@@ -471,21 +521,27 @@ const decodeResult = (
 
 const decodeParameters = <
   Tools extends Record<string, Tool.Any>,
-  Name extends Extract<keyof Tools, string>,
+  Name extends keyof Tools,
 >(
   toolkit: { readonly tools: Tools },
   services: Context.Context<never>,
   name: Name,
   params: unknown,
 ): Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError> =>
-  toolkit.tools[name] === undefined
-    ? Effect.fail(unknownToolError(name))
+  !Object.hasOwn(toolkit.tools, name) || toolkit.tools[name] === undefined
+    ? Effect.fail(
+        unknownModelToolError(
+          String(name),
+          Object.keys(toolkit.tools),
+          'decodeToolParameters',
+        ),
+      )
     : (Schema.decodeUnknownEffect(toolkit.tools[name].parametersSchema)(
         params,
       ).pipe(
         Effect.provide(services),
         Effect.mapError((error) =>
-          toolParameterDecodeError(name, String(error)),
+          toolParameterDecodeError(String(name), params, String(error)),
         ),
       ) as Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError>);
 
@@ -701,9 +757,9 @@ export const gate = <
           }),
       );
 
-    const handle = <Name extends keyof Tools>(
-      name: Name,
-      params: Tool.Parameters<Tools[Name]>,
+    const handle = (
+      name: keyof Tools,
+      params: unknown,
       toolCallId?: string,
     ): ReturnType<Toolkit.WithHandler<Tools>['handle']> => {
       const toolName = String(name);
@@ -739,6 +795,27 @@ export const gate = <
           return yield* indeterminateError(toolName, normalizedToolCallId);
         }
 
+        // Provider tool arguments are untrusted input. Validate them before
+        // interception, arbitration, or ToolStarted; the inner Toolkit
+        // validates again at the final handler boundary. Passing the original
+        // value inward avoids decoding schema transformations twice.
+        const decodedParams = yield* Effect.result(
+          decodeParameters(resolved, services, name, params),
+        );
+        if (Result.isFailure(decodedParams)) {
+          const encodedError = yield* Schema.encodeUnknownEffect(
+            AiError.AiError,
+          )(
+            new AiError.AiError({
+              module: decodedParams.failure.module,
+              method: 'dispatchToolCall',
+              reason: decodedParams.failure.reason,
+            }),
+          ).pipe(Effect.orDie);
+          return yield* answered(name, encodedError, true, false);
+        }
+        const validatedParams = decodedParams.success;
+
         // Step 3. The ordinary interceptor, which may answer in the tool's place.
         //
         // Its requirement channel is erased in the same way and for the same
@@ -755,7 +832,7 @@ export const gate = <
               conversationId: options.conversationId ?? session?.conversationId,
               name: toolName,
               toolCallId: normalizedToolCallId,
-              params,
+              params: validatedParams,
             })
             .pipe(Effect.provide(services));
 
@@ -911,13 +988,17 @@ const recoveryCorruptionError = (description: string): AiError.AiError =>
     reason: new AiError.InvalidRequestError({ description }),
   });
 
-const unknownToolError = (name: string): AiError.AiError =>
+const unknownModelToolError = (
+  name: string,
+  availableTools: ReadonlyArray<string>,
+  method: 'decodeToolParameters' | 'resolveIndeterminateToolCall',
+): AiError.AiError =>
   new AiError.AiError({
     module: 'Agent',
-    method: 'resolveIndeterminateToolCall',
-    reason: new AiError.InvalidRequestError({
-      description: `Stored tool "${name}" is not present in the current toolkit. Use the matching agent revision.`,
-      metadata: { name },
+    method,
+    reason: new AiError.ToolNotFoundError({
+      toolName: name,
+      availableTools,
     }),
   });
 
@@ -968,14 +1049,16 @@ const toolResultDecodeError = (name: string, detail: string): AiError.AiError =>
 
 const toolParameterDecodeError = (
   name: string,
+  params: unknown,
   detail: string,
 ): AiError.AiError =>
   new AiError.AiError({
     module: 'Agent',
     method: 'resolveIndeterminateToolCall',
-    reason: new AiError.InvalidRequestError({
-      description: `Stored parameters for tool "${name}" do not match its current parameter schema. Use the matching agent revision.`,
-      metadata: { name, detail },
+    reason: new AiError.ToolParameterValidationError({
+      toolName: name,
+      toolParams: params,
+      description: detail,
     }),
   });
 

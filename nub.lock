@@ -30,7 +30,7 @@ overrides:
 
 patchedDependencies:
   effect@4.0.0-rc.109:
-    hash: a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48
+    hash: 10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb
     path: patches/effect@4.0.0-rc.109.patch
 
 importers:
@@ -66,7 +66,7 @@ importers:
         version: 10.0.5
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       knip:
         specifier: 6.32.2
         version: 6.32.2
@@ -111,7 +111,7 @@ importers:
         version: link:../packages/log
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       valibot:
         specifier: 1.4.2
         version: 1.4.2(typescript@5.9.3)
@@ -129,7 +129,7 @@ importers:
         version: link:../../packages/log
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   examples/compliance-relay:
     dependencies:
@@ -144,7 +144,7 @@ importers:
         version: link:../../packages/agent
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   examples/live-smoke:
     dependencies:
@@ -174,7 +174,7 @@ importers:
         version: link:../../packages/workspace
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   examples/provider-contract:
     dependencies:
@@ -192,7 +192,7 @@ importers:
         version: link:../../packages/agent
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   examples/support-agent:
     dependencies:
@@ -207,7 +207,7 @@ importers:
         version: link:../../packages/log
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   packages/agent:
     dependencies:
@@ -220,7 +220,7 @@ importers:
     devDependencies:
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   packages/attachments:
     devDependencies:
@@ -232,7 +232,7 @@ importers:
         version: 4.0.0-rc.109(effect@4.0.0-rc.109)(vitest@4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)))
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       vitest:
         specifier: ^4.1.9
         version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
@@ -241,7 +241,7 @@ importers:
     devDependencies:
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       vitest:
         specifier: ^4.1.9
         version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
@@ -272,7 +272,7 @@ importers:
         version: 8.21.0
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       vitest:
         specifier: ^4.1.9
         version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
@@ -291,7 +291,7 @@ importers:
         version: 4.0.0-rc.109(effect@4.0.0-rc.109)(vitest@4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)))
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       vitest:
         specifier: ^4.1.9
         version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
@@ -310,13 +310,13 @@ importers:
         version: 4.0.0-rc.109(effect@4.0.0-rc.109)(vitest@4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)))
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   packages/workspace:
     devDependencies:
       effect:
         specifier: 'catalog:'
-        version: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+        version: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       vitest:
         specifier: ^4.1.9
         version: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
@@ -3401,20 +3401,20 @@ snapshots:
 
   '@effect/ai-anthropic@4.0.0-rc.109(effect@4.0.0-rc.109)':
     dependencies:
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   '@effect/ai-openai@4.0.0-rc.109(effect@4.0.0-rc.109)':
     dependencies:
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   '@effect/ai-openrouter@4.0.0-rc.109(effect@4.0.0-rc.109)':
     dependencies:
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
 
   '@effect/platform-node-shared@4.0.0-rc.109(effect@4.0.0-rc.109)':
     dependencies:
       '@types/ws': 8.18.1
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       ws: 8.21.3
     transitivePeerDependencies:
       - bufferutil
@@ -3423,7 +3423,7 @@ snapshots:
   '@effect/platform-node@4.0.0-rc.109(@opentelemetry/api@1.9.0)(effect@4.0.0-rc.109)(redis@6.2.1)':
     dependencies:
       '@effect/platform-node-shared': 4.0.0-rc.109(effect@4.0.0-rc.109)
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       mime: 4.1.0
       redis: 6.2.1(@opentelemetry/api@1.9.0)
       undici: 8.10.0
@@ -3433,7 +3433,7 @@ snapshots:
 
   '@effect/sql-pg@4.0.0-rc.109(effect@4.0.0-rc.109)':
     dependencies:
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       pg: 8.23.0
       pg-connection-string: 2.14.0
       pg-cursor: 2.22.0(pg@8.23.0)
@@ -3475,7 +3475,7 @@ snapshots:
 
   '@effect/vitest@4.0.0-rc.109(effect@4.0.0-rc.109)(vitest@4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3)))':
     dependencies:
-      effect: 4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48)
+      effect: 4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb)
       vitest: 4.1.10(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.1(@types/node@24.13.3))
 
   '@emnapi/core@1.11.2':
@@ -4551,7 +4551,7 @@ snapshots:
     dependencies:
       safe-buffer: 5.2.1
 
-  effect@4.0.0-rc.109(patch_hash=a7091a317f9d2ae02e30bc6467ed4353e4396dbeef643a75a958430330400b48):
+  effect@4.0.0-rc.109(patch_hash=10cdeb2ed3ff40291096e0099704b2de7072a41102cf95018f9873a0bb8fdcfb):
     dependencies:
       '@standard-schema/spec': 1.1.0
       fast-check: 4.9.0
