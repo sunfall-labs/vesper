@@ -647,6 +647,16 @@ family `AgentWorkflow.wait` uses below — and ends with `Result.outcome ===
 'suspended'` and `pendingInteractions`. No
 Effect Workflow, no `AgentWorkflow.durable`, and the handler has not run.
 
+Model-emitted arguments cross their schema boundary before approval,
+interception, or durable `ToolStarted`. Invalid arguments and unknown tool
+names are framework input failures: they are returned to the model as typed
+`AiError` tool results regardless of the tool handler's `failureMode`. That
+setting controls handler failures; it cannot turn untrusted model output into
+an agent-loop failure. Public model events therefore expose tool names as
+`string` and parameters as `unknown`; only the toolkit handler receives the
+schema-decoded parameter type. Durable replay validates again and settles
+malformed records without invoking the handler.
+
 ```ts
 const result = yield * conversation.run('release r1');
 // result.outcome === 'suspended'
@@ -683,6 +693,7 @@ const question = Interaction.answer(
       options: Schema.NullOr(Schema.Array(Schema.NonEmptyString)),
     }),
     success: Schema.Struct({ answer: Schema.NonEmptyString }),
+    failureMode: 'return',
   }),
 );
 

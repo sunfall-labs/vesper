@@ -178,7 +178,7 @@ export type SubstitutedToolResult<
 };
 
 export type StreamPart<Tools extends Record<string, Tool.Any>> =
-  | Response.StreamPart<Tools>
+  | Response.ModelStreamPart<Tools>
   | SubstitutedToolResult<keyof Tools & string>;
 
 export type Event<Tools extends Record<string, Tool.Any>> =
@@ -186,14 +186,14 @@ export type Event<Tools extends Record<string, Tool.Any>> =
   | {
       readonly _tag: 'Part';
       readonly step: number;
-      readonly part: Response.StreamPart<Tools>;
+      readonly part: Response.ModelStreamPart<Tools>;
       /**
        * The provider-facing representation of `part`.
        *
-       * `part` is decoded so live consumers can use the tool's typed result
-       * and parameter values. The encoded sibling is what a recording sink
-       * must persist: a schema transformation (for example `DateFromString`)
-       * can make the two representations differ.
+       * Tool-call names and parameters remain model-authored `string` and
+       * `unknown` values until Toolkit validates them for a handler. Tool
+       * results and other parts are decoded. The encoded sibling is what a
+       * recording sink must persist.
        */
       readonly encodedPart: Response.StreamPartEncoded;
       /** Durable interaction semantics for a tool approval request part. */

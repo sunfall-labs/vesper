@@ -239,9 +239,9 @@ export function wrap<ToolSet extends Record<string, Tool.Any>, E, R>(
     const resolved = yield* toolkit;
     const store = yield* AttachmentStore.Service;
 
-    const handle = <Name extends keyof ToolSet>(
-      name: Name,
-      params: Tool.Parameters<ToolSet[Name]>,
+    const handle = (
+      name: keyof ToolSet,
+      params: unknown,
       toolCallId?: string,
     ): ReturnType<Toolkit.WithHandler<ToolSet>['handle']> =>
       resolved

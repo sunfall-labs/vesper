@@ -27,7 +27,7 @@ export type ToolConfig = {
   readonly parameters: Schema.Constraint;
   readonly success: Schema.Constraint;
   readonly failure: Schema.Constraint;
-  readonly failureMode: Tool.FailureMode;
+  readonly failureMode: 'return';
 };
 
 const annotate = <Name extends string, C extends ToolConfig, R>(

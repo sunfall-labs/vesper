@@ -98,7 +98,7 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 6
+      "count": 3
     }
   },
   "packages/agent/src/dispatch.ts": {
@@ -247,7 +247,7 @@
       "count": 9
     },
     "typescript/no-unsafe-assignment": {
-      "count": 2
+      "count": 1
     },
     "typescript/no-unsafe-return": {
       "count": 1
@@ -295,11 +295,6 @@
     "effecttsgo/global-date": {
       "count": 2
     },
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/dynamic-toolkit.test.ts": {
     "effecttsgo/prefer-schema-over-json": {
       "count": 1
     }
@@ -792,12 +787,6 @@
     }
   },
   "scripts/check-packed-consumer.mjs": {
-    "typescript/no-unsafe-argument": {
-      "count": 1
-    },
-    "typescript/restrict-template-expressions": {
-      "count": 1
-    },
     "typescript/strict-boolean-expressions": {
       "count": 1
     }

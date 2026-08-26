@@ -1,16 +1,8 @@
 import { Effect, Schema } from 'effect';
-import { AiError, Response, type Tool, type Toolkit } from 'effect/unstable/ai';
-
-// The loop's persistence boundary. Tool calls are provider input and keep
-// their encoded `unknown` parameters until Toolkit validates them for a typed
-// handler. Every other part has already crossed its schema boundary.
-
-export type ModelStreamPart<PartTools extends Record<string, Tool.Any>> =
-  | Response.StreamPart<PartTools>
-  | Response.ToolCallPart<string, unknown>;
+import { AiError, Response, type Tool } from 'effect/unstable/ai';
 
 type EncodableToolResult<PartTools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<PartTools>,
+  Response.ModelStreamPart<PartTools>,
   { readonly type: 'tool-result' }
 >;
 type EncodableFile<PartTools extends Record<string, Tool.Any>> = Extract<
@@ -50,32 +42,16 @@ const encodeStandardPart = (
     Effect.mapError(encodePartError),
   );
 
-const encodeToolCall = <PartTools extends Record<string, Tool.Any>>(
+const encodeToolCall = (
   part: Response.ToolCallPart<string, unknown>,
-  toolkit: Toolkit.WithHandler<PartTools>,
-): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
-  const tool = Object.hasOwn(toolkit.tools, part.name)
-    ? toolkit.tools[part.name]
-    : undefined;
-  if (tool === undefined) {
-    return Effect.fail(
-      new AiError.AiError({
-        module: 'Agent',
-        method: 'encodePart',
-        reason: new AiError.InvalidOutputError({
-          description: `Model emitted unknown tool ${part.name}`,
-        }),
-      }),
-    );
-  }
-  return Effect.succeed({
+): Effect.Effect<Response.StreamPartEncoded> =>
+  Effect.succeed({
     type: 'tool-call',
     id: part.id,
     name: part.name,
     params: part.params,
     providerExecuted: part.providerExecuted,
   });
-};
 
 const encodeToolResult = <PartTools extends Record<string, Tool.Any>>(
   part: EncodableToolResult<PartTools>,
@@ -106,12 +82,11 @@ const assertPartEncodingStrategy = (part: never): never => {
 
 /** Preserve a model part in its provider-facing form for persistence. */
 export const encodePart = <PartTools extends Record<string, Tool.Any>>(
-  part: ModelStreamPart<PartTools>,
-  toolkit: Toolkit.WithHandler<PartTools>,
+  part: Response.ModelStreamPart<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   switch (part.type) {
     case 'tool-call':
-      return encodeToolCall(part, toolkit);
+      return encodeToolCall(part);
     case 'tool-result':
       return encodeToolResult(part);
     case 'file':

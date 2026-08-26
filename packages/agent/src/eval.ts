@@ -255,13 +255,13 @@ export const evaluate = <
 /** Query whether the model requested a particular typed tool. */
 export const toolCalled = <Tools extends Record<string, Tool.Any>>(
   capture: Capture<Tools>,
-  name: ToolCall<Tools>['part']['name'],
+  name: keyof Tools & string,
 ): boolean => capture.toolCalls.some((call) => call.part.name === name);
 
 /** Query whether a particular typed tool produced a final successful result. */
 export const toolSucceeded = <Tools extends Record<string, Tool.Any>>(
   capture: Capture<Tools>,
-  name: ToolResult<Tools>['part']['name'],
+  name: keyof Tools & string,
 ): boolean =>
   capture.toolResults.some(
     (result) =>

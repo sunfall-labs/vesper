@@ -65,6 +65,29 @@ const releaseAgentWith = (ran: { count: number }) =>
       }),
   });
 
+const releaseWithOptionalEnvironment = Tool.make('release_optional', {
+  description: 'release a build to an optional environment',
+  parameters: Schema.Struct({
+    id: Schema.String,
+    environment: Schema.optionalKey(Schema.String),
+  }),
+  success: Schema.Struct({ released: Schema.Boolean }),
+}).setNeedsApproval(true);
+
+const releaseOptionalAgentWith = (ran: { count: number }) =>
+  Agent.make({
+    name: 'approval-parameter-test',
+    revision: '1',
+    instructions: 'release only through the tool',
+    toolkit: Toolkit.make(releaseWithOptionalEnvironment),
+  }).withHandlers({
+    release_optional: () =>
+      Effect.sync(() => {
+        ran.count += 1;
+        return { released: true };
+      }),
+  });
+
 /**
  * First call asks for the tool and gets stopped on its own approval gate;
  * every later call reacts to whatever the resolved history now says, the
@@ -111,6 +134,84 @@ const approvalScripted = () =>
     }),
   );
 
+const malformedApprovalScripted = Layer.effect(
+  LanguageModel.LanguageModel,
+  Effect.gen(function* () {
+    const calls = yield* Ref.make(0);
+    return yield* LanguageModel.make({
+      generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+      streamText: () =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
+            return index === 0
+              ? Stream.fromIterable<Response.StreamPartEncoded>([
+                  {
+                    type: 'tool-call',
+                    id: CALL_ID,
+                    name: 'release_optional',
+                    params: { id: 'r1', environment: null },
+                  },
+                  finish('tool-calls'),
+                ])
+              : Stream.fromIterable<Response.StreamPartEncoded>([
+                  { type: 'text-start', id: 'recovered' },
+                  {
+                    type: 'text-delta',
+                    id: 'recovered',
+                    delta: 'Recovered.',
+                  },
+                  { type: 'text-end', id: 'recovered' },
+                  finish(),
+                ]);
+          }),
+        ),
+    });
+  }),
+);
+
+const completionModel = Layer.effect(
+  LanguageModel.LanguageModel,
+  LanguageModel.make({
+    generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+    streamText: () =>
+      Stream.fromIterable<Response.StreamPartEncoded>([
+        { type: 'text-start', id: 'recovered' },
+        {
+          type: 'text-delta',
+          id: 'recovered',
+          delta: 'Recovered.',
+        },
+        { type: 'text-end', id: 'recovered' },
+        finish(),
+      ]),
+  }),
+);
+
+const expectMalformedParameterOutcome = (
+  records: ReadonlyArray<ConversationRecord.Record>,
+) => {
+  const outcome = records.find(
+    (record) =>
+      record._tag === 'ToolOutcome' && record.name === 'release_optional',
+  );
+  expect(outcome).toBeDefined();
+  if (outcome?._tag !== 'ToolOutcome') {
+    throw new Error('expected release_optional ToolOutcome');
+  }
+  expect(outcome.outcome).toBe('failure');
+  const error = Schema.decodeUnknownSync(AiError.AiError)(outcome.result);
+  expect(error.reason._tag).toBe('ToolParameterValidationError');
+  if (error.reason._tag !== 'ToolParameterValidationError') {
+    throw new Error('expected ToolParameterValidationError');
+  }
+  expect(error.reason.toolName).toBe('release_optional');
+  expect(error.reason.toolParams).toEqual({
+    id: 'r1',
+    environment: null,
+  });
+};
+
 /** A model that fails a test the moment it is asked anything. */
 const unreachableModel = Layer.effect(
   LanguageModel.LanguageModel,
@@ -147,7 +248,6 @@ const provide = <A, E>(
   );
 
 const CONVERSATION = LogVocabulary.ConversationId.make('approval-conversation');
-const PATH = AgentLog.pathFor(CONVERSATION);
 
 /**
  * Write a previous run's records straight into the conversation, as if a
@@ -156,20 +256,22 @@ const PATH = AgentLog.pathFor(CONVERSATION);
  */
 const seed = Effect.fn('test.seed')(function* (
   records: ReadonlyArray<ConversationRecord.Record>,
+  conversationId: LogVocabulary.ConversationId = CONVERSATION,
 ) {
   const store = yield* LogStore.Service;
-  yield* store.create(PATH, CONVERSATION).pipe(Effect.orDie);
+  const path = AgentLog.pathFor(conversationId);
+  yield* store.create(path, conversationId).pipe(Effect.orDie);
   const claim = yield* store
-    .acquire(PATH, LogVocabulary.ProducerId.make('previous-run'))
+    .acquire(path, LogVocabulary.ProducerId.make('previous-run'))
     .pipe(Effect.orDie);
   yield* store
     .append({
-      path: PATH,
+      path,
       producerId: claim.producerId,
       epoch: claim.epoch,
       sequence: claim.nextSequence,
       records: records.map((record) => ({
-        conversationId: CONVERSATION,
+        conversationId,
         timestamp: 1_700_000_000_000,
         record,
       })),
@@ -203,6 +305,108 @@ const suspended: ConversationRecord.Record = {
 };
 
 describe('durable tool approval', () => {
+  it.effect('returns malformed parameters without asking for approval', () =>
+    provide(
+      Effect.gen(function* () {
+        const ran = { count: 0 };
+        const conversation = Conversation.make(
+          releaseOptionalAgentWith(ran),
+          'malformed-before-approval',
+        );
+
+        const result = yield* conversation.run('release r1');
+
+        expect(result.outcome).toBe('success');
+        expect(result.text).toBe('Recovered.');
+        expect(ran.count).toBe(0);
+        const records = yield* conversation.records().pipe(Stream.runCollect);
+        const recordValues = Array.from(records, ({ record }) => record);
+        expect(
+          recordValues.some((record) => record._tag === 'ToolSuspended'),
+        ).toBe(false);
+        expect(
+          recordValues.some((record) => record._tag === 'ToolStarted'),
+        ).toBe(false);
+        expectMalformedParameterOutcome(recordValues);
+      }),
+      malformedApprovalScripted,
+    ),
+  );
+
+  it.effect(
+    'settles malformed parameters from an already-approved durable call',
+    () =>
+      provide(
+        Effect.gen(function* () {
+          const conversationId = LogVocabulary.ConversationId.make(
+            'malformed-approved-call',
+          );
+          const ran = { count: 0 };
+          yield* seed(
+            [
+              {
+                _tag: 'RunStarted',
+                agent: 'approval-parameter-test',
+                formatVersion: 1,
+                agentRevision: LogVocabulary.AgentRevision.make('1'),
+                prompt: [],
+              },
+              {
+                _tag: 'ToolCall',
+                step: 1,
+                id: CALL_ID,
+                name: 'release_optional',
+                params: { id: 'r1', environment: null },
+              },
+              {
+                _tag: 'ToolSuspended',
+                id: CALL_ID,
+                name: 'release_optional',
+                wait: ToolDispatch.INTERACTION_WAIT,
+                token: APPROVAL_ID,
+                request: { id: 'r1', environment: null },
+              },
+              {
+                _tag: 'ToolWaitCompleted',
+                id: CALL_ID,
+                name: 'release_optional',
+                wait: ToolDispatch.INTERACTION_WAIT,
+                token: APPROVAL_ID,
+                outcome: 'success',
+                result: null,
+              },
+            ],
+            conversationId,
+          );
+          const conversation = Conversation.make(
+            releaseOptionalAgentWith(ran),
+            conversationId,
+          );
+
+          const result = yield* conversation.run();
+
+          expect(result.outcome).toBe('success');
+          expect(result.text).toBe('Recovered.');
+          expect(ran.count).toBe(0);
+          const records = yield* conversation.records().pipe(Stream.runCollect);
+          const recordValues = Array.from(records, ({ record }) => record);
+          expectMalformedParameterOutcome(recordValues);
+          const resumedIndex = recordValues.findIndex(
+            (record) => record._tag === 'ToolResumed',
+          );
+          const outcomeIndex = recordValues.findIndex(
+            (record) => record._tag === 'ToolOutcome' && record.id === CALL_ID,
+          );
+          expect(resumedIndex).toBeGreaterThan(-1);
+          expect(outcomeIndex).toBe(resumedIndex + 1);
+          expect(
+            recordValues.some((record) => record._tag === 'ToolStarted'),
+          ).toBe(false);
+        }),
+        completionModel,
+      ),
+  );
+
   it.effect('suspends the run and surfaces the pending approval', () =>
     provide(
       Effect.gen(function* () {

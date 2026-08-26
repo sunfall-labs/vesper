@@ -93,20 +93,28 @@ const call = <Name extends keyof Tools>(
         error: new Error('tool returned no result'),
       };
     }
+    if (last.isFailure) {
+      if (!isRecord(last.result)) {
+        return {
+          kind: 'call-error',
+          error: new Error('tool returned a non-object failure'),
+        };
+      }
+      return {
+        kind: 'tool-failure',
+        tag: String(
+          '_tag' in last.result ? last.result['_tag'] : 'UnknownToolFailure',
+        ),
+        error: last.result,
+      } as const;
+    }
     if (!isRecord(last.result)) {
       return {
         kind: 'call-error',
         error: new Error('tool returned a non-object result'),
       };
     }
-    const value = last.result;
-    return last.isFailure
-      ? ({
-          kind: 'tool-failure',
-          tag: String(value['_tag']),
-          error: value,
-        } as const)
-      : ({ kind: 'ok', value } as const);
+    return { kind: 'ok', value: last.result } as const;
   }).pipe(
     Effect.provide(WorkspaceTools.layer),
     Effect.provide(
