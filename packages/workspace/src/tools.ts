@@ -707,7 +707,7 @@ const readFileTool = Tool.make('read_file', {
   // instead would make a mistyped filename fatal.
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const writeFileTool = Tool.make('write_file', {
   description:
@@ -727,7 +727,7 @@ const writeFileTool = Tool.make('write_file', {
   failure: Schema.Union([PathOutsideWorkspace, ...pathFailureSchemas]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const editFileTool = Tool.make('edit_file', {
   description:
@@ -758,7 +758,7 @@ const editFileTool = Tool.make('edit_file', {
   ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const ListedEntry = Schema.Struct({
   path: Schema.String,
@@ -792,7 +792,7 @@ const listFilesTool = Tool.make('list_files', {
   ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const SearchMatch = Schema.Struct({
   path: Schema.String,
@@ -835,7 +835,7 @@ const searchFilesTool = Tool.make('search_files', {
   ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const runShellTool = Tool.make('run_shell', {
   description:
@@ -870,7 +870,7 @@ const runShellTool = Tool.make('run_shell', {
     CommandPolicy,
     FilesystemPolicy,
   ],
-});
+}).annotate(Tool.Strict, true);
 
 /**
  * Approval switches for the workspace's mutating or host-authoritative tools.

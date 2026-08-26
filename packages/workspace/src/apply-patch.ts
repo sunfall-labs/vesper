@@ -313,7 +313,7 @@ export const makeApplyPatchTool = (needsApproval: boolean) =>
     failureMode: 'return',
     needsApproval,
     dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-  });
+  }).annotate(Tool.Strict, true);
 
 export const ApplyPatchTool = makeApplyPatchTool(false);
 
