@@ -8,7 +8,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Compaction } from '@sunfall/vesper-agent/compaction';
 import { ModelPlan } from '@sunfall/vesper-agent/model-plan';
-import { Effect, ExecutionPlan, Layer, Schema, Stream } from 'effect';
+import { Effect, ExecutionPlan, Layer, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
   LanguageModel,
@@ -297,9 +297,6 @@ const chargeCard = Tool.make('charge_card', {
   success: Schema.Struct({ authorization: Schema.String }),
 });
 const chargeToolkit = Toolkit.make(chargeCard);
-const chargeHandlers = chargeToolkit.toLayer({
-  charge_card: () => Effect.succeed({ authorization: 'approved' }),
-});
 
 const anthropicLayer = (
   http: Layer.Layer<HttpClient.HttpClient>,
@@ -608,6 +605,13 @@ describe('official Effect provider seam', () => {
         const fake = fakeHttp([
           { status: 200, body: openRouterNumericStringToolCall },
         ]);
+        const receivedAmount = yield* Ref.make<number | undefined>(undefined);
+        const chargeHandlers = chargeToolkit.toLayer({
+          charge_card: ({ amountCents }) =>
+            Ref.set(receivedAmount, amountCents).pipe(
+              Effect.as({ authorization: 'approved' }),
+            ),
+        });
 
         const parts = yield* LanguageModel.streamText({
           prompt: 'Charge 4999 cents.',
@@ -623,8 +627,9 @@ describe('official Effect provider seam', () => {
           Array.from(parts).find((part) => part.type === 'tool-call'),
         ).toMatchObject({
           name: 'charge_card',
-          params: { amountCents: 4999 },
+          params: { amountCents: '4999' },
         });
+        expect(yield* Ref.get(receivedAmount)).toBe(4999);
         expect(
           Array.from(parts).find((part) => part.type === 'tool-result'),
         ).toMatchObject({

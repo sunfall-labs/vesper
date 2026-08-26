@@ -24,7 +24,6 @@ import {
   type Entry,
   type Wiring,
 } from './internal/loop.js';
-import type { ParameterEncodingServices } from './internal/part-encoding.js';
 import {
   hasProtocol,
   register as registerProtocol,
@@ -273,11 +272,7 @@ export type WithOwnHandlers<HandlerTools extends Record<string, Tool.Any>> =
   // `any`. An earlier comment claimed otherwise; `types.test.ts` pins the
   // truth, because the difference decides whether callers inherit an `any`.
   | Tool.HandlerServices<HandlerTools[keyof HandlerTools]>
-  | Tool.ResultDecodingServices<HandlerTools[keyof HandlerTools]>
-  // The live model stream yields decoded tool-call parameters. Recording the
-  // provider-facing form requires encoding those parameters again, so expose
-  // the corresponding codec services at the same boundary.
-  | ParameterEncodingServices<HandlerTools>;
+  | Tool.ResultDecodingServices<HandlerTools[keyof HandlerTools]>;
 
 type WithOwnHandlersForState<
   StateTools extends Record<string, Tool.Any>,
@@ -289,8 +284,7 @@ type WithOwnHandlersForState<
       Tool.HandlerServices<StateTools[keyof StateTools]>,
       StateDefinition
     >
-  | Tool.ResultDecodingServices<StateTools[keyof StateTools]>
-  | ParameterEncodingServices<StateTools>;
+  | Tool.ResultDecodingServices<StateTools[keyof StateTools]>;
 
 /**
  * Discharge an agent's own tool handlers from whatever it required.

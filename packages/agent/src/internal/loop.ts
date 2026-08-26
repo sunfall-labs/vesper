@@ -29,7 +29,7 @@ import { TurnControl } from '../turn-control.js';
 import { CompactionRuntime } from './compaction.js';
 import { AgentEventRuntime } from './event.js';
 import * as Observability from './observability.js';
-import { encodePart } from './part-encoding.js';
+import { encodePart, type ModelStreamPart } from './part-encoding.js';
 import {
   incompleteOutputError,
   interactionRequiresConversationError,
@@ -431,40 +431,19 @@ export const makeEntry = <
               concurrency: definition.concurrency,
             })
             .pipe(
-              // `part` is reasserted to the same `Response.StreamPart<RunTools>`
-              // at each of the three points below that need it, rather than
-              // cast once and reused. Effect's mapped tool-part union is not
-              // idempotent under this compiled intersection: TypeScript's
-              // control-flow narrowing (excluding the `'error'` member below)
-              // produces a structural type this generic union no longer
-              // recognises as itself, so a single upstream cast stops
-              // type-checking at exactly the two downstream call sites that
-              // need the full, unnarrowed union again. Reasserting the same
-              // target type at each site is what the toolkit value passed
-              // alongside it already guarantees at runtime; nothing here
-              // asserts a *different* type than the one Chat actually decoded
-              // the part against.
               Stream.mapEffect((part) =>
                 part.type === 'error'
                   ? Effect.fail(
                       normalizeProviderError(part.error, part.metadata),
                     )
-                  : encodePart(
-                      part as Response.StreamPart<ModelTools>,
-                      resolvedToolkit,
-                    ).pipe(
+                  : encodePart(part, resolvedToolkit).pipe(
                       Effect.map((encodedPart) => ({ part, encodedPart })),
                     ),
               ),
               Stream.tap(({ part, encodedPart }) =>
                 Effect.gen(function* () {
                   seen.started = true;
-                  observe(
-                    seen,
-                    part as Response.StreamPart<RunTools>,
-                    encodedPart,
-                    resolvedToolkit,
-                  );
+                  observe(seen, part, encodedPart, resolvedToolkit);
                   if (encodedPart.type === 'finish') {
                     yield* Observability.usage(encodedPart.usage);
                   }
@@ -1660,7 +1639,7 @@ interface TurnState {
   finishReason: Response.FinishReason | undefined;
   emitted: boolean;
   started: boolean;
-  /** Decoded call params seen this turn, keyed by tool call id. */
+  /** Raw provider call params seen this turn, keyed by tool call id. */
   callsById: Map<
     string,
     {
@@ -1690,20 +1669,18 @@ const emptyTurnState = (): TurnState => ({
 /**
  * Accumulate what the stop decision and the result need from one turn.
  *
- * Takes both the decoded and encoded sibling of the same part: `encoded` is
- * what every existing accumulation here reads, and a `tool-approval-request`
- * carries no parameters of its own — the params worth showing an approver are
- * the same tool call's decoded ones, tracked from `decoded` as calls stream
- * by and looked up when the matching approval request arrives.
+ * Takes both the live and provider-facing sibling of the same part. A
+ * `tool-approval-request` carries no parameters of its own, so the raw request
+ * is tracked from its tool call and looked up when the approval arrives.
  */
 const observe = <PartTools extends Record<string, Tool.Any>>(
   state: TurnState,
-  decoded: Response.StreamPart<PartTools>,
+  part: ModelStreamPart<PartTools>,
   encoded: Response.StreamPartEncoded,
   toolkit: { readonly tools: Record<string, Tool.Any> },
 ): void => {
   state.emitted = true;
-  state.parts.push(decoded);
+  state.parts.push(part);
   switch (encoded.type) {
     case 'text-delta':
       state.text += encoded.delta;
@@ -1713,15 +1690,15 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
       break;
     case 'tool-call':
       state.toolCalls.push(encoded);
-      if (decoded.type === 'tool-call') {
-        const tool = toolkit.tools[decoded.name];
+      if (part.type === 'tool-call') {
+        const tool = toolkit.tools[part.name];
         const interaction =
           tool === undefined
             ? undefined
             : Option.getOrUndefined(Interaction.metadata(tool));
-        state.callsById.set(decoded.id, {
-          name: decoded.name,
-          input: decoded.params,
+        state.callsById.set(part.id, {
+          name: part.name,
+          input: part.params,
           ...(interaction === undefined ? {} : { interaction }),
         });
       }

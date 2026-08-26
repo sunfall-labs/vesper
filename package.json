@@ -102,5 +102,8 @@
     "msgpackr-extract": false,
     "protobufjs": false,
     "ssh2": false
+  },
+  "patchedDependencies": {
+    "effect@4.0.0-rc.109": "patches/effect@4.0.0-rc.109.patch"
   }
 }

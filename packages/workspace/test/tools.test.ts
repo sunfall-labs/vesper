@@ -69,11 +69,9 @@ type Outcome =
 /**
  * Invoke one tool and classify what came back.
  *
- * Three outcomes rather than two, because a *parameter* rejection does not
- * arrive the same way a handler failure does: `handle` fails outright, while a
- * declared failure rides back on the stream with `isFailure` set. Collapsing
- * them would let a test claiming to pin a typed failure pass on a validation
- * error instead.
+ * Three outcomes rather than two, because `failureMode: 'return'` carries both
+ * declared handler failures and typed parameter-validation failures on the
+ * stream, while framework failures still fail the call itself.
  */
 const call = <Name extends keyof Tools>(
   directory: string,
@@ -901,7 +899,16 @@ describe('edit_file', () => {
 
       // An empty string matches at every position, so there is no sound answer
       // to give; the schema refuses it before the handler has to invent one.
-      expect(outcome.kind).toBe('call-error');
+      expect(outcome).toMatchObject({
+        kind: 'tool-failure',
+        tag: 'AiError',
+        error: {
+          reason: {
+            _tag: 'ToolParameterValidationError',
+            toolName: 'edit_file',
+          },
+        },
+      });
       expect(readFileSync(join(directory, 'f.txt'), 'utf8')).toBe('abc');
     }),
   );
