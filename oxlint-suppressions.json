@@ -147,20 +147,9 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 9
+      "count": 8
     },
     "typescript/switch-exhaustiveness-check": {
-      "count": 1
-    }
-  },
-  "packages/agent/src/internal/part-encoding.ts": {
-    "effecttsgo/any-unknown-in-error-context": {
-      "count": 1
-    },
-    "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 1
-    },
-    "typescript/no-unsafe-type-assertion": {
       "count": 1
     }
   },

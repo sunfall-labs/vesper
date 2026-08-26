@@ -1,23 +1,14 @@
 import { Effect, Schema } from 'effect';
 import { AiError, Response, type Tool, type Toolkit } from 'effect/unstable/ai';
 
-// The loop's persistence boundary: every decoded model part is re-encoded to
-// the provider representation before it reaches observers or the durable
-// recording sink. Private to the loop — `agent.ts` re-imports only the
-// `ParameterEncodingServices` requirement term its public types name.
+// The loop's persistence boundary. Tool calls are provider input and keep
+// their encoded `unknown` parameters until Toolkit validates them for a typed
+// handler. Every other part has already crossed its schema boundary.
 
-export type ParameterEncodingServices<
-  EncodingTools extends Record<string, Tool.Any>,
-> = EncodingTools[keyof EncodingTools] extends infer Candidate
-  ? Candidate extends Tool.Any
-    ? Tool.ParametersSchema<Candidate>['EncodingServices']
-    : never
-  : never;
+export type ModelStreamPart<PartTools extends Record<string, Tool.Any>> =
+  | Response.StreamPart<PartTools>
+  | Response.ToolCallPart<string, unknown>;
 
-type EncodableToolCall<PartTools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<PartTools>,
-  { readonly type: 'tool-call' }
->;
 type EncodableToolResult<PartTools extends Record<string, Tool.Any>> = Extract<
   Response.StreamPart<PartTools>,
   { readonly type: 'tool-result' }
@@ -60,7 +51,7 @@ const encodeStandardPart = (
   );
 
 const encodeToolCall = <PartTools extends Record<string, Tool.Any>>(
-  part: EncodableToolCall<PartTools>,
+  part: Response.ToolCallPart<string, unknown>,
   toolkit: Toolkit.WithHandler<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   const tool = Object.hasOwn(toolkit.tools, part.name)
@@ -77,27 +68,13 @@ const encodeToolCall = <PartTools extends Record<string, Tool.Any>>(
       }),
     );
   }
-  // The toolkit lookup erases the name-to-schema relationship. The runtime
-  // schema is still the one that produced `part.params`; this assertion only
-  // restores its encoding-service requirement for the generic helper, just as
-  // dispatch restores the handler relationship.
-  const encoded = Schema.encodeEffect(tool.parametersSchema)(
-    part.params,
-  ) as Effect.Effect<
-    unknown,
-    Schema.SchemaError,
-    ParameterEncodingServices<PartTools>
-  >;
-  return encoded.pipe(
-    Effect.mapError(encodePartError),
-    Effect.map((params) => ({
-      type: 'tool-call',
-      id: part.id,
-      name: part.name,
-      params,
-      providerExecuted: part.providerExecuted,
-    })),
-  );
+  return Effect.succeed({
+    type: 'tool-call',
+    id: part.id,
+    name: part.name,
+    params: part.params,
+    providerExecuted: part.providerExecuted,
+  });
 };
 
 const encodeToolResult = <PartTools extends Record<string, Tool.Any>>(
@@ -127,9 +104,9 @@ const assertPartEncodingStrategy = (part: never): never => {
   throw new Error(`Unhandled response part encoding strategy: ${String(part)}`);
 };
 
-/** Encode a decoded model part before it reaches observers or persistence. */
+/** Preserve a model part in its provider-facing form for persistence. */
 export const encodePart = <PartTools extends Record<string, Tool.Any>>(
-  part: Response.StreamPart<PartTools>,
+  part: ModelStreamPart<PartTools>,
   toolkit: Toolkit.WithHandler<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   switch (part.type) {

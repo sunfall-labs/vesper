@@ -1,0 +1,224 @@
+diff --git a/dist/unstable/ai/LanguageModel.js b/dist/unstable/ai/LanguageModel.js
+index baa9a25a98866054381239b77a83bfa5419752ba..d1a1aebed91cebbc47091a76a121bb36fd1bd64f 100644
+--- a/dist/unstable/ai/LanguageModel.js
++++ b/dist/unstable/ai/LanguageModel.js
+@@ -496,7 +496,9 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (params) {
+       }
+     }
+     // Construct the response schema with the tools from the toolkit
+-    const ResponseSchema = Schema.mutable(Schema.Array(Response.Part(toolkit)));
++    const ResponseSchema = Schema.mutable(Schema.Array(Response.Part(toolkit, {
++      relaxParams: true
++    })));
+     // If tool call resolution is disabled, return the response without
+     // resolving the tool calls that were generated
+     if (options.disableToolCallResolution === true) {
+@@ -684,7 +686,9 @@ export const make = /*#__PURE__*/Effect.fnUntraced(function* (params) {
+         return Effect.void;
+       }) : identity)));
+     }
+-    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit));
++    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit, {
++      relaxParams: true
++    }));
+     const decodeParts = Schema.decodeEffect(ResponseSchema);
+     // Queue for decoded parts and tool results
+     const queue = yield* Queue.make();
+diff --git a/dist/unstable/ai/Response.d.ts b/dist/unstable/ai/Response.d.ts
+index 3e6a5bb4dcbc5cf5c386c5885a06f54d4bc3b7e7..da8fd6ce2e80e0c51c521280f8524e4fe07562f2 100644
+--- a/dist/unstable/ai/Response.d.ts
++++ b/dist/unstable/ai/Response.d.ts
+@@ -100,7 +100,9 @@ export type PartEncoded = TextPartEncoded | ReasoningPartEncoded | ReasoningDelt
+  * @category schemas
+  * @since 4.0.0
+  */
+-export declare const Part: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T) => Schema.Codec<Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, PartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
++export declare const Part: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T, options?: {
++    readonly relaxParams?: boolean;
++}) => Schema.Codec<Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, PartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
+ /**
+  * A type for representing streaming response parts with tool-specific typing.
+  *
+@@ -121,7 +123,9 @@ export type StreamPartEncoded = TextStartPartEncoded | TextDeltaPartEncoded | Te
+  * @category schemas
+  * @since 4.0.0
+  */
+-export declare const StreamPart: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T) => Schema.Codec<StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, StreamPartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
++export declare const StreamPart: <T extends Toolkit.Any | Toolkit.WithHandler<any>>(toolkit: T, options?: {
++    readonly relaxParams?: boolean;
++}) => Schema.Codec<StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>, StreamPartEncoded, Tool.ResultDecodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>, Tool.ResultEncodingServices<Toolkit.Tools<T>[keyof Toolkit.Tools<T>]>>;
+ /**
+  * Utility type that extracts tool call parts from a set of tools.
+  *
+diff --git a/dist/unstable/ai/Response.js b/dist/unstable/ai/Response.js
+index 6cb3604fbbec3a5b4518cbff0cf37a89095b3cb2..01815e86fe7c09726b4fda27563d288e47f25d67 100644
+--- a/dist/unstable/ai/Response.js
++++ b/dist/unstable/ai/Response.js
+@@ -59,11 +59,11 @@ export const AllParts = toolkit => {
+  * @category schemas
+  * @since 4.0.0
+  */
+-export const Part = toolkit => {
++export const Part = (toolkit, options) => {
+   const toolCalls = [];
+   const toolResults = [];
+   for (const tool of Object.values(toolkit.tools)) {
+-    const toolCall = ToolCallPart(tool.name, tool.parametersSchema);
++    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema);
+     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema);
+     toolCalls.push(toolCall);
+     toolResults.push(toolResult);
+@@ -76,11 +76,11 @@ export const Part = toolkit => {
+  * @category schemas
+  * @since 4.0.0
+  */
+-export const StreamPart = toolkit => {
++export const StreamPart = (toolkit, options) => {
+   const toolCalls = [];
+   const toolResults = [];
+   for (const tool of Object.values(toolkit.tools)) {
+-    const toolCall = ToolCallPart(tool.name, tool.parametersSchema);
++    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema);
+     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema);
+     toolCalls.push(toolCall);
+     toolResults.push(toolResult);
+diff --git a/dist/unstable/ai/Toolkit.js b/dist/unstable/ai/Toolkit.js
+index d51f3213d28a69f145b4c17479f9c5bb37b5c639..15b951ce26c508cf039d8ad071aa624b7be297f9 100644
+--- a/dist/unstable/ai/Toolkit.js
++++ b/dist/unstable/ai/Toolkit.js
+@@ -56,7 +56,8 @@ const Proto = {
+         }
+         // Fetch cached schemas / handlers for the tool
+         const schemas = getSchemas(tool);
+-        // Decode the tool call parameters which will be passed to the handler
++        // Decode the tool call parameters which will be passed to the handler.
++        // When decoding fails, respect the tool's failureMode before propagating.
+         const decodedParams = yield* schemas.decodeParameters(params).pipe(Effect.mapError(cause => AiError.make({
+           module: "Toolkit",
+           method: `${name}.handle`,
+@@ -65,7 +66,18 @@ const Proto = {
+             toolParams: params,
+             description: cause.message
+           })
+-        })));
++        })), Effect.matchEffect({
++          onFailure: error => tool.failureMode === "error" ? Effect.fail(error) : schemas.encodeResult(error).pipe(Effect.map(encodedResult => Stream.succeed({
++            result: error,
++            encodedResult,
++            isFailure: true,
++            preliminary: false
++          })), Effect.orDie),
++          onSuccess: Effect.succeed
++        }));
++        if (Stream.isStream(decodedParams)) {
++          return decodedParams;
++        }
+         // Setup the handler context
+         const queue = yield* Queue.make();
+         const context = {
+diff --git a/src/unstable/ai/LanguageModel.ts b/src/unstable/ai/LanguageModel.ts
+index 0f5f544b0b0a884aa49ca631715bf7b5cdcd231f..f0414d972575632c9974c089094730913a02f4a1 100644
+--- a/src/unstable/ai/LanguageModel.ts
++++ b/src/unstable/ai/LanguageModel.ts
+@@ -1167,7 +1167,7 @@ export const make: (params: {
+ 
+     // Construct the response schema with the tools from the toolkit
+     const ResponseSchema = Schema.mutable(
+-      Schema.Array(Response.Part(toolkit))
++      Schema.Array(Response.Part(toolkit, { relaxParams: true }))
+     )
+ 
+     // If tool call resolution is disabled, return the response without
+@@ -1469,7 +1469,7 @@ export const make: (params: {
+       >
+     }
+ 
+-    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit))
++    const ResponseSchema = Schema.NonEmptyArray(Response.StreamPart(toolkit, { relaxParams: true }))
+     const decodeParts = Schema.decodeEffect(ResponseSchema)
+ 
+     // Queue for decoded parts and tool results
+diff --git a/src/unstable/ai/Response.ts b/src/unstable/ai/Response.ts
+index fab6fa0ce51e702307f0c90ed1cdaa199735d165..a1f1575714d14fa31446944f674853d35d9e3bda 100644
+--- a/src/unstable/ai/Response.ts
++++ b/src/unstable/ai/Response.ts
+@@ -263,7 +263,8 @@ export type PartEncoded =
+  * @since 4.0.0
+  */
+ export const Part = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
+-  toolkit: T
++  toolkit: T,
++  options?: { readonly relaxParams?: boolean }
+ ): Schema.Codec<
+   Part<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
+   PartEncoded,
+@@ -273,7 +274,7 @@ export const Part = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
+   const toolCalls: Array<Schema.Top> = []
+   const toolResults: Array<Schema.Top> = []
+   for (const tool of Object.values(toolkit.tools as Record<string, Tool.Any>)) {
+-    const toolCall = ToolCallPart(tool.name, tool.parametersSchema)
++    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema)
+     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema)
+     toolCalls.push(toolCall)
+     toolResults.push(toolResult)
+@@ -355,7 +356,8 @@ export type StreamPartEncoded =
+  * @since 4.0.0
+  */
+ export const StreamPart = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
+-  toolkit: T
++  toolkit: T,
++  options?: { readonly relaxParams?: boolean }
+ ): Schema.Codec<
+   StreamPart<T extends Toolkit.Any ? Toolkit.Tools<T> : Toolkit.WithHandlerTools<T>>,
+   StreamPartEncoded,
+@@ -365,7 +367,7 @@ export const StreamPart = <T extends Toolkit.Any | Toolkit.WithHandler<any>>(
+   const toolCalls: Array<Schema.Top> = []
+   const toolResults: Array<Schema.Top> = []
+   for (const tool of Object.values(toolkit.tools as Record<string, Tool.Any>)) {
+-    const toolCall = ToolCallPart(tool.name, tool.parametersSchema)
++    const toolCall = ToolCallPart(tool.name, options?.relaxParams === true ? Schema.Unknown : tool.parametersSchema)
+     const toolResult = ToolResultPart(tool.name, tool.successSchema, tool.failureSchema)
+     toolCalls.push(toolCall)
+     toolResults.push(toolResult)
+diff --git a/src/unstable/ai/Toolkit.ts b/src/unstable/ai/Toolkit.ts
+index 1cedb040c6540884c03f58265ca7d0bd4b88f24f..169f4a7a602eb2ddf49ef67b10cc823b82fc2c91 100644
+--- a/src/unstable/ai/Toolkit.ts
++++ b/src/unstable/ai/Toolkit.ts
+@@ -293,7 +293,8 @@ const Proto = {
+         // Fetch cached schemas / handlers for the tool
+         const schemas = getSchemas(tool)
+ 
+-        // Decode the tool call parameters which will be passed to the handler
++        // Decode the tool call parameters which will be passed to the handler.
++        // When decoding fails, respect the tool's failureMode before propagating.
+         const decodedParams = yield* schemas.decodeParameters(params).pipe(
+           Effect.mapError((cause) =>
+             AiError.make({
+@@ -305,8 +306,26 @@ const Proto = {
+                 description: cause.message
+               })
+             })
+-          )
++          ),
++          Effect.matchEffect({
++            onFailure: (error) =>
++              tool.failureMode === "error"
++                ? Effect.fail(error)
++                : schemas.encodeResult(error).pipe(
++                  Effect.map((encodedResult) =>
++                    Stream.succeed({ result: error, encodedResult, isFailure: true, preliminary: false }) as Stream.Stream<
++                      { readonly result: any; readonly encodedResult: any; readonly isFailure: boolean; readonly preliminary: boolean },
++                      never
++                    >
++                  ),
++                  Effect.orDie
++                ),
++            onSuccess: Effect.succeed
++          })
+         )
++        if (Stream.isStream(decodedParams)) {
++          return decodedParams
++        }
+ 
+         // Setup the handler context
+         const queue = yield* Queue.make<{
