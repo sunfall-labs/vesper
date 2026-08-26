@@ -1517,6 +1517,12 @@ describe('the JSON schema these tools advertise', () => {
       expect(JSON.stringify(schemaFor(name))).not.toContain('Infinity');
     }
   });
+
+  it('requires providers to enforce every workspace parameter schema', () => {
+    for (const tool of Object.values(WorkspaceTools.toolkit.tools)) {
+      expect(ToolNamespace.getStrictMode(tool)).toBe(true);
+    }
+  });
 });
 
 describe('public numeric failure schemas', () => {

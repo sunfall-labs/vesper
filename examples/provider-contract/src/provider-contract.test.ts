@@ -276,7 +276,7 @@ const lookup = Tool.make('lookup', {
   description: 'look up a deterministic value',
   parameters: Schema.Struct({ key: Schema.String }),
   success: Schema.Struct({ value: Schema.String }),
-});
+}).annotate(Tool.Strict, true);
 const toolkit = Toolkit.make(lookup);
 const handlers = toolkit.toLayer({
   lookup: ({ key }) => Effect.succeed({ value: key }),
@@ -501,12 +501,41 @@ describe('official Effect provider seam', () => {
               type: 'function',
               name: 'lookup',
               description: 'look up a deterministic value',
+              strict: true,
             },
           ],
         });
         expect(observed.text).toBe('world');
         expect(observed.completed).toMatchObject({
           usage: { input: 17, output: 9 },
+        });
+      }),
+  );
+
+  it.effect(
+    'sends strict tool schemas through the native OpenRouter contract',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([{ status: 200, body: openRouterSuccess }]);
+
+        yield* runAgent(openRouterLayer(fake.layer));
+        const request = present(fake.requests[0]);
+        const body = present(requestJson(request));
+
+        expect(request.url).toBe(
+          'https://openrouter.invalid/v1/chat/completions',
+        );
+        expect(body).toMatchObject({
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'lookup',
+                description: 'look up a deterministic value',
+                strict: true,
+              },
+            },
+          ],
         });
       }),
   );
