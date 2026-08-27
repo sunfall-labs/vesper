@@ -4,6 +4,8 @@ import { Prompt } from 'effect/unstable/ai';
 import { AgentBranch } from './branch.js';
 import { rebuild } from './internal/history.js';
 
+export { usageFrom } from './internal/history.js';
+
 /**
  * Rebuild the active durable conversation as an Effect AI prompt.
  *

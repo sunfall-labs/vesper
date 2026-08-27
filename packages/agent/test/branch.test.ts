@@ -447,7 +447,7 @@ describe('rebuilding a branched conversation', () => {
   // mind. Mutation-checked: scoping `usageFrom` to the active path drops the
   // abandoned run's tokens and fails this.
   it('still counts what the abandoned branch cost', () => {
-    const usage = AgentHistoryRuntime.usageFrom(
+    const usage = AgentHistory.usageFrom(
       envelopes([
         started('one'),
         { _tag: 'TurnFinished', step: 1, usage: { input: 7, output: 3 } },
