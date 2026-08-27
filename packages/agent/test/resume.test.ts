@@ -709,7 +709,7 @@ describe('rebuilding a prompt from records', () => {
   });
 
   it('sums usage across runs rather than reporting the last one', () => {
-    const usage = AgentHistoryRuntime.usageFrom(
+    const usage = AgentHistory.usageFrom(
       envelopes([
         {
           _tag: 'RunStarted',
