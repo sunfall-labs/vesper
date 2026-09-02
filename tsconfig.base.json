@@ -91,6 +91,7 @@
       "@sunfall/vesper-log/layer-memory": [
         "./packages/log/src/layer-memory.ts"
       ],
+      "@sunfall/vesper-log/testing": ["./packages/log/src/testing.ts"],
       "@sunfall/vesper-log-pg/layer": ["./packages/log-pg/src/layer.ts"],
       "@sunfall/vesper-log-pg/client": ["./packages/log-pg/src/client.ts"],
       "@sunfall/vesper-log-sqlite/layer": [

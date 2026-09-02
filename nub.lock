@@ -248,6 +248,9 @@ importers:
 
   packages/log:
     devDependencies:
+      '@effect/vitest':
+        specifier: 'catalog:'
+        version: 4.0.0-rc.112(effect@4.0.0-rc.112)(vitest@4.1.11(@opentelemetry/api@1.9.0)(@types/node@24.13.3)(vite@8.2.2(@types/node@24.13.3)))
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.112(patch_hash=8c1003ca68389c10a651ad91323f7aab61f71171eb8a7433ec34ff11970dbf81)

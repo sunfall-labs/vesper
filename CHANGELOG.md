@@ -5,6 +5,26 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added `@sunfall/vesper-log/testing`, publishing the `LogStore` contract
+  suite that `@sunfall/vesper-log-sqlite` and `@sunfall/vesper-log-pg` already
+  ran privately, so a third-party adapter can certify against it without
+  vendoring this package's test tree. `LogStoreConformance.register(name,
+layer, { concurrent })` runs every case — creation and epoch bumps,
+  compare-and-acquire, append atomicity, idempotent retry and conflict
+  detection, sequence gaps, fencing, per-record offsets, exclusive-bound
+  paging (forwards and backwards, including mid-batch resume), `meta`, and
+  in-process change notification — as an `@effect/vitest` suite; `concurrent:
+false` skips any case that would need two independent connections to the
+  same storage, which a single-file SQLite layer cannot offer.
+  `LogStoreConformance.registerDeadChangeFeed` remains separate for the one
+  backend (the bundled memory adapter) that can fake a dying change feed on
+  demand. `@effect/vitest` is an optional peer dependency scoped to this
+  subpath; installing `@sunfall/vesper-log`'s runtime modules does not pull
+  in a test framework. Compatibility: additive. `packages/log/test` no longer
+  exports an internal `log-store-contract.ts` — it is replaced by this
+  published module, and `log-sqlite`/`log-pg` now call it instead of keeping
+  duplicated adapter-local copies of the same cases.
+
 - Provider finishes explicitly marked `length`, `content-filter`, or `error`
   no longer settle an agent run as a successful answer. The raw finish and
   partial text remain stream-visible; blocking runs fail with

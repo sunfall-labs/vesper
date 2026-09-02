@@ -111,9 +111,14 @@ publishing policy.
   re-exports. A file that is not in `exports` is internal.
 - Keep tests in `packages/<module>/test/`, named for what they exercise.
 - A backend's internal contract suite lives beside the interface it verifies,
-  not in a testkit package or the published export map. A shared testkit would
-  have to depend on those packages while they depend on it to run their
-  contracts, creating a cycle that per-package test runs may not expose.
+  not in a separate testkit package. A shared testkit package would have to
+  depend on the backends that depend on it to run their contracts, creating a
+  cycle that per-package test runs may not expose. Publishing the suite as a
+  subpath of the package that already owns the interface — `/testing`, the
+  same shape as `@sunfall/vesper-agent/testing` — does not create that cycle
+  and is how a contract suite is made certifiable by adapters outside this
+  repository; see `@sunfall/vesper-log/testing` and "Certifying an adapter"
+  in [`packages/log/README.md`](../packages/log/README.md).
 
 ## Tests
 

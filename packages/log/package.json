@@ -60,6 +60,10 @@
     "./layer-memory": {
       "types": "./dist/layer-memory.d.ts",
       "default": "./dist/layer-memory.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     }
   },
   "publishConfig": {
@@ -69,9 +73,16 @@
     "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.112"
+    "effect": "4.0.0-rc.112",
+    "@effect/vitest": "4.0.0-rc.112"
+  },
+  "peerDependenciesMeta": {
+    "@effect/vitest": {
+      "optional": true
+    }
   },
   "devDependencies": {
+    "@effect/vitest": "catalog:",
     "effect": "catalog:",
     "vitest": "^4.1.9"
   }
