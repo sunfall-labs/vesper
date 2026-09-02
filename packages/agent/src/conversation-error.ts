@@ -1,4 +1,5 @@
 import {
+  AgentDefinitionDigest,
   AgentRevision,
   ConversationId,
   ToolCallId,
@@ -9,18 +10,22 @@ const CompatibilityErrorFields: {
   readonly message: typeof Schema.String;
   readonly expectedAgent: typeof Schema.String;
   readonly expectedRevision: typeof Schema.String;
+  readonly expectedDigest: Schema.optionalKey<typeof AgentDefinitionDigest>;
   readonly persistedFormat: ReturnType<
     typeof Schema.optionalKey<Schema.Natural>
   >;
   readonly persistedAgent: ReturnType<typeof Schema.optionalKey<Schema.String>>;
   readonly persistedRevision: Schema.optionalKey<typeof AgentRevision>;
+  readonly persistedDigest: Schema.optionalKey<typeof AgentDefinitionDigest>;
 } = {
   message: Schema.String,
   expectedAgent: Schema.String,
   expectedRevision: Schema.String,
+  expectedDigest: Schema.optionalKey(AgentDefinitionDigest),
   persistedFormat: Schema.optionalKey(Schema.Natural),
   persistedAgent: Schema.optionalKey(Schema.String),
   persistedRevision: Schema.optionalKey(AgentRevision),
+  persistedDigest: Schema.optionalKey(AgentDefinitionDigest),
 };
 
 const SuspendedConversationErrorFields: {

@@ -216,6 +216,9 @@ export const resumeState = (
   formatVersion: FORMAT_VERSION,
   agent: compatibility.agent,
   agentRevision: compatibility.revision,
+  ...(compatibility.digest === undefined
+    ? {}
+    : { agentDigest: compatibility.digest }),
   usage,
   signalCursor,
   ...(completed === undefined ? {} : { completed }),

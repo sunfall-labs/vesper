@@ -167,6 +167,25 @@ compatibility metadata is not silently self-upgraded.
 [Design.md](../Design.md) has the reasoning behind the explicit compatibility
 identity.
 
+`revision` is declared by an application and nothing checks that it was
+actually bumped when the definition changed. `Agent.make` additionally
+computes `digest` — a canonical SHA-256 over the parts of the compiled
+definition that affect durable compatibility (tool names and their
+parameter/success/failure JSON schemas, subagent names and digests, the
+skill catalog, `codeMode`, and `resultOverflow.threshold`; see the agent
+guide's revision section for the full inclusion/exclusion list) — and
+persists it beside `revision` in `RunStarted`, `Compacted`, and the
+`RunSettled` resume aggregate. Resume compares both: **same revision with a
+different digest** means the definition changed underneath an unbumped
+revision, and fails with a typed `Conversation.CompatibilityError` naming
+both digests and saying the revision must be bumped — the case a revision
+check alone cannot catch on its own. A record written before this field
+existed carries no digest at all; that absence is accepted as compatible,
+not rejected, so old history is not retroactively broken by upgrading to a
+release that computes one. `revision` remains the human-declared identity —
+bumping it is still how an application says "this history is intentionally
+incompatible" — the digest only catches the case where nobody said so.
+
 ## Settlement, and what an orphan looks like
 
 Every run ends with a `RunSettled` record — `success`, `failure`, `cancelled`,

@@ -55,6 +55,7 @@ const started = (
   agent = 'test',
   revision: string | undefined = '1',
   formatVersion: number | undefined = 1,
+  digest?: string,
 ): ConversationRecord.Record => {
   return {
     _tag: 'RunStarted',
@@ -63,6 +64,9 @@ const started = (
       ? {}
       : { agentRevision: LogVocabulary.AgentRevision.make(revision) }),
     ...(formatVersion === undefined ? {} : { formatVersion }),
+    ...(digest === undefined
+      ? {}
+      : { agentDigest: LogVocabulary.AgentDefinitionDigest.make(digest) }),
     prompt: [],
   };
 };
@@ -189,6 +193,61 @@ describe('durable compatibility', () => {
       expect(result.text).toBe('ok');
       expect(calls.count).toBe(1);
     }),
+  );
+
+  it.effect('resumes history recorded before the digest field existed', () =>
+    Effect.gen(function* () {
+      const calls = { count: 0 };
+      const result = yield* run(
+        Effect.gen(function* () {
+          // `started()` writes no `agentDigest`, simulating a `RunStarted`
+          // recorded before this feature existed. `definition()` builds a
+          // real `Agent`, whose `digest` is always defined — this is the
+          // "absent digest in an older record is accepted as compatible"
+          // half of the contract.
+          yield* seed('no-digest', [started('test', '1', 1)]);
+          return yield* Conversation.make(definition(), 'no-digest').run(
+            'continue',
+          );
+        }),
+        calls,
+      );
+
+      expect(result.text).toBe('ok');
+      expect(calls.count).toBe(1);
+    }),
+  );
+
+  it.effect(
+    'rejects a same-revision history recorded under a different digest',
+    () =>
+      Effect.gen(function* () {
+        const calls = { count: 0 };
+        const agent = definition();
+        // A digest that cannot coincidentally equal the real one: it is not
+        // even the right shape's worth of entropy, only its length.
+        const staleDigest = '0'.repeat(63) + '1';
+
+        const failure = yield* run(
+          Effect.gen(function* () {
+            yield* seed('digest-mismatch', [
+              started('test', '1', 1, staleDigest),
+            ]);
+            yield* Conversation.make(agent, 'digest-mismatch').run('continue');
+          }),
+          calls,
+        ).pipe(Effect.flip);
+
+        expect(failure).toBeInstanceOf(Conversation.CompatibilityError);
+        expect(failure.message).toContain('bump revision');
+        expect(failure.message).toContain(staleDigest);
+        expect(failure.message).toContain(agent.digest);
+        if (failure._tag === 'CompatibilityError') {
+          expect(failure.persistedDigest).toBe(staleDigest);
+          expect(failure.expectedDigest).toBe(agent.digest);
+        }
+        expect(calls.count).toBe(0);
+      }),
   );
 
   it.effect.each([

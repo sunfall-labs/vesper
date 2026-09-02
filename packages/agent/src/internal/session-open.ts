@@ -484,6 +484,7 @@ export const openWith = (
               compatibility: {
                 agent: childOptions.agent,
                 revision: childOptions.revision,
+                digest: childOptions.digest,
               },
             });
             yield* ensureChildReference(

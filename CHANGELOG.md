@@ -5,6 +5,22 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- `Agent.make` now computes `digest` — a canonical SHA-256 over the parts of
+  a compiled definition that affect durable compatibility: tool names and
+  their parameter/success/failure JSON schemas, subagent names and digests,
+  the skill catalog, `codeMode`, and `resultOverflow.threshold` — and carries
+  it read-only beside `revision`. Recorded runs persist it in `RunStarted`,
+  `Compacted`, and the `RunSettled` resume aggregate; resume, branch, and
+  fork now reject a same-revision history whose persisted digest disagrees
+  with the current definition's, with a typed `Conversation.CompatibilityError`
+  naming both digests and saying the revision must be bumped. A record
+  written before this field existed has no digest and is still accepted as
+  compatible. Compatibility: purely additive — existing history without a
+  digest resumes exactly as before, and no application code changes unless it
+  wants to read `agent.digest`. `revision` remains the sole human-declared
+  compatibility identity; the digest only catches the case where it should
+  have been bumped and was not.
+
 - Provider finishes explicitly marked `length`, `content-filter`, or `error`
   no longer settle an agent run as a successful answer. The raw finish and
   partial text remain stream-visible; blocking runs fail with
