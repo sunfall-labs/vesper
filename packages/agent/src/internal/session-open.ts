@@ -21,6 +21,7 @@ import {
   type CompatibilityError,
 } from '../conversation-error.js';
 import { AgentBranch } from '../branch.js';
+import * as Failpoint from './failpoint.js';
 import type {
   ChildOptions,
   Compatibility,
@@ -227,6 +228,7 @@ export const openWith = (
         ? Effect.die(new Error('compare-and-acquire retry exhausted'))
         : Effect.fail(lastConflict);
     }
+    yield* Failpoint.hit('claim:after-acquire');
     const sequence = yield* SynchronizedRef.make(claim.nextSequence);
     const childLock = yield* Semaphore.make(1);
 

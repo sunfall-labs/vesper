@@ -7,6 +7,7 @@ import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
 
 import { AgentEvents } from './event.js';
 import { ToolDispatch } from './dispatch.js';
+import * as Failpoint from './internal/failpoint.js';
 import { AgentHistory } from './internal/history.js';
 import { DurabilityError } from './conversation-error.js';
 import type { Session } from './log.js';
@@ -50,7 +51,7 @@ export const record = <Tools extends Record<string, Tool.Any>, E, R>(
           // turn one settled call into two durable outcomes.
           return session.append(flush(pending));
         }
-        return session.append(recordsFor(pending, event));
+        return appendWithFailpoints(session, recordsFor(pending, event));
       }).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
     }),
   );
@@ -81,6 +82,7 @@ const compaction = (
       ),
     );
 
+    yield* Failpoint.hit('compaction:before-append');
     yield* session.append([
       {
         _tag: 'Compacted',
@@ -97,6 +99,63 @@ const compaction = (
         keptMessages: event.keptMessages,
       },
     ]);
+    yield* Failpoint.hit('compaction:after-append');
+  });
+
+/**
+ * The one durable-boundary failpoint a records batch produced by one lifecycle
+ * event can carry, before and after `session.append` durably commits it.
+ *
+ * A single event never produces more than one of these tags in the same
+ * batch — `recordsFor` emits at most one "special" record per call, flushed
+ * text aside — so a per-batch lookup is exact, not a heuristic.
+ */
+const BEFORE_LOCATION: Partial<
+  Record<ConversationRecord.Record['_tag'], Failpoint.Location>
+> = {
+  ToolOutcome: 'tool:before-outcome',
+  TurnFinished: 'turn:before-finished',
+  Completed: 'run:before-completed',
+};
+
+const AFTER_LOCATION: Partial<
+  Record<ConversationRecord.Record['_tag'], Failpoint.Location>
+> = {
+  ToolOutcome: 'tool:after-outcome',
+  ToolSuspended: 'approval:after-suspended',
+  TurnFinished: 'turn:after-finished',
+  SignalReceived: 'signal:after-received',
+};
+
+const locationFor = (
+  table: Partial<Record<ConversationRecord.Record['_tag'], Failpoint.Location>>,
+  records: ReadonlyArray<ConversationRecord.Record>,
+): Failpoint.Location | undefined => {
+  for (const candidate of records) {
+    const location = table[candidate._tag];
+    if (location !== undefined) {
+      return location;
+    }
+  }
+  return undefined;
+};
+
+/** Append one lifecycle event's records, bracketed by whichever durable
+ * boundary failpoints the batch corresponds to. */
+const appendWithFailpoints = (
+  session: Session,
+  records: ReadonlyArray<ConversationRecord.Record>,
+): Effect.Effect<void, DurabilityError> =>
+  Effect.gen(function* () {
+    const before = locationFor(BEFORE_LOCATION, records);
+    if (before !== undefined) {
+      yield* Failpoint.hit(before);
+    }
+    yield* session.append(records);
+    const after = locationFor(AFTER_LOCATION, records);
+    if (after !== undefined) {
+      yield* Failpoint.hit(after);
+    }
   });
 
 /** Maximum time run teardown waits for the settlement append. */

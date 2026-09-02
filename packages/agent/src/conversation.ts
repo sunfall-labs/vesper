@@ -15,6 +15,7 @@ import {
 import { ToolDispatch } from './dispatch.js';
 import type { AgentEvents } from './event.js';
 import { Interaction } from './interaction.js';
+import * as Failpoint from './internal/failpoint.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
 import type { RecordingPolicy } from './recording-policy.js';
@@ -393,17 +394,19 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
                   }),
                 }),
               ).pipe(Effect.orDie);
-        return yield* session.append([
-          {
-            _tag: 'ToolWaitCompleted',
-            id: normalizedId,
-            name: suspended.name,
-            wait: ToolDispatch.INTERACTION_WAIT,
-            token: suspended.token,
-            outcome: decision === 'approve' ? 'success' : 'failure',
-            result,
-          },
-        ]);
+        return yield* session
+          .append([
+            {
+              _tag: 'ToolWaitCompleted',
+              id: normalizedId,
+              name: suspended.name,
+              wait: ToolDispatch.INTERACTION_WAIT,
+              token: suspended.token,
+              outcome: decision === 'approve' ? 'success' : 'failure',
+              result,
+            },
+          ])
+          .pipe(Effect.tap(() => Failpoint.hit('approval:after-resolved')));
       }),
     resolveInteraction: (tool, toolCallId, result) =>
       Effect.gen(function* () {
@@ -452,17 +455,19 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             reason: 'already_resolved',
           });
         }
-        return yield* session.append([
-          {
-            _tag: 'ToolWaitCompleted',
-            id: normalizedId,
-            name: suspended.name,
-            wait: ToolDispatch.INTERACTION_WAIT,
-            token: suspended.token,
-            outcome: 'success',
-            result: encodedResult,
-          },
-        ]);
+        return yield* session
+          .append([
+            {
+              _tag: 'ToolWaitCompleted',
+              id: normalizedId,
+              name: suspended.name,
+              wait: ToolDispatch.INTERACTION_WAIT,
+              token: suspended.token,
+              outcome: 'success',
+              result: encodedResult,
+            },
+          ])
+          .pipe(Effect.tap(() => Failpoint.hit('approval:after-resolved')));
       }),
   };
 };

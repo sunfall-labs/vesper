@@ -314,7 +314,44 @@ after semantics).
   deduplication is the application's job
   (`docs/conversations.md`, Signals section).
 
-## Discrepancies
+## VSP-015 — Convergence at named durable boundaries is chaos-tested, not asserted
+
+**Guarantee.** `packages/agent/src/internal/failpoint.ts` names the durable
+boundaries the recording and recovery machinery crosses as a closed
+`Failpoint.Location` union, with at least one instrumented call site per
+location across `dispatch.ts`, `internal/session-open.ts`,
+`recording-sink.ts`, and `conversation.ts`
+(`packages/agent/src/internal/failpoint.ts:58-72`); `test/failpoint.test.ts`
+statically checks the union and the call sites cannot drift apart.
+`Chaos.converge` (`packages/agent/src/testing.ts`) drives a scripted
+conversation with a crash armed at one location, reopens it with the crash
+disarmed, and checks the recovered result against a crash-free baseline, a
+well-formed durable history, and no tool call replayed outside the
+`ToolStarted`..`ToolOutcome` window it is legitimately reconciled through.
+`test/chaos.test.ts` runs this scenario — two tool calls and one durable
+approval — against both the in-memory and the SQLite log store, and
+`claim:after-acquire`, `tool:before-started`, `approval:after-resolved`,
+`turn:before-finished`, and `turn:after-finished` converge cleanly on both.
+
+**Non-guarantee.** The same suite found, and pins as regression tests rather
+than papering over, two locations that do not yet converge cleanly:
+cumulative usage undercounts by exactly one physical run's worth of tokens
+after a crash whose own physical run reaches settlement near a tool boundary
+(`tool:after-started`, `tool:before-outcome`, `tool:after-outcome`,
+`approval:after-suspended`), and recovering from a crash between the final
+turn's `TurnFinished` and its `Completed` record re-asks the provider for a
+turn whose content is already fully durable instead of deriving `Completed`
+from history the way an unanswered tool call is already dropped from a
+resumed prompt (`run:before-completed`). Neither is a correctness violation
+in the sense VSP-006 or VSP-001 promise — no tool re-runs, no history
+corrupts — but neither is "resumed run doesn't re-ask the provider for turns
+it completed" fully true at these two locations either. `test/chaos.test.ts`
+names both, with the record-level trace each was diagnosed from, next to
+`CONVERGING_LOCATIONS`. This scenario also does not yet cross a compaction
+threshold or send a signal, so `compaction:before-append`,
+`compaction:after-append`, and `signal:after-received` report
+`not-triggered` rather than either status — a scenario gap, not a finding,
+tracked the same way.
 
 - **`docs/conversations.md` says a failed append is a defect; the code makes
   it a typed failure.** `docs/conversations.md`'s "The conversation log"

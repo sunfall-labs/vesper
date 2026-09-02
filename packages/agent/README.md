@@ -703,6 +703,47 @@ is explicit when repetition is the behavior under test. `fake.requests`
 exposes normalized prompts, tool names, and tool choice without retaining a
 tracing span.
 
+### Failpoints and chaos
+
+`packages/agent/src/internal/failpoint.ts` names every durable boundary the
+recording and recovery machinery crosses — immediately before or after an
+append that changes what a resumed run will see — as a closed
+`Failpoint.Location` union: `claim:after-acquire`, `tool:before-started`,
+`tool:after-started`, `tool:before-outcome`, `tool:after-outcome`,
+`approval:after-suspended`, `approval:after-resolved`, `turn:before-finished`,
+`turn:after-finished`, `run:before-completed`, `compaction:before-append`,
+`compaction:after-append`, `signal:after-received`. Every location has at
+least one instrumented call site across `dispatch.ts`, `internal/session-open.ts`,
+`recording-sink.ts`, and `conversation.ts`, and `test/failpoint.test.ts`
+statically checks that the union and the call sites cannot drift apart.
+
+In production nothing is listening: `Failpoint`'s call sites read a
+`Context.Reference` that falls through to a no-op default, so no application
+provides anything and no agent's `Requires` changes. A test arms one location
+with `Failpoint.layerTest`, backed by a `Ref` of a handler that decides,
+per call, whether to crash — `Failpoint.crashAt(location)` crashes the first
+(and every) time that location is hit, `Failpoint.passthrough` never does. A
+crash is a defect, not a typed failure, so instrumenting a call site never
+changes its type and `Stream.onExit`/`Effect.ensuring` finalizers still run
+exactly as they would for a real crash or interruption — which is what lets
+`recording-sink.ts`'s settlement finalizer correctly leave an orphaned run
+behind for a crash inside the `ToolStarted`/`ToolOutcome` window.
+
+`Chaos.converge`, in the same `testing` module as `ScriptedModel`, drives a
+caller-supplied scenario once per location: it arms the crash, runs the
+scenario to see it actually crash there, disarms, reopens the same
+conversation, and asserts the recovered result equals a crash-free baseline,
+that the durable history is well-formed (every `ToolCall` has exactly one
+`ToolOutcome`, every suspended wait is resolved exactly once), and that no
+tool call executed more times than a caller-declared allowance for the
+`ToolStarted`..`ToolOutcome` window permits. It returns a report — one of
+`converged`, `not-triggered`, or `failed(reason)` per location — rather than
+throwing at the first bad one, so a test can see every location's fate at
+once and decide what to assert. See `test/chaos.test.ts` for a full scenario
+(two tool calls and one durable approval) run against both the in-memory and
+the SQLite log stores, including two locations pinned as known,
+not-yet-fixed recovery gaps rather than silently skipped.
+
 ## Durable State
 
 Define one typed state document and declare it as a tool dependency:

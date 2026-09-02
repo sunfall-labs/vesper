@@ -5,6 +5,39 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added a failpoint service and a chaos convergence runner to
+  `@sunfall/vesper-agent`, proving recovery converges rather than asserting
+  it in prose. `packages/agent/src/internal/failpoint.ts` names every durable
+  boundary the recording and recovery machinery crosses as a closed
+  `Failpoint.Location` union (`claim:after-acquire`, `tool:before-started`,
+  `tool:after-started`, `tool:before-outcome`, `tool:after-outcome`,
+  `approval:after-suspended`, `approval:after-resolved`,
+  `turn:before-finished`, `turn:after-finished`, `run:before-completed`,
+  `compaction:before-append`, `compaction:after-append`,
+  `signal:after-received`), instrumented across `dispatch.ts`,
+  `internal/session-open.ts`, `recording-sink.ts`, and `conversation.ts`,
+  with a static test checking the union and the call sites cannot drift.
+  `Chaos.converge`, alongside `ScriptedModel` in
+  `@sunfall/vesper-agent/testing`, arms one location at a time, drives a
+  caller's scenario to a crash there, reopens with the crash disarmed, and
+  reports whether the recovered result converges on a crash-free baseline
+  with a well-formed log and no unexpected tool replay. `test/chaos.test.ts`
+  runs a two-tool, one-approval scenario through this against both the
+  in-memory and the SQLite log stores; `claim:after-acquire`,
+  `tool:before-started`, `approval:after-resolved`, `turn:before-finished`,
+  and `turn:after-finished` converge cleanly, and two real, not-yet-fixed
+  recovery gaps are pinned as regression tests rather than hidden: cumulative
+  usage undercounts by one physical run's worth of tokens after a crash near
+  a tool boundary, and recovering from a crash between a final turn's
+  `TurnFinished` and its `Completed` record re-asks the provider for an
+  already-durable turn. See the new "Failpoints and chaos" section in
+  [`packages/agent/README.md`](packages/agent/README.md) and VSP-015 in
+  [`docs/guarantees.md`](docs/guarantees.md). Compatibility: additive.
+  `Failpoint` reads a `Context.Reference` with a no-op default, so no
+  existing agent's `Requires` changes and no production caller provides
+  anything; only `test/chaos.test.ts` arms a location, via
+  `Failpoint.layerTest`.
+
 - Added [`docs/guarantees.md`](docs/guarantees.md), a numbered, cited contract
   for the durable conversation log and recovery: append atomicity and
   idempotent replay by fingerprint, producer epoch fencing, the fixed-attempt

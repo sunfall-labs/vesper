@@ -227,6 +227,9 @@ importers:
         specifier: 0.1.0-alpha.1
         version: link:../log
     devDependencies:
+      '@sunfall/vesper-log-sqlite':
+        specifier: 0.1.0-alpha.1
+        version: link:../log-sqlite
       effect:
         specifier: 'catalog:'
         version: 4.0.0-rc.112(patch_hash=8c1003ca68389c10a651ad91323f7aab61f71171eb8a7433ec34ff11970dbf81)

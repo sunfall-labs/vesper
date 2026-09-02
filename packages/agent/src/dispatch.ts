@@ -15,6 +15,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import type { AgentEvents } from './event.js';
 import type { Interception } from './interception.js';
 import type * as AgentLog from './log.js';
+import * as Failpoint from './internal/failpoint.js';
 import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
 import { INTERACTION_WAIT } from './recovery.js';
@@ -961,6 +962,7 @@ export const gate = <
             if (normalizedToolCallId === undefined) {
               return yield* missingToolCallIdError(toolName);
             }
+            yield* Failpoint.hit('tool:before-started');
             yield* session
               .append([
                 {
@@ -970,6 +972,7 @@ export const gate = <
                 },
               ])
               .pipe(Effect.mapError(durabilityAiError));
+            yield* Failpoint.hit('tool:after-started');
             // Register only after ToolStarted is durable. The handler cannot
             // begin before this effect returns, so no ToolOutcome can race the
             // registration; a failed append leaves no stale callback behind.

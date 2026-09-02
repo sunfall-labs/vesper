@@ -138,6 +138,7 @@
     "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
+    "@sunfall/vesper-log-sqlite": "0.1.0-alpha.1",
     "effect": "catalog:"
   }
 }
