@@ -1,4 +1,4 @@
-import { Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
+import { Effect, Exit, Layer, Option, Ref, Schema, Stream } from 'effect';
 import {
   AiError,
   Chat,
@@ -22,7 +22,7 @@ import { Interaction } from '../interaction.js';
 import type * as AgentLog from '../log.js';
 import { ResultBounds } from '../result-bounds.js';
 import { ResultOverflow } from '../result-overflow.js';
-import type { RunPolicy } from '../run-policy.js';
+import { RunPolicy } from '../run-policy.js';
 import { RunPolicyRuntime } from '../run-policy-runtime.js';
 import type { Stop } from '../stop.js';
 import { AgentState } from '../state.js';
@@ -405,6 +405,16 @@ export const makeEntry = <
       input: Prompt.RawInput,
       attempt: Interception.Attempt,
       arbitration: ToolDispatch.TurnArbitration,
+      // The one extra model call `onExhaustion: 'final-answer'` performs once
+      // a soft-fallback-eligible hard budget is exhausted (see
+      // `finalAnswerTurn` below). It skips `runtime.modelCall` — the budget
+      // that call already crossed is not re-charged for the call that
+      // answers within it — and forces `toolChoice: 'none'` so the model
+      // cannot spend the run further on a tool call it has no budget left to
+      // resolve. Everything else about the provider call — interception,
+      // observability, the deadline, part encoding — stays identical, which
+      // is what lets this turn's output "settle the run normally".
+      finalAnswer = false,
     ): Stream.Stream<
       AgentEvents.Event<ModelTools>,
       RunFailure,
@@ -425,7 +435,7 @@ export const makeEntry = <
               attempt,
             });
           }
-          if (runtime !== undefined) {
+          if (runtime !== undefined && !finalAnswer) {
             yield* runtime.modelCall;
           }
           // Count attempts at the provider boundary, including calls that
@@ -444,6 +454,11 @@ export const makeEntry = <
               // a failed tool result instead of failing the turn. Handler
               // failures keep obeying each tool's own `failureMode`.
               invalidToolCalls: 'return',
+              // The final-answer call still advertises the toolkit — the
+              // model boundary already resolved it above, and building a
+              // second, empty one would fork the encode/observe path this
+              // call shares with every ordinary turn — but forbids using it.
+              ...(finalAnswer ? { toolChoice: 'none' as const } : {}),
             })
             .pipe(
               Stream.mapEffect((part) =>
@@ -643,6 +658,11 @@ export const makeEntry = <
       usage: Ref.Ref<Stop.Usage>,
       toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
       lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
+      // The last step this recursion reached, kept for `onExhaustion:
+      // 'final-answer'`: a `RunPolicyExhausted` raised anywhere in this
+      // recursive stream is caught outside it, where `step` itself is no
+      // longer in scope, so the fallback turn reads it from here instead.
+      stepRef: Ref.Ref<number>,
       step: number,
       pending: Prompt.RawInput,
     ): Stream.Stream<
@@ -652,6 +672,7 @@ export const makeEntry = <
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
+          yield* Ref.set(stepRef, step);
           const input = yield* openTurn(
             step,
             yield* Ref.get(usage),
@@ -679,7 +700,10 @@ export const makeEntry = <
           const ahead = yield* compactAhead(chat, lastTurn, input);
           if (ahead !== undefined) {
             yield* Ref.update(usage, (current) =>
-              addStopUsage(current, ahead.usage),
+              addStopUsage(
+                current,
+                pricedUsage(runtime?.limits.costModel, ahead.usage),
+              ),
             );
           }
           const modelInput: Prompt.RawInput =
@@ -779,7 +803,13 @@ export const makeEntry = <
                             yield* runtime.addUsage(summarized.usage);
                           }
                           yield* Ref.update(usage, (current) =>
-                            addStopUsage(current, summarized.usage),
+                            addStopUsage(
+                              current,
+                              pricedUsage(
+                                runtime?.limits.costModel,
+                                summarized.usage,
+                              ),
+                            ),
                           );
 
                           const retry = emptyTurnState();
@@ -809,7 +839,7 @@ export const makeEntry = <
             Effect.gen(function* () {
               const seen = yield* Ref.get(active);
               const totals = yield* Ref.updateAndGet(usage, (current) =>
-                addUsage(current, seen.usage),
+                addUsage(current, seen.usage, runtime?.limits.costModel),
               );
               const toolCallTotals = yield* Ref.updateAndGet(
                 toolCallCounts,
@@ -820,6 +850,7 @@ export const makeEntry = <
                   runtime.addUsage({
                     input: seen.usage.inputTokens.total ?? 0,
                     output: seen.usage.outputTokens.total ?? 0,
+                    cachedInput: seen.usage.inputTokens.cacheRead ?? 0,
                   }),
                 );
                 if (Exit.isFailure(accounted)) {
@@ -1026,6 +1057,7 @@ export const makeEntry = <
                         usage,
                         toolCallCounts,
                         lastTurn,
+                        stepRef,
                         step + 1,
                         continuationInput(prepared, steers),
                       ),
@@ -1108,6 +1140,103 @@ export const makeEntry = <
         RunFailure,
         WithOwnHandlers<RuntimeTools> | StopR | TurnControlR | InterceptorR
       >;
+
+    /**
+     * The one extra call `onExhaustion: 'final-answer'` performs once a
+     * soft-fallback-eligible hard budget (see {@link finalAnswerEligibleLimits})
+     * is exhausted: no tools, a short appended instruction that the budget is
+     * spent, and its output settles the run as an ordinary success — with
+     * `exhausted` recording which limit forced it.
+     *
+     * Reuses `askModel` rather than calling `chat.streamText` directly, so
+     * interception, observability, part encoding, and the deadline timeout
+     * stay exactly what an ordinary turn gets — a hard limit this call itself
+     * crosses (chiefly the wall-clock deadline) still fails the run, because
+     * that timeout is `askModel`'s, not something layered on top here.
+     *
+     * Does not attempt to replay whatever input the aborted turn would have
+     * sent — `chat.history` already holds every turn that completed, which is
+     * everything a "best answer so far" needs, and reconstructing the one
+     * turn that never ran would require tracking exactly how far it got
+     * before failing. What it adds is the instruction below, nothing more.
+     */
+    const finalAnswerTurn = (
+      chat: Chat.Service,
+      usage: Ref.Ref<Stop.Usage>,
+      toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
+      step: number,
+      exhaustion: RunPolicy.RunPolicyExhausted,
+    ): Stream.Stream<
+      AgentEvents.Event<ModelTools>,
+      RunFailure,
+      WithOwnHandlers<RuntimeTools> | InterceptorR
+    > =>
+      Stream.unwrap(
+        Effect.gen(function* () {
+          const seen = emptyTurnState();
+          const arbitration = yield* ToolDispatch.makeTurnArbitration;
+          const parts = askModel(
+            chat,
+            seen,
+            step,
+            Prompt.make([{ role: 'user', content: FINAL_ANSWER_INSTRUCTION }]),
+            'initial',
+            arbitration,
+            true,
+          );
+          const decide = Stream.unwrap(
+            Effect.gen(function* () {
+              const totals = yield* Ref.updateAndGet(usage, (current) =>
+                addUsage(current, seen.usage, runtime?.limits.costModel),
+              );
+              yield* Ref.update(toolCallCounts, (current) =>
+                addToolCallCounts(current, seen.toolCalls),
+              );
+              const incomplete =
+                seen.finishReason === undefined
+                  ? undefined
+                  : incompleteOutputError('streamText', seen.finishReason);
+              if (incomplete !== undefined) {
+                return Stream.concat(
+                  Stream.make(AgentEventRuntime.turnFinished(step, totals)),
+                  Stream.fail(incomplete),
+                );
+              }
+              return Stream.concat(
+                Stream.make(AgentEventRuntime.turnFinished(step, totals)),
+                Stream.make(
+                  AgentEventRuntime.completed(
+                    seen.text,
+                    step,
+                    totals,
+                    'success',
+                    outputOf(seen),
+                    {
+                      limit: exhaustion.limit,
+                      used: exhaustion.used,
+                      maximum: exhaustion.maximum,
+                    },
+                  ),
+                ),
+              );
+            }),
+          );
+          return Stream.concat(
+            Stream.make(AgentEventRuntime.turnStarted(step)),
+            Stream.concat(parts, decide),
+          ).pipe(
+            Stream.withSpan('Agent.finalAnswerTurn', {
+              attributes: {
+                'vesper.agent.step': step,
+                'vesper.run_policy.exhausted_limit': exhaustion.limit,
+                ...(session === undefined
+                  ? {}
+                  : { 'vesper.conversation.id': session.conversationId }),
+              },
+            }),
+          );
+        }),
+      );
 
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
       Stream.unwrap(
@@ -1508,8 +1637,38 @@ export const makeEntry = <
           const lastTurn = yield* Ref.make<ContextWindow.TurnUsage | undefined>(
             wiring.lastTurn,
           );
+          const stepRef = yield* Ref.make(0);
           const remaining = yield* runtime.remainingMillis;
-          return turn(chat, usage, toolCallCounts, lastTurn, 1, input).pipe(
+          const primary = turn(
+            chat,
+            usage,
+            toolCallCounts,
+            lastTurn,
+            stepRef,
+            1,
+            input,
+          );
+          const withFallback =
+            (runtime.limits.onExhaustion ?? 'fail') === 'final-answer'
+              ? primary.pipe(
+                  Stream.catchIf(isFinalAnswerEligible, (exhaustion) =>
+                    Stream.unwrap(
+                      Ref.get(stepRef).pipe(
+                        Effect.map((lastStep) =>
+                          finalAnswerTurn(
+                            chat,
+                            usage,
+                            toolCallCounts,
+                            lastStep + 1,
+                            exhaustion,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+              : primary;
+          return withFallback.pipe(
             Stream.interruptWhen(
               Effect.sleep(remaining).pipe(
                 Effect.andThen(
@@ -1771,6 +1930,34 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
 const outputOf = (state: TurnState): Prompt.Prompt =>
   Prompt.fromResponseParts(state.parts);
 
+/**
+ * Limits `onExhaustion: 'final-answer'` may recover from with one extra
+ * no-tools model call rather than failing the run outright — see
+ * `RunPolicy.Limits.onExhaustion`. `deadline`, `maxToolConcurrency`'s clamp
+ * (which never raises `RunPolicyExhausted` at all), and the signal limits are
+ * deliberately excluded: a run that is out of *time*, rather than out of
+ * turns, calls, tokens, cost, or delegation budget, has no safe way to spend
+ * more of it on one further call.
+ */
+const finalAnswerEligibleLimits: ReadonlySet<RunPolicy.Limit> = new Set([
+  'turns',
+  'model_calls',
+  'input_tokens',
+  'output_tokens',
+  'maxCostMicrousd',
+  'delegated_tasks',
+]);
+
+const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
+
+const isFinalAnswerEligible = (
+  error: RunFailure,
+): error is RunPolicy.RunPolicyExhausted =>
+  isRunPolicyExhausted(error) && finalAnswerEligibleLimits.has(error.limit);
+
+const FINAL_ANSWER_INSTRUCTION =
+  'The run budget is spent: no further turns, model calls, tokens, or delegated tasks remain, and no tools are available for this call. Answer now with the best final response you can give using only what you already have.';
+
 const continuationInput = (
   continuation: Option.Option<TurnControl.Continuation>,
   steers: ReadonlyArray<{ readonly text: string }>,
@@ -1795,21 +1982,56 @@ const continueTurn = <A, E, R>(
       )
     : stream;
 
+/**
+ * Price a plain `{input, output}` figure against a cost model, the same way
+ * `RunPolicyRuntime.addUsage` prices it for enforcement — so the local usage
+ * projection a caller observes and the budget a run is charged against never
+ * disagree. Absent `costModel` leaves `costMicrousd` unset, matching
+ * `Stop.Usage`'s "never priced" reading of a missing figure.
+ */
+const pricedUsage = (
+  costModel: RunPolicy.CostModel | undefined,
+  plain: {
+    readonly input: number;
+    readonly output: number;
+    readonly cachedInput?: number;
+  },
+): Stop.Usage =>
+  costModel === undefined
+    ? { input: plain.input, output: plain.output }
+    : {
+        input: plain.input,
+        output: plain.output,
+        costMicrousd: RunPolicy.costOf(costModel, plain),
+      };
+
 const addUsage = (
   current: Stop.Usage,
   usage: Response.FinishPartEncoded['usage'] | undefined,
-): Stop.Usage =>
-  usage === undefined
-    ? current
-    : {
-        input: current.input + (usage.inputTokens.total ?? 0),
-        output: current.output + (usage.outputTokens.total ?? 0),
-      };
+  costModel: RunPolicy.CostModel | undefined,
+): Stop.Usage => {
+  if (usage === undefined) {
+    return current;
+  }
+  const priced = pricedUsage(costModel, {
+    input: usage.inputTokens.total ?? 0,
+    output: usage.outputTokens.total ?? 0,
+    cachedInput: usage.inputTokens.cacheRead ?? 0,
+  });
+  return addStopUsage(current, priced);
+};
 
-const addStopUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
-  input: left.input + right.input,
-  output: left.output + right.output,
-});
+const addStopUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => {
+  const costMicrousd =
+    left.costMicrousd === undefined && right.costMicrousd === undefined
+      ? undefined
+      : (left.costMicrousd ?? 0) + (right.costMicrousd ?? 0);
+  return {
+    input: left.input + right.input,
+    output: left.output + right.output,
+    ...(costMicrousd === undefined ? {} : { costMicrousd }),
+  };
+};
 
 const addToolCallCounts = (
   current: Readonly<Record<string, number>>,

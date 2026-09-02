@@ -244,6 +244,13 @@ export const Result = Schema.Union([
   Schema.Struct({
     outcome: Schema.Literal('success'),
     ...ResultFields,
+    /**
+     * Present only when `RunPolicy.Limits.onExhaustion: 'final-answer'`
+     * settled this run with its one allowed extra no-tools call instead of
+     * failing with `RunPolicy.RunPolicyExhausted`, naming the budget that
+     * forced it. See the agent README's "Run policy and budgets" section.
+     */
+    exhausted: Schema.optionalKey(AgentEvents.Exhausted),
   }),
   Schema.Struct({
     outcome: Schema.Literal('cancelled'),
@@ -1531,13 +1538,37 @@ const fromParts = <
                         : yield* Schema.decodeEffect(Prompt.Prompt)(
                             completed.response,
                           ).pipe(Effect.orDie);
-                    return {
-                      outcome: completed.outcome,
-                      text: completed.text,
-                      steps: completed.steps,
-                      usage: completed.usage,
-                      ...(response === undefined ? {} : { response }),
-                    } satisfies Result;
+                    // Narrowed by `outcome` rather than spread once: the
+                    // 'success' branch of `Result` carries an `exhausted`
+                    // field 'cancelled' does not, so an object literal typed
+                    // from the wider `'success' | 'cancelled'` union no
+                    // longer structurally matches either member. A durably
+                    // resumed `Completed` carries no `exhausted` figure of
+                    // its own — that marker lives only on the live event
+                    // stream and a result produced in the same run, not on
+                    // `RunSettled.resume.completed` — so it is never set here.
+                    //
+                    // Annotated `: Result` rather than `satisfies Result`:
+                    // `satisfies` keeps the narrower literal type of each
+                    // branch, which then fails to unify with `foldToResult`'s
+                    // full `Result` in the ternary above this `Effect.gen`.
+                    const result: Result =
+                      completed.outcome === 'success'
+                        ? {
+                            outcome: 'success',
+                            text: completed.text,
+                            steps: completed.steps,
+                            usage: completed.usage,
+                            ...(response === undefined ? {} : { response }),
+                          }
+                        : {
+                            outcome: 'cancelled',
+                            text: completed.text,
+                            steps: completed.steps,
+                            usage: completed.usage,
+                            ...(response === undefined ? {} : { response }),
+                          };
+                    return result;
                   });
             }),
           ),

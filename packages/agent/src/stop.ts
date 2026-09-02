@@ -48,10 +48,19 @@ export interface State<Tools extends Record<string, Tool.Any>> {
  * A `Schema` rather than a plain interface because it crosses boundaries —
  * it rides on `Completed` events, and a persisted or transported run needs
  * to decode it. The same-name interface keeps call sites reading naturally.
+ *
+ * `costMicrousd` is optional rather than defaulted to zero at the schema
+ * boundary: a record written before `RunPolicy.Limits.costModel` existed, or
+ * by a run that never configured one, has no cost figure to report, which is
+ * different from a run whose cost was zero. Projections that accumulate this
+ * value (`AgentHistory.usageFrom`, `RunPolicyRuntime`) treat an absent figure
+ * as zero for arithmetic, the same way they treat an absent turn as zero
+ * tokens.
  */
 export const Usage = Schema.Struct({
   input: Schema.Natural,
   output: Schema.Natural,
+  costMicrousd: Schema.optionalKey(Schema.Natural),
 });
 export interface Usage extends Schema.Struct.Type<typeof Usage.fields> {}
 

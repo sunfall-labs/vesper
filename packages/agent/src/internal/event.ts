@@ -17,6 +17,8 @@ export const completed = (
   usage: Stop.Usage,
   outcome: 'success' | 'cancelled',
   response?: Prompt.Prompt,
+  /** Set only when `RunPolicy.Limits.onExhaustion: 'final-answer'` settled this run. */
+  exhausted?: AgentEvents.Exhausted,
 ): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.Completed.make({
     outcome,
@@ -24,6 +26,7 @@ export const completed = (
     steps,
     usage,
     ...(response === undefined ? {} : { response }),
+    ...(exhausted === undefined ? {} : { exhausted }),
   });
 
 export const suspended = (

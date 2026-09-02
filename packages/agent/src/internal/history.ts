@@ -449,15 +449,15 @@ const fold = (
 export const usageFrom = (
   records: ReadonlyArray<ConversationRecord.Envelope>,
 ): Stop.Usage => {
-  let total: Stop.Usage = { input: 0, output: 0 };
-  let run: Stop.Usage = { input: 0, output: 0 };
+  let total: Stop.Usage = emptyUsage;
+  let run: Stop.Usage = emptyUsage;
 
   const matchRecord = ConversationRecord.Record.match({
     RunStarted: () => {
       // Only non-zero for a run that reported usage and never settled, which
       // takes a lost finalizer. Banking it is cheaper than losing it.
       total = add(total, run);
-      run = { input: 0, output: 0 };
+      run = emptyUsage;
     },
     TurnFinished: (record) => {
       run = record.usage;
@@ -470,7 +470,7 @@ export const usageFrom = (
         record.resume === undefined
           ? add(total, record.usage)
           : record.resume.usage;
-      run = { input: 0, output: 0 };
+      run = emptyUsage;
     },
     Text: () => {},
     ToolCall: () => {},
@@ -511,9 +511,24 @@ export const completedFrom = (
   // result and side effects are already durable.
   ResumeProjection.activeFrom(records).completed;
 
-const add = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => ({
-  input: left.input + right.input,
-  output: left.output + right.output,
-});
+/**
+ * Zero usage, including a still-absent `costMicrousd`: a conversation that
+ * never configured `RunPolicy.Limits.costModel` should project no cost
+ * figure at all, not a defined zero indistinguishable from "priced at
+ * nothing".
+ */
+const emptyUsage: Stop.Usage = { input: 0, output: 0 };
+
+const add = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => {
+  const costMicrousd =
+    left.costMicrousd === undefined && right.costMicrousd === undefined
+      ? undefined
+      : (left.costMicrousd ?? 0) + (right.costMicrousd ?? 0);
+  return {
+    input: left.input + right.input,
+    output: left.output + right.output,
+    ...(costMicrousd === undefined ? {} : { costMicrousd }),
+  };
+};
 
 export * as AgentHistory from './history.js';

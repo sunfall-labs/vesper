@@ -187,6 +187,69 @@ leaf-tool handler stream, including recovery retries, and is shared by parent
 and child loops. Delegation handlers use the separate child limits and never
 hold a leaf permit while waiting for a child.
 
+### Cost budgets
+
+`runPolicy.maxCostMicrousd` bounds cumulative spend in micro-USD (1e-6 USD),
+charged from provider usage after each model call — including compaction —
+using `runPolicy.costModel`:
+
+```ts
+const agent = Agent.make({
+  // ...
+  runPolicy: {
+    maxCostMicrousd: 500_000, // $0.50
+    costModel: {
+      inputMicrousdPerMillionTokens: 3_000_000, // $3.00 / million input tokens
+      outputMicrousdPerMillionTokens: 15_000_000, // $15.00 / million output tokens
+      cachedInputMicrousdPerMillionTokens: 300_000, // $0.30 / million cached tokens
+    },
+  },
+});
+```
+
+`costModel` prices input tokens (cached input tokens separately, at
+`cachedInputMicrousdPerMillionTokens` when set, or at the ordinary input rate
+otherwise) and output tokens per million tokens. Setting `maxCostMicrousd`
+without `costModel` fails at `Agent.make` with a typed
+`RunPolicy.CostModelRequiredError` — a cost ceiling nobody can price is not a
+smaller ceiling, it is one that never fires. Like `maxInputTokens`, cost is
+checked after each turn's usage is known, so a run can overshoot by up to one
+turn's cost before the check after it fails the run.
+
+Accumulated cost is exposed the same way tokens are: `Stop.Usage.costMicrousd`
+rides on `TurnFinished`, `Completed`, and `Agent.Result`, and
+`AgentHistory.usageFrom` folds it into the conversation-wide usage projection.
+It is present only once a `costModel` is configured — absent, not zero, on a
+run or conversation that never priced its usage.
+
+### Exhaustion mode
+
+`runPolicy.onExhaustion` controls what happens once `maxTurns`, `maxModelCalls`,
+`maxInputTokens`, `maxOutputTokens`, `maxCostMicrousd`, or `maxDelegatedTasks`
+is exhausted. `'fail'`, the default, is today's behavior: the run fails with
+`RunPolicy.RunPolicyExhausted`. `'final-answer'` instead lets the run make
+exactly one more model call — with no tools available (`toolChoice: 'none'`)
+and a short appended instruction that the budget is spent — and settles on
+that call's output as an ordinary `outcome: 'success'` result:
+
+```ts
+const agent = Agent.make({
+  // ...
+  runPolicy: { maxModelCalls: 40, onExhaustion: 'final-answer' },
+});
+```
+
+The settled `Result` (and the live `Completed` event) carries an `exhausted:
+{ limit, used, maximum }` field naming the budget that forced the fallback, so
+a caller can tell a normal finish from a budget-constrained one. `exhausted`
+is not persisted to the durable conversation log — it lives only on the live
+event stream and the `Result` from the run that produced it.
+
+The wall-clock deadline, `maxToolConcurrency`'s clamp, and the signal limits
+are never eligible for the fallback: a deadline still fails a run outright in
+either mode, including the fallback call itself, since that call reuses the
+same `remainingMillis` timeout an ordinary turn gets.
+
 ## Subagents and skills
 
 A subagent is an agent definition compiled to a tool named `task_<child>` on
