@@ -39,6 +39,7 @@ false` skips any case that would need two independent connections to the
   exports an internal `log-store-contract.ts` — it is replaced by this
   published module, and `log-sqlite`/`log-pg` now call it instead of keeping
   duplicated adapter-local copies of the same cases.
+
 - `Agent.make` now computes `digest` — a canonical SHA-256 over the parts of
   a compiled definition that affect durable compatibility: tool names and
   their parameter/success/failure JSON schemas, subagent names and digests,
@@ -54,6 +55,19 @@ false` skips any case that would need two independent connections to the
   wants to read `agent.digest`. `revision` remains the sole human-declared
   compatibility identity; the digest only catches the case where it should
   have been bumped and was not.
+
+- Added a default per-result byte bound: `Agent.Definition.resultBounds`
+  (`{ maxBytes: number }`) truncates an oversized tool result into a small,
+  schema-encodable envelope (`{ truncated: true, bytes, maxBytes, preview }`)
+  before it reaches the model or the durable log, so one oversized result
+  cannot poison a conversation that never configured `resultOverflow`. When
+  `resultOverflow` is also configured, it always spills first — a spilled
+  result is already a small pointer, so bounds only ever apply to a result
+  overflow did not spill. Unlike `resultOverflow`, bounding needs no extra
+  service and adds no extra tool. Compatibility: the default is 64 KiB and
+  applies even when `resultBounds` is left unset, which is a behavior change
+  for any tool result over that size — pass `resultBounds: false` to disable
+  bounding and restore unbounded results, or pass a larger `maxBytes`.
 
 - Provider finishes explicitly marked `length`, `content-filter`, or `error`
   no longer settle an agent run as a successful answer. The raw finish and

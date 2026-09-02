@@ -75,6 +75,9 @@
       "@sunfall/vesper-agent/result-overflow": [
         "./packages/agent/src/result-overflow.ts"
       ],
+      "@sunfall/vesper-agent/result-bounds": [
+        "./packages/agent/src/result-bounds.ts"
+      ],
       "@sunfall/vesper-agent/compaction": [
         "./packages/agent/src/compaction.ts"
       ],

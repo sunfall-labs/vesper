@@ -103,6 +103,10 @@
       "types": "./dist/result-overflow.d.ts",
       "default": "./dist/result-overflow.js"
     },
+    "./result-bounds": {
+      "types": "./dist/result-bounds.d.ts",
+      "default": "./dist/result-bounds.js"
+    },
     "./compaction": {
       "types": "./dist/compaction.d.ts",
       "default": "./dist/compaction.js"

@@ -20,6 +20,7 @@ import { DynamicToolkit } from '../dynamic-toolkit.js';
 import type { Interception } from '../interception.js';
 import { Interaction } from '../interaction.js';
 import type * as AgentLog from '../log.js';
+import { ResultBounds } from '../result-bounds.js';
 import { ResultOverflow } from '../result-overflow.js';
 import type { RunPolicy } from '../run-policy.js';
 import { RunPolicyRuntime } from '../run-policy-runtime.js';
@@ -176,6 +177,7 @@ export interface LoopDefinition<
   readonly concurrency: number | 'unbounded' | undefined;
   readonly codeMode: CodeModeOption | undefined;
   readonly resultOverflow: ResultOverflow.Policy | undefined;
+  readonly resultBounds: ResultBounds.Policy | false | undefined;
   readonly state: StateDefinition | undefined;
   readonly dynamicTools: DynamicSources | undefined;
   readonly instructions: string;
@@ -263,10 +265,18 @@ export const makeEntry = <
     // — both consumers of this same `runToolkit` — see only the pointer, not
     // the payload it stands in for. See `result-overflow.ts` for why a
     // storage failure here is a defect rather than a typed tool failure.
-    const runToolkit = ResultOverflow.wrap(
-      definition.resultOverflow,
-      Effect.map(toolkit, (staticallyDefined) =>
-        withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
+    //
+    // `ResultBounds.wrap` wraps *outside* `ResultOverflow.wrap`, so overflow's
+    // spill always runs first: a spilled result is already a small pointer by
+    // the time bounds sees it, and bounds only ever truncates a result
+    // overflow did not spill. See `result-bounds.ts`.
+    const runToolkit = ResultBounds.wrap(
+      definition.resultBounds,
+      ResultOverflow.wrap(
+        definition.resultOverflow,
+        Effect.map(toolkit, (staticallyDefined) =>
+          withDynamicToolkit(staticallyDefined, wiring.dynamicToolkit),
+        ),
       ),
     );
 

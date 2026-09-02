@@ -33,6 +33,7 @@ import type { AgentProtocol } from './internal/protocol.js';
 import type { Interception } from './interception.js';
 import * as AgentLog from './log.js';
 import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
+import type { ResultBounds } from './result-bounds.js';
 import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import type { RunPolicyRuntime } from './run-policy-runtime.js';
@@ -196,6 +197,22 @@ export interface Definition<
    * service requirement appears.
    */
   readonly resultOverflow?: OverflowPolicy;
+  /**
+   * Bound every tool result to this many UTF-8 bytes of encoded size, so one
+   * oversized result cannot poison a conversation that never configured
+   * `resultOverflow`. Excess is replaced with a small, schema-encodable
+   * truncation envelope; unlike `resultOverflow` there is nothing left to
+   * read back.
+   *
+   * Defaults to {@link ResultBounds.defaultPolicy} (64 KiB) when unset —
+   * this bound is on by default, unlike `resultOverflow`. Pass `false` to
+   * disable it and restore unbounded results.
+   *
+   * When `resultOverflow` is also set, it always spills first: a spilled
+   * result is already a small pointer, so this bound only ever applies to a
+   * result overflow did not spill.
+   */
+  readonly resultBounds?: ResultBounds.Policy | false;
   /**
    * Broker tools behind the isolated `exec` tool. `true` brokers the whole
    * toolkit; `{ except: [...] }` keeps the named tools directly advertised —
@@ -989,6 +1006,7 @@ export const make = <
     concurrency: definition.concurrency,
     codeMode: definition.codeMode,
     resultOverflow: definition.resultOverflow,
+    resultBounds: definition.resultBounds,
     state: definition.state,
     dynamicTools: definition.dynamicTools,
     instructions,

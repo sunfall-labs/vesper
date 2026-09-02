@@ -427,6 +427,51 @@ describe('recovering a tool call from the log', () => {
       }),
   );
 
+  it.effect(
+    'serves a truncated result on recovery by its envelope shape, not the tool schema',
+    () =>
+      Effect.gen(function* () {
+        const ran = { count: 0 };
+        // `lookup`'s own success schema is `{ status, at }` — nothing like a
+        // truncation envelope. `ResultBounds.wrap` is what would have
+        // produced this shape live; seeding it directly exercises recovery
+        // without depending on the bounds module being wired into this
+        // agent.
+        const truncatedOutcome: ConversationRecord.Record = {
+          _tag: 'ToolOutcome',
+          step: 1,
+          id: CALL_ID,
+          name: 'lookup',
+          outcome: 'success',
+          result: {
+            truncated: true,
+            bytes: 5_000,
+            maxBytes: 64 * 1024,
+            preview: 'the record this settled call actually produced',
+          },
+        };
+
+        const written = yield* run(
+          Effect.gen(function* () {
+            yield* seed([started, called, truncatedOutcome]);
+            yield* Conversation.make(agentWith(ran), CONVERSATION)
+              .run('hi')
+              .pipe(Effect.orDie);
+            return yield* readAll();
+          }),
+        );
+
+        // Decoding the envelope against `lookup`'s schema would fail, which
+        // would make a conversation containing a truncated result
+        // unresumable.
+        expect(ran.count).toBe(0);
+        expect(outcomesOf(written).at(-1)).toMatchObject({
+          id: CALL_ID,
+          result: { truncated: true },
+        });
+      }),
+  );
+
   it.effect('shows the model the recovered result, not a fresh one', () =>
     Effect.gen(function* () {
       const ran = { count: 0 };
