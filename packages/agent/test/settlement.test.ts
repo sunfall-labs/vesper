@@ -190,6 +190,7 @@ describe('how a run settles', () => {
             formatVersion: 1,
             agent: 'test',
             agentRevision: LogVocabulary.AgentRevision.make('1'),
+            agentDigest: agent.digest,
             usage: { input: 5, output: 2 },
             signalCursor: LogOffset.START,
             completed: {

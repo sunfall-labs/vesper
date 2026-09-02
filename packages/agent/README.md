@@ -14,6 +14,28 @@ Compatibility failures use the tagged `Conversation.CompatibilityError`
 channel, included by `Conversation.Error<A>` alongside the agent and store
 failures for that bound definition.
 
+`revision` is human-declared identity; nothing checks that it actually
+changed when the definition did. `Agent.make` also computes `digest` —
+`agent.digest`, read-only — a canonical SHA-256 over the parts of the
+compiled definition that affect durable compatibility: the sorted tool names
+with each tool's parameter, success, and failure JSON schema (the same
+derivation the model boundary uses, `Tool.getJsonSchema`/
+`Tool.getJsonSchemaFromSchema`); subagent names and their own digests,
+recursively; the skill catalog names; `codeMode`; and
+`resultOverflow.threshold`. It deliberately excludes `instructions` (an
+application may build it per run), model choice and `runPolicy` (run-time
+wiring, not definition shape), tool descriptions (documentation for the
+model, not wire shape), and `resultOverflow.preview` (changes what the model
+sees, not the pointer shape a resumed run decodes). Recorded runs persist
+`digest` beside `revision`; resuming with the same revision but a different
+digest — the definition changed and the revision was not bumped — fails with
+a typed `Conversation.CompatibilityError` naming both digests. A record from
+before this field existed has no digest at all, and that absence is accepted
+as compatible rather than rejected: only a same-revision digest that actively
+disagrees is a problem. See
+[`docs/conversations.md`](../../docs/conversations.md)'s "Compatibility and
+revisions" for the full resume-time contract.
+
 ```bash
 npm install @sunfall/vesper-agent effect@4.0.0-rc.112
 ```

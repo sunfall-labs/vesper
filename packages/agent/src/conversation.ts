@@ -330,7 +330,11 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
       Effect.gen(function* () {
         const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
         const session = yield* AgentLog.open(id, {
-          compatibility: { agent: agent.name, revision: agent.revision },
+          compatibility: {
+            agent: agent.name,
+            revision: agent.revision,
+            digest: agent.digest,
+          },
         });
         // Both lookups scan `session.history` — the resume view that spans
         // runs back to the latest compaction boundary — rather than the
@@ -417,7 +421,11 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
         )(result);
         const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
         const session = yield* AgentLog.open(id, {
-          compatibility: { agent: agent.name, revision: agent.revision },
+          compatibility: {
+            agent: agent.name,
+            revision: agent.revision,
+            digest: agent.digest,
+          },
         });
         const { suspended, resolved } = nativeInteractionState(
           session.history,

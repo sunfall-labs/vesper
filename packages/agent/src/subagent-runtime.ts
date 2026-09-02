@@ -71,6 +71,7 @@ export const handler =
                     : LogVocabulary.ToolCallId.make(call.toolCallId),
                 agent: child.name,
                 revision: child.revision,
+                digest: child.digest,
                 depth: depth + 1,
               }),
               run,
