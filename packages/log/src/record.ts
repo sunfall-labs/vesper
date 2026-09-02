@@ -39,10 +39,18 @@ export const FORMAT_VERSION = 1;
 // into one `Text` record per contiguous run of text in a turn, and flushes
 // on a turn boundary or a tool call.
 
-/** Cumulative token usage. Mirrors `Stop.Usage` without importing it. */
+/**
+ * Cumulative token usage. Mirrors `Stop.Usage` without importing it.
+ *
+ * `costMicrousd` is optional so records written before cost budgets existed
+ * still decode: it is absent, not zero, on a conversation that never
+ * configured `RunPolicy.Limits.costModel`.
+ */
 export const Usage = Schema.Struct({
   input: Schema.Natural,
   output: Schema.Natural,
+  /** Accumulated cost in micro-USD (1e-6 USD), when a cost model is set. */
+  costMicrousd: Schema.optionalKey(Schema.Natural),
 });
 export interface Usage extends Schema.Struct.Type<typeof Usage.fields> {}
 

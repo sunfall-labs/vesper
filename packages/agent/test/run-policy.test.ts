@@ -12,6 +12,7 @@ import { Agent } from '../src/agent.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 import { Stop } from '../src/stop.js';
+import { ScriptedModel } from '../src/testing.js';
 
 const finish = (input = 3, output = 2): Response.FinishPartEncoded => ({
   type: 'finish',
@@ -385,6 +386,145 @@ describe('hard run policy', () => {
           accepted: false,
           exhaustion: { limit: 'signals_per_boundary' },
         });
+      }),
+  );
+});
+
+const finishToolCalls = (
+  input: number,
+  output: number,
+): Response.FinishPartEncoded => ({
+  type: 'finish',
+  reason: 'tool-calls',
+  usage: {
+    inputTokens: { total: input, uncached: input, cacheRead: 0, cacheWrite: 0 },
+    outputTokens: { total: output },
+  },
+});
+
+const textTurn = (
+  id: string,
+  text: string,
+  usage: Response.FinishPartEncoded = finish(),
+): ReadonlyArray<Response.StreamPartEncoded> => [
+  { type: 'text-start', id },
+  { type: 'text-delta', id, delta: text },
+  { type: 'text-end', id },
+  usage,
+];
+
+const ping = Tool.make('ping', {
+  description: 'ping',
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({ ok: Schema.Boolean }),
+});
+
+describe('cost budget', () => {
+  it.effect('accumulates cost across turns and exhausts the budget', () =>
+    Effect.gen(function* () {
+      // 1 micro-USD per token on both sides keeps the arithmetic legible:
+      // each turn below costs exactly input + output micro-USD.
+      const costModel: RunPolicy.CostModel = {
+        inputMicrousdPerMillionTokens: 1_000_000,
+        outputMicrousdPerMillionTokens: 1_000_000,
+      };
+      const scripted = ScriptedModel.make([
+        [calling('call-1', 'ping', {}), finishToolCalls(10, 5)], // costs 15
+        [calling('call-2', 'ping', {}), finishToolCalls(10, 5)], // totals 30
+      ]);
+      const guarded = Agent.make({
+        name: 'cost-guarded',
+        revision: '1',
+        instructions: 'call ping until told to stop',
+        toolkit: Toolkit.make(ping),
+        runPolicy: { maxCostMicrousd: 20, costModel },
+      }).withHandlers({ ping: () => Effect.succeed({ ok: true }) });
+
+      const rendered = yield* failedWith(
+        guarded.run('go').pipe(Effect.provide(scripted.layer)),
+      );
+      expect(rendered).toContain('maxCostMicrousd');
+
+      const requests = yield* scripted.requests;
+      expect(requests).toHaveLength(2);
+    }),
+  );
+
+  it('fails Agent.make construction when maxCostMicrousd is set without a costModel', () => {
+    expect(() =>
+      Agent.make({
+        name: 'no-cost-model',
+        revision: '1',
+        instructions: 'answer',
+        toolkit: Toolkit.make(),
+        runPolicy: { maxCostMicrousd: 1_000 },
+      }),
+    ).toThrow(RunPolicy.CostModelRequiredError);
+  });
+
+  it('fails RunPolicy.make construction when maxCostMicrousd is set without a costModel', () => {
+    expect(() => RunPolicy.make({ maxCostMicrousd: 1_000 })).toThrow(
+      /costModel/,
+    );
+  });
+});
+
+describe('onExhaustion', () => {
+  it.effect(
+    "'fail' (the default) still fails the run once a soft-fallback-eligible limit is exhausted",
+    () =>
+      Effect.gen(function* () {
+        const scripted = ScriptedModel.make([
+          [calling('call-1', 'ping', {}), finishToolCalls(3, 2)],
+          textTurn('answer', 'never reached'),
+        ]);
+        const guarded = Agent.make({
+          name: 'fail-mode',
+          revision: '1',
+          instructions: 'call ping then answer',
+          toolkit: Toolkit.make(ping),
+          runPolicy: { maxModelCalls: 1 },
+        }).withHandlers({ ping: () => Effect.succeed({ ok: true }) });
+
+        const rendered = yield* failedWith(
+          guarded.run('go').pipe(Effect.provide(scripted.layer)),
+        );
+        expect(rendered).toContain('model_calls');
+
+        const requests = yield* scripted.requests;
+        expect(requests).toHaveLength(1);
+      }),
+  );
+
+  it.effect(
+    "'final-answer' makes exactly one extra no-tools model call and settles once maxModelCalls is exhausted",
+    () =>
+      Effect.gen(function* () {
+        const scripted = ScriptedModel.make([
+          [calling('call-1', 'ping', {}), finishToolCalls(3, 2)],
+          textTurn('answer', 'the best I can do'),
+        ]);
+        const guarded = Agent.make({
+          name: 'final-answer-mode',
+          revision: '1',
+          instructions: 'call ping then answer',
+          toolkit: Toolkit.make(ping),
+          runPolicy: { maxModelCalls: 1, onExhaustion: 'final-answer' },
+        }).withHandlers({ ping: () => Effect.succeed({ ok: true }) });
+
+        const result = yield* guarded
+          .run('go')
+          .pipe(Effect.provide(scripted.layer));
+
+        expect(result.outcome).toBe('success');
+        expect(result.text).toBe('the best I can do');
+        expect(result).toMatchObject({
+          exhausted: { limit: 'model_calls', used: 2, maximum: 1 },
+        });
+
+        const requests = yield* scripted.requests;
+        expect(requests).toHaveLength(2);
+        expect(requests[1]?.toolChoice).toBe('none');
       }),
   );
 });

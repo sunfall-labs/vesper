@@ -1,7 +1,6 @@
 import { Clock, Effect, Ref, Semaphore, Stream } from 'effect';
 
 import { RunPolicy } from './run-policy.js';
-import type { Stop } from './stop.js';
 
 export interface Exhaustion {
   readonly limit: RunPolicy.Limit;
@@ -16,6 +15,8 @@ interface Counters {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly steeredBytes: number;
+  /** Micro-USD (1e-6 USD) charged so far; zero when no `costModel` is set. */
+  readonly costMicrousd: number;
 }
 
 const emptyCounters: Counters = {
@@ -25,6 +26,7 @@ const emptyCounters: Counters = {
   inputTokens: 0,
   outputTokens: 0,
   steeredBytes: 0,
+  costMicrousd: 0,
 };
 
 type SignalExhaustion = Exhaustion & {
@@ -43,6 +45,21 @@ export type SignalDecision =
       readonly exhaustion: SignalExhaustion;
     };
 
+/**
+ * One call's usage as charged to a run's budgets.
+ *
+ * `cachedInput` is optional and a subset of `input` — the portion served
+ * from the provider's prompt cache, priced at
+ * `CostModel.cachedInputMicrousdPerMillionTokens` when a cost model is set.
+ * Compaction's summarizer usage carries no cache breakdown, so it is charged
+ * as though every input token were uncached.
+ */
+export interface UsageCharge {
+  readonly input: number;
+  readonly output: number;
+  readonly cachedInput?: number;
+}
+
 /** Non-mutating eligibility check used by responsive cancel detection. */
 export const acceptsCancel = (
   limits: RunPolicy.Limits,
@@ -58,7 +75,7 @@ export interface Runtime {
   readonly turn: Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly modelCall: Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly addUsage: (
-    usage: Stop.Usage,
+    usage: UsageCharge,
   ) => Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly delegation: <A, E, R>(
     effect: Effect.Effect<A, E, R>,
@@ -118,10 +135,15 @@ export const create = Effect.fn('RunPolicy.create')(function* (
   const addUsage: Runtime['addUsage'] = (usage) =>
     Effect.gen(function* () {
       yield* checkDeadline;
+      const costDelta =
+        limits.costModel === undefined
+          ? 0
+          : RunPolicy.costOf(limits.costModel, usage);
       const next = yield* Ref.updateAndGet(counters, (current) => ({
         ...current,
         inputTokens: current.inputTokens + usage.input,
         outputTokens: current.outputTokens + usage.output,
+        costMicrousd: current.costMicrousd + costDelta,
       }));
       if (next.inputTokens > limits.maxInputTokens) {
         return yield* error({
@@ -135,6 +157,16 @@ export const create = Effect.fn('RunPolicy.create')(function* (
           limit: 'output_tokens',
           used: next.outputTokens,
           maximum: limits.maxOutputTokens,
+        });
+      }
+      if (
+        limits.maxCostMicrousd !== undefined &&
+        next.costMicrousd > limits.maxCostMicrousd
+      ) {
+        return yield* error({
+          limit: 'maxCostMicrousd',
+          used: next.costMicrousd,
+          maximum: limits.maxCostMicrousd,
         });
       }
     });

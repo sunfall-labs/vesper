@@ -5,6 +5,40 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added a cost budget and a "final-answer" exhaustion mode to `RunPolicy`.
+  `RunPolicy.Limits.maxCostMicrousd` bounds cumulative spend in micro-USD
+  (1e-6 USD), charged from provider usage after each model call —
+  including compaction — using `RunPolicy.Limits.costModel`
+  (`{ inputMicrousdPerMillionTokens, outputMicrousdPerMillionTokens,
+cachedInputMicrousdPerMillionTokens? }`); setting `maxCostMicrousd` without
+  `costModel` fails at `Agent.make`/`RunPolicy.make` with a typed
+  `RunPolicy.CostModelRequiredError`. Exhaustion raises the existing
+  `RunPolicy.RunPolicyExhausted` with `limit: 'maxCostMicrousd'`. Accumulated
+  cost is exposed the same way tokens are, as an optional
+  `Stop.Usage.costMicrousd` riding on `TurnFinished`, `Completed`, and
+  `Agent.Result`, and folded into `AgentHistory.usageFrom`'s conversation-wide
+  projection — present only once a `costModel` is configured.
+  `RunPolicy.Limits.onExhaustion` (`'fail'` | `'final-answer'`, default
+  `'fail'`) controls what happens once `maxTurns`, `maxModelCalls`,
+  `maxInputTokens`, `maxOutputTokens`, `maxCostMicrousd`, or
+  `maxDelegatedTasks` is exhausted: `'final-answer'` performs exactly one more
+  model call with no tools available (`toolChoice: 'none'`) and a short
+  appended instruction that the budget is spent, and settles the run as an
+  ordinary `outcome: 'success'` result carrying an `exhausted: { limit, used,
+maximum }` field on both the `Completed` event and `Agent.Result`. The
+  wall-clock deadline, `maxToolConcurrency`, and the signal limits are never
+  eligible for the fallback and still fail the run outright, including during
+  the fallback call itself. See the agent README's "Run policy and budgets"
+  section.
+  Compatibility: `RunPolicy.Limits`, `Stop.Usage`, `AgentEvents.Lifecycle`'s
+  `Completed` case, and `Agent.Result`'s `success` variant each gained new
+  optional fields; existing callers and persisted records are unaffected, and
+  `onExhaustion`'s default preserves today's fail-on-exhaustion behavior
+  exactly. `@sunfall/vesper-log`'s `Usage` schema also mirrors the new
+  optional `costMicrousd` field, but `exhausted` is not persisted to the
+  durable conversation log — it lives only on the live event stream and the
+  `Result` from the run that produced it.
+
 - Provider finishes explicitly marked `length`, `content-filter`, or `error`
   no longer settle an agent run as a successful answer. The raw finish and
   partial text remain stream-visible; blocking runs fail with
