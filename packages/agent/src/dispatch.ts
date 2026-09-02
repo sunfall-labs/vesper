@@ -18,6 +18,7 @@ import type * as AgentLog from './log.js';
 import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
 import { INTERACTION_WAIT } from './recovery.js';
+import { ResultBounds } from './result-bounds.js';
 import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
@@ -784,15 +785,15 @@ export const gate = <
             : Schema.Union([tool.successSchema, AiError.AiError]);
 
       const decode: Decode = (stored: unknown) =>
-        // A spilled result decodes against its own pointer shape rather than
-        // the tool's declared schema, independent of which tool produced it.
-        // `ResultOverflow.wrap` replaced both `result` and `encodedResult`
-        // with the pointer at dispatch time, before the tool's own schema
-        // ever saw the real value — recovery has to make the same
-        // substitution, or resuming a conversation containing a spilled
-        // result would fail to decode against a schema that was never asked
-        // to describe a pointer.
-        ResultOverflow.isPointer(stored)
+        // A spilled or truncated result decodes against its own envelope
+        // shape rather than the tool's declared schema, independent of which
+        // tool produced it. `ResultOverflow.wrap` and `ResultBounds.wrap`
+        // both replace `result` and `encodedResult` at dispatch time, before
+        // the tool's own schema ever saw the real value — recovery has to
+        // make the same substitution, or resuming a conversation containing
+        // a spilled or truncated result would fail to decode against a
+        // schema that was never asked to describe either envelope.
+        ResultOverflow.isPointer(stored) || ResultBounds.isTruncation(stored)
           ? Effect.succeed(stored)
           : // The requirement channel is erased rather than declared. A tool's
             // decoding services are already in the agent's `WithOwnHandlers`, so

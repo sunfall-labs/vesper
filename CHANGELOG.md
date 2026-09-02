@@ -5,6 +5,18 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added a default per-result byte bound: `Agent.Definition.resultBounds`
+  (`{ maxBytes: number }`) truncates an oversized tool result into a small,
+  schema-encodable envelope (`{ truncated: true, bytes, maxBytes, preview }`)
+  before it reaches the model or the durable log, so one oversized result
+  cannot poison a conversation that never configured `resultOverflow`. When
+  `resultOverflow` is also configured, it always spills first — a spilled
+  result is already a small pointer, so bounds only ever apply to a result
+  overflow did not spill. Unlike `resultOverflow`, bounding needs no extra
+  service and adds no extra tool. Compatibility: the default is 64 KiB and
+  applies even when `resultBounds` is left unset, which is a behavior change
+  for any tool result over that size — pass `resultBounds: false` to disable
+  bounding and restore unbounded results, or pass a larger `maxBytes`.
 - Provider finishes explicitly marked `length`, `content-filter`, or `error`
   no longer settle an agent run as a successful answer. The raw finish and
   partial text remain stream-visible; blocking runs fail with
