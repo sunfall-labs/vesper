@@ -376,6 +376,21 @@ describe('recording a run', () => {
         name: 'transformed_lookup',
         params: { at: '2026-01-02T03:04:05.000Z' },
       });
+
+      // `ToolCall` is written before the handler runs, so it says nothing about
+      // whether the parameters reached the handler decoded. A transforming
+      // parameter schema decoded twice fails validation, and the tool answers
+      // with a `ToolParameterValidationError` instead of executing — which the
+      // record above cannot see. Assert the outcome the handler produced.
+      const toolOutcome = written.find(
+        (envelope) => envelope.record._tag === 'ToolOutcome',
+      )?.record;
+      expect(toolOutcome).toMatchObject({
+        _tag: 'ToolOutcome',
+        name: 'transformed_lookup',
+        outcome: 'success',
+        result: { status: 'at:2026-01-02T03:04:05.000Z' },
+      });
     }),
   );
 
