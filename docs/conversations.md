@@ -91,9 +91,14 @@ Two properties worth knowing before reading records:
 
 Claiming a conversation fences the previous producer, so two concurrent runs
 against one id do not interleave: the older one fails its next append instead
-of writing a history that never happened. A failed append is a **defect**, not
-a typed failure — continuing past one would produce a run whose result exists
-and whose history does not.
+of writing a history that never happened. A failed append surfaces as a
+**typed failure** (`DurabilityError`), not a defect, so both the live
+recorder and `resolveApproval`/`resolveInteraction` can distinguish durable
+infrastructure failure from model and application failures; reads (
+`session.history`, `session.recorded`, the resume-history helpers) keep the
+defect boundary instead, since they back synchronous views. See VSP-001
+(Append atomicity) in [`docs/guarantees.md`](guarantees.md) for the append
+contract.
 
 Two adapters implement `LogStore`: core's in-memory adapter and the opt-in
 `@sunfall/vesper-log-pg` package. PostgreSQL consumes Effect's official
