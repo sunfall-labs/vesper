@@ -331,6 +331,79 @@ describe('resuming a crashed run', () => {
       ]);
     }),
   );
+
+  // BUG, partially closed: a run interrupted strictly inside the
+  // `ToolStarted`..`ToolOutcome` window — after the tool's own durable
+  // outcome, but before its enclosing turn's `TurnFinished` — cannot
+  // recover that turn's real provider usage from any durable record.
+  // `TurnFinished` is the only record that carries it, and Effect AI defers
+  // emitting the model's finish part (which is what carries usage) until
+  // after automatic tool resolution completes (see CONTEXT.md's Turn
+  // entry) — so at the crash point nothing in the process, durable or not,
+  // yet knows that turn's cost. What is fixable, and is what this asserts,
+  // is that the interrupted run stops caching that necessarily-incomplete
+  // guess as a *verified* checkpoint: its own `RunSettled` carries no
+  // `resume`, so a later open always re-derives `usage` fresh from durable
+  // records (`usageFrom` over the whole log) instead of trusting a cached
+  // snapshot that could drift from it or compound across a second crash.
+  it.effect(
+    "does not cache an interrupted run's own guessed usage as a verified checkpoint",
+    () =>
+      Effect.gen(function* () {
+        const models = provider([callingTurn, answeringTurn]);
+
+        const observed = yield* run(
+          Effect.gen(function* () {
+            yield* conversation.stream('where is order 42?').pipe(
+              Stream.takeUntil(
+                (event) =>
+                  AgentEvents.isPart(event) &&
+                  event.part.type === 'tool-result',
+              ),
+              Stream.runDrain,
+              Effect.orDie,
+            );
+
+            const records = yield* readAll();
+            const opened = yield* AgentLog.open(
+              LogVocabulary.ConversationId.make(CONVERSATION),
+              {
+                compatibility: {
+                  agent: 'test',
+                  revision: LogVocabulary.AgentRevision.make('1'),
+                },
+              },
+            );
+
+            return { records, sessionUsage: opened.usage };
+          }),
+          models.layer,
+        );
+
+        const settled = required(
+          observed.records.find(
+            (envelope) => envelope.record._tag === 'RunSettled',
+          ),
+        ).record;
+        if (settled._tag !== 'RunSettled') {
+          throw new Error('expected a RunSettled record');
+        }
+        // The fix: an interrupted run's own settlement never becomes a
+        // trusted resume boundary.
+        expect(settled.resume).toBeUndefined();
+
+        // What remains true, and is not this fix's to close: the model's
+        // real turn-one usage never became durable at all, so a fresh fold
+        // over every durable record gives the same (necessarily short)
+        // figure a cached checkpoint would have — reopening no longer
+        // trusts a wrong number instead of a merely incomplete one, which
+        // is the difference this fix makes.
+        expect(observed.sessionUsage).toEqual({ input: 0, output: 0 });
+        expect(observed.sessionUsage).toEqual(
+          AgentHistoryRuntime.usageFrom(observed.records),
+        );
+      }),
+  );
 });
 
 describe('resuming an ordinary conversation', () => {

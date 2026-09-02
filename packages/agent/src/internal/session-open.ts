@@ -520,6 +520,14 @@ export const openWith = (
         })
       : { input: 0, output: 0 };
 
+    // `session.completed` stays exactly what the durable `Completed`/
+    // successful-`RunSettled` records say — nothing heuristic. Whether a
+    // bare `TurnFinished` tail (`run:before-completed`'s crash window) may
+    // *also* count as settled depends on the agent's own stop condition and
+    // turn-control interceptor, neither of which this log-layer module has
+    // any business knowing; `agent.ts` computes that derivation itself, with
+    // the agent definition in hand, at the one or two call sites that need
+    // it.
     const initialResume = ResumeProjection.activeFrom(history);
     const resume = yield* Ref.make(initialResume);
     const projectionHistory = mergeByOffset(opened.aggregateSuffix, history);
@@ -565,20 +573,46 @@ export const openWith = (
               ResumeProjection.updateCodeState,
               currentCodeState,
             );
-            const resumeSnapshot = resumeState(
-              options.compatibility,
-              addUsage(opened.usage, settlement.usage),
-              nextSignalCursor,
-              settlementResume.completed,
-              settlementResume.latestTurnUsage,
-              settlementState,
-              settlementCodeState,
-            );
-            persisted = records.map((record, index) =>
-              index === settlementIndex
-                ? { ...settlement, resume: resumeSnapshot }
-                : record,
-            );
+            // `failure`/`interrupted` are the two outcomes a crash — not a
+            // clean stop — produces (`recording-sink.ts`'s `outcomeOf`).
+            // `settlement.usage` is `pending.usage`, an in-memory run-local
+            // accumulator that only ever advances at a `TurnFinished`/
+            // `Completed` lifecycle event; a crash strictly inside a turn —
+            // after its tool call's own durable marker, before that turn's
+            // own finish — leaves it holding the *previous* turn's figure,
+            // not this one's. Caching that gap into `resume.usage` would
+            // make `readAggregateSuffix` trust it as a verified checkpoint
+            // on every later open, compounding a guess instead of costing it
+            // once. Omitting `resume` here is what `readAggregateSuffix`
+            // already does for a still-open (never-settled) history — this
+            // extends the same non-guarantee (VSP-014) to a run whose only
+            // settlement was a crash, so a later open always re-derives
+            // `usage` from the durable `TurnFinished`/`Completed` records
+            // this run actually produced instead of trusting this one's
+            // best-effort snapshot. A clean `success` or `cancelled` stop —
+            // `pending.usage` is accurate at a turn boundary either way —
+            // keeps caching the aggregate as before.
+            const trustworthy =
+              settlement.outcome === 'success' ||
+              settlement.outcome === 'cancelled';
+            persisted = trustworthy
+              ? records.map((record, index) =>
+                  index === settlementIndex
+                    ? {
+                        ...settlement,
+                        resume: resumeState(
+                          options.compatibility,
+                          addUsage(opened.usage, settlement.usage),
+                          nextSignalCursor,
+                          settlementResume.completed,
+                          settlementResume.latestTurnUsage,
+                          settlementState,
+                          settlementCodeState,
+                        ),
+                      }
+                    : record,
+                )
+              : records;
           }
 
           yield* append(persisted, timeoutMillis);
