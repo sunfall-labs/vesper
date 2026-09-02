@@ -9,10 +9,16 @@ import type { LogVocabulary } from './vocabulary.js';
 // History pages forwards with `read` and backwards with `readBackwards`;
 // `changes` says "something arrived". Resumable tailing is derived
 // from those in `./tail.ts` rather than being a third method, so a backend
-// implements these primitives and gets tailing that is tested once. The contract
-// suite in `./log-store-contract.ts` holds every backend to the same
-// behaviour; per `docs/contributing.md` it lives here, in the package that
-// owns the interface, not in a testkit package that would cycle.
+// implements these primitives and gets tailing that is tested once. The
+// contract suite in `./testing.ts` holds every backend to the same
+// behaviour. It lives here, in the package that owns the interface, and is
+// published as `@sunfall/vesper-log/testing` — the same shape as
+// `@sunfall/vesper-agent/testing` — so a third-party adapter can certify
+// against it too, not only the two built in this repository. Publishing it
+// does not create the dependency cycle a separate testkit package would:
+// this module depends on nothing but this package's own interface, and
+// `@effect/vitest` is scoped to this subpath as an optional peer dependency
+// rather than pulled into every consumer of the runtime modules.
 //
 // ## Offsets are per record, not per batch
 //

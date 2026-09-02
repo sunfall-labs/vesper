@@ -601,6 +601,17 @@
       "count": 1
     }
   },
+  "packages/log/src/testing.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/global-date-in-effect": {
+      "count": 1
+    },
+    "effecttsgo/strict-effect-provide": {
+      "count": 2
+    }
+  },
   "packages/log/test/adapter.test.ts": {
     "typescript/no-unsafe-type-assertion": {
       "count": 3
@@ -618,32 +629,6 @@
     },
     "typescript/restrict-template-expressions": {
       "count": 2
-    }
-  },
-  "packages/log/test/log-store-contract.ts": {
-    "effecttsgo/any-unknown-in-error-context": {
-      "count": 2
-    },
-    "effecttsgo/async-function": {
-      "count": 39
-    },
-    "effecttsgo/global-date": {
-      "count": 1
-    },
-    "effecttsgo/strict-effect-provide": {
-      "count": 1
-    },
-    "typescript/no-unnecessary-condition": {
-      "count": 1
-    },
-    "vitest/no-conditional-expect": {
-      "count": 16
-    },
-    "vitest/no-conditional-tests": {
-      "count": 2
-    },
-    "vitest/no-disabled-tests": {
-      "count": 1
     }
   },
   "packages/log/test/record-batch.test.ts": {

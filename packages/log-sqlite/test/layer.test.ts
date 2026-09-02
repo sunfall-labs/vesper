@@ -7,54 +7,34 @@ import { SqlClient } from 'effect/unstable/sql';
 import { LogStoreSqlite } from '../src/layer.js';
 import { SqliteNative } from '../src/layer-native.js';
 import { LogStore } from '@sunfall/vesper-log/log-store';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { LogStoreConformance } from '@sunfall/vesper-log/testing';
 
-const storeLayer = LogStoreSqlite.layer().pipe(
-  Layer.provideMerge(
-    Layer.mergeAll(
-      SqliteNative.layer(':memory:'),
-      NodeServices.layer,
-      ReactivityModule.layer,
-    ),
-  ),
+const infrastructure = Layer.mergeAll(
+  SqliteNative.layer(':memory:'),
+  NodeServices.layer,
+  ReactivityModule.layer,
 );
 
-describe('LogStore SQLite backend', () => {
-  it.effect('round-trips batches, retries, and process-local changes', () =>
-    Effect.gen(function* () {
-      yield* LogStoreSqlite.migrate();
-      const store = yield* LogStore.Service;
-      const producer = LogVocabulary.ProducerId.make('producer');
-      yield* store.create('conversation', 'identity');
-      const claim = yield* store.acquire('conversation', producer);
-      const entry = {
-        conversationId: LogVocabulary.ConversationId.make('conversation'),
-        timestamp: 1,
-        record: { _tag: 'Text' as const, step: 1, text: 'hello' },
-      };
-      const offset = yield* store.append({
-        path: 'conversation',
-        producerId: claim.producerId,
-        epoch: claim.epoch,
-        sequence: claim.nextSequence,
-        records: [entry],
-      });
-      expect(
-        yield* store.append({
-          path: 'conversation',
-          producerId: claim.producerId,
-          epoch: claim.epoch,
-          sequence: claim.nextSequence,
-          records: [entry],
-        }),
-      ).toBe(offset);
-      const page = yield* store.read('conversation');
-      expect(page.records).toHaveLength(1);
-      expect(page.records[0]?.record).toEqual(entry.record);
-      expect(page.upToDate).toBe(true);
-    }).pipe(Effect.provide(storeLayer)),
-  );
+// The shared contract needs a plain `Layer<LogStore.Service, E>`, but this
+// backend's `LogStore.Service` is only usable once its tables exist. Folding
+// `migrate()` into the layer itself — rather than calling it inside each
+// case, which the contract does not know to do — gives every generated
+// `it.effect` a fresh, already-migrated `:memory:` database.
+const storeLayer = Layer.effect(
+  LogStore.Service,
+  Effect.gen(function* () {
+    yield* LogStoreSqlite.migrate();
+    const client = yield* SqlClient.SqlClient;
+    return yield* LogStoreSqlite.make(client);
+  }),
+).pipe(Layer.provide(infrastructure));
 
+// A single-file `:memory:` connection cannot stand up two independent
+// connections to the same database, so this backend skips any case that
+// would need one.
+LogStoreConformance.register('sqlite', storeLayer, { concurrent: false });
+
+describe('LogStore SQLite backend', () => {
   it.effect('supports positional value rows through the native client', () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
