@@ -102,10 +102,22 @@ export interface OpenOptions {
   readonly pendingWait?: 'restart';
 }
 
-/** Durable identity required before a definition may continue history. */
+/**
+ * Durable identity required before a definition may continue history.
+ *
+ * `digest` is optional here, deliberately: `Compatibility` is also the shape
+ * a caller builds by hand against the lower-level `open`/`fork` entry points
+ * (this module's own tests do), and those callers may have no compiled
+ * `Agent.Instance` to read a digest from. Every `Agent`-driven call site —
+ * `agent.ts`'s `stream`/`run` protocol, `Conversation`, subagent delegation —
+ * always supplies the real `Agent.digest`. When `digest` is absent here, the
+ * open-time comparison in `internal/compatibility.ts` skips the digest check
+ * entirely rather than treating the absence as a mismatch.
+ */
 export interface Compatibility {
   readonly agent: string;
   readonly revision: LogVocabulary.AgentRevision;
+  readonly digest?: LogVocabulary.AgentDefinitionDigest | undefined;
 }
 
 /** Ensure a claimed session is handed only to the definition that claimed it. */
@@ -114,7 +126,12 @@ export const assertCompatible = (
   expected: Compatibility,
 ): Effect.Effect<void, CompatibilityError> =>
   session.compatibility.agent === expected.agent &&
-  session.compatibility.revision === expected.revision
+  session.compatibility.revision === expected.revision &&
+  // Absent on either side compares equal: a caller without a digest (see
+  // `Compatibility`'s doc comment) never fences itself out of its own claim.
+  (session.compatibility.digest === expected.digest ||
+    session.compatibility.digest === undefined ||
+    expected.digest === undefined)
     ? Effect.void
     : Effect.fail(
         compatibilityError(
@@ -123,6 +140,9 @@ export const assertCompatible = (
             formatVersion: FORMAT_VERSION,
             agent: session.compatibility.agent,
             agentRevision: session.compatibility.revision,
+            ...(session.compatibility.digest === undefined
+              ? {}
+              : { agentDigest: session.compatibility.digest }),
           },
           `session was claimed for agent "${session.compatibility.agent}" revision "${session.compatibility.revision}"`,
         ),
@@ -134,6 +154,7 @@ export interface ChildOptions {
   /** The child agent's name. */
   readonly agent: string;
   readonly revision: LogVocabulary.AgentRevision;
+  readonly digest?: LogVocabulary.AgentDefinitionDigest | undefined;
   /** The child's delegation depth; 1 for a top-level agent's child. */
   readonly depth: number;
 }
@@ -497,6 +518,7 @@ export interface Options {
   /** Agent name, written into `RunStarted`. */
   readonly agent: string;
   readonly revision: LogVocabulary.AgentRevision;
+  readonly digest?: LogVocabulary.AgentDefinitionDigest | undefined;
   /** The run's input, written into `RunStarted` as prompt messages. */
   readonly input: Prompt.RawInput;
 }
@@ -511,6 +533,7 @@ export const start = (
       _tag: 'RunStarted',
       agent: options.agent,
       agentRevision: options.revision,
+      ...(options.digest === undefined ? {} : { agentDigest: options.digest }),
       formatVersion: FORMAT_VERSION,
       // `beforeTurn` has already run when this is called. Persisting here is
       // what makes reconstruction use the same input the provider saw.

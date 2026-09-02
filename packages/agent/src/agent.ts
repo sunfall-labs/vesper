@@ -17,6 +17,7 @@ import type { DynamicToolkit } from './dynamic-toolkit.js';
 import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
 import { AgentEventRuntime } from './internal/event.js';
+import * as DefinitionDigest from './internal/definition-digest.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import {
   makeEntry,
@@ -364,6 +365,14 @@ export interface Instance<
   readonly [ChildTypeId]: typeof ChildTypeId;
   readonly name: AgentName;
   readonly revision: LogVocabulary.AgentRevision;
+  /**
+   * Canonical SHA-256 over the compiled definition's durable compatibility
+   * surface: tool names and their parameter/success/failure JSON schemas,
+   * subagent names and digests, the skill catalog, `codeMode`, and
+   * `resultOverflow.threshold`. Computed once in `Agent.make`; read-only.
+   * See `docs/conversations.md`'s "Compatibility and revisions".
+   */
+  readonly digest: LogVocabulary.AgentDefinitionDigest;
   /** Shown to a parent when this agent is used as a subagent. */
   readonly description?: string | undefined;
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
@@ -533,6 +542,7 @@ export interface Child<
   readonly [ChildTypeId]: typeof ChildTypeId;
   readonly name: ChildName;
   readonly revision: LogVocabulary.AgentRevision;
+  readonly digest: LogVocabulary.AgentDefinitionDigest;
   readonly description?: string | undefined;
   readonly run: (input: Prompt.RawInput) => Effect.Effect<Result, RunError, R>;
 }
@@ -994,6 +1004,21 @@ export const make = <
     runPolicy,
   });
 
+  // Computed once, from exactly the parts of `definition` that change what
+  // durable history means — see `internal/definition-digest.ts` for the
+  // full inclusion/exclusion rationale.
+  const digest = DefinitionDigest.compute({
+    name: definition.name,
+    tools: definition.toolkit.tools,
+    subagents: children.map((child) => ({
+      name: child.name,
+      digest: child.digest,
+    })),
+    skills: skills.map((skill) => ({ name: skill.name })),
+    codeMode: definition.codeMode,
+    resultOverflowThreshold: definition.resultOverflow?.threshold,
+  });
+
   return fromParts<
     AgentName,
     AgentTools,
@@ -1007,6 +1032,7 @@ export const make = <
   >({
     name: definition.name,
     revision,
+    digest,
     description: definition.description,
     ownToolkit: definition.toolkit,
     toolkit,
@@ -1111,6 +1137,7 @@ interface Parts<
 > {
   readonly name: PartsName;
   readonly revision: LogVocabulary.AgentRevision;
+  readonly digest: LogVocabulary.AgentDefinitionDigest;
   readonly description: string | undefined;
   readonly ownToolkit: Toolkit.Toolkit<PartsOwnTools>;
   readonly toolkit: Toolkit.Toolkit<RuntimeTools>;
@@ -1268,6 +1295,7 @@ const fromParts = <
               AgentLog.start(session, {
                 agent: parts.name,
                 revision: parts.revision,
+                digest: parts.digest,
                 input: effective,
               }),
             lastTurn:
@@ -1330,6 +1358,7 @@ const fromParts = <
     [ChildTypeId]: ChildTypeId,
     name: parts.name,
     revision: parts.revision,
+    digest: parts.digest,
     description: parts.description,
     toolkit: parts.toolkit,
     instructions: parts.instructions,
@@ -1411,7 +1440,11 @@ const fromParts = <
     ModelTools
   > = {
     stream: (conversationId, input, options) => {
-      const compatibility = { agent: parts.name, revision: parts.revision };
+      const compatibility = {
+        agent: parts.name,
+        revision: parts.revision,
+        digest: parts.digest,
+      };
       const policy = options?.policy;
       const opener =
         options?.forkConversationId === undefined
@@ -1461,6 +1494,7 @@ const fromParts = <
             AgentLog.assertCompatible(session, {
               agent: parts.name,
               revision: parts.revision,
+              digest: parts.digest,
             }),
             Effect.suspend(() => {
               const completed = session.completed;

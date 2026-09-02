@@ -66,6 +66,8 @@ const ResumeState = Schema.Struct({
   formatVersion: Schema.optionalKey(Count),
   agent: Schema.optionalKey(Schema.String),
   agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+  /** Optional only so records written before this field existed still decode. */
+  agentDigest: Schema.optionalKey(LogVocabulary.AgentDefinitionDigest),
   usage: Usage,
   signalCursor: LogOffset.Offset,
   completed: Schema.optionalKey(CompletedValue),
@@ -118,6 +120,12 @@ export const Record = Schema.TaggedUnion({
     /** Optional only so legacy records decode and can be rejected deliberately. */
     formatVersion: Schema.optionalKey(Count),
     agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    /**
+     * Optional only so records written before this field existed still
+     * decode — an absent digest is accepted as compatible on open, never
+     * rejected outright. See `@sunfall/vesper-agent/agent`'s `Agent.make`.
+     */
+    agentDigest: Schema.optionalKey(LogVocabulary.AgentDefinitionDigest),
     /** Encoded `Prompt.RawInput`, held opaque. */
     prompt: Schema.Unknown,
   },
@@ -279,6 +287,8 @@ export const Record = Schema.TaggedUnion({
     formatVersion: Schema.optionalKey(Count),
     agent: Schema.optionalKey(Schema.String),
     agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    /** Optional only so records written before this field existed still decode. */
+    agentDigest: Schema.optionalKey(LogVocabulary.AgentDefinitionDigest),
     step: Count,
     /** What the summarized history was replaced by. */
     summary: Schema.String,

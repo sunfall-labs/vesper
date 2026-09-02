@@ -87,6 +87,9 @@ const compaction = (
         formatVersion: FORMAT_VERSION,
         agent: session.compatibility.agent,
         agentRevision: session.compatibility.revision,
+        ...(session.compatibility.digest === undefined
+          ? {}
+          : { agentDigest: session.compatibility.digest }),
         step: event.step,
         summary: event.summary,
         firstKept,

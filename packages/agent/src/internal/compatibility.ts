@@ -20,6 +20,13 @@ export interface PersistedCompatibility {
   readonly formatVersion?: number | undefined;
   readonly agent?: string | undefined;
   readonly agentRevision?: LogVocabulary.AgentRevision | undefined;
+  /**
+   * Absent on a record written before this field existed. Accepted as
+   * compatible, deliberately: an unrevisioned digest gap in older history is
+   * not itself grounds to reject a resume — only a same-revision digest that
+   * actively disagrees is.
+   */
+  readonly agentDigest?: LogVocabulary.AgentDefinitionDigest | undefined;
 }
 
 /** Validate every retained durable definition identity against one authority. */
@@ -34,6 +41,7 @@ export const validateCompatibility = (
         formatVersion: record.formatVersion,
         agent: record.agent,
         agentRevision: record.agentRevision,
+        agentDigest: record.agentDigest,
       });
     } else if (record._tag === 'Compacted') {
       identities.push(record);
@@ -73,7 +81,16 @@ export const validateCompatibility = (
             ? `history contains contradictory agent "${persisted.agent}", not "${expected.agent}"`
             : persisted.agentRevision !== expected.revision
               ? `history contains contradictory revision "${persisted.agentRevision}", not "${expected.revision}"`
-              : undefined;
+              : // Same revision from here on. A digest absent on either side is
+                // accepted as compatible — see `PersistedCompatibility.agentDigest`
+                // and `Compatibility.digest` — so this only fires when both
+                // sides know a digest and they disagree: the one case a
+                // revision bump alone cannot catch a coding agent forgetting.
+                expected.digest !== undefined &&
+                  persisted.agentDigest !== undefined &&
+                  persisted.agentDigest !== expected.digest
+                ? `history was recorded under revision "${expected.revision}" with definition digest "${persisted.agentDigest}", but this definition's digest is "${expected.digest}"; bump revision when the agent definition changes`
+                : undefined;
     if (problem !== undefined) {
       return Effect.fail(compatibilityError(expected, persisted, problem));
     }
@@ -175,6 +192,9 @@ export const compatibilityError = (
       'Use the matching agent definition or explicitly migrate the history and its compatibility metadata.',
     expectedAgent: expected.agent,
     expectedRevision: expected.revision,
+    ...(expected.digest === undefined
+      ? {}
+      : { expectedDigest: expected.digest }),
     ...(persisted.formatVersion === undefined
       ? {}
       : { persistedFormat: persisted.formatVersion }),
@@ -184,4 +204,7 @@ export const compatibilityError = (
     ...(persisted.agentRevision === undefined
       ? {}
       : { persistedRevision: persisted.agentRevision }),
+    ...(persisted.agentDigest === undefined
+      ? {}
+      : { persistedDigest: persisted.agentDigest }),
   });

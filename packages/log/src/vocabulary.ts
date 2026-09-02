@@ -15,6 +15,16 @@ export const AgentRevision = Schema.String.check(
 ).pipe(Schema.brand('@sunfall/vesper-log/AgentRevision'));
 export type AgentRevision = typeof AgentRevision.Type;
 
+/**
+ * The compile-time compatibility digest a definition computes beside its
+ * `AgentRevision`. Lowercase SHA-256 hex, matching the wire form
+ * `@sunfall/vesper-mcp`'s tool fingerprint already uses.
+ */
+export const AgentDefinitionDigest = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{64}$/),
+).pipe(Schema.brand('@sunfall/vesper-log/AgentDefinitionDigest'));
+export type AgentDefinitionDigest = typeof AgentDefinitionDigest.Type;
+
 export const ProducerId = Schema.String.check(Schema.isMinLength(1)).pipe(
   Schema.brand('@sunfall/vesper-log/ProducerId'),
 );
