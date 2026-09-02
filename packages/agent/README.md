@@ -415,6 +415,54 @@ before `Mcp.make`'s own `maxResultBytes` or this seam ever sees it —
 `resultOverflow` keeps an oversized result out of the model's context and the
 log, not out of the MCP client's peak memory.
 
+## Tool-result bounds
+
+`resultOverflow` is opt-in and needs an `AttachmentStore` the application
+wires. `resultBounds` is the unconditional backstop: a default 64 KiB
+per-result byte bound, on for every agent whether or not `resultOverflow` is
+configured, so one oversized tool result cannot poison a conversation that
+never set up overflow spilling. It needs no extra service and adds no extra
+tool.
+
+```ts
+import { Agent } from '@sunfall/vesper-agent/agent';
+
+const agent = Agent.make({
+  // ...
+  resultBounds: { maxBytes: 8_192 }, // default is 65_536 (64 KiB)
+});
+```
+
+Unset applies the 64 KiB default. Pass `resultBounds: false` to disable
+bounding entirely and restore unbounded results — the alternative, a very
+large `maxBytes`, works the same way but stays an explicit ceiling rather
+than "off".
+
+An excess result is replaced, everywhere it matters, by a small,
+schema-encodable truncation envelope:
+
+```ts
+{ truncated: true, bytes: 200_000, maxBytes: 65_536, preview: '...' }
+```
+
+`bytes` is the encoded result's real UTF-8 size, `maxBytes` is the bound that
+tripped, and `preview` is a fixed-length head of the original content —
+there is nothing left to read back, unlike a `resultOverflow` pointer.
+`ResultBounds.isTruncation` recognizes the shape independent of any tool's
+schema, the same way `ResultOverflow.isPointer` does for a spilled pointer,
+and recovering a call an earlier crashed run had already truncated decodes
+by that shape rather than the tool's own schema, for the same reason
+overflow's pointer does (see
+[Durable conversations](#durable-conversations)).
+
+When both are configured, `resultOverflow` always spills first: a spilled
+result is already a small pointer, so `resultBounds` only ever truncates a
+result overflow did not spill — for example when overflow's own threshold is
+larger than the bound, or overflow is not configured at all. Preliminary
+(intermediate progress) results are bounded the same way as final ones. A
+provider-executed tool call never reaches a toolkit's `handle`, so it never
+reaches either seam.
+
 ## Evals
 
 `AgentEval.run` executes a real agent and captures its typed public evidence:

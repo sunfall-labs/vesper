@@ -173,6 +173,14 @@
       "count": 2
     }
   },
+  "packages/agent/src/result-bounds.ts": {
+    "typescript/no-unnecessary-condition": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 1
+    }
+  },
   "packages/agent/src/result-overflow.ts": {
     "typescript/no-unnecessary-condition": {
       "count": 1
@@ -353,6 +361,11 @@
     }
   },
   "packages/agent/test/recording-policy.test.ts": {
+    "effecttsgo/prefer-schema-over-json": {
+      "count": 2
+    }
+  },
+  "packages/agent/test/result-bounds.test.ts": {
     "effecttsgo/prefer-schema-over-json": {
       "count": 2
     }
