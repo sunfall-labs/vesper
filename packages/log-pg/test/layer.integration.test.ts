@@ -5,6 +5,7 @@ import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Tail } from '@sunfall/vesper-log/tail';
+import { LogStoreConformance } from '@sunfall/vesper-log/testing';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Deferred,
@@ -18,7 +19,6 @@ import {
 
 import { VesperPgClient } from '../src/client.js';
 import { channelFor, LogStorePg } from '../src/layer.js';
-import { logStoreContract } from '../../log/test/log-store-contract.js';
 import {
   createPostgresTestHarness,
   type PostgresTestHarness,
@@ -56,7 +56,11 @@ describeIntegration('LogStore Postgres backend', () => {
     Layer.provide(NodeServices.layer),
   );
 
-  logStoreContract('postgres', { layer: storeLayer });
+  // A single Postgres backend can stand up two independent connections
+  // (see the cross-instance notification test below, and the contended
+  // fencing races in `layer.fencing-race.integration.test.ts`), so nothing
+  // here needs to be skipped.
+  LogStoreConformance.register('postgres', storeLayer);
 
   describe('corrected official PgClient behavior', () => {
     it(

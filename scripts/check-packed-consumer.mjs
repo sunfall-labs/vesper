@@ -14,6 +14,17 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 const root = resolve(import.meta.dirname, '..');
 const packageRoot = resolve(root, 'packages');
 const audit = process.argv.includes('--audit');
+
+// Subpaths that require an optional peer dependency this minimal --prod
+// consumer never installs. `@sunfall/vesper-log/testing` publishes a
+// certification suite for `LogStore` adapters and is wired to
+// `@effect/vitest`, declared as an optional peer of the package precisely so
+// installing the runtime modules does not require a test framework. That
+// makes it untestable by this script's "import every export and see it
+// resolve" smoke: a bare `--prod` install has nothing to satisfy the peer.
+// Consumers who actually want `/testing` install `@effect/vitest`
+// themselves, the same way they would for any other optional peer.
+const optionalPeerExports = new Set(['@sunfall/vesper-log/testing']);
 const temporaryRoot = await mkdtemp(join(tmpdir(), 'vesper-packed-consumer-'));
 const packDirectory = resolve(temporaryRoot, 'packs');
 const consumerDirectory = resolve(temporaryRoot, 'consumer');
@@ -180,6 +191,9 @@ try {
 
     for (const [subpath, target] of Object.entries(exports)) {
       const specifier = `${name}/${subpath.slice(2)}`;
+      if (optionalPeerExports.has(specifier)) {
+        continue;
+      }
       if (exportedTarget(target).endsWith('.js')) {
         imports.push(specifier);
       } else {

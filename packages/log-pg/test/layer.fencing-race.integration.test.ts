@@ -52,7 +52,7 @@ const forkGated = <A>(
 
 // Real two-connection fencing races.
 //
-// `layer.integration.test.ts` runs the shared `logStoreContract` plus a
+// `layer.integration.test.ts` runs the shared `LogStoreConformance.register` plus a
 // handful of driver-behavior probes, and every fencing case in that contract
 // is exercised from one fiber on one connection: acquire, then acquire
 // again, then observe the first append fail. That proves the *decision*
@@ -328,7 +328,7 @@ describeIntegration('LogStore Postgres backend: contended fencing', () => {
       // data (`producerId`, `epoch`), not a lease object — so two
       // connections legitimately holding the same claim and racing an
       // identical retry is a real scenario, not a misuse of the interface.
-      // The contract's exact-retry case (`log-store-contract.ts`, "returns
+      // The contract's exact-retry case (`packages/log/src/testing.ts`, "returns
       // the original offset for an exact retry") proves this converges
       // sequentially; this proves it converges when both attempts are
       // in-flight against Postgres at once.
