@@ -5,6 +5,21 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Added [`docs/guarantees.md`](docs/guarantees.md), a numbered, cited contract
+  for the durable conversation log and recovery: append atomicity and
+  idempotent replay by fingerprint, producer epoch fencing, the fixed-attempt
+  session claim, the authoritative/advisory split between `ToolOutcome` and
+  tool advertisement, the indeterminate crash window between `ToolStarted`
+  and `ToolOutcome`, at-least-once external effects, durable approvals and
+  typed answers, append-only compaction, fork offset reseating, per-backend
+  change notification, read limits, and what is explicitly not promised. Each
+  item states its guarantee and matching non-guarantee against file and line,
+  derived from `packages/log`, `packages/log-sqlite`, `packages/log-pg`, and
+  `packages/agent` rather than from prose docs; a Discrepancies section notes
+  one place `docs/conversations.md` and the code disagree (append failures
+  are a typed `DurabilityError`, not the defect the guide describes).
+  Compatibility: documentation only, no code changed.
+
 - Provider finishes explicitly marked `length`, `content-filter`, or `error`
   no longer settle an agent run as a successful answer. The raw finish and
   partial text remain stream-visible; blocking runs fail with

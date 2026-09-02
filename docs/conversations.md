@@ -7,7 +7,10 @@ should expect to find when something goes wrong. Configuration that lives on
 an agent definition — budgets, compaction, interception, approvals API — is
 in the [agent guide](../packages/agent/README.md). The `supportAgent` used
 below is the one built in the
-[complete example](../examples/support-agent/README.md).
+[complete example](../examples/support-agent/README.md). For the same
+guarantees stated as a numbered, cited contract against the store and agent
+source rather than as narrative, see
+[Durability guarantees](guarantees.md).
 
 ## The conversation log
 
