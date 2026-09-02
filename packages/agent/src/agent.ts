@@ -18,6 +18,7 @@ import { AgentEvents } from './event.js';
 import { AgentHistory } from './history.js';
 import { AgentEventRuntime } from './internal/event.js';
 import * as DefinitionDigest from './internal/definition-digest.js';
+import { AgentHistory as AgentHistoryRuntime } from './internal/history.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import {
   makeEntry,
@@ -1066,6 +1067,8 @@ export const make = <
     interceptor: undefined,
     runPolicy,
     entry: entryFor,
+    safeToSettleFromHistory:
+      definition.stopWhen === undefined && definition.nextTurn === undefined,
   });
 };
 
@@ -1175,6 +1178,14 @@ interface Parts<
   readonly entry: <WiringRequires>(
     wiring: Wiring<WiringRequires, DynamicTools>,
   ) => Entry<ModelTools, BaseRequires | WiringRequires, RunError>;
+  /**
+   * `true` only when this definition left both `stopWhen` and `nextTurn` at
+   * their defaults. `settledCompletion`'s one caller-side condition for
+   * ever treating a bare `TurnFinished` as evidence the loop was done — see
+   * `completedFromTail`'s doc for why a custom stop condition or turn
+   * control interceptor makes that inference unsafe.
+   */
+  readonly safeToSettleFromHistory: boolean;
 }
 
 /**
@@ -1272,6 +1283,23 @@ const fromParts = <
       foldToResult(plainIn(chat, input)),
   };
 
+  // `session.completed` as the durable records alone state it, widened by
+  // one case a crash can leave behind: a final turn whose `TurnFinished` is
+  // durable but whose `Completed` (and the successful `RunSettled` that
+  // would carry it forward) never got appended — `run:before-completed`.
+  // `completedFromTail` reconstructs that shape, but only ever safely when
+  // this definition's stop condition and turn control are both left at
+  // their defaults — see its own doc for why a custom `stopWhen`/`nextTurn`
+  // makes a tool-call-free final turn no longer reliable evidence that the
+  // loop was actually done, at which point this simply returns what the
+  // durable records already said and the caller falls back to asking the
+  // model, exactly as it did before this existed.
+  const settledCompletion = (session: AgentLog.Session) =>
+    session.completed ??
+    (parts.safeToSettleFromHistory
+      ? AgentHistoryRuntime.completedFromTail(session.history)
+      : undefined);
+
   // The writer half of the log, and the reason `@sunfall/vesper-durable`'s
   // checkpointer could be deleted rather than merely shrunk. Shared by every
   // Conversation execution, which differs only in how the session was claimed
@@ -1305,6 +1333,53 @@ const fromParts = <
           input: Math.max(0, total.input - session.inheritedUsage.input),
           output: Math.max(0, total.output - session.inheritedUsage.output),
         };
+        // A crash between the final turn's `TurnFinished` and its
+        // `Completed`/successful `RunSettled` leaves a run whose result is
+        // already fully durable — `session.completed` derives it from
+        // history the same way an unanswered tool call is already dropped
+        // from a resumed prompt (see `AgentLog.Session.completed`'s own
+        // doc). Settling from that here, before ever building a `Chat` or
+        // asking the provider, is what keeps this branch from re-asking a
+        // question the model already fully answered: the turn already
+        // spent is not retracted by asking again, only doubled.
+        //
+        // `prior` alone is the figure to report, not `prior + completed.usage`
+        // the way a genuinely new physical run's contribution gets added
+        // below: `session.usage` already reads back through this same run's
+        // own `RunSettled`/`TurnFinished`, so `completed.usage` (that run's
+        // own cumulative, the shape every `Completed` carries) is already
+        // folded into `total` — adding it again would double the very run
+        // this branch exists to avoid re-asking the model for.
+        //
+        // Gated on empty `input`: `session.completed` says the *previous*
+        // physical run already reached a durable answer, not that this call
+        // has nothing new to contribute. `conversation.run(nextMessage)`
+        // must still ask the model — a fresh user message is exactly the
+        // "new work requested" this short-circuit is not for; only a bare
+        // continuation (recovering a crash, or a child returning without
+        // rerunning) has none.
+        const settled =
+          Prompt.make(input).content.length === 0
+            ? settledCompletion(session)
+            : undefined;
+        if (settled !== undefined) {
+          const completed = settled;
+          const response =
+            completed.response === undefined
+              ? undefined
+              : yield* Schema.decodeEffect(Prompt.Prompt)(
+                  completed.response,
+                ).pipe(Effect.orDie);
+          return Stream.make(
+            AgentEventRuntime.completed(
+              completed.text,
+              completed.steps,
+              prior,
+              completed.outcome,
+              response,
+            ),
+          );
+        }
         const latest = session.latestTurnUsage;
         const chat = yield* Chat.fromPrompt(
           Prompt.concat(
@@ -1522,7 +1597,15 @@ const fromParts = <
               digest: parts.digest,
             }),
             Effect.suspend(() => {
-              const completed = session.completed;
+              // Unlike `continuingStream`'s own use of `settledCompletion`,
+              // this one is deliberately not gated on empty `input`: this is
+              // the child-delegation entry point (`Agent.Child`'s own `run`,
+              // reached via `task_<name>`, never `Conversation.run`), and a
+              // parent re-invoking an already-settled child is asking "what
+              // did it return", not supplying a new instruction for it to
+              // act on — the same reasoning `completedFrom`'s own doc gives
+              // for not rerunning a child whose result is already durable.
+              const completed = settledCompletion(session);
               return completed === undefined
                 ? foldToResult(
                     runStream(

@@ -332,6 +332,62 @@ describe('resuming a crashed run', () => {
     }),
   );
 
+  // `run:before-completed`: a run whose final turn already durably finished
+  // — `Text` and `TurnFinished` both settled — but whose own `Completed`
+  // (and the successful `RunSettled` that would carry it forward) never got
+  // appended before the run was abandoned. Recovery has no tool call to
+  // reconcile and no unanswered call to drop from the rebuilt prompt: the
+  // model's answer is already fully durable, so resuming must settle from
+  // that history instead of asking the provider a second time for a turn it
+  // already received in full.
+  it.effect(
+    'settles from a durable TurnFinished instead of re-asking the model when only Completed is missing',
+    () =>
+      Effect.gen(function* () {
+        const models = provider([answeringTurn, laterTurn]);
+
+        const observed = yield* run(
+          Effect.gen(function* () {
+            yield* conversation.stream('hi').pipe(
+              Stream.takeUntil((event) => event._tag === 'TurnFinished'),
+              Stream.runDrain,
+              Effect.orDie,
+            );
+
+            const afterCrash = yield* readAll();
+            const askedDuringCrash = models.asked.length;
+
+            const result = yield* conversation.run().pipe(Effect.orDie);
+
+            return {
+              afterCrash: afterCrash.map((envelope) => envelope.record._tag),
+              askedDuringCrash,
+              askedTotal: models.asked.length,
+              result,
+            };
+          }),
+          models.layer,
+        );
+
+        // Durable through TurnFinished; Completed and a successful
+        // RunSettled never got appended before the run was abandoned.
+        expect(observed.afterCrash).toEqual([
+          'RunStarted',
+          'Text',
+          'TurnFinished',
+          'RunSettled',
+        ]);
+        expect(observed.askedDuringCrash).toBe(1);
+
+        // Exactly zero further provider calls — the invariant this fix
+        // exists for. Before the fix this was 2: a redundant call for a
+        // turn whose text and usage were already fully durable.
+        expect(observed.askedTotal).toBe(1);
+        expect(observed.result.text).toBe('done');
+        expect(observed.result.usage).toEqual({ input: 10, output: 4 });
+      }),
+  );
+
   // BUG, partially closed: a run interrupted strictly inside the
   // `ToolStarted`..`ToolOutcome` window — after the tool's own durable
   // outcome, but before its enclosing turn's `TurnFinished` — cannot

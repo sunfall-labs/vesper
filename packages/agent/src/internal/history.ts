@@ -511,6 +511,99 @@ export const completedFrom = (
   // result and side effects are already durable.
   ResumeProjection.activeFrom(records).completed;
 
+const isTextPart = (
+  part: Prompt.AssistantMessagePart,
+): part is Prompt.TextPart => part.type === 'text';
+
+/**
+ * Derive `Completed` from a run whose final turn's `TurnFinished` is durable
+ * but whose own `Completed`/successful `RunSettled` never got appended — the
+ * `run:before-completed` crash window. Every fact `Completed` would have
+ * carried is already implied by that `TurnFinished` (steps, cumulative usage)
+ * plus the assistant message {@link rebuild} already produces for the same
+ * turn from `Text`/`ToolCall` records (text, response), so recovery can
+ * settle from history instead of re-asking the model for a turn it already
+ * fully received — the same inference `messagesFrom` already relies on to
+ * drop an unanswered tool call, applied to the opposite edge of a turn.
+ *
+ * Conservative by construction, but not by itself sufficient — read this
+ * whole note before calling it. Structurally it only fires when the newest
+ * record on the active path — a crashed run's own trailing `RunSettled`
+ * skipped, since it carries no information beyond what caused this to be
+ * reached — is a `TurnFinished` with nothing after it, and when that turn's
+ * own rebuilt message carries no tool call (the default stop condition,
+ * `noToolCalls`, is what a turn shaped like that would have satisfied). An
+ * accepted `cancel` signal seen since this physical run's own `RunStarted`
+ * resolves to `'cancelled'`, matching what the live loop would have emitted
+ * instead of `'success'`.
+ *
+ * What it cannot see is *why* the loop kept a turn's own `TurnFinished`
+ * around without ever reaching `Completed`: a custom `stopWhen` or
+ * `nextTurn` can keep a loop going past a turn that requested no tool call
+ * at all — this function has no way to tell that shape apart from one where
+ * the loop was genuinely, unconditionally done, because neither is durable.
+ * **The caller must gate on `definition.stopWhen === undefined &&
+ * definition.nextTurn === undefined` before ever calling this** — only the
+ * default stop condition's `noToolCalls` half is what a tool-call-free final
+ * turn is reliable evidence for. `agent.ts`'s two call sites both do.
+ */
+export const completedFromTail = (
+  records: ReadonlyArray<ConversationRecord.Envelope>,
+): ResumeProjection.Completed | undefined => {
+  const active = AgentBranch.activePath(records);
+  let index = active.length - 1;
+  while (index >= 0 && active[index]?.record._tag === 'RunSettled') {
+    index -= 1;
+  }
+  const boundary = active[index];
+  if (boundary === undefined || boundary.record._tag !== 'TurnFinished') {
+    return undefined;
+  }
+  const turnFinished = boundary.record;
+
+  let runStart = index;
+  while (runStart > 0 && active[runStart - 1]?.record._tag !== 'RunStarted') {
+    runStart -= 1;
+  }
+  const cancelled = active
+    .slice(runStart, index + 1)
+    .some(
+      ({ record }) =>
+        record._tag === 'SignalReceived' &&
+        record.kind === 'cancel' &&
+        record.disposition !== 'rejected',
+    );
+
+  const built = rebuild(active.slice(0, index + 1));
+  const finalMessage = built.at(-1)?.message;
+  if (finalMessage === undefined || finalMessage.role !== 'assistant') {
+    return undefined;
+  }
+  // A tool call in the final turn means the default stop condition
+  // (`noToolCalls`) would not have fired — the loop was headed for another
+  // turn, not a `Completed`, regardless of whether that call is already
+  // resolved. Refusing here rather than guessing is what keeps the caller's
+  // own gate (see this function's doc) sufficient on its own: nothing below
+  // this check can turn a live "keep going" into a synthesized "done".
+  if (finalMessage.content.some((part) => part.type === 'tool-call')) {
+    return undefined;
+  }
+  const text = finalMessage.content
+    .filter(isTextPart)
+    .map((part) => part.text)
+    .join('');
+
+  return {
+    text,
+    outcome: cancelled ? 'cancelled' : 'success',
+    steps: turnFinished.step,
+    usage: turnFinished.usage,
+    response: Schema.encodeSync(Schema.toEncoded(Prompt.Prompt))(
+      Prompt.make([finalMessage]),
+    ),
+  };
+};
+
 /**
  * Zero usage, including a still-absent `costMicrousd`: a conversation that
  * never configured `RunPolicy.Limits.costModel` should project no cost
