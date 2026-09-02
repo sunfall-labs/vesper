@@ -733,16 +733,26 @@ behind for a crash inside the `ToolStarted`/`ToolOutcome` window.
 caller-supplied scenario once per location: it arms the crash, runs the
 scenario to see it actually crash there, disarms, reopens the same
 conversation, and asserts the recovered result equals a crash-free baseline,
-that the durable history is well-formed (every `ToolCall` has exactly one
-`ToolOutcome`, every suspended wait is resolved exactly once), and that no
-tool call executed more times than a caller-declared allowance for the
-`ToolStarted`..`ToolOutcome` window permits. It returns a report — one of
-`converged`, `not-triggered`, or `failed(reason)` per location — rather than
-throwing at the first bad one, so a test can see every location's fate at
-once and decide what to assert. See `test/chaos.test.ts` for a full scenario
-(two tool calls and one durable approval) run against both the in-memory and
-the SQLite log stores, including two locations pinned as known,
-not-yet-fixed recovery gaps rather than silently skipped.
+that recovery asked the provider no more times than the baseline did plus a
+caller-declared tolerance (`ChaosAttempt.modelCalls`,
+`ChaosOptions.modelCallTolerance` — `0` where every part of the in-flight
+call's own output is already durable at the crash point, so any repeat is
+unambiguously redundant; the default `1` where a crash before anything about
+that call is durable makes one clean retry the correct recovery, not a
+replay bug), that the durable history is well-formed (every `ToolCall` has
+exactly one `ToolOutcome`, every suspended wait is resolved exactly once),
+and that no tool call executed more times than a caller-declared allowance
+for the `ToolStarted`..`ToolOutcome` window permits. It returns a report —
+one of `converged`, `not-triggered`, or `failed(reason)` per location —
+rather than throwing at the first bad one, so a test can see every
+location's fate at once and decide what to assert. See `test/chaos.test.ts`
+for a full scenario (two tool calls and one durable approval) run against
+both the in-memory and the SQLite log stores, including one location pinned
+as a known, not-yet-closeable recovery limitation — a crash inside a tool
+dispatch or suspend-registration window loses that turn's real provider
+usage because Effect AI's own `LanguageModel.streamText` does not make it
+durable anywhere until after that window closes — rather than silently
+skipped.
 
 ## Durable State
 

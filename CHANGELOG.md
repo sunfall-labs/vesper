@@ -5,6 +5,42 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Fixed the two recovery gaps the chaos convergence runner (see the entry
+  below) pinned as regression tests rather than hidden. Recovering from a
+  crash between a final turn's `TurnFinished` and its `Completed` record no
+  longer re-asks the provider for an already-durable turn: `agent.ts`'s
+  `settledCompletion` derives `Completed` from that `TurnFinished` plus the
+  durable `Text`/`ToolCall` records the same turn already produced, gated on
+  the agent's stop condition and turn control both being left at their
+  defaults (a custom `stopWhen`/`nextTurn` can keep a tool-call-free turn
+  from being the loop's last, which durable records alone cannot rule out).
+  `run:before-completed` now converges with zero additional provider calls,
+  asserted with no tolerance in `test/chaos.test.ts`. Separately, a crashed
+  or suspended run's own necessarily-incomplete usage guess no longer gets
+  cached as a trusted checkpoint: `session-open.ts`'s `trackedAppend` only
+  writes a `RunSettled.resume` aggregate for a `'success'`/`'cancelled'`
+  settlement, so a `'failure'`/`'interrupted'` one (what a crash produces)
+  always forces the next open to re-derive `usage` from durable
+  `TurnFinished`/`Completed` records instead of trusting a cached snapshot
+  that could compound across a later crash. This does not close the
+  underlying usage gap itself — a crash strictly inside the
+  `ToolStarted`..`ToolOutcome` window (or the suspend-registration window)
+  still loses that turn's real provider cost, because `TurnFinished` is the
+  only record that carries it and Effect AI's own `LanguageModel.streamText`
+  defers emitting a turn's `finish` part until every tool call that turn
+  requested has resolved — the cost is not durable anywhere yet at the crash
+  point, for any store. `test/resume.test.ts` and `packages/agent/README.md`
+  carry both halves directly: the shortfall that remains, traced to Effect
+  AI's own deferred-finish behavior, and the checkpoint that no longer
+  compounds it. `Chaos.converge` gained a strict, opt-out-of-tolerance
+  provider-call-count check (`ChaosAttempt.modelCalls`,
+  `ChaosOptions.modelCallTolerance`) alongside its existing exact
+  `Agent.Result` equality check, so a redundant call that happens to
+  reproduce the same final text — `run:before-completed`'s own bug shape —
+  cannot pass silently again. Compatibility: additive; `ChaosAttempt` gained
+  a required `modelCalls` field, a source change for any caller implementing
+  it directly (only `test/chaos.test.ts` does, in this repository).
+
 - Added a failpoint service and a chaos convergence runner to
   `@sunfall/vesper-agent`, proving recovery converges rather than asserting
   it in prose. `packages/agent/src/internal/failpoint.ts` names every durable

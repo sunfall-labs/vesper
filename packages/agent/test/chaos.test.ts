@@ -102,6 +102,7 @@ const DONE_TURN: ReadonlyArray<Response.StreamPartEncoded> = [
  */
 const contentAwareModel = (
   counts: Ref.Ref<Record<string, number>>,
+  modelCalls: Ref.Ref<number>,
 ): Layer.Layer<LanguageModel.LanguageModel> =>
   Layer.effect(
     LanguageModel.LanguageModel,
@@ -109,7 +110,9 @@ const contentAwareModel = (
       generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
       streamText: () =>
         Stream.unwrap(
-          Effect.map(Ref.get(counts), (current) => {
+          Effect.gen(function* () {
+            yield* Ref.update(modelCalls, (n) => n + 1);
+            const current = yield* Ref.get(counts);
             if ((current['lookup'] ?? 0) === 0) {
               return Stream.fromIterable(LOOKUP_TURN);
             }
@@ -205,6 +208,7 @@ const makeAttempt =
     Effect.gen(function* () {
       const store = yield* openStore(storeLayer);
       const counts = yield* Ref.make<Record<string, number>>({});
+      const modelCalls = yield* Ref.make(0);
       const started = yield* Ref.make(false);
       const agent = buildAgent(counts);
       const conversation = Conversation.make(agent, conversationId);
@@ -230,7 +234,7 @@ const makeAttempt =
       });
 
       const layer = Layer.mergeAll(
-        contentAwareModel(counts),
+        contentAwareModel(counts, modelCalls),
         NodeServices.layer,
         failpointLayer,
       );
@@ -244,6 +248,7 @@ const makeAttempt =
         executionCounts: Ref.get(counts).pipe(
           Effect.map((record) => new Map(Object.entries(record))),
         ),
+        modelCalls: Ref.get(modelCalls),
         records: conversation
           .records()
           .pipe(
@@ -255,14 +260,15 @@ const makeAttempt =
     });
 
 // Every location this scenario actually reaches sorts into one of three
-// buckets. The first converges cleanly and is asserted on every test run.
-// The other two are real findings from running this suite, not test
-// artifacts — both reproduced identically against the in-memory and the
-// SQLite store, and both were traced to a specific record-level cause before
-// being written down here. Per the task's own instruction, a location that
-// cannot converge because of a real recovery bug is not papered over: it
-// stays in the report as `failed`, and the test for it is `it.skip`, naming
-// the bug rather than silently passing or quietly deleting the location.
+// buckets. `run:before-completed` used to be a documented bug — a resumed
+// run re-asked the provider for a turn it had already received in full — and
+// is fixed (`agent.ts`'s `settledCompletion`); it now converges alongside
+// the locations that always did. The usage locations remain a real,
+// diagnosed limitation, not a test artifact: `test/resume.test.ts`'s "does
+// not cache an interrupted run's own guessed usage as a verified checkpoint"
+// carries the direct, non-chaos reproduction and the fix that *is* real
+// (session-open.ts never caches a crashed run's own guess as a trusted
+// checkpoint any more) next to what remains open and why.
 
 /** Reached and recovered correctly by this scenario. */
 const CONVERGING_LOCATIONS: ReadonlyArray<Failpoint.Location> = [
@@ -271,64 +277,49 @@ const CONVERGING_LOCATIONS: ReadonlyArray<Failpoint.Location> = [
   'approval:after-resolved',
   'turn:before-finished',
   'turn:after-finished',
+  'run:before-completed',
 ];
 
 /**
- * BUG: cumulative usage undercounts by exactly one physical run's worth of
- * tokens after a crash whose own physical run reaches settlement — either a
- * `RunSettled(outcome: 'failure')` written by `recording-sink.ts`'s `settle`
- * finalizer (`tool:after-started`, `tool:before-outcome`, `tool:after-outcome`
- * — `pendingToolState` is `'none'` or `'indeterminate'`-then-resolved at that
- * point, so `settle` does write a record), or the still-open, never-settled
- * run a `ToolSuspended` leaves behind (`approval:after-suspended`).
+ * LIMITATION: cumulative usage undercounts by exactly one physical run's
+ * worth of tokens after a crash strictly inside the `ToolStarted`..
+ * `ToolOutcome` window (`tool:after-started`, `tool:before-outcome`,
+ * `tool:after-outcome`) or the suspend-registration window
+ * (`approval:after-suspended`).
  *
- * Traced with `records`/`executionCounts` directly (bypassing
- * `Chaos.converge`) against the in-memory store: for `tool:after-outcome`,
- * the crashed physical run's own `RunSettled` correctly carries that turn's
- * usage (`{ input: 10, output: 4 }`), `session-open.ts`'s `trackedAppend`
- * folds it into `opened.usage` via `addUsage` regardless of outcome, and the
- * next two physical runs each contribute one more turn's worth — three
- * physical runs, three turns, and a crash-free baseline of the same
- * conversation settles at `{ input: 30, output: 12 }`. The recovered
- * conversation here settles at `{ input: 20, output: 8 }` instead: exactly
- * the first (crashed) physical run's contribution missing, with the record
- * log otherwise well-formed and every tool call executing the expected
- * number of times (`lookup` and `charge` once each, or twice only where the
- * `ToolStarted`/`ToolOutcome` window legitimately retries one of them).
- * `approval:after-suspended`'s crashed run never gets a `RunSettled` at all
- * (`pendingToolState` is `'suspended'`, so `settle` deliberately skips it),
- * and the same one-turn shortfall appears — suggesting the same usage is
- * lost by a related path rather than two unrelated bugs, though this suite
- * did not trace that second path to its own root cause.
+ * Traced directly (bypassing `Chaos.converge`, both against the in-memory
+ * store): at every one of these, the crashed physical run's own `RunSettled`
+ * carries `{ input: 0, output: 0 }`, not the turn's real cost — not because
+ * `session-open.ts`/`recording-sink.ts` drop a number they had, but because
+ * neither has one yet. `recording-sink.ts`'s `pending.usage` — the only
+ * thing `RunSettled.usage` can ever be — only advances at a `TurnFinished`/
+ * `Completed` lifecycle event, and Effect AI's own `LanguageModel.streamText`
+ * defers emitting a turn's `finish` part (usage's only carrier, downstream
+ * of nothing else) until every tool call that turn requested has been
+ * resolved — "This guarantees tool results are emitted before finish in
+ * streaming mode," in its own source. A crash anywhere in that window is
+ * therefore a crash before the number exists anywhere in the process, durable
+ * or not; no fold over `session.recorded`, however constructed, can recover
+ * it. This is the same fact CONTEXT.md's Turn entry states for a different
+ * consequence ("Effect AI begins automatic tool resolution before it emits
+ * its deferred finish part").
+ *
+ * What *is* fixed: `session-open.ts`'s `trackedAppend` used to cache that
+ * necessarily-incomplete guess into `RunSettled.resume` for every outcome,
+ * turning a one-turn shortfall into a trusted checkpoint later opens would
+ * build on rather than re-derive past. It now only caches `resume` for a
+ * `'success'`/`'cancelled'` settlement — a clean stop, where `pending.usage`
+ * is accurate — so a `'failure'`/`'interrupted'` settlement (what a crash
+ * produces) always forces the next open to re-fold `usage` from durable
+ * `TurnFinished`/`Completed` records instead of trusting a cached guess.
+ * `test/resume.test.ts` carries both halves of this directly: the shortfall
+ * that remains, and the checkpoint that no longer compounds it.
  */
 const USAGE_UNDERCOUNT_LOCATIONS: ReadonlyArray<Failpoint.Location> = [
   'tool:after-started',
   'tool:before-outcome',
   'tool:after-outcome',
   'approval:after-suspended',
-];
-
-/**
- * BUG: recovering from a crash between the final turn's `TurnFinished` and
- * its `Completed` record re-asks the model for a turn whose content is
- * already fully durable, instead of deriving `Completed` from history the
- * way it derives everything else on resume.
- *
- * Traced directly: at `run:before-completed`, the crashed physical run's
- * records end `..., 'Text', 'TurnFinished', 'RunSettled'` — the finish
- * reason ('stop', no tool calls) is fully implied by the *absence* of a
- * `ToolCall` record in that turn, exactly the inference
- * `AgentHistory.messagesFrom` already relies on to drop an unanswered call.
- * Recovery does not make that inference here: it opens a **third** physical
- * run, asks the model again, and gets a third `'Text'`/`'TurnFinished'` pair
- * before finally reaching `Completed`. The extra call is not free — it is
- * exactly the "provider cost may repeat" case `docs/guarantees.md` (VSP-007)
- * scopes to a crash catching a turn genuinely mid-flight, and this turn was
- * not: every part of it was already durable except the run's own bookkeeping
- * that it was over.
- */
-const EXTRA_CALL_LOCATIONS: ReadonlyArray<Failpoint.Location> = [
-  'run:before-completed',
 ];
 
 /**
@@ -367,15 +358,39 @@ describe.each([
     30_000,
   );
 
-  // The three tests below are deliberately not assertions that everything is
+  // The batch above allows one tolerated provider call per location — the
+  // default, correct for a crash like `claim:after-acquire`'s or
+  // `tool:before-started`'s that lands before anything about the in-flight
+  // call is durable, where a full clean retry is the only correct recovery
+  // (VSP-007). `run:before-completed` is the opposite shape: every part of
+  // that call's own output — text, usage, everything `Completed` would
+  // carry — is already durable at the crash point, so this asserts the
+  // model-call count with zero tolerance, the regression guard for the
+  // bug this location used to have.
+  it.effect(
+    'settles run:before-completed with exactly as many provider calls as the crash-free baseline',
+    () =>
+      Effect.gen(function* () {
+        const report = yield* Chaos.converge({
+          attempt: makeAttempt(storeLayer),
+          locations: ['run:before-completed'],
+          windowedCallIds: ['lookup', 'charge'],
+          modelCallTolerance: 0,
+        });
+        expect(badStatuses(report)).toEqual([]);
+      }),
+    30_000,
+  );
+
+  // The two tests below are deliberately not assertions that everything is
   // fine — `no-disabled-tests` forbids `it.skip` in this repository, so each
-  // pins today's actual (broken, or not-yet-exercised) status instead of
+  // pins today's actual (limited, or not-yet-exercised) status instead of
   // silently skipping. Each fails loudly — a real signal, not a stale
   // skip — the moment the underlying behavior changes, whether that is the
-  // bug getting fixed (move the location up to `CONVERGING_LOCATIONS`) or
-  // regressing somewhere new.
+  // limitation narrowing further (move the location up to
+  // `CONVERGING_LOCATIONS`) or regressing somewhere new.
   it.effect(
-    'BUG: cumulative usage undercounts by one physical run after a crash near a tool boundary — see USAGE_UNDERCOUNT_LOCATIONS above',
+    'LIMITATION: cumulative usage undercounts by one physical run after a crash strictly inside a tool-dispatch or suspend-registration window — see USAGE_UNDERCOUNT_LOCATIONS above',
     () =>
       Effect.gen(function* () {
         const report = yield* Chaos.converge({
@@ -385,21 +400,6 @@ describe.each([
         });
         expect(report.results.map((result) => result.status._tag)).toEqual(
           USAGE_UNDERCOUNT_LOCATIONS.map(() => 'failed'),
-        );
-      }),
-    30_000,
-  );
-
-  it.effect(
-    'BUG: run:before-completed re-asks the model for an already-durable final turn — see EXTRA_CALL_LOCATIONS above',
-    () =>
-      Effect.gen(function* () {
-        const report = yield* Chaos.converge({
-          attempt: makeAttempt(storeLayer),
-          locations: EXTRA_CALL_LOCATIONS,
-        });
-        expect(report.results.map((result) => result.status._tag)).toEqual(
-          EXTRA_CALL_LOCATIONS.map(() => 'failed'),
         );
       }),
     30_000,

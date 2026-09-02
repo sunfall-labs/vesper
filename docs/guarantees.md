@@ -331,27 +331,61 @@ well-formed durable history, and no tool call replayed outside the
 `test/chaos.test.ts` runs this scenario — two tool calls and one durable
 approval — against both the in-memory and the SQLite log store, and
 `claim:after-acquire`, `tool:before-started`, `approval:after-resolved`,
-`turn:before-finished`, and `turn:after-finished` converge cleanly on both.
+`turn:before-finished`, `turn:after-finished`, and `run:before-completed`
+converge cleanly on both, the last of these with zero tolerance on how many
+times the provider was asked
+(`ChaosOptions.modelCallTolerance: 0`, `ChaosAttempt.modelCalls`) — not just
+that the recovered `Agent.Result` happens to match, which a redundant call
+that reproduces the same final text would not by itself catch.
+`run:before-completed` used to be a documented gap here: recovering from a
+crash between the final turn's `TurnFinished` and its `Completed` record
+re-asked the provider for a turn whose content was already fully durable.
+`agent.ts`'s `settledCompletion` now derives `Completed` from that
+`TurnFinished` plus the same turn's durable `Text`/`ToolCall` records — the
+same inference `messagesFrom` already relies on to drop an unanswered tool
+call, applied to the opposite edge of a turn — gated on the agent's stop
+condition and turn control interceptor both being left at their defaults
+(`packages/agent/src/internal/history.ts`'s `completedFromTail` documents
+why a custom `stopWhen`/`nextTurn` makes that inference unsafe: a
+tool-call-free final turn is only reliable evidence the loop was done under
+the default `noToolCalls` condition, and durable records alone cannot say
+whether a custom one would have kept going).
 
-**Non-guarantee.** The same suite found, and pins as regression tests rather
-than papering over, two locations that do not yet converge cleanly:
+**Non-guarantee.** The same suite found, and still pins as a regression test
+rather than papering over, one location that does not converge cleanly:
 cumulative usage undercounts by exactly one physical run's worth of tokens
-after a crash whose own physical run reaches settlement near a tool boundary
-(`tool:after-started`, `tool:before-outcome`, `tool:after-outcome`,
-`approval:after-suspended`), and recovering from a crash between the final
-turn's `TurnFinished` and its `Completed` record re-asks the provider for a
-turn whose content is already fully durable instead of deriving `Completed`
-from history the way an unanswered tool call is already dropped from a
-resumed prompt (`run:before-completed`). Neither is a correctness violation
-in the sense VSP-006 or VSP-001 promise — no tool re-runs, no history
-corrupts — but neither is "resumed run doesn't re-ask the provider for turns
-it completed" fully true at these two locations either. `test/chaos.test.ts`
-names both, with the record-level trace each was diagnosed from, next to
-`CONVERGING_LOCATIONS`. This scenario also does not yet cross a compaction
-threshold or send a signal, so `compaction:before-append`,
-`compaction:after-append`, and `signal:after-received` report
-`not-triggered` rather than either status — a scenario gap, not a finding,
-tracked the same way.
+after a crash strictly inside the `ToolStarted`..`ToolOutcome` window
+(`tool:after-started`, `tool:before-outcome`, `tool:after-outcome`) or the
+suspend-registration window (`approval:after-suspended`). Traced directly
+(`test/resume.test.ts`'s "does not cache an interrupted run's own guessed
+usage as a verified checkpoint"): the crashed run's own `RunSettled` carries
+`{ input: 0, output: 0 }`, not because `session-open.ts`/`recording-sink.ts`
+discard a number they had, but because neither has one yet at that point —
+`recording-sink.ts`'s `pending.usage` only advances at a `TurnFinished`/
+`Completed` lifecycle event, and Effect AI's own `LanguageModel.streamText`
+defers emitting a turn's `finish` part (usage's only carrier) until every
+tool call that turn requested has resolved, "to guarantee tool results are
+emitted before finish in streaming mode." A crash in that window is a crash
+before the number exists anywhere in the process, durable or not; no fold
+over any durable record can recover it, so this is not a correctness
+violation in the sense VSP-006 or VSP-001 promise — no tool re-runs, no
+history corrupts, and what the same information-theoretic ceiling
+`docs/conversations.md`'s Signals section and VSP-007 already accept for a
+provider call caught genuinely mid-flight. What did change:
+`session-open.ts`'s `trackedAppend` used to cache that necessarily-incomplete
+guess into `RunSettled.resume` for every settlement outcome, so the shortfall
+did not just cost this run once — it became a trusted checkpoint later opens
+built on rather than re-derived past. It now only caches `resume` for a
+`'success'`/`'cancelled'` settlement, where `pending.usage` is accurate at a
+turn boundary either way, so a `'failure'`/`'interrupted'` settlement (what a
+crash produces) always forces the next open to re-fold `usage` from durable
+`TurnFinished`/`Completed` records instead of trusting a stale snapshot.
+`test/chaos.test.ts` names the remaining location, with the record-level
+trace it was diagnosed from, next to `USAGE_UNDERCOUNT_LOCATIONS`. This
+scenario also does not yet cross a compaction threshold or send a signal, so
+`compaction:before-append`, `compaction:after-append`, and
+`signal:after-received` report `not-triggered` rather than either status — a
+scenario gap, not a finding, tracked the same way.
 
 - **`docs/conversations.md` says a failed append is a defect; the code makes
   it a typed failure.** `docs/conversations.md`'s "The conversation log"

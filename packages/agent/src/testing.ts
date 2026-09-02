@@ -171,6 +171,20 @@ export interface ChaosAttempt {
   readonly executionCounts: Effect.Effect<ReadonlyMap<string, number>>;
   /** Every record currently in this attempt's conversation, read fresh. */
   readonly records: Effect.Effect<ReadonlyArray<ConversationRecord.Envelope>>;
+  /**
+   * How many provider calls this attempt's scripted model has answered so
+   * far, cumulative across every `drive` call made against this attempt —
+   * the scenario's own count, the same way `executionCounts` is a tool
+   * handler's own count rather than something inferred from the log.
+   * {@link converge} compares this against the crash-free baseline's own
+   * total: a resumed run may never ask the provider more times than a
+   * crash-free run of the same scenario did. `run:before-completed` is the
+   * location this exists for — a turn whose text and usage are already
+   * fully durable produces the same recovered `Agent.Result` whether or not
+   * the provider was asked again for it, so result equality alone cannot
+   * catch a redundant call there the way it catches everything else.
+   */
+  readonly modelCalls: Effect.Effect<number>;
 }
 
 export interface ChaosOptions {
@@ -199,6 +213,19 @@ export interface ChaosOptions {
    * every other call id executing more than once is a replay bug.
    */
   readonly windowedCallIds?: ReadonlyArray<string> | undefined;
+  /**
+   * How many more provider calls, beyond the crash-free baseline's own
+   * total, a recovered run may make — the model-call analogue of
+   * `windowedCallIds`. Defaults to `1`: a crash before anything about the
+   * in-flight call became durable (`claim:after-acquire`, an armed but
+   * never-entered `tool:before-started`) forces a clean, full retry of that
+   * one call, which is VSP-007's "provider cost may repeat" case, not a
+   * replay bug. Pass `0` where the location under test is known to reach
+   * its crash only after that call's own content is already fully durable,
+   * so any repeat at all is unambiguously redundant — `run:before-completed`
+   * is exactly this.
+   */
+  readonly modelCallTolerance?: number | undefined;
 }
 
 /** One location's outcome from {@link converge}. */
@@ -346,12 +373,14 @@ export const converge = (options: ChaosOptions): Effect.Effect<ChaosReport> =>
   Effect.gen(function* () {
     const locations = options.locations ?? Failpoint.locations;
     const windowed = new Set(options.windowedCallIds ?? []);
+    const modelCallTolerance = options.modelCallTolerance ?? 1;
 
     const baseline = yield* options.attempt(
       'chaos-baseline',
       Failpoint.layerNoop,
     );
     const baselineResult = yield* baseline.drive;
+    const baselineModelCalls = yield* baseline.modelCalls;
 
     const results: Array<ChaosLocationResult> = [];
     for (const location of locations) {
@@ -389,6 +418,28 @@ export const converge = (options: ChaosOptions): Effect.Effect<ChaosReport> =>
           status: {
             _tag: 'failed',
             reason: `recovered result diverged from the crash-free baseline: ${mismatch}`,
+          },
+        });
+        continue;
+      }
+
+      // Strict, not "at most the baseline plus one for the interrupted
+      // call": every location in this scenario reaches its crash after the
+      // one provider call in flight at that point has already been fully
+      // received (a durable `ToolStarted`/`ToolCall`/`TurnFinished` is
+      // proof of that, not merely evidence of it) — see `testing.ts`'s
+      // `ChaosAttempt.modelCalls` doc. A resumed run asking strictly more
+      // times than the crash-free baseline did is `run:before-completed`'s
+      // own bug shape, not a cost `Agent.Result` equality alone would show:
+      // asking the same scripted model the same question again reproduces
+      // the same text.
+      const recoveredModelCalls = yield* attempt.modelCalls;
+      if (recoveredModelCalls > baselineModelCalls + modelCallTolerance) {
+        results.push({
+          location,
+          status: {
+            _tag: 'failed',
+            reason: `recovery asked the provider ${String(recoveredModelCalls)} times, more than the crash-free baseline's ${String(baselineModelCalls)} plus its ${String(modelCallTolerance)}-call tolerance`,
           },
         });
         continue;
