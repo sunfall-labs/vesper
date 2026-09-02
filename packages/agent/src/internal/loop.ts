@@ -1,41 +1,31 @@
-import { Effect, Exit, Layer, Option, Ref, Schema, Stream } from 'effect';
+import { Effect, Layer, Ref, Stream } from 'effect';
 import {
   AiError,
   Chat,
-  LanguageModel,
   Prompt,
-  type Response,
   type Tool,
   type Toolkit,
 } from 'effect/unstable/ai';
 
-import type { RunFailure, VisibleTools, WithOwnHandlers } from '../agent.js';
+import type { RunFailure, VisibleTools } from '../agent.js';
 import { CodeMode } from '../code-mode.js';
-import { Compaction } from '../compaction.js';
-import { ContextWindow } from '../context-window.js';
+import type { Compaction } from '../compaction.js';
+import type { ContextWindow } from '../context-window.js';
 import { ToolDispatch } from '../dispatch.js';
 import type { AgentEvents } from '../event.js';
-import { AgentHistory } from '../history.js';
 import { DynamicToolkit } from '../dynamic-toolkit.js';
 import type { Interception } from '../interception.js';
-import { Interaction } from '../interaction.js';
 import type * as AgentLog from '../log.js';
 import { ResultBounds } from '../result-bounds.js';
 import { ResultOverflow } from '../result-overflow.js';
-import { RunPolicy } from '../run-policy.js';
+import type { RunPolicy } from '../run-policy.js';
 import { RunPolicyRuntime } from '../run-policy-runtime.js';
 import type { Stop } from '../stop.js';
 import { AgentState } from '../state.js';
-import { TurnControl } from '../turn-control.js';
-import { CompactionRuntime } from './compaction.js';
-import { AgentEventRuntime } from './event.js';
-import * as Observability from './observability.js';
-import { encodePart, type ModelTurnPart } from './part-encoding.js';
-import {
-  incompleteOutputError,
-  interactionRequiresConversationError,
-  normalizeProviderError,
-} from './provider-error.js';
+import type { TurnControl } from '../turn-control.js';
+import * as Bootstrap from './bootstrap.js';
+import * as RecoveryRun from './recovery-run.js';
+import * as TurnRun from './turn.js';
 
 // The loop, in CONTEXT.md's sense: repeated turns until a stop condition
 // holds, which is the piece `effect/unstable/ai` does not have. `agent.ts`
@@ -141,6 +131,24 @@ export interface Wiring<
   readonly initialUsage?: Stop.Usage | undefined;
   readonly lastTurn?: ContextWindow.TurnUsage | undefined;
 }
+
+/**
+ * The recursive re-entry into `entryFor(...).streamIn(...)` that every
+ * `streamIn` precondition (code-mode bootstrap, dynamic-toolkit bootstrap,
+ * runtime creation, signal recovery — see `bootstrap.ts` and
+ * `recovery-run.ts`) funnels through once it has resolved its own concern.
+ * Naming the shape here, once, is what lets each precondition's extracted
+ * function declare its return type against this signature instead of
+ * asserting the resolved `Stream` shape at every call site.
+ */
+export type ReEnter<
+  ModelTools extends Record<string, Tool.Any>,
+  DynamicTools extends Record<string, Tool.Any>,
+  BaseRequires,
+  InterceptorR,
+> = (
+  wiring: Wiring<InterceptorR, DynamicTools>,
+) => Entry<ModelTools, BaseRequires | InterceptorR, RunFailure>;
 
 /** A generated capability whose handler layer depends on the run's wiring. */
 interface DelegationCapability {
@@ -256,7 +264,7 @@ export const makeEntry = <
     const session = wiring.session;
     const interceptor = wiring.interceptor;
     const runtime = wiring.runtime;
-    const runInstructions = dynamicContextFor(
+    const runInstructions = Bootstrap.dynamicContextFor(
       instructions,
       wiring.dynamicToolkit,
     );
@@ -388,856 +396,27 @@ export const makeEntry = <
             ),
           );
 
-    /**
-     * The provider call, and the seam that sits in front of it.
-     *
-     * Factored out because a turn makes this call in two places — once, and
-     * once more if compaction retried it — and duplicating the fold that
-     * observes its parts is how the two would drift. It is also the only place
-     * `beforeModelCall` needs to be, which is the point of naming the seam:
-     * "before the provider is called" is a position in the code, not a
-     * description of one.
-     */
-    const askModel = (
-      chat: Chat.Service,
-      seen: TurnState,
-      step: number,
-      input: Prompt.RawInput,
-      attempt: Interception.Attempt,
-      arbitration: ToolDispatch.TurnArbitration,
-      // The one extra model call `onExhaustion: 'final-answer'` performs once
-      // a soft-fallback-eligible hard budget is exhausted (see
-      // `finalAnswerTurn` below). It skips `runtime.modelCall` — the budget
-      // that call already crossed is not re-charged for the call that
-      // answers within it — and forces `toolChoice: 'none'` so the model
-      // cannot spend the run further on a tool call it has no budget left to
-      // resolve. Everything else about the provider call — interception,
-      // observability, the deadline, part encoding — stays identical, which
-      // is what lets this turn's output "settle the run normally".
-      finalAnswer = false,
-    ): Stream.Stream<
-      AgentEvents.Event<ModelTools>,
-      RunFailure,
-      WithOwnHandlers<RuntimeTools> | InterceptorR
-    > =>
-      Stream.unwrap(
-        Effect.gen(function* () {
-          // Chat exposes decoded parts so tool handlers receive their typed
-          // parameters. Resolve the same toolkit here to encode each part
-          // back to the provider representation before it reaches observers
-          // or the durable recording sink.
-          const resolvedToolkit = yield* dispatching(arbitration);
-          if (interceptor?.beforeModelCall !== undefined) {
-            yield* interceptor.beforeModelCall({
-              agent: definition.name,
-              conversationId: session?.conversationId,
-              step,
-              attempt,
-            });
-          }
-          if (runtime !== undefined && !finalAnswer) {
-            yield* runtime.modelCall;
-          }
-          // Count attempts at the provider boundary, including calls that
-          // fail before producing a part. Token counters are updated only
-          // once a provider finish part reports usage below.
-          yield* Observability.modelCall;
-          const remaining =
-            runtime === undefined ? undefined : yield* runtime.remainingMillis;
-          const asked = chat
-            .streamText({
-              prompt: input,
-              toolkit: resolvedToolkit,
-              concurrency: definition.concurrency,
-              // A call that never reaches a handler (an invented tool name,
-              // invalid or unparseable arguments) is returned to the model as
-              // a failed tool result instead of failing the turn. Handler
-              // failures keep obeying each tool's own `failureMode`.
-              invalidToolCalls: 'return',
-              // The final-answer call still advertises the toolkit — the
-              // model boundary already resolved it above, and building a
-              // second, empty one would fork the encode/observe path this
-              // call shares with every ordinary turn — but forbids using it.
-              ...(finalAnswer ? { toolChoice: 'none' as const } : {}),
-            })
-            .pipe(
-              Stream.mapEffect((part) =>
-                part.type === 'error'
-                  ? Effect.fail(
-                      normalizeProviderError(part.error, part.metadata),
-                    )
-                  : encodePart(resolvedToolkit, part).pipe(
-                      Effect.map((encodedPart) => ({ part, encodedPart })),
-                    ),
-              ),
-              Stream.tap(({ part, encodedPart }) =>
-                Effect.gen(function* () {
-                  seen.started = true;
-                  observe(seen, part, encodedPart, resolvedToolkit);
-                  if (encodedPart.type === 'finish') {
-                    yield* Observability.usage(encodedPart.usage);
-                  }
-                  if (runtime !== undefined) {
-                    yield* runtime.remainingMillis;
-                  }
-                }),
-              ),
-              Stream.map(
-                ({ part, encodedPart }): AgentEvents.Event<ModelTools> => {
-                  const interaction =
-                    encodedPart.type === 'tool-approval-request'
-                      ? seen.callsById.get(encodedPart.toolCallId)?.interaction
-                      : undefined;
-                  return {
-                    _tag: 'Part',
-                    step,
-                    part,
-                    encodedPart,
-                    ...(interaction === undefined ? {} : { interaction }),
-                  };
-                },
-              ),
-            );
-          const model =
-            remaining === undefined
-              ? asked
-              : asked.pipe(
-                  Stream.timeoutOrElse({
-                    duration: remaining,
-                    orElse: () =>
-                      Stream.fail(
-                        RunPolicyRuntime.error({
-                          limit: 'deadline',
-                          used: runPolicy.wallClockMillis,
-                          maximum: runPolicy.wallClockMillis,
-                        }),
-                      ),
-                  }),
-                );
-          return model.pipe(
-            Stream.withSpan('Agent.model', {
-              attributes: {
-                'vesper.agent.step': step,
-                'vesper.model.attempt': attempt,
-                ...(session === undefined
-                  ? {}
-                  : { 'vesper.conversation.id': session.conversationId }),
-              },
-            }),
-          );
-        }),
-      ) as Stream.Stream<
-        AgentEvents.Event<ModelTools>,
-        RunFailure,
-        WithOwnHandlers<RuntimeTools>
-      >;
+    const turnRunner = TurnRun.makeTurnRunner({
+      agentName: definition.name,
+      concurrency: definition.concurrency,
+      session,
+      interceptor,
+      runtime,
+      runPolicy,
+      compaction,
+      stopWhen,
+      nextTurn,
+      startRun: wiring.startRun,
+      dispatching,
+    });
 
-    /**
-     * The seam in front of a turn, resolved to the input the turn will use.
-     *
-     * Runs before `TurnStarted`, so a turn an interceptor refused produces no
-     * boundary events for a turn that never happened.
-     */
-    const openTurn = (
-      step: number,
-      totals: Stop.Usage,
-      input: Prompt.RawInput,
-    ): Effect.Effect<Prompt.RawInput, RunFailure, InterceptorR> =>
-      interceptor?.beforeTurn === undefined
-        ? Effect.succeed(input)
-        : Effect.map(
-            interceptor.beforeTurn({
-              agent: definition.name,
-              conversationId: session?.conversationId,
-              step,
-              usage: totals,
-              input: Prompt.make(input),
-            }),
-            (decision) =>
-              decision._tag === 'Proceed' ? input : decision.input,
-          );
-
-    /**
-     * The proactive trigger: compact before a turn that would not have fit.
-     *
-     * Silent unless the caller told us the model's context window, because
-     * without one there is no threshold to compare against — the loop targets
-     * the `LanguageModel` tag, and that tag does not carry a window. When
-     * there is one, this is strictly cheaper than the reactive path below: an
-     * overflow costs a rejected request and a re-run of the turn, and this
-     * costs nothing the compaction itself did not already cost.
-     *
-     * The estimate is anchored on the previous turn's reported usage, which is
-     * the difference between knowing what the provider counted and guessing at
-     * it. `input` is folded in because `streamText` is about to append it and
-     * the question is whether the *next* request fits, not the last one.
-     */
-    const compactAhead = (
-      chat: Chat.Service,
-      lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
-      input: Prompt.RawInput,
-    ): Effect.Effect<
-      CompactionRuntime.Summarized | undefined,
-      RunFailure,
-      LanguageModel.LanguageModel
-    > =>
-      Effect.gen(function* () {
-        if (compaction?.contextWindow === undefined) {
-          return undefined;
-        }
-
-        const history = yield* Ref.get(chat.history);
-        const effectivePrompt = Prompt.concat(history, Prompt.make(input));
-        const over = yield* CompactionRuntime.shouldCompact(
-          effectivePrompt,
-          compaction.contextWindow,
-          compaction,
-          yield* Ref.get(lastTurn),
-        );
-
-        if (!over) {
-          return undefined;
-        }
-        // Compact the same prompt the estimator measured. In a recorded run,
-        // `RunStarted` has already persisted this turn's input; leaving it out
-        // of the live Chat makes durable reconstruction one message longer
-        // than the compaction split. The input stays in the compacted history,
-        // so the provider call below uses `Prompt.empty` rather than appending
-        // it a second time.
-        yield* Ref.set(chat.history, effectivePrompt);
-        const summarized = yield* compactWithBudget(chat, compaction).pipe(
-          Effect.onError(() => Ref.set(chat.history, history)),
-        );
-        if (summarized === undefined) {
-          // `compact` can decline when there is no old history to summarize.
-          // Restore the original shape so the ordinary provider call remains
-          // responsible for appending this turn's input.
-          yield* Ref.set(chat.history, history);
-          return undefined;
-        }
-        if (runtime !== undefined) {
-          yield* runtime.addUsage(summarized.usage);
-        }
-        return summarized;
-      });
-
-    const compactWithBudget = (
-      chat: Chat.Service,
-      policy: Compaction.Policy,
-    ): Effect.Effect<
-      CompactionRuntime.Summarized | undefined,
-      RunFailure,
-      LanguageModel.LanguageModel
-    > =>
-      Effect.gen(function* () {
-        if (runtime === undefined) {
-          yield* Observability.modelCall;
-          return yield* CompactionRuntime.compact(chat, policy);
-        }
-        yield* runtime.modelCall;
-        yield* Observability.modelCall;
-        const remaining = yield* runtime.remainingMillis;
-        return yield* Effect.timeoutOrElse(
-          CompactionRuntime.compact(chat, policy),
-          {
-            duration: remaining,
-            orElse: () =>
-              Effect.fail(
-                RunPolicyRuntime.error({
-                  limit: 'deadline',
-                  used: runPolicy.wallClockMillis,
-                  maximum: runPolicy.wallClockMillis,
-                }),
-              ),
-          },
-        );
-      });
-
-    const turn = (
-      chat: Chat.Service,
-      usage: Ref.Ref<Stop.Usage>,
-      toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
-      lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
-      // The last step this recursion reached, kept for `onExhaustion:
-      // 'final-answer'`: a `RunPolicyExhausted` raised anywhere in this
-      // recursive stream is caught outside it, where `step` itself is no
-      // longer in scope, so the fallback turn reads it from here instead.
-      stepRef: Ref.Ref<number>,
-      step: number,
-      pending: Prompt.RawInput,
-    ): Stream.Stream<
-      AgentEvents.Event<ModelTools>,
-      RunFailure,
-      WithOwnHandlers<RuntimeTools> | StopR | TurnControlR | InterceptorR
-    > =>
-      Stream.unwrap(
-        Effect.gen(function* () {
-          yield* Ref.set(stepRef, step);
-          const input = yield* openTurn(
-            step,
-            yield* Ref.get(usage),
-            pending,
-          ).pipe(
-            Effect.catch((error) =>
-              step === 1 && wiring.startRun !== undefined
-                ? wiring
-                    .startRun(pending)
-                    .pipe(Effect.andThen(Effect.fail(error)))
-                : Effect.fail(error),
-            ),
-          );
-          if (step === 1 && wiring.startRun !== undefined) {
-            yield* wiring.startRun(input);
-          }
-          if (runtime !== undefined) {
-            yield* runtime.turn;
-          }
-
-          // Before the request, not after it is refused. Announced the same
-          // way the reactive rewrite is, because from the log's point of view
-          // the two are the same event: history was replaced by a summary, and
-          // a reader rebuilding this conversation has to know that.
-          const ahead = yield* compactAhead(chat, lastTurn, input);
-          if (ahead !== undefined) {
-            yield* Ref.update(usage, (current) =>
-              addStopUsage(
-                current,
-                pricedUsage(runtime?.limits.costModel, ahead.usage),
-              ),
-            );
-          }
-          const modelInput: Prompt.RawInput =
-            ahead === undefined ? input : Prompt.empty;
-
-          // A turn's outcome is only knowable once its parts have gone by, but
-          // the stop decision needs it. Accumulating through a `tap` while the
-          // parts stream past is what lets a consumer see tokens live and
-          // still have the decision made on complete information.
-          //
-          // Only what the stop condition and the result actually read is kept:
-          // text, tool calls, usage. Rebuilding whole content parts would retain
-          // data nothing here consumes.
-          const initial = emptyTurnState();
-          const active = yield* Ref.make(initial);
-          const arbitration = yield* ToolDispatch.makeTurnArbitration;
-
-          // The conversation as it stood before this turn was attempted, kept
-          // for the reactive path below. See the `catchIf` there for why.
-          const historyBefore = yield* Ref.get(chat.history);
-
-          const parts = askModel(
-            chat,
-            initial,
-            step,
-            modelInput,
-            'initial',
-            arbitration,
-          );
-
-          const guarded =
-            compaction === undefined
-              ? parts
-              : parts.pipe(
-                  // Reactive compaction: the turn is retried once against a
-                  // compacted history when the provider says the prompt no
-                  // longer fits. Wrapping the stream rather than the loop
-                  // keeps the retry scoped to the call that overflowed.
-                  //
-                  // The rewrite is announced before the retry rather than
-                  // swallowed. It used to produce nothing observable, which
-                  // made it the one thing a run did that its own log could not
-                  // describe: `Compacted` had no producer, so a resumed
-                  // conversation was rebuilt from records compaction had
-                  // already replaced and compacted again on its first turn. A
-                  // no-op compaction announces nothing, because nothing was
-                  // replaced.
-                  Stream.catchIf(
-                    (error) =>
-                      AiError.isAiError(error) &&
-                      Compaction.isContextOverflow(error),
-                    (error) =>
-                      Stream.unwrap(
-                        Effect.gen(function* () {
-                          // Once a part escaped, retrying can duplicate visible
-                          // text or tool side effects. Provider retries belong
-                          // below this seam; compaction is safe only for a request
-                          // rejected before it produced anything.
-                          if (initial.emitted) {
-                            return Stream.fail(error);
-                          }
-
-                          // State the history the summarizer should see rather
-                          // than inherit whatever the rejected turn left behind.
-                          //
-                          // It is the conversation as it was, plus the input this
-                          // turn was rejected for — the request the provider
-                          // refused, which is exactly what has to be made to fit.
-                          // Including the input matters: it is the newest message,
-                          // so `splitAt` protects it as the recent tail and
-                          // summarizes the history behind it, which is the only
-                          // split that can shrink a request whose bulk *is* the
-                          // input.
-                          //
-                          // `Chat.streamText` happens to leave something close to
-                          // this behind — it writes `history + input` from a
-                          // finalizer that runs on failure too — but that is one
-                          // implementation's detail and the retry below depends
-                          // on it being exactly right, so it is not assumed.
-                          yield* Ref.set(
-                            chat.history,
-                            Prompt.concat(
-                              historyBefore,
-                              Prompt.make(modelInput),
-                            ),
-                          );
-                          const summarized = yield* compactWithBudget(
-                            chat,
-                            compaction,
-                          );
-                          // Retrying an unchanged prompt repeats the same refusal
-                          // and can loop provider-side work for no gain.
-                          if (summarized === undefined) {
-                            return Stream.fail(error);
-                          }
-                          if (runtime !== undefined) {
-                            yield* runtime.addUsage(summarized.usage);
-                          }
-                          yield* Ref.update(usage, (current) =>
-                            addStopUsage(
-                              current,
-                              pricedUsage(
-                                runtime?.limits.costModel,
-                                summarized.usage,
-                              ),
-                            ),
-                          );
-
-                          const retry = emptyTurnState();
-                          yield* Ref.set(active, retry);
-                          // Empty, not `input`. The input is in the history above
-                          // and `Chat.streamText` appends whatever it is given.
-                          const retried = askModel(
-                            chat,
-                            retry,
-                            step,
-                            Prompt.empty,
-                            'after-compaction',
-                            arbitration,
-                          );
-                          return Stream.concat(
-                            Stream.make(
-                              AgentEventRuntime.compacted(step, summarized),
-                            ),
-                            retried,
-                          );
-                        }),
-                      ),
-                  ),
-                );
-
-          const decide = Stream.unwrap(
-            Effect.gen(function* () {
-              const seen = yield* Ref.get(active);
-              const totals = yield* Ref.updateAndGet(usage, (current) =>
-                addUsage(current, seen.usage, runtime?.limits.costModel),
-              );
-              const toolCallTotals = yield* Ref.updateAndGet(
-                toolCallCounts,
-                (current) => addToolCallCounts(current, seen.toolCalls),
-              );
-              if (runtime !== undefined && seen.usage !== undefined) {
-                const accounted = yield* Effect.exit(
-                  runtime.addUsage({
-                    input: seen.usage.inputTokens.total ?? 0,
-                    output: seen.usage.outputTokens.total ?? 0,
-                    cachedInput: seen.usage.inputTokens.cacheRead ?? 0,
-                  }),
-                );
-                if (Exit.isFailure(accounted)) {
-                  return Stream.concat(
-                    Stream.make(AgentEventRuntime.turnFinished(step, totals)),
-                    Stream.failCause(accounted.cause),
-                  );
-                }
-              }
-
-              // This turn's own figures, kept apart from the running totals.
-              // The estimator needs what the provider counted for *one*
-              // request; summing turns would count the same prompt once per
-              // turn and diverge without bound. A turn that reported nothing
-              // leaves the previous anchor in place rather than clearing it —
-              // a stale anchor understates the trailing text by one turn,
-              // while no anchor throws the whole conversation back to a
-              // character count.
-              if (seen.usage !== undefined) {
-                yield* Ref.set(
-                  lastTurn,
-                  ContextWindow.usageFromTurn(seen.usage),
-                );
-              }
-
-              const incomplete =
-                seen.finishReason === undefined
-                  ? undefined
-                  : incompleteOutputError('streamText', seen.finishReason);
-              if (incomplete !== undefined) {
-                return Stream.concat(
-                  Stream.make(AgentEventRuntime.turnFinished(step, totals)),
-                  Stream.fail(incomplete),
-                );
-              }
-
-              // The turn boundary is where out-of-band input lands. Draining
-              // here rather than racing it against the provider stream is what
-              // keeps a steer from arriving in the middle of a tool call, and
-              // the drain itself is one bounded read from a cursor — see
-              // `signal.ts` on why anything resembling a blocking receive is
-              // the wrong primitive for this.
-              const drained: AgentLog.SignalDrain =
-                session === undefined
-                  ? { signals: [], backlog: false }
-                  : yield* session.drainSignalsBounded(
-                      runtime?.limits.maxSignalsPerBoundary ??
-                        runPolicy.maxSignalsPerBoundary,
-                    );
-              type Decision = RunPolicyRuntime.SignalDecision & {
-                readonly signal: AgentLog.Delivered;
-              };
-              const decisions = yield* Effect.forEach(
-                drained.signals,
-                (signal, index): Effect.Effect<Decision> =>
-                  runtime === undefined
-                    ? Effect.succeed({ signal, accepted: true, bytes: 0 })
-                    : Effect.map(
-                        runtime.signal(signal.kind, signal.text, index),
-                        (decision) => ({ signal, ...decision }),
-                      ),
-              );
-              const delivered = decisions.flatMap((decision) =>
-                decision.accepted ? [decision.signal] : [],
-              );
-
-              const cancelled = delivered.some(
-                (signal) => signal.kind === 'cancel',
-              );
-              const steers = delivered.filter(
-                (signal) => signal.kind === 'steer',
-              );
-
-              const announced = Stream.concat(
-                Stream.fromIterable(
-                  decisions
-                    .map((decision) =>
-                      decision.accepted
-                        ? AgentEventRuntime.signalled(step, decision.signal)
-                        : AgentEventRuntime.signalRejected(
-                            step,
-                            decision.signal,
-                            decision.exhaustion,
-                          ),
-                    )
-                    .concat(
-                      drained.backlog
-                        ? [
-                            AgentEventRuntime.signalBacklog(
-                              step,
-                              runtime?.limits.maxSignalsPerBoundary ??
-                                runPolicy.maxSignalsPerBoundary,
-                            ),
-                          ]
-                        : [],
-                    ),
-                ),
-                Stream.make(AgentEventRuntime.turnFinished(step, totals)),
-              );
-
-              const response = outputOf(seen);
-              const wanted = yield* stopWhen({
-                step,
-                toolCalls: seen.toolCalls,
-                response,
-                toolResults: seen.toolResults,
-                finishReason: seen.finishReason,
-                text: seen.text,
-                reasoning: seen.reasoning,
-                usage: totals,
-                toolCallCounts: toolCallTotals,
-              });
-
-              // A tool this turn called requires approval that is not yet
-              // durably decided. Nothing productive can follow: the model
-              // cannot be asked again with an unanswered tool call in its own
-              // last turn, so this outranks a steer exactly like a cancel
-              // does. Unlike a cancel, it needs somewhere durable to resolve
-              // from — an unrecorded run has nowhere to record the decision
-              // this would wait on, so it fails outright instead of
-              // returning a `Result` nothing can ever act on.
-              const pendingInteractions = seen.pendingInteractions;
-              if (pendingInteractions.length > 0 && session === undefined) {
-                return Stream.fail(
-                  interactionRequiresConversationError(pendingInteractions),
-                );
-              }
-
-              const prepared =
-                cancelled ||
-                pendingInteractions.length > 0 ||
-                nextTurn === undefined
-                  ? TurnControl.keep
-                  : yield* nextTurn({
-                      step,
-                      toolCalls: seen.toolCalls,
-                      response,
-                      toolResults: seen.toolResults,
-                      finishReason: seen.finishReason,
-                      text: seen.text,
-                      reasoning: seen.reasoning,
-                      usage: totals,
-                      toolCallCounts: toolCallTotals,
-                      wouldStop: wanted,
-                    });
-
-              const policyWantsStop = Option.isNone(prepared) && wanted;
-
-              // A steer, or a signal backlog this boundary could not fully
-              // drain, outranks the stop condition for one more turn,
-              // including a step ceiling — `Stop.maxSteps` is not a hard
-              // ceiling once a run takes signal traffic; `runPolicy.maxTurns`
-              // is. The ceiling is a runaway-loop guard and a steer is a
-              // person asking for more work; stopping anyway would consume
-              // the instruction and ignore it, which is the one outcome
-              // nobody can debug. A backlog is the same shape: it means more
-              // signals are already waiting, so stopping now would drop them
-              // on the floor rather than let the next boundary see them. A
-              // cancel outranks everything.
-              const stop =
-                cancelled ||
-                pendingInteractions.length > 0 ||
-                (policyWantsStop && steers.length === 0 && !drained.backlog);
-              const completedSteps = seen.started ? step : step - 1;
-
-              return stop
-                ? Stream.concat(
-                    announced,
-                    Stream.make(
-                      cancelled
-                        ? AgentEventRuntime.completed(
-                            seen.text,
-                            completedSteps,
-                            totals,
-                            'cancelled',
-                            seen.started ? response : undefined,
-                          )
-                        : pendingInteractions.length > 0
-                          ? AgentEventRuntime.suspended(
-                              completedSteps,
-                              seen.text,
-                              totals,
-                              pendingInteractions,
-                              seen.started ? response : undefined,
-                            )
-                          : AgentEventRuntime.completed(
-                              seen.text,
-                              completedSteps,
-                              totals,
-                              'success',
-                              response,
-                            ),
-                    ),
-                  )
-                : Stream.concat(
-                    announced,
-                    // Later turns continue the stored conversation; the tool
-                    // results `streamText` appended are already in history, so
-                    // nothing new is supplied unless a steer arrived.
-                    continueTurn(
-                      prepared,
-                      turn(
-                        chat,
-                        usage,
-                        toolCallCounts,
-                        lastTurn,
-                        stepRef,
-                        step + 1,
-                        continuationInput(prepared, steers),
-                      ),
-                    ),
-                  );
-            }),
-          );
-
-          const responsiveCancel =
-            session === undefined
-              ? undefined
-              : session
-                  .signalPages(
-                    runtime?.limits.maxSignalsPerBoundary ??
-                      runPolicy.maxSignalsPerBoundary,
-                  )
-                  .pipe(
-                    Stream.flatMap((page) =>
-                      Stream.fromIterable(
-                        page.signals.map((signal, index) => ({
-                          signal,
-                          index,
-                        })),
-                      ),
-                    ),
-                    Stream.filter(({ signal }) => signal.kind === 'cancel'),
-                    Stream.filter(({ signal, index }) =>
-                      RunPolicyRuntime.acceptsCancel(
-                        runtime?.limits ?? runPolicy,
-                        signal.text,
-                        index,
-                      ),
-                    ),
-                    Stream.tap(() => arbitration.cancel),
-                    Stream.runHead,
-                    Effect.flatMap((cancel) =>
-                      Option.isSome(cancel) ? Effect.void : Effect.never,
-                    ),
-                    Effect.catch((error) =>
-                      Effect.logError(
-                        'Agent responsive cancel watcher failed; cancellation remains available at the next turn boundary',
-                        error,
-                      ).pipe(
-                        Effect.annotateLogs({
-                          'vesper.component': 'agent',
-                          'vesper.event': 'responsive_cancel_watcher_failure',
-                        }),
-                        Effect.andThen(Effect.never),
-                      ),
-                    ),
-                  );
-
-          const opened =
-            ahead === undefined
-              ? Stream.make(AgentEventRuntime.turnStarted(step))
-              : Stream.make(
-                  AgentEventRuntime.turnStarted(step),
-                  AgentEventRuntime.compacted(step, ahead),
-                );
-          const cancellable =
-            responsiveCancel === undefined
-              ? guarded
-              : guarded.pipe(Stream.interruptWhen(responsiveCancel));
-
-          return opened.pipe(
-            Stream.concat(cancellable),
-            Stream.concat(decide),
-            Stream.withSpan('Agent.turn', {
-              attributes: {
-                'vesper.agent.step': step,
-                ...(session === undefined
-                  ? {}
-                  : { 'vesper.conversation.id': session.conversationId }),
-              },
-            }),
-          );
-        }),
-      ) as Stream.Stream<
-        AgentEvents.Event<ModelTools>,
-        RunFailure,
-        WithOwnHandlers<RuntimeTools> | StopR | TurnControlR | InterceptorR
-      >;
-
-    /**
-     * The one extra call `onExhaustion: 'final-answer'` performs once a
-     * soft-fallback-eligible hard budget (see {@link finalAnswerEligibleLimits})
-     * is exhausted: no tools, a short appended instruction that the budget is
-     * spent, and its output settles the run as an ordinary success — with
-     * `exhausted` recording which limit forced it.
-     *
-     * Reuses `askModel` rather than calling `chat.streamText` directly, so
-     * interception, observability, part encoding, and the deadline timeout
-     * stay exactly what an ordinary turn gets — a hard limit this call itself
-     * crosses (chiefly the wall-clock deadline) still fails the run, because
-     * that timeout is `askModel`'s, not something layered on top here.
-     *
-     * Does not attempt to replay whatever input the aborted turn would have
-     * sent — `chat.history` already holds every turn that completed, which is
-     * everything a "best answer so far" needs, and reconstructing the one
-     * turn that never ran would require tracking exactly how far it got
-     * before failing. What it adds is the instruction below, nothing more.
-     */
-    const finalAnswerTurn = (
-      chat: Chat.Service,
-      usage: Ref.Ref<Stop.Usage>,
-      toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
-      step: number,
-      exhaustion: RunPolicy.RunPolicyExhausted,
-    ): Stream.Stream<
-      AgentEvents.Event<ModelTools>,
-      RunFailure,
-      WithOwnHandlers<RuntimeTools> | InterceptorR
-    > =>
-      Stream.unwrap(
-        Effect.gen(function* () {
-          const seen = emptyTurnState();
-          const arbitration = yield* ToolDispatch.makeTurnArbitration;
-          const parts = askModel(
-            chat,
-            seen,
-            step,
-            Prompt.make([{ role: 'user', content: FINAL_ANSWER_INSTRUCTION }]),
-            'initial',
-            arbitration,
-            true,
-          );
-          const decide = Stream.unwrap(
-            Effect.gen(function* () {
-              const totals = yield* Ref.updateAndGet(usage, (current) =>
-                addUsage(current, seen.usage, runtime?.limits.costModel),
-              );
-              yield* Ref.update(toolCallCounts, (current) =>
-                addToolCallCounts(current, seen.toolCalls),
-              );
-              const incomplete =
-                seen.finishReason === undefined
-                  ? undefined
-                  : incompleteOutputError('streamText', seen.finishReason);
-              if (incomplete !== undefined) {
-                return Stream.concat(
-                  Stream.make(AgentEventRuntime.turnFinished(step, totals)),
-                  Stream.fail(incomplete),
-                );
-              }
-              return Stream.concat(
-                Stream.make(AgentEventRuntime.turnFinished(step, totals)),
-                Stream.make(
-                  AgentEventRuntime.completed(
-                    seen.text,
-                    step,
-                    totals,
-                    'success',
-                    outputOf(seen),
-                    {
-                      limit: exhaustion.limit,
-                      used: exhaustion.used,
-                      maximum: exhaustion.maximum,
-                    },
-                  ),
-                ),
-              );
-            }),
-          );
-          return Stream.concat(
-            Stream.make(AgentEventRuntime.turnStarted(step)),
-            Stream.concat(parts, decide),
-          ).pipe(
-            Stream.withSpan('Agent.finalAnswerTurn', {
-              attributes: {
-                'vesper.agent.step': step,
-                'vesper.run_policy.exhausted_limit': exhaustion.limit,
-                ...(session === undefined
-                  ? {}
-                  : { 'vesper.conversation.id': session.conversationId }),
-              },
-            }),
-          );
-        }),
-      );
-
+    // The five preconditions a run's first `streamIn` call has to resolve,
+    // in the order they have to resolve: code mode's execution state,
+    // a dynamic toolkit's sources, the root run-policy runtime, recovery
+    // from a session with pending tool calls, and — once all four hold —
+    // the ordinary turn path. The first four each re-enter `entryFor` with
+    // an updated `Wiring` once resolved; only the fifth actually starts a
+    // turn.
     const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
       Stream.unwrap(
         Effect.gen(function* () {
@@ -1245,381 +424,72 @@ export const makeEntry = <
             CodeMode.isEnabled(definition.codeMode) &&
             wiring.codeState === undefined
           ) {
-            const codeState = yield* CodeMode.openState(session).pipe(
-              Effect.mapError(
-                (error) =>
-                  new AiError.AiError({
-                    module: 'CodeMode',
-                    method: 'openState',
-                    reason: new AiError.InvalidRequestError({
-                      description: error.message,
-                    }),
-                  }),
-              ),
-            );
-            return entryFor({ ...wiring, codeState }).streamIn(
+            return yield* Bootstrap.bootstrapCodeMode<
+              ModelTools,
+              DynamicTools,
+              BaseRequires,
+              InterceptorR
+            >({
+              session,
+              wiring,
+              entryFor,
               chat,
               input,
-            ) as Stream.Stream<
-              AgentEvents.Event<ModelTools>,
-              RunFailure,
-              | WithOwnHandlers<RuntimeTools>
-              | StopR
-              | TurnControlR
-              | InterceptorR
-            >;
+            });
           }
           if (
             wiring.dynamicToolkit === undefined &&
             definition.dynamicTools !== undefined &&
             definition.dynamicTools.length > 0
           ) {
-            const dynamicToolkit = yield* DynamicToolkit.open(
-              definition.dynamicTools,
-            );
-            const nextWiring = { ...wiring, dynamicToolkit };
-            yield* replaceSystemInstructions(
-              chat,
-              dynamicContextFor(instructions, dynamicToolkit),
-            );
-            return entryFor(nextWiring).streamIn(chat, input) as Stream.Stream<
-              AgentEvents.Event<ModelTools>,
-              RunFailure,
-              | WithOwnHandlers<RuntimeTools>
-              | StopR
-              | TurnControlR
-              | InterceptorR
-            >;
-          }
-          if (runtime === undefined) {
-            const root = yield* RunPolicyRuntime.create(runPolicy);
-            return entryFor({ ...wiring, runtime: root }).streamIn(
+            return yield* Bootstrap.bootstrapDynamicToolkit<
+              ModelTools,
+              DynamicSources,
+              BaseRequires,
+              InterceptorR
+            >({
+              dynamicTools: definition.dynamicTools,
+              instructions,
+              wiring,
+              entryFor,
               chat,
               input,
-            ) as Stream.Stream<
-              AgentEvents.Event<ModelTools>,
-              RunFailure,
-              | WithOwnHandlers<RuntimeTools>
-              | StopR
-              | TurnControlR
-              | InterceptorR
-            >;
+            });
+          }
+          if (runtime === undefined) {
+            return yield* Bootstrap.bootstrapRuntime<
+              ModelTools,
+              DynamicTools,
+              BaseRequires,
+              InterceptorR
+            >({
+              runPolicy,
+              wiring,
+              entryFor,
+              chat,
+              input,
+            });
           }
           if (session !== undefined && (yield* session.hasPendingToolCalls)) {
-            const drained = yield* session.drainSignalsBounded(
-              runtime.limits.maxSignalsPerBoundary,
-            );
-            const decisions = yield* Effect.forEach(
-              drained.signals,
-              (signal, index) =>
-                Effect.map(
-                  runtime.signal(signal.kind, signal.text, index),
-                  (decision) => ({ signal, ...decision }),
-                ),
-            );
-            const delivered = decisions.flatMap((decision) =>
-              decision.accepted ? [decision.signal] : [],
-            );
-            const steers = delivered.filter(
-              (signal) => signal.kind === 'steer',
-            );
-            const effective =
-              steers.length === 0
-                ? input
-                : Prompt.concat(
-                    Prompt.make(input),
-                    Prompt.make(steeringInput(steers)),
-                  );
-            const announced = Stream.fromIterable(
-              decisions
-                .map((decision) =>
-                  decision.accepted
-                    ? AgentEventRuntime.signalled(0, decision.signal)
-                    : AgentEventRuntime.signalRejected(
-                        0,
-                        decision.signal,
-                        decision.exhaustion,
-                      ),
-                )
-                .concat(
-                  drained.backlog
-                    ? [
-                        AgentEventRuntime.signalBacklog(
-                          0,
-                          runtime.limits.maxSignalsPerBoundary,
-                        ),
-                      ]
-                    : [],
-                ),
-            );
-            if (delivered.some((signal) => signal.kind === 'cancel')) {
-              if (wiring.startRun !== undefined) {
-                yield* wiring.startRun(effective);
-              }
-              return Stream.concat(
-                announced,
-                Stream.make(
-                  AgentEventRuntime.completed(
-                    '',
-                    0,
-                    wiring.initialUsage ?? { input: 0, output: 0 },
-                    'cancelled',
-                  ),
-                ),
-              );
-            }
-
-            const arbitration = yield* ToolDispatch.makeTurnArbitration;
-            const cancelDuringRecovery = session
-              .signalPages(runtime.limits.maxSignalsPerBoundary)
-              .pipe(
-                Stream.flatMap((page) =>
-                  Stream.fromIterable(
-                    page.signals.map((signal, index) => ({ signal, index })),
-                  ),
-                ),
-                Stream.filter(({ signal }) => signal.kind === 'cancel'),
-                Stream.filter(({ signal, index }) =>
-                  RunPolicyRuntime.acceptsCancel(
-                    runtime.limits,
-                    signal.text,
-                    index,
-                  ),
-                ),
-                Stream.tap(() => arbitration.cancel),
-                Stream.runHead,
-                Effect.flatMap((cancel) =>
-                  Option.isSome(cancel) ? Effect.void : Effect.never,
-                ),
-                Effect.catch((error) =>
-                  Effect.logError(
-                    'Agent recovery cancel watcher failed; cancellation remains available at the next boundary',
-                    error,
-                  ).pipe(
-                    Effect.annotateLogs({
-                      'vesper.component': 'agent',
-                      'vesper.event': 'responsive_cancel_watcher_failure',
-                    }),
-                    Effect.andThen(Effect.never),
-                  ),
-                ),
-              );
-
-            return Stream.concat(
-              announced,
-              Stream.unwrap(
-                Effect.gen(function* () {
-                  const remaining = yield* runtime.remainingMillis;
-                  const recovery = ToolDispatch.resolveIndeterminate(
-                    runToolkit,
-                    {
-                      agent: definition.name,
-                      session,
-                      interceptor,
-                      runtime,
-                      unmeteredToolNames: delegationToolNames,
-                      arbitration,
-                    },
-                  ).pipe(
-                    Effect.timeoutOrElse({
-                      duration: remaining,
-                      orElse: () =>
-                        Effect.fail(
-                          RunPolicyRuntime.error({
-                            limit: 'deadline',
-                            used: runtime.limits.wallClockMillis,
-                            maximum: runtime.limits.wallClockMillis,
-                          }),
-                        ),
-                    }),
-                  );
-                  const recoveryOutcome = yield* Effect.raceFirst(
-                    Effect.map(recovery, (results) => ({
-                      _tag: 'Recovered' as const,
-                      results,
-                    })),
-                    Effect.as(cancelDuringRecovery, {
-                      _tag: 'Cancelled' as const,
-                    }),
-                  );
-                  if (recoveryOutcome._tag === 'Cancelled') {
-                    const after = yield* session.drainSignalsBounded(
-                      runtime.limits.maxSignalsPerBoundary,
-                    );
-                    const afterDecisions = yield* Effect.forEach(
-                      after.signals,
-                      (signal, index) =>
-                        Effect.map(
-                          runtime.signal(signal.kind, signal.text, index),
-                          (decision) => ({ signal, ...decision }),
-                        ),
-                    );
-                    const afterSteers = afterDecisions
-                      .filter(
-                        (decision) =>
-                          decision.accepted && decision.signal.kind === 'steer',
-                      )
-                      .map((decision) => decision.signal);
-                    const cancelledInput =
-                      afterSteers.length === 0
-                        ? effective
-                        : Prompt.concat(
-                            Prompt.make(effective),
-                            Prompt.make(steeringInput(afterSteers)),
-                          );
-                    if (wiring.startRun !== undefined) {
-                      yield* wiring.startRun(cancelledInput);
-                    }
-                    return Stream.concat(
-                      Stream.fromIterable(
-                        afterDecisions.map((decision) =>
-                          decision.accepted
-                            ? AgentEventRuntime.signalled(0, decision.signal)
-                            : AgentEventRuntime.signalRejected(
-                                0,
-                                decision.signal,
-                                decision.exhaustion,
-                              ),
-                        ),
-                      ),
-                      Stream.make(
-                        AgentEventRuntime.completed(
-                          '',
-                          0,
-                          wiring.initialUsage ?? { input: 0, output: 0 },
-                          'cancelled',
-                        ),
-                      ),
-                    );
-                  }
-                  const recovered = recoveryOutcome.results;
-
-                  // `resolveIndeterminate` settles every durable approval this
-                  // session already has a decision for, but it does not — and
-                  // must not — invent one for a call still waiting on
-                  // `Conversation.resolveApproval`. Re-check by identity
-                  // rather than trusting `suspendedToolCalls`, which is the
-                  // snapshot from when this session opened: the recovery
-                  // index it is read through here is the same one
-                  // `resolveIndeterminate` just updated.
-                  const approvalWaits = session.suspendedToolCalls.filter(
-                    (call) => call.wait === ToolDispatch.INTERACTION_WAIT,
-                  );
-                  // The toolkit is resolved once, and only when an approval
-                  // wait exists at all: resolution may include dynamic
-                  // sources whose work is real (an MCP discovery
-                  // round-trip), and almost every run has nothing suspended.
-                  const stillPendingInteractions: AgentEvents.PendingInteraction[] =
-                    approvalWaits.length === 0
-                      ? []
-                      : yield* Effect.gen(function* () {
-                          const approvalToolkit = Effect.succeed(
-                            yield* runToolkit,
-                          );
-                          const batches = yield* Effect.forEach(
-                            approvalWaits,
-                            (call) => {
-                              const current = session.recovery(
-                                call.name,
-                                call.toolCallId,
-                              );
-                              if (
-                                Option.isNone(current) ||
-                                current.value._tag !== 'Suspended'
-                              ) {
-                                return Effect.succeed<
-                                  ReadonlyArray<AgentEvents.PendingInteraction>
-                                >([]);
-                              }
-                              const pendingRecovery = current.value;
-                              // Re-decoded against the tool's current
-                              // parameter schema rather than surfaced from
-                              // the durable encoded form: a caller
-                              // re-reading this pending approval sees the
-                              // same typed value the first suspension did,
-                              // not the toolkit's wire encoding of it.
-                              return Effect.map(
-                                ToolDispatch.decodeSuspendedRequest(
-                                  approvalToolkit,
-                                  call.name,
-                                  call.request,
-                                ),
-                                (
-                                  decodedInput,
-                                ): ReadonlyArray<AgentEvents.PendingInteraction> => [
-                                  {
-                                    toolCallId: call.toolCallId,
-                                    toolName: call.name,
-                                    kind:
-                                      pendingRecovery.interaction?.name ??
-                                      'approval',
-                                    request: decodedInput,
-                                  },
-                                ],
-                              );
-                            },
-                          );
-                          return batches.flat();
-                        });
-                  if (stillPendingInteractions.length > 0) {
-                    return Stream.concat(
-                      Stream.fromIterable(recovered),
-                      Stream.make(
-                        AgentEventRuntime.suspended(
-                          0,
-                          // No model call happened on this path — the run was
-                          // refused before turn 1 — so there is no partial text
-                          // to preserve.
-                          '',
-                          wiring.initialUsage ?? { input: 0, output: 0 },
-                          stillPendingInteractions,
-                        ),
-                      ),
-                    );
-                  }
-
-                  yield* Ref.set(
-                    chat.history,
-                    Prompt.concat(
-                      Prompt.make([
-                        { role: 'system', content: runInstructions },
-                      ]),
-                      AgentHistory.messagesFrom(yield* session.recorded),
-                    ),
-                  );
-                  return Stream.concat(
-                    Stream.fromIterable(recovered),
-                    entryFor({
-                      session: wiring.session,
-                      interceptor: wiring.interceptor,
-                      runtime,
-                      ...(wiring.dynamicToolkit === undefined
-                        ? {}
-                        : { dynamicToolkit: wiring.dynamicToolkit }),
-                      ...(wiring.startRun === undefined
-                        ? {}
-                        : { startRun: wiring.startRun }),
-                      ...(wiring.initialUsage === undefined
-                        ? {}
-                        : { initialUsage: wiring.initialUsage }),
-                      ...(wiring.lastTurn === undefined
-                        ? {}
-                        : { lastTurn: wiring.lastTurn }),
-                      ...(wiring.codeState === undefined
-                        ? {}
-                        : { codeState: wiring.codeState }),
-                    }).streamIn(chat, effective),
-                  );
-                }),
-              ),
-            ) as Stream.Stream<
-              AgentEvents.Event<ModelTools>,
-              RunFailure,
-              | WithOwnHandlers<RuntimeTools>
-              | StopR
-              | TurnControlR
-              | InterceptorR
-            >;
+            return yield* RecoveryRun.runRecovery<
+              ModelTools,
+              RunTools,
+              DynamicTools,
+              BaseRequires,
+              InterceptorR
+            >({
+              agentName: definition.name,
+              session,
+              interceptor,
+              runtime,
+              delegationToolNames,
+              runToolkit,
+              runInstructions,
+              wiring,
+              entryFor,
+              chat,
+              input,
+            });
           }
           // The only point every path above funnels through exactly once
           // before a run's first turn — including dynamic-toolkit resolution,
@@ -1639,7 +509,7 @@ export const makeEntry = <
           );
           const stepRef = yield* Ref.make(0);
           const remaining = yield* runtime.remainingMillis;
-          const primary = turn(
+          const primary = turnRunner.turn(
             chat,
             usage,
             toolCallCounts,
@@ -1651,11 +521,11 @@ export const makeEntry = <
           const withFallback =
             (runtime.limits.onExhaustion ?? 'fail') === 'final-answer'
               ? primary.pipe(
-                  Stream.catchIf(isFinalAnswerEligible, (exhaustion) =>
+                  Stream.catchIf(TurnRun.isFinalAnswerEligible, (exhaustion) =>
                     Stream.unwrap(
                       Ref.get(stepRef).pipe(
                         Effect.map((lastStep) =>
-                          finalAnswerTurn(
+                          turnRunner.finalAnswerTurn(
                             chat,
                             usage,
                             toolCallCounts,
@@ -1746,35 +616,6 @@ const stateErrorMetadata = (error: AgentState.Error) => {
       };
   }
 };
-
-/**
- * What a batch of steering instructions becomes for the next turn.
- *
- * Plain user messages. A steer is somebody talking to the agent
- * out-of-band, and the model already knows what to do with a user turn;
- * inventing a bespoke role would mean every provider adapter had to learn
- * one. Several steers delivered together are joined rather than sent as
- * several messages, so the turn count does not depend on how a sender
- * happened to batch them.
- */
-const steeringInput = (
-  steers: ReadonlyArray<{ readonly text: string }>,
-): Prompt.RawInput =>
-  steers.length === 0
-    ? Prompt.empty
-    : Prompt.make([
-        {
-          role: 'user',
-          content: steers.map((steer) => steer.text).join('\n\n'),
-        },
-      ]);
-
-const dynamicContextFor = (instructions: string, toolkit: unknown): string => {
-  const context = DynamicToolkit.resourceContext(toolkit);
-  return context === '' ? instructions : `${instructions}\n\n${context}`;
-};
-
-/** Keep runtime toolkit composition out of DynamicToolkit's public interface. */
 function withDynamicToolkit<
   StaticTools extends Record<string, Tool.Any>,
   DynamicTools extends Record<string, Tool.Any>,
@@ -1790,265 +631,3 @@ function withDynamicToolkit(
     ? staticallyDefined
     : DynamicToolkit.merge(staticallyDefined, dynamic);
 }
-
-const replaceSystemInstructions = (
-  chat: Chat.Service,
-  instructions: string,
-): Effect.Effect<void> =>
-  Ref.update(chat.history, (history) => {
-    const rest =
-      history.content[0]?.role === 'system'
-        ? history.content.slice(1)
-        : history.content;
-    return Prompt.fromMessages([
-      Prompt.makeMessage('system', { content: instructions }),
-      ...rest,
-    ]);
-  });
-
-interface TurnState {
-  text: string;
-  reasoning: string;
-  parts: Response.AnyPart[];
-  toolCalls: Response.ToolCallPartEncoded[];
-  toolResults: Response.ToolResultPartEncoded[];
-  usage: Response.FinishPartEncoded['usage'] | undefined;
-  finishReason: Response.FinishReason | undefined;
-  emitted: boolean;
-  started: boolean;
-  /** Raw provider call params seen this turn, keyed by tool call id. */
-  callsById: Map<
-    string,
-    {
-      readonly name: string;
-      readonly input: unknown;
-      readonly interaction?: Interaction.Metadata;
-    }
-  >;
-  /** External interaction requests observed this turn, in provider order. */
-  pendingInteractions: AgentEvents.PendingInteraction[];
-}
-
-const emptyTurnState = (): TurnState => ({
-  text: '',
-  reasoning: '',
-  parts: [],
-  toolCalls: [],
-  toolResults: [],
-  usage: undefined,
-  finishReason: undefined,
-  emitted: false,
-  started: false,
-  callsById: new Map(),
-  pendingInteractions: [],
-});
-
-/**
- * Accumulate what the stop decision and the result need from one turn.
- *
- * Takes both the live and provider-facing sibling of the same part. A
- * `tool-approval-request` carries no parameters of its own, so the raw request
- * is tracked from its tool call and looked up when the approval arrives.
- */
-const observe = <PartTools extends Record<string, Tool.Any>>(
-  state: TurnState,
-  part: ModelTurnPart<PartTools>,
-  encoded: Response.StreamPartEncoded,
-  toolkit: { readonly tools: Record<string, Tool.Any> },
-): void => {
-  state.emitted = true;
-  state.parts.push(part);
-  switch (encoded.type) {
-    case 'text-delta':
-      state.text += encoded.delta;
-      break;
-    case 'reasoning-delta':
-      state.reasoning += encoded.delta;
-      break;
-    case 'tool-call':
-      state.toolCalls.push(encoded);
-      if (part.type === 'tool-call') {
-        const tool = Object.hasOwn(toolkit.tools, part.name)
-          ? toolkit.tools[part.name]
-          : undefined;
-        const interaction =
-          tool === undefined
-            ? undefined
-            : Option.getOrUndefined(Interaction.metadata(tool));
-        state.callsById.set(part.id, {
-          name: part.name,
-          input: part.params,
-          ...(interaction === undefined ? {} : { interaction }),
-        });
-      }
-      break;
-    case 'tool-call-error':
-      state.toolCalls.push({
-        type: 'tool-call',
-        id: encoded.id,
-        name: encoded.name,
-        params: encoded.params,
-        ...(encoded.providerExecuted === true
-          ? { providerExecuted: true }
-          : {}),
-      });
-      state.toolResults.push({
-        type: 'tool-result',
-        id: encoded.id,
-        name: encoded.name,
-        result: encoded.error,
-        isFailure: true,
-        ...(encoded.providerExecuted === true
-          ? { providerExecuted: true }
-          : {}),
-      });
-      break;
-    case 'tool-result':
-      if (encoded.preliminary !== true) {
-        state.toolResults.push(encoded);
-      }
-      break;
-    case 'tool-approval-request': {
-      const call = state.callsById.get(encoded.toolCallId);
-      state.pendingInteractions.push({
-        toolCallId: encoded.toolCallId,
-        toolName: call?.name ?? '',
-        kind: call?.interaction?.name ?? 'approval',
-        request: call?.input,
-      });
-      break;
-    }
-    case 'finish':
-      state.usage = encoded.usage;
-      state.finishReason = encoded.reason;
-      break;
-    default:
-      break;
-  }
-};
-
-const outputOf = (state: TurnState): Prompt.Prompt =>
-  Prompt.fromResponseParts(state.parts);
-
-/**
- * Limits `onExhaustion: 'final-answer'` may recover from with one extra
- * no-tools model call rather than failing the run outright — see
- * `RunPolicy.Limits.onExhaustion`. `deadline`, `maxToolConcurrency`'s clamp
- * (which never raises `RunPolicyExhausted` at all), and the signal limits are
- * deliberately excluded: a run that is out of *time*, rather than out of
- * turns, calls, tokens, cost, or delegation budget, has no safe way to spend
- * more of it on one further call.
- */
-const finalAnswerEligibleLimits: ReadonlySet<RunPolicy.Limit> = new Set([
-  'turns',
-  'model_calls',
-  'input_tokens',
-  'output_tokens',
-  'maxCostMicrousd',
-  'delegated_tasks',
-]);
-
-const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
-
-const isFinalAnswerEligible = (
-  error: RunFailure,
-): error is RunPolicy.RunPolicyExhausted =>
-  isRunPolicyExhausted(error) && finalAnswerEligibleLimits.has(error.limit);
-
-const FINAL_ANSWER_INSTRUCTION =
-  'The run budget is spent: no further turns, model calls, tokens, or delegated tasks remain, and no tools are available for this call. Answer now with the best final response you can give using only what you already have.';
-
-const continuationInput = (
-  continuation: Option.Option<TurnControl.Continuation>,
-  steers: ReadonlyArray<{ readonly text: string }>,
-): Prompt.RawInput =>
-  Prompt.concat(
-    Option.isSome(continuation)
-      ? Prompt.make(continuation.value.input)
-      : Prompt.empty,
-    Prompt.make(steeringInput(steers)),
-  );
-
-/** Apply a model override without narrowing the caller's requirement type. */
-const continueTurn = <A, E, R>(
-  continuation: Option.Option<TurnControl.Continuation>,
-  stream: Stream.Stream<A, E, R>,
-): Stream.Stream<A, E, R> =>
-  Option.isSome(continuation) && continuation.value.model !== undefined
-    ? Stream.provideService(
-        stream,
-        LanguageModel.LanguageModel,
-        continuation.value.model,
-      )
-    : stream;
-
-/**
- * Price a plain `{input, output}` figure against a cost model, the same way
- * `RunPolicyRuntime.addUsage` prices it for enforcement — so the local usage
- * projection a caller observes and the budget a run is charged against never
- * disagree. Absent `costModel` leaves `costMicrousd` unset, matching
- * `Stop.Usage`'s "never priced" reading of a missing figure.
- */
-const pricedUsage = (
-  costModel: RunPolicy.CostModel | undefined,
-  plain: {
-    readonly input: number;
-    readonly output: number;
-    readonly cachedInput?: number;
-  },
-): Stop.Usage =>
-  costModel === undefined
-    ? { input: plain.input, output: plain.output }
-    : {
-        input: plain.input,
-        output: plain.output,
-        costMicrousd: RunPolicy.costOf(costModel, plain),
-      };
-
-const addUsage = (
-  current: Stop.Usage,
-  usage: Response.FinishPartEncoded['usage'] | undefined,
-  costModel: RunPolicy.CostModel | undefined,
-): Stop.Usage => {
-  if (usage === undefined) {
-    return current;
-  }
-  const priced = pricedUsage(costModel, {
-    input: usage.inputTokens.total ?? 0,
-    output: usage.outputTokens.total ?? 0,
-    cachedInput: usage.inputTokens.cacheRead ?? 0,
-  });
-  return addStopUsage(current, priced);
-};
-
-const addStopUsage = (left: Stop.Usage, right: Stop.Usage): Stop.Usage => {
-  const costMicrousd =
-    left.costMicrousd === undefined && right.costMicrousd === undefined
-      ? undefined
-      : (left.costMicrousd ?? 0) + (right.costMicrousd ?? 0);
-  return {
-    input: left.input + right.input,
-    output: left.output + right.output,
-    ...(costMicrousd === undefined ? {} : { costMicrousd }),
-  };
-};
-
-const addToolCallCounts = (
-  current: Readonly<Record<string, number>>,
-  calls: ReadonlyArray<Response.ToolCallPartEncoded>,
-): Readonly<Record<string, number>> => {
-  if (calls.length === 0) {
-    return current;
-  }
-  // Tool names here come from the model's response, not the toolkit — a call
-  // to a nonexistent tool still lands in `toolCalls` — so `__proto__` is a
-  // possible key. On a default-prototype object that assignment hits the
-  // inherited accessor and silently drops the count; a null-prototype object
-  // makes it an ordinary own property.
-  const next: Record<string, number> = Object.create(null);
-  Object.assign(next, current);
-  for (const call of calls) {
-    next[call.name] = (next[call.name] ?? 0) + 1;
-  }
-  return next;
-};

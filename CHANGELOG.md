@@ -5,6 +5,29 @@ entry should state compatibility impact and migration guidance when applicable.
 
 ## Unreleased
 
+- Split `internal/loop.ts` (2,054 lines) along its internal seams, with no
+  public-API or behavior change. `loop.ts` keeps the `entryFor`/`streamIn`
+  surface and orchestration only; single-turn execution — `askModel`, part
+  observation and state folding, tool-result and usage bookkeeping,
+  `TurnFinished` emission, and the final-answer turn — moved to
+  `internal/turn.ts`; the recovery branch entered when a session has pending
+  tool calls, plus the settle-from-history path it funnels into, moved to
+  `internal/recovery-run.ts`; code-mode and dynamic-toolkit bootstrap and
+  root run-policy runtime creation moved to `internal/bootstrap.ts`; the
+  signal-draining and responsive-cancel-watcher logic shared by the ordinary
+  turn boundary and the recovery boundary moved to `internal/signals-run.ts`.
+  Every durable string, span name, event shape, and rationale comment moved
+  verbatim. `streamIn` is now a short function naming its five preconditions
+  — code-mode bootstrap, dynamic-toolkit bootstrap, runtime creation, signal
+  recovery, and the ordinary turn path — and delegating each to its new
+  home. The six positional `as Stream.Stream<...>` casts on `entryFor`'s
+  recursive re-entry are now four fewer: a new `ReEnter` type names the
+  re-entry's signature once, so the four `streamIn` precondition branches
+  need no per-call-site assertion; the two that remain (`askModel`'s own
+  provider-call stream and `turn`'s own recursive step) stay asserted, each
+  with a one-line comment explaining the generic self-recursion limit that
+  requires it. No behavior changed.
+
 - Fixed the two recovery gaps the chaos convergence runner (see the entry
   below) pinned as regression tests rather than hidden. Recovering from a
   crash between a final turn's `TurnFinished` and its `Completed` record no

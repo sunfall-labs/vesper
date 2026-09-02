@@ -137,19 +137,10 @@
     "effecttsgo/any-unknown-in-error-context": {
       "count": 9
     },
-    "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 6
-    },
     "typescript/consistent-return": {
       "count": 1
     },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
-    },
     "typescript/no-unsafe-type-assertion": {
-      "count": 7
-    },
-    "typescript/switch-exhaustiveness-check": {
       "count": 1
     }
   },
@@ -166,6 +157,20 @@
   "packages/agent/src/internal/session-open.ts": {
     "typescript/no-unnecessary-condition": {
       "count": 3
+    }
+  },
+  "packages/agent/src/internal/turn.ts": {
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 2
+    },
+    "typescript/no-unsafe-assignment": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 2
+    },
+    "typescript/switch-exhaustiveness-check": {
+      "count": 1
     }
   },
   "packages/agent/src/model-plan.ts": {
