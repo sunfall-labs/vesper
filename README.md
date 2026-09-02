@@ -151,6 +151,7 @@ separate reusable package and are only externalized when an
 - [Design and architectural boundaries](Design.md)
 - [Agent guide](packages/agent/README.md)
 - [Durable conversations](docs/conversations.md)
+- [Durability guarantees](docs/guarantees.md)
 - [The complete example, walked through](examples/support-agent/README.md)
 - [Workspace composition](docs/workspace.md)
 - [Conversation migration guide](docs/migrating-to-conversation.md)
