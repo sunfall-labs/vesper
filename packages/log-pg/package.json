@@ -47,12 +47,12 @@
     "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "dependencies": {
-    "@effect/sql-pg": "4.0.0-rc.109",
+    "@effect/sql-pg": "4.0.0-rc.112",
     "@sunfall/vesper-log": "0.1.0-alpha.1",
     "pg": "8.23.0"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109"
+    "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
     "@effect/platform-node": "catalog:",

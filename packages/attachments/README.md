@@ -4,7 +4,7 @@ Content-addressed blob storage for agent conversations, with content verified
 again when it is read.
 
 ```bash
-npm install @sunfall/vesper-attachments effect@4.0.0-rc.109
+npm install @sunfall/vesper-attachments effect@4.0.0-rc.112
 ```
 
 Modules are exposed as explicit subpaths, including
@@ -15,7 +15,7 @@ The filesystem adapter uses Effect's `FileSystem`, `Path`, and `Crypto`
 interfaces, so the application retains control of the platform implementation:
 
 ```bash
-npm install @effect/platform-node@4.0.0-rc.109
+npm install @effect/platform-node@4.0.0-rc.112
 ```
 
 ```ts

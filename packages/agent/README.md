@@ -15,7 +15,7 @@ channel, included by `Conversation.Error<A>` alongside the agent and store
 failures for that bound definition.
 
 ```bash
-npm install @sunfall/vesper-agent effect@4.0.0-rc.109
+npm install @sunfall/vesper-agent effect@4.0.0-rc.112
 ```
 
 Node.js 22.13.0 or newer is required. The snippets below assume the application

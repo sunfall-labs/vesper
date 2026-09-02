@@ -1,0 +1,420 @@
+diff --git a/dist/AnthropicLanguageModel.d.ts b/dist/AnthropicLanguageModel.d.ts
+--- a/dist/AnthropicLanguageModel.d.ts
++++ b/dist/AnthropicLanguageModel.d.ts
+@@ -1,7 +1,7 @@
+ import * as Context from "effect/Context";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
+-import * as Schema from "effect/Schema";
++import type * as Schema from "effect/Schema";
+ import * as LanguageModel from "effect/unstable/ai/LanguageModel";
+ import * as AiModel from "effect/unstable/ai/Model";
+ import { AnthropicClient } from "./AnthropicClient.ts";
+@@ -752,47 +752,7 @@
+  * @since 4.0.0
+  */
+ export declare const withConfigOverride: {
+-    /**
+-     * Provides config overrides for Anthropic language model operations.
+-     *
+-     * **When to use**
+-     *
+-     * Use to apply Anthropic request configuration to one effect without changing
+-     * the model's default configuration.
+-     *
+-     * **Details**
+-     *
+-     * The overrides are merged with any existing `Config` service for the duration
+-     * of the supplied effect. Fields in `overrides` take precedence over existing
+-     * config, and the helper supports both `effect.pipe(withConfigOverride(overrides))`
+-     * and `withConfigOverride(effect, overrides)`.
+-     *
+-     * @see {@link Config} for available Anthropic request configuration fields
+-     *
+-     * @category configuration
+-     * @since 4.0.0
+-     */
+     (overrides: typeof Config.Service): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>;
+-    /**
+-     * Provides config overrides for Anthropic language model operations.
+-     *
+-     * **When to use**
+-     *
+-     * Use to apply Anthropic request configuration to one effect without changing
+-     * the model's default configuration.
+-     *
+-     * **Details**
+-     *
+-     * The overrides are merged with any existing `Config` service for the duration
+-     * of the supplied effect. Fields in `overrides` take precedence over existing
+-     * config, and the helper supports both `effect.pipe(withConfigOverride(overrides))`
+-     * and `withConfigOverride(effect, overrides)`.
+-     *
+-     * @see {@link Config} for available Anthropic request configuration fields
+-     *
+-     * @category configuration
+-     * @since 4.0.0
+-     */
+     <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service): Effect.Effect<A, E, Exclude<R, Config>>;
+ };
+ /**
+diff --git a/dist/AnthropicLanguageModel.js b/dist/AnthropicLanguageModel.js
+--- a/dist/AnthropicLanguageModel.js
++++ b/dist/AnthropicLanguageModel.js
+@@ -18,9 +18,7 @@
+ import * as Option from "effect/Option";
+ import * as Predicate from "effect/Predicate";
+ import * as Redactable from "effect/Redactable";
+-import * as Schema from "effect/Schema";
+ import * as SchemaAST from "effect/SchemaAST";
+-import * as SchemaIssue from "effect/SchemaIssue";
+ import * as Stream from "effect/Stream";
+ import * as AiError from "effect/unstable/ai/AiError";
+ import { toCodecAnthropic } from "effect/unstable/ai/AnthropicStructuredOutput";
+@@ -31,7 +29,6 @@
+ import { AnthropicClient } from "./AnthropicClient.js";
+ import { addGenAIAnnotations } from "./AnthropicTelemetry.js";
+ import * as InternalUtilities from "./internal/utilities.js";
+-const formatIssue = /*#__PURE__*/SchemaIssue.makeFormatterDefault();
+ // =============================================================================
+ // Configuration
+ // =============================================================================
+@@ -513,7 +510,12 @@
+                         type: "tool_use",
+                         id: part.id,
+                         name: part.name,
+-                        input: part.params,
++                        // Anthropic requires `input` to be an object. Argument
++                        // text which never parsed as JSON is carried under an
++                        // `arguments` key so the model still sees what it wrote.
++                        input: typeof part.params === "string" ? {
++                          arguments: part.params
++                        } : part.params,
+                         ...(Predicate.isNotUndefined(caller) ? {
+                           caller
+                         } : undefined)
+@@ -971,12 +973,11 @@
+             // Map the provider wire name (e.g. "memory") back to the tool's
+             // custom name (e.g. "AnthropicMemory") that the toolkit is keyed by
+             const toolName = toolNameMapper.getCustomName(part.name);
+-            const params = yield* transformToolCallParams(options.tools, toolName, part.input);
+             parts.push({
+               type: "tool-call",
+               id: part.id,
+               name: toolName,
+-              params,
++              params: part.input,
+               ...(Predicate.isNotUndefined(callerInfo) ? {
+                 metadata: {
+                   anthropic: {
+@@ -1329,12 +1330,11 @@
+                   type: "tool-params-end",
+                   id: part.id
+                 });
+-                const params = yield* transformToolCallParams(options.tools, toolName, part.input);
+                 parts.push({
+                   type: "tool-call",
+                   id: part.id,
+                   name: toolName,
+-                  params,
++                  params: part.input,
+                   ...(Predicate.isNotUndefined(callerInfo) ? {
+                     metadata: {
+                       anthropic: {
+@@ -1846,7 +1846,7 @@
+                       // Ignore errors and use original tool call parameters
+                     }
+                   }
+-                  const params = contentBlock.providerExecuted === true ? Tool.unsafeSecureJsonParse(finalParams) : yield* transformToolCallParams(options.tools, contentBlock.name, Tool.unsafeSecureJsonParse(finalParams));
++                  const params = parseToolArguments(finalParams);
+                   parts.push({
+                     type: "tool-call",
+                     id: contentBlock.id,
+@@ -2128,10 +2128,6 @@
+     description: error instanceof Error ? error.message : String(error)
+   })
+ });
+-const tryCodecTransform = (schema, method) => Effect.try({
+-  try: () => toCodecAnthropic(schema),
+-  catch: error => unsupportedSchemaError(error, method)
+-});
+ const tryJsonSchema = (schema, method) => Effect.try({
+   try: () => Tool.getJsonSchemaFromSchema(schema, {
+     transformer: toCodecAnthropic
+@@ -2157,30 +2153,14 @@
+   }
+   return undefined;
+ });
+-const transformToolCallParams = /*#__PURE__*/Effect.fnUntraced(function* (tools, toolName, toolParams) {
+-  const tool = tools.find(tool => tool.name === toolName);
+-  if (Predicate.isUndefined(tool)) {
+-    return yield* AiError.make({
+-      module: "AnthropicLanguageModel",
+-      method: "makeResponse",
+-      reason: new AiError.ToolNotFoundError({
+-        toolName,
+-        availableTools: tools.map(tool => tool.name)
+-      })
+-    });
++// Argument text which is not valid JSON is passed through verbatim.
++// `LanguageModel` validates every tool call against its schema and reports the
++// failure, so the adapter only translates the wire format.
++const parseToolArguments = text => {
++  try {
++    return Tool.unsafeSecureJsonParse(text);
++  } catch {
++    return text;
+   }
+-  const {
+-    codec
+-  } = yield* tryCodecTransform(tool.parametersSchema, "makeResponse");
+-  const transform = Schema.decodeEffect(codec);
+-  return yield* transform(toolParams).pipe(Effect.mapError(error => AiError.make({
+-    module: "AnthropicLanguageModel",
+-    method: "makeResponse",
+-    reason: new AiError.ToolParameterValidationError({
+-      toolName,
+-      toolParams,
+-      description: formatIssue(error.issue)
+-    })
+-  })));
+-});
++};
+ //# sourceMappingURL=AnthropicLanguageModel.js.map
+\ No newline at end of file
+diff --git a/src/AnthropicLanguageModel.ts b/src/AnthropicLanguageModel.ts
+--- a/src/AnthropicLanguageModel.ts
++++ b/src/AnthropicLanguageModel.ts
+@@ -18,9 +18,8 @@
+ import * as Option from "effect/Option"
+ import * as Predicate from "effect/Predicate"
+ import * as Redactable from "effect/Redactable"
+-import * as Schema from "effect/Schema"
++import type * as Schema from "effect/Schema"
+ import * as SchemaAST from "effect/SchemaAST"
+-import * as SchemaIssue from "effect/SchemaIssue"
+ import * as Stream from "effect/Stream"
+ import type { Span } from "effect/Tracer"
+ import type { Mutable, Simplify } from "effect/Types"
+@@ -40,8 +39,6 @@
+ import type * as Generated from "./Generated.ts"
+ import * as InternalUtilities from "./internal/utilities.ts"
+
+-const formatIssue = SchemaIssue.makeFormatterDefault()
+-
+ /**
+  * Known Anthropic Claude model identifiers exposed by the generated Anthropic schema.
+  *
+@@ -808,90 +805,12 @@
+  * @since 4.0.0
+  */
+ export const withConfigOverride: {
+-  /**
+-   * Provides config overrides for Anthropic language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply Anthropic request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both `effect.pipe(withConfigOverride(overrides))`
+-   * and `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available Anthropic request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+   (overrides: typeof Config.Service): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>
+-  /**
+-   * Provides config overrides for Anthropic language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply Anthropic request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both `effect.pipe(withConfigOverride(overrides))`
+-   * and `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available Anthropic request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+   <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service): Effect.Effect<A, E, Exclude<R, Config>>
+ } = dual<
+-  /**
+-   * Provides config overrides for Anthropic language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply Anthropic request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both `effect.pipe(withConfigOverride(overrides))`
+-   * and `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available Anthropic request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+-  (overrides: typeof Config.Service) => <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>,
+-  /**
+-   * Provides config overrides for Anthropic language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply Anthropic request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both `effect.pipe(withConfigOverride(overrides))`
+-   * and `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available Anthropic request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
++  (
++    overrides: typeof Config.Service
++  ) => <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>,
+   <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service) => Effect.Effect<A, E, Exclude<R, Config>>
+ >(2, (self, overrides) =>
+   Effect.flatMap(
+@@ -1203,7 +1122,10 @@
+                       type: "tool_use",
+                       id: part.id,
+                       name: part.name,
+-                      input: part.params as any,
++                      // Anthropic requires `input` to be an object. Argument
++                      // text which never parsed as JSON is carried under an
++                      // `arguments` key so the model still sees what it wrote.
++                      input: typeof part.params === "string" ? { arguments: part.params } : part.params as any,
+                       ...(Predicate.isNotUndefined(caller) ? { caller } : undefined)
+                     })
+                   }
+@@ -1725,13 +1647,11 @@
+             // Map the provider wire name (e.g. "memory") back to the tool's
+             // custom name (e.g. "AnthropicMemory") that the toolkit is keyed by
+             const toolName = toolNameMapper.getCustomName(part.name)
+-            const params = yield* transformToolCallParams(options.tools, toolName, part.input)
+-
+             parts.push({
+               type: "tool-call",
+               id: part.id,
+               name: toolName,
+-              params,
++              params: part.input,
+               ...(Predicate.isNotUndefined(callerInfo)
+                 ? { metadata: { anthropic: { caller: callerInfo } } }
+                 : undefined)
+@@ -2165,13 +2085,11 @@
+                     id: part.id
+                   })
+
+-                  const params = yield* transformToolCallParams(options.tools, toolName, part.input)
+-
+                   parts.push({
+                     type: "tool-call",
+                     id: part.id,
+                     name: toolName,
+-                    params,
++                    params: part.input,
+                     ...(Predicate.isNotUndefined(callerInfo)
+                       ? { metadata: { anthropic: { caller: callerInfo } } }
+                       : undefined)
+@@ -2753,13 +2671,7 @@
+                     }
+                   }
+
+-                  const params = contentBlock.providerExecuted === true
+-                    ? Tool.unsafeSecureJsonParse(finalParams)
+-                    : yield* transformToolCallParams(
+-                      options.tools,
+-                      contentBlock.name,
+-                      Tool.unsafeSecureJsonParse(finalParams)
+-                    )
++                  const params = parseToolArguments(finalParams)
+
+                   parts.push({
+                     type: "tool-call",
+@@ -3132,12 +3044,6 @@
+     })
+   })
+
+-const tryCodecTransform = <S extends Schema.Constraint>(schema: S, method: string) =>
+-  Effect.try({
+-    try: () => toCodecAnthropic(schema),
+-    catch: (error) => unsupportedSchemaError(error, method)
+-  })
+-
+ const tryJsonSchema = <S extends Schema.Constraint>(schema: S, method: string) =>
+   Effect.try({
+     try: () => Tool.getJsonSchemaFromSchema(schema, { transformer: toCodecAnthropic }),
+@@ -3164,39 +3070,13 @@
+   return undefined
+ })
+
+-const transformToolCallParams = Effect.fnUntraced(function*<Tools extends ReadonlyArray<Tool.Any>>(
+-  tools: Tools,
+-  toolName: string,
+-  toolParams: unknown
+-): Effect.fn.Return<unknown, AiError.AiError> {
+-  const tool = tools.find((tool) => tool.name === toolName)
+-
+-  if (Predicate.isUndefined(tool)) {
+-    return yield* AiError.make({
+-      module: "AnthropicLanguageModel",
+-      method: "makeResponse",
+-      reason: new AiError.ToolNotFoundError({
+-        toolName,
+-        availableTools: tools.map((tool) => tool.name)
+-      })
+-    })
++// Argument text which is not valid JSON is passed through verbatim.
++// `LanguageModel` validates every tool call against its schema and reports the
++// failure, so the adapter only translates the wire format.
++const parseToolArguments = (text: string): unknown => {
++  try {
++    return Tool.unsafeSecureJsonParse(text)
++  } catch {
++    return text
+   }
+-
+-  const { codec } = yield* tryCodecTransform(tool.parametersSchema, "makeResponse")
+-
+-  const transform = Schema.decodeEffect(codec)
+-
+-  return yield* (
+-    transform(toolParams) as Effect.Effect<unknown, Schema.SchemaError>
+-  ).pipe(Effect.mapError((error) =>
+-    AiError.make({
+-      module: "AnthropicLanguageModel",
+-      method: "makeResponse",
+-      reason: new AiError.ToolParameterValidationError({
+-        toolName,
+-        toolParams,
+-        description: formatIssue(error.issue)
+-      })
+-    })
+-  ))
+-})
++}

@@ -67,147 +67,6 @@ const exportedTarget = (target) => {
   return path;
 };
 
-/**
- * @param {string} source
- * @param {string} start
- * @param {string} end
- * @param {string} description
- * @returns {string}
- */
-const sectionBetween = (source, start, end, description) => {
-  const from = source.indexOf(start);
-  const to = source.indexOf(end, from + start.length);
-  if (from === -1 || to === -1) {
-    throw new Error(`Unable to locate ${description}`);
-  }
-  return source.slice(from, to);
-};
-
-/** @returns {Promise<void>} */
-const assertEffectPatchSourceContract = async () => {
-  const effectRoot = resolve(root, 'node_modules/effect');
-  const toolkitSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/Toolkit.ts'),
-    'utf8',
-  );
-  const toolkitDeclaration = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/Toolkit.d.ts'),
-    'utf8',
-  );
-  const responseSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/Response.ts'),
-    'utf8',
-  );
-  const responseDeclaration = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/Response.d.ts'),
-    'utf8',
-  );
-  const toolSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/Tool.ts'),
-    'utf8',
-  );
-  const toolDeclaration = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/Tool.d.ts'),
-    'utf8',
-  );
-  const languageModelSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/LanguageModel.ts'),
-    'utf8',
-  );
-  const languageModelRuntime = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/LanguageModel.js'),
-    'utf8',
-  );
-
-  /** @type {ReadonlyArray<readonly [string, string]>} */
-  const toolkitContracts = [
-    ['source', toolkitSource],
-    ['declaration', toolkitDeclaration],
-  ];
-  for (const [kind, source] of toolkitContracts) {
-    const handlers = sectionBetween(
-      source,
-      'export type HandlersFrom',
-      'export interface WithHandler',
-      `Effect Toolkit ${kind} handler section`,
-    );
-    const boundary = sectionBetween(
-      source,
-      'export interface WithHandler',
-      'export type WithHandlerTools',
-      `Effect Toolkit ${kind} boundary section`,
-    );
-    if (!handlers.includes('params: Tool.Parameters<Tools[Name]>')) {
-      throw new Error(`Effect Toolkit ${kind} lost typed application handlers`);
-    }
-    if (!boundary.includes('params: unknown')) {
-      throw new Error(
-        `Effect Toolkit ${kind} does not accept untrusted parameters`,
-      );
-    }
-  }
-
-  /** @type {ReadonlyArray<readonly [string, string]>} */
-  const responseContracts = [
-    ['source', responseSource],
-    ['declaration', responseDeclaration],
-  ];
-  for (const [kind, source] of responseContracts) {
-    if (!source.includes('true extends RelaxParams')) {
-      throw new Error(
-        `Effect Response ${kind} unsafely narrows a boolean relaxed codec`,
-      );
-    }
-  }
-
-  /** @type {ReadonlyArray<readonly [string, string]>} */
-  const toolContracts = [
-    ['source', toolSource],
-    ['declaration', toolDeclaration],
-  ];
-  for (const [kind, source] of toolContracts) {
-    const handlerResult = sectionBetween(
-      source,
-      'export type HandlerResult',
-      'export type HandlerOutput',
-      `Effect Tool ${kind} handler result`,
-    );
-    if (
-      !handlerResult.includes('readonly isFailure: false') ||
-      !handlerResult.includes('readonly isFailure: true') ||
-      !handlerResult.includes('FailureResult<Tool>')
-    ) {
-      throw new Error(
-        `Effect Tool ${kind} lost its discriminated framework-failure result`,
-      );
-    }
-  }
-
-  if (
-    !languageModelSource.includes(
-      'Response.StreamPart(toolkit, { relaxParams: true })',
-    ) ||
-    languageModelSource.includes('as ToolResolutionResult<Tools>') ||
-    !languageModelSource.includes('const hasTool =') ||
-    languageModelSource.split('hasTool(toolkit.tools').length - 1 < 2
-  ) {
-    throw new Error(
-      'Effect LanguageModel source lost relaxed streaming or typed tool resolution',
-    );
-  }
-  if (
-    !languageModelRuntime.includes(
-      'Response.StreamPart(toolkit, {\n        relaxParams: true\n      })',
-    ) ||
-    languageModelRuntime.split('Object.hasOwn(toolkit.tools').length - 1 < 2 ||
-    !languageModelRuntime.includes('Response.toolResultPart({')
-  ) {
-    throw new Error(
-      'Effect LanguageModel runtime drifted from the patched source contract',
-    );
-  }
-};
-
 try {
   await mkdir(packDirectory);
   await mkdir(consumerDirectory);
@@ -225,13 +84,6 @@ try {
   const configuredPatches = rootManifest['patchedDependencies'];
   if (configuredPatches !== undefined && !isObject(configuredPatches)) {
     throw new Error('root package.json patchedDependencies must be an object');
-  }
-  if (
-    Object.keys(configuredPatches ?? {}).some(
-      (selector) => selector === 'effect' || selector.startsWith('effect@'),
-    )
-  ) {
-    await assertEffectPatchSourceContract();
   }
   /** @type {Record<string, string>} */
   const consumerPatches = {};
@@ -258,6 +110,20 @@ try {
   const dependencies = {
     effect: effectVersion,
   };
+  for (const selector of Object.keys(configuredPatches ?? {})) {
+    const separator = selector.lastIndexOf('@');
+    const packageName = separator > 0 ? selector.slice(0, separator) : selector;
+    if (packageName === 'effect') {
+      continue;
+    }
+    const version = isObject(catalog) ? catalog[packageName] : undefined;
+    if (typeof version !== 'string') {
+      throw new Error(
+        `Patched dependency ${packageName} must have a catalog version`,
+      );
+    }
+    dependencies[packageName] = version;
+  }
   /** @type {string[]} */
   const imports = [];
   /** @type {string[]} */
@@ -397,6 +263,12 @@ const finish = (reason = 'stop') => ({
     outputTokens: { total: 1 },
   },
 });
+// Behavioral probe of the model tool-call boundary. A dependency patch is not
+// inherited by registry consumers, so the packed install must itself prove the
+// two contracts Vesper relies on: an invalid call to a tool and a call to a
+// tool the model invented both come back to the model as failed tool results
+// (the loop runs every model turn with \`failureMode: 'return'\`), without
+// reaching approval or the handler, and the run continues.
 const calls = { handler: 0, model: 0 };
 const probe = Tool.make('boundary_probe', {
   parameters: Schema.Struct({ path: Schema.String }),
@@ -440,7 +312,6 @@ const result = await Effect.runPromise(
 if (result.text !== 'Recovered.' || calls.model !== 2 || calls.handler !== 0) {
   throw new Error('Packed Vesper does not recover invalid model tool calls');
 }
-
 console.log(\`Imported \${imports.length} public modules and read \${assets.length} exported assets from \${packages.length} packed packages.\`);
 `,
   );

@@ -3,7 +3,7 @@
 Vesper is pre-1.0. The six publishable `@sunfall/vesper-*` packages are released
 together at the same version so their generated types and sibling dependencies
 stay compatible. The `effect` peer dependency is currently pinned to
-`4.0.0-rc.109`; update that family deliberately as one change. The pin appears
+`4.0.0-rc.112`; update that family deliberately as one change. The pin appears
 in the install commands of the root and package READMEs and in two prose
 statements (the root README and this file); find every markdown occurrence
 with `grep -rn '4.0.0-rc' --include='*.md' .` when bumping it.
@@ -38,6 +38,17 @@ before approval or handler dispatch; dependency patches are not inherited by
 registry consumers. Land that behavior upstream, upgrade the pinned Effect
 family, remove the patch, and let the packed-consumer behavior check pass on the
 released dependency before publishing Vesper.
+
+While the patch exists, regenerate it from the Effect branch it tracks rather
+than editing it by hand:
+
+```bash
+nub run patches:regenerate --effect ../effect-upstream
+```
+
+The script builds the touched packages in that checkout, overlays exactly the
+files the branch changes on the pinned catalog versions through `nub patch`
+and `nub patch-commit`, and prints the before and after size of every patch.
 
 The packed-consumer check installs every generated tarball into a clean
 temporary project, imports every runtime export, reads exported assets, and

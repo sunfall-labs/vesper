@@ -28,6 +28,7 @@
     "typecheck": "nub run check:package-paths && nub run check:unsafe-casts && nub run -r --filter './packages/*' --filter './examples/*' --if-present typecheck && nub run typecheck:types",
     "check:package-paths": "node scripts/check-package-paths.mjs",
     "check:packed-consumer": "node scripts/check-packed-consumer.mjs",
+    "patches:regenerate": "node scripts/regenerate-effect-patches.mjs",
     "check:publish-ready": "node scripts/check-publish-ready.mjs",
     "audit:packed-consumer": "node scripts/check-packed-consumer.mjs --audit",
     "check:published-types": "node scripts/check-published-types.mjs && tsc -p tsconfig.published-types.json --noEmit --pretty false",
@@ -81,17 +82,17 @@
       "benchmarks"
     ],
     "catalog": {
-      "@effect/ai-anthropic": "4.0.0-rc.109",
-      "@effect/ai-openai": "4.0.0-rc.109",
-      "@effect/ai-openrouter": "4.0.0-rc.109",
-      "@effect/platform-node": "4.0.0-rc.109",
-      "@effect/vitest": "4.0.0-rc.109",
-      "effect": "4.0.0-rc.109"
+      "@effect/ai-anthropic": "4.0.0-rc.112",
+      "@effect/ai-openai": "4.0.0-rc.112",
+      "@effect/ai-openrouter": "4.0.0-rc.112",
+      "@effect/platform-node": "4.0.0-rc.112",
+      "@effect/vitest": "4.0.0-rc.112",
+      "effect": "4.0.0-rc.112"
     }
   },
   "overrides": {
     "@effect/platform-node": {
-      "@effect/platform-node-shared": "4.0.0-rc.109"
+      "@effect/platform-node-shared": "4.0.0-rc.112"
     },
     "effect": "catalog:"
   },
@@ -105,6 +106,9 @@
     "ssh2": false
   },
   "patchedDependencies": {
-    "effect@4.0.0-rc.109": "patches/effect@4.0.0-rc.109.patch"
+    "effect@4.0.0-rc.112": "patches/effect@4.0.0-rc.112.patch",
+    "@effect/ai-openai@4.0.0-rc.112": "patches/@effect+ai-openai@4.0.0-rc.112.patch",
+    "@effect/ai-anthropic@4.0.0-rc.112": "patches/@effect+ai-anthropic@4.0.0-rc.112.patch",
+    "@effect/ai-openrouter@4.0.0-rc.112": "patches/@effect+ai-openrouter@4.0.0-rc.112.patch"
   }
 }

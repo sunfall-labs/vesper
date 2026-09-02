@@ -1,0 +1,284 @@
+diff --git a/dist/OpenRouterLanguageModel.d.ts b/dist/OpenRouterLanguageModel.d.ts
+--- a/dist/OpenRouterLanguageModel.d.ts
++++ b/dist/OpenRouterLanguageModel.d.ts
+@@ -674,47 +674,7 @@
+  * @since 4.0.0
+  */
+ export declare const withConfigOverride: {
+-    /**
+-     * Provides config overrides for OpenRouter language model operations.
+-     *
+-     * **When to use**
+-     *
+-     * Use to apply OpenRouter request configuration to one effect without changing
+-     * the model's default configuration.
+-     *
+-     * **Details**
+-     *
+-     * The overrides are merged with any existing `Config` service for the duration
+-     * of the supplied effect. Fields in `overrides` take precedence over existing
+-     * config, and the helper supports both pipe form and
+-     * `withConfigOverride(effect, overrides)`.
+-     *
+-     * @see {@link Config} for available OpenRouter request configuration fields
+-     *
+-     * @category configuration
+-     * @since 4.0.0
+-     */
+     (overrides: typeof Config.Service): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>;
+-    /**
+-     * Provides config overrides for OpenRouter language model operations.
+-     *
+-     * **When to use**
+-     *
+-     * Use to apply OpenRouter request configuration to one effect without changing
+-     * the model's default configuration.
+-     *
+-     * **Details**
+-     *
+-     * The overrides are merged with any existing `Config` service for the duration
+-     * of the supplied effect. Fields in `overrides` take precedence over existing
+-     * config, and the helper supports both pipe form and
+-     * `withConfigOverride(effect, overrides)`.
+-     *
+-     * @see {@link Config} for available OpenRouter request configuration fields
+-     *
+-     * @category configuration
+-     * @since 4.0.0
+-     */
+     <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service): Effect.Effect<A, E, Exclude<R, Config>>;
+ };
+ export {};
+diff --git a/dist/OpenRouterLanguageModel.js b/dist/OpenRouterLanguageModel.js
+--- a/dist/OpenRouterLanguageModel.js
++++ b/dist/OpenRouterLanguageModel.js
+@@ -382,7 +382,9 @@
+                     id: part.id,
+                     function: {
+                       name: part.name,
+-                      arguments: JSON.stringify(part.params)
++                      // Argument text the model produced is sent back verbatim,
++                      // including text which never parsed as JSON
++                      arguments: typeof part.params === "string" ? part.params : JSON.stringify(part.params)
+                     }
+                   });
+                   break;
+@@ -575,18 +577,7 @@
+       const toolCall = toolCalls[index];
+       const toolName = toolCall.function.name;
+       const toolParams = toolCall.function.arguments ?? "{}";
+-      const params = yield* Effect.try({
+-        try: () => Tool.unsafeSecureJsonParse(toolParams),
+-        catch: cause => AiError.make({
+-          module: "OpenRouterLanguageModel",
+-          method: "makeResponse",
+-          reason: new AiError.ToolParameterValidationError({
+-            toolName,
+-            toolParams: {},
+-            description: `Failed to securely JSON parse tool parameters: ${cause}`
+-          })
+-        })
+-      });
++      const params = parseToolArguments(toolParams);
+       parts.push({
+         type: "tool-call",
+         id: toolCall.id,
+@@ -1004,14 +995,7 @@
+       // Forward any unsent tool calls if finish reason is 'tool-calls'
+       if (finishReason === "tool-calls") {
+         for (const toolCall of Object.values(activeToolCalls)) {
+-          // Coerce invalid tool call parameters to an empty object
+-          let params;
+-          // @effect-diagnostics-next-line tryCatchInEffectGen:off
+-          try {
+-            params = Tool.unsafeSecureJsonParse(toolCall.params);
+-          } catch {
+-            params = {};
+-          }
++          const params = parseToolArguments(toolCall.params);
+           // Only attach reasoning_details to the first tool call to avoid
+           // duplicating thinking blocks for parallel tool calls (Claude)
+           parts.push({
+@@ -1296,6 +1280,16 @@
+   const match = dataUrl.match(/^data:[^;]*;base64,(.+)$/);
+   return match ? match[1] : dataUrl;
+ };
++// Argument text which is not valid JSON is passed through verbatim.
++// `LanguageModel` validates every tool call against its schema and reports the
++// failure, so the adapter only translates the wire format.
++const parseToolArguments = text => {
++  try {
++    return Tool.unsafeSecureJsonParse(text);
++  } catch {
++    return text;
++  }
++};
+ const getUsage = usage => {
+   if (Predicate.isUndefined(usage)) {
+     return {
+diff --git a/src/OpenRouterLanguageModel.ts b/src/OpenRouterLanguageModel.ts
+--- a/src/OpenRouterLanguageModel.ts
++++ b/src/OpenRouterLanguageModel.ts
+@@ -642,90 +642,12 @@
+  * @since 4.0.0
+  */
+ export const withConfigOverride: {
+-  /**
+-   * Provides config overrides for OpenRouter language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenRouter request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both pipe form and
+-   * `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available OpenRouter request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+   (overrides: typeof Config.Service): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>
+-  /**
+-   * Provides config overrides for OpenRouter language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenRouter request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both pipe form and
+-   * `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available OpenRouter request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+   <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service): Effect.Effect<A, E, Exclude<R, Config>>
+ } = dual<
+-  /**
+-   * Provides config overrides for OpenRouter language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenRouter request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both pipe form and
+-   * `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available OpenRouter request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+-  (overrides: typeof Config.Service) => <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>,
+-  /**
+-   * Provides config overrides for OpenRouter language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenRouter request configuration to one effect without changing
+-   * the model's default configuration.
+-   *
+-   * **Details**
+-   *
+-   * The overrides are merged with any existing `Config` service for the duration
+-   * of the supplied effect. Fields in `overrides` take precedence over existing
+-   * config, and the helper supports both pipe form and
+-   * `withConfigOverride(effect, overrides)`.
+-   *
+-   * @see {@link Config} for available OpenRouter request configuration fields
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
++  (
++    overrides: typeof Config.Service
++  ) => <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>,
+   <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service) => Effect.Effect<A, E, Exclude<R, Config>>
+ >(2, (self, overrides) =>
+   Effect.flatMap(
+@@ -919,7 +841,12 @@
+                 toolCalls.push({
+                   type: "function",
+                   id: part.id,
+-                  function: { name: part.name, arguments: JSON.stringify(part.params) }
++                  function: {
++                    name: part.name,
++                    // Argument text the model produced is sent back verbatim,
++                    // including text which never parsed as JSON
++                    arguments: typeof part.params === "string" ? part.params : JSON.stringify(part.params)
++                  }
+                 })
+                 break
+               }
+@@ -1116,19 +1043,7 @@
+         const toolCall = toolCalls[index]
+         const toolName = toolCall.function.name
+         const toolParams = toolCall.function.arguments ?? "{}"
+-        const params = yield* Effect.try({
+-          try: () => Tool.unsafeSecureJsonParse(toolParams),
+-          catch: (cause) =>
+-            AiError.make({
+-              module: "OpenRouterLanguageModel",
+-              method: "makeResponse",
+-              reason: new AiError.ToolParameterValidationError({
+-                toolName,
+-                toolParams: {},
+-                description: `Failed to securely JSON parse tool parameters: ${cause}`
+-              })
+-            })
+-        })
++        const params = parseToolArguments(toolParams)
+         parts.push({
+           type: "tool-call",
+           id: toolCall.id,
+@@ -1579,14 +1494,7 @@
+           // Forward any unsent tool calls if finish reason is 'tool-calls'
+           if (finishReason === "tool-calls") {
+             for (const toolCall of Object.values(activeToolCalls)) {
+-              // Coerce invalid tool call parameters to an empty object
+-              let params: unknown
+-              // @effect-diagnostics-next-line tryCatchInEffectGen:off
+-              try {
+-                params = Tool.unsafeSecureJsonParse(toolCall.params)
+-              } catch {
+-                params = {}
+-              }
++              const params = parseToolArguments(toolCall.params)
+
+               // Only attach reasoning_details to the first tool call to avoid
+               // duplicating thinking blocks for parallel tool calls (Claude)
+@@ -1910,6 +1818,17 @@
+   return match ? match[1]! : dataUrl
+ }
+
++// Argument text which is not valid JSON is passed through verbatim.
++// `LanguageModel` validates every tool call against its schema and reports the
++// failure, so the adapter only translates the wire format.
++const parseToolArguments = (text: string): unknown => {
++  try {
++    return Tool.unsafeSecureJsonParse(text)
++  } catch {
++    return text
++  }
++}
++
+ const getUsage = (usage: Generated.ChatUsage | undefined): Response.Usage => {
+   if (Predicate.isUndefined(usage)) {
+     return {

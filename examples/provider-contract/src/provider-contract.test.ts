@@ -627,7 +627,7 @@ describe('official Effect provider seam', () => {
           Array.from(parts).find((part) => part.type === 'tool-call'),
         ).toMatchObject({
           name: 'charge_card',
-          params: { amountCents: '4999' },
+          params: { amountCents: 4999 },
         });
         expect(yield* Ref.get(receivedAmount)).toBe(4999);
         expect(

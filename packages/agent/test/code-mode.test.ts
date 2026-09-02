@@ -567,15 +567,12 @@ describe('code mode tool broker', () => {
           throw new Error('expected a nested tool failure');
         }
         expect(response.error.code).toBe('tool_failure');
-        const error = yield* Schema.decodeUnknownEffect(AiError.AiError)(
-          response.error.value,
-        );
-        expect(error.reason._tag).toBe('ToolParameterValidationError');
-        if (error.reason._tag !== 'ToolParameterValidationError') {
-          throw new Error('expected ToolParameterValidationError');
-        }
-        expect(error.reason.toolName).toBe('lookup');
-        expect(error.reason.toolParams).toEqual({ id: 42 });
+        const error = yield* Schema.decodeUnknownEffect(
+          AiError.ToolParameterValidationError,
+        )(response.error.value);
+        expect(error._tag).toBe('ToolParameterValidationError');
+        expect(error.toolName).toBe('lookup');
+        expect(error.toolParams).toEqual({ id: 42 });
       }),
   );
 

@@ -6,7 +6,7 @@ database migration without adding PostgreSQL dependencies to the core package.
 
 ```bash
 npm install @sunfall/vesper-log-pg \
-  @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
+  @effect/platform-node@4.0.0-rc.112 effect@4.0.0-rc.112
 ```
 
 The migration is published as
@@ -31,6 +31,6 @@ const store = LogStorePg.layer({
 service while the adapter is constructed.
 
 `VesperPgClient` delegates queries and transactions to the official client and
-corrects only the Effect 4.0.0-rc.109 `LISTEN` connection lifecycle. A standard
+corrects only the Effect 4.0.0-rc.112 `LISTEN` connection lifecycle. A standard
 client is also accepted when its listener satisfies the same lifecycle
 contract.

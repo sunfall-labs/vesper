@@ -6,7 +6,7 @@ adapter. The package depends only on Effect; PostgreSQL support is opt-in via
 [`@sunfall/vesper-log-pg`](../log-pg).
 
 ```bash
-npm install @sunfall/vesper-log effect@4.0.0-rc.109
+npm install @sunfall/vesper-log effect@4.0.0-rc.112
 ```
 
 Modules are explicit subpaths: `/log-store`, `/record`, `/record-batch`,

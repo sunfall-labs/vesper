@@ -13,8 +13,8 @@ import { join } from 'node:path';
 
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Schema, Stream } from 'effect';
-import { Tool as ToolNamespace } from 'effect/unstable/ai';
+import { Cause, Effect, Layer, Schema, Stream } from 'effect';
+import { AiError, Tool as ToolNamespace } from 'effect/unstable/ai';
 import type { Tool, Toolkit } from 'effect/unstable/ai';
 
 import { WorkspaceDriver } from '../src/driver.js';
@@ -907,15 +907,21 @@ describe('edit_file', () => {
 
       // An empty string matches at every position, so there is no sound answer
       // to give; the schema refuses it before the handler has to invent one.
-      expect(outcome).toMatchObject({
-        kind: 'tool-failure',
-        tag: 'AiError',
-        error: {
-          reason: {
-            _tag: 'ToolParameterValidationError',
-            toolName: 'edit_file',
-          },
-        },
+      expect(outcome.kind).toBe('call-error');
+      if (outcome.kind !== 'call-error') {
+        throw new Error('expected parameter validation to fail the call');
+      }
+      if (!Cause.isCause(outcome.error)) {
+        throw new Error('expected a failed Effect cause');
+      }
+      const failure = Cause.squash(outcome.error);
+      expect(AiError.isAiError(failure)).toBe(true);
+      if (!AiError.isAiError(failure)) {
+        throw new Error('expected an AiError parameter failure');
+      }
+      expect(failure.reason).toMatchObject({
+        _tag: 'ToolParameterValidationError',
+        toolName: 'edit_file',
       });
       expect(readFileSync(join(directory, 'f.txt'), 'utf8')).toBe('abc');
     }),

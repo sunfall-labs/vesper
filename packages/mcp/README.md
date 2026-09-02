@@ -5,7 +5,7 @@ tool is exposed to the model as `mcp__<server>__<tool>`, with unsupported name
 characters replaced by `_`, so tools from different servers remain distinct.
 
 ```bash
-npm install @sunfall/vesper-mcp @sunfall/vesper-agent effect@4.0.0-rc.109
+npm install @sunfall/vesper-mcp @sunfall/vesper-agent effect@4.0.0-rc.112
 ```
 
 Node.js 22 or newer is required. `getLinearToken()` below is an

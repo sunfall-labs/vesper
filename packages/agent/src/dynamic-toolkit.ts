@@ -252,27 +252,26 @@ const mergeRuntime = (
     }
   }
 
-  return annotate(
-    {
-      tools,
-      handle: (name, params, toolCallId) => {
-        const owner = owners.get(name);
-        return owner === undefined
-          ? Effect.fail(
-              new AiError.AiError({
-                module: 'DynamicToolkit',
-                method: 'handle',
-                reason: new AiError.ToolNotFoundError({
-                  toolName: name,
-                  availableTools: Object.keys(tools),
-                }),
-              }),
-            )
-          : owner.handle(name, params, toolCallId);
-      },
-    },
-    mergedResources,
-  );
+  const handle: Toolkit.WithHandler<Record<string, Tool.Any>>['handle'] = (
+    name,
+    params,
+    toolCallId,
+  ) => {
+    const owner = owners.get(name);
+    return owner === undefined
+      ? Effect.fail(
+          new AiError.AiError({
+            module: 'DynamicToolkit',
+            method: 'handle',
+            reason: new AiError.ToolNotFoundError({
+              toolName: name,
+              availableTools: Object.keys(tools),
+            }),
+          }),
+        )
+      : owner.handle(name, params, toolCallId);
+  };
+  return annotate({ tools, handle }, mergedResources);
 };
 
 const available = <ToolSet extends Record<string, Tool.Any>>(
@@ -289,11 +288,11 @@ const annotate = <ToolSet extends Record<string, Tool.Any>>(
   snapshots: ReadonlyArray<Resource>,
 ): Toolkit.WithHandler<ToolSet> & {
   readonly [ResourcesTypeId]: ReadonlyArray<Resource>;
-} => ({
-  tools: toolkit.tools,
-  handle: toolkit.handle,
-  [ResourcesTypeId]: snapshots,
-});
+} =>
+  Object.assign(
+    { tools: toolkit.tools, handle: toolkit.handle },
+    { [ResourcesTypeId]: snapshots },
+  );
 
 const hasResources = (
   value: unknown,

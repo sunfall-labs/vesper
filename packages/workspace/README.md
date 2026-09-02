@@ -6,7 +6,7 @@ adapter from those standalone tools to an agent toolkit; the agent package does
 not install workspace access implicitly.
 
 ```bash
-npm install @sunfall/vesper-workspace effect@4.0.0-rc.109
+npm install @sunfall/vesper-workspace effect@4.0.0-rc.112
 ```
 
 Use the standard toolkit directly, or compose it with application tools:

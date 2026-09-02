@@ -35,11 +35,23 @@ export const record = <Tools extends Record<string, Tool.Any>, E, R>(
         toolCalls: new Map(),
       };
 
-      return Stream.tap(events, (event) =>
-        event._tag === 'Compacted'
-          ? compaction(session, pending, event)
-          : session.append(recordsFor(pending, event)),
-      ).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
+      return Stream.tap(events, (event) => {
+        if (event._tag === 'Compacted') {
+          return compaction(session, pending, event);
+        }
+        if (
+          event._tag === 'Part' &&
+          event.part.type === 'tool-result' &&
+          'resultSource' in event.part &&
+          event.part.resultSource === 'recovered'
+        ) {
+          // Recovery appended this outcome before rebuilding the prompt. The
+          // event exists for live consumers only; persisting it here would
+          // turn one settled call into two durable outcomes.
+          return session.append(flush(pending));
+        }
+        return session.append(recordsFor(pending, event));
+      }).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
     }),
   );
 
@@ -330,6 +342,35 @@ const partRecords = (
             ? { providerExecuted: true }
             : {}),
           params: encoded.params,
+        },
+      ];
+    case 'tool-call-error':
+      pending.toolCalls.set(encoded.id, {
+        name: encoded.name,
+        params: encoded.params,
+      });
+      return [
+        ...flush(pending),
+        {
+          _tag: 'ToolCall',
+          step,
+          id: LogVocabulary.ToolCallId.make(encoded.id),
+          name: encoded.name,
+          ...(encoded.providerExecuted === true
+            ? { providerExecuted: true }
+            : {}),
+          params: encoded.params,
+        },
+        {
+          _tag: 'ToolOutcome',
+          step,
+          id: LogVocabulary.ToolCallId.make(encoded.id),
+          name: encoded.name,
+          ...(encoded.providerExecuted === true
+            ? { providerExecuted: true }
+            : {}),
+          outcome: 'failure',
+          result: encoded.error,
         },
       ];
     case 'tool-result':

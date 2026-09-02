@@ -1,0 +1,734 @@
+diff --git a/dist/OpenAiLanguageModel.d.ts b/dist/OpenAiLanguageModel.d.ts
+--- a/dist/OpenAiLanguageModel.d.ts
++++ b/dist/OpenAiLanguageModel.d.ts
+@@ -592,49 +592,7 @@
+  * @since 4.0.0
+  */
+ export declare const withConfigOverride: {
+-    /**
+-     * Provides scoped config overrides for OpenAI language model operations.
+-     *
+-     * **When to use**
+-     *
+-     * Use to apply OpenAI Responses API config overrides around one or more
+-     * language model operations without changing the defaults passed to `model`,
+-     * `make`, or `layer`.
+-     *
+-     * **Details**
+-     *
+-     * The override is dual, so it can be used in pipe form or as
+-     * `withConfigOverride(effect, overrides)`. Overrides are merged with any
+-     * existing `Config` service in the current context, and the override values take
+-     * precedence.
+-     *
+-     * @see {@link Config} for the scoped configuration service consumed by this function
+-     *
+-     * @category configuration
+-     * @since 4.0.0
+-     */
+     (overrides: typeof Config.Service): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>;
+-    /**
+-     * Provides scoped config overrides for OpenAI language model operations.
+-     *
+-     * **When to use**
+-     *
+-     * Use to apply OpenAI Responses API config overrides around one or more
+-     * language model operations without changing the defaults passed to `model`,
+-     * `make`, or `layer`.
+-     *
+-     * **Details**
+-     *
+-     * The override is dual, so it can be used in pipe form or as
+-     * `withConfigOverride(effect, overrides)`. Overrides are merged with any
+-     * existing `Config` service in the current context, and the override values take
+-     * precedence.
+-     *
+-     * @see {@link Config} for the scoped configuration service consumed by this function
+-     *
+-     * @category configuration
+-     * @since 4.0.0
+-     */
+     <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service): Effect.Effect<A, E, Exclude<R, Config>>;
+ };
+ export {};
+diff --git a/dist/OpenAiLanguageModel.js b/dist/OpenAiLanguageModel.js
+--- a/dist/OpenAiLanguageModel.js
++++ b/dist/OpenAiLanguageModel.js
+@@ -19,7 +19,6 @@
+ import * as Redactable from "effect/Redactable";
+ import * as Schema from "effect/Schema";
+ import * as AST from "effect/SchemaAST";
+-import * as SchemaIssue from "effect/SchemaIssue";
+ import * as Stream from "effect/Stream";
+ import * as AiError from "effect/unstable/ai/AiError";
+ import * as IdGenerator from "effect/unstable/ai/IdGenerator";
+@@ -31,7 +30,6 @@
+ import * as InternalUtilities from "./internal/utilities.js";
+ import { OpenAiClient } from "./OpenAiClient.js";
+ import { addGenAIAnnotations } from "./OpenAiTelemetry.js";
+-const formatIssue = /*#__PURE__*/SchemaIssue.makeFormatterDefault();
+ const ResponseModelIds = Generated.ModelIdsResponses.members[1];
+ const SharedModelIds = Generated.ModelIdsShared.members[1];
+ // =============================================================================
+@@ -499,16 +497,11 @@
+                     break;
+                   }
+                   const toolName = toolNameMapper.getProviderName(part.name);
++                  // History parts carry the parameters `LanguageModel` already
++                  // decoded for this provider-defined tool, so they are the
++                  // schema's `Type` and are re-serialized without decoding again
+                   if (Predicate.isNotUndefined(localShellTool) && toolName === "local_shell") {
+-                    const params = yield* Schema.decodeUnknownEffect(localShellTool.parametersSchema)(part.params).pipe(Effect.mapError(error => AiError.make({
+-                      module: "OpenAiLanguageModel",
+-                      method: "prepareMessages",
+-                      reason: new AiError.ToolParameterValidationError({
+-                        toolName: "local_shell",
+-                        toolParams: part.params,
+-                        description: error.message
+-                      })
+-                    })));
++                    const params = part.params;
+                     messages.push({
+                       id: id,
+                       type: "local_shell_call",
+@@ -519,15 +512,7 @@
+                     break;
+                   }
+                   if (Predicate.isNotUndefined(shellTool) && toolName === "shell") {
+-                    const params = yield* Schema.decodeUnknownEffect(shellTool.parametersSchema)(part.params).pipe(Effect.mapError(error => AiError.make({
+-                      module: "OpenAiLanguageModel",
+-                      method: "prepareMessages",
+-                      reason: new AiError.ToolParameterValidationError({
+-                        toolName: "shell",
+-                        toolParams: part.params,
+-                        description: error.message
+-                      })
+-                    })));
++                    const params = part.params;
+                     messages.push({
+                       id: id,
+                       type: "shell_call",
+@@ -541,7 +526,9 @@
+                     type: "function_call",
+                     name: toolName,
+                     call_id: part.id,
+-                    arguments: JSON.stringify(part.params),
++                    // Argument text the model produced is sent back verbatim,
++                    // including text which never parsed as JSON
++                    arguments: typeof part.params === "string" ? part.params : JSON.stringify(part.params),
+                     ...(Predicate.isNotNull(id) ? {
+                       id
+                     } : {}),
+@@ -760,19 +747,7 @@
+         {
+           hasToolCalls = true;
+           const toolName = part.name;
+-          const toolParams = yield* Effect.try({
+-            try: () => Tool.unsafeSecureJsonParse(part.arguments),
+-            catch: cause => AiError.make({
+-              module: "OpenAiLanguageModel",
+-              method: "makeResponse",
+-              reason: new AiError.ToolParameterValidationError({
+-                toolName,
+-                toolParams: {},
+-                description: `Faled to securely JSON parse tool parameters: ${cause}`
+-              })
+-            })
+-          });
+-          const params = yield* transformToolCallParams(options.tools, part.name, toolParams);
++          const params = parseToolArguments(part.arguments);
+           parts.push({
+             type: "tool-call",
+             id: part.call_id,
+@@ -827,10 +802,9 @@
+           const {
+             toolName,
+             params
+-          } = yield* normalizeMcpToolCall({
++          } = normalizeMcpToolCall({
+             toolNameMapper,
+-            toolParams: part.arguments,
+-            method: "makeResponse"
++            toolParams: part.arguments
+           });
+           parts.push({
+             type: "tool-call",
+@@ -875,10 +849,9 @@
+           const {
+             toolName,
+             params
+-          } = yield* normalizeMcpToolCall({
++          } = normalizeMcpToolCall({
+             toolNameMapper,
+-            toolParams: part.arguments,
+-            method: "makeResponse"
++            toolParams: part.arguments
+           });
+           parts.push({
+             type: "tool-call",
+@@ -1489,19 +1462,7 @@
+                 hasToolCalls = true;
+                 const toolName = event.item.name;
+                 const toolArgs = event.item.arguments;
+-                const toolParams = yield* Effect.try({
+-                  try: () => Tool.unsafeSecureJsonParse(toolArgs),
+-                  catch: cause => AiError.make({
+-                    module: "OpenAiLanguageModel",
+-                    method: "makeStreamResponse",
+-                    reason: new AiError.ToolParameterValidationError({
+-                      toolName,
+-                      toolParams: {},
+-                      description: `Failed securely JSON parse tool parameters: ${cause}`
+-                    })
+-                  })
+-                });
+-                const params = yield* transformToolCallParams(options.tools, toolName, toolParams);
++                const params = parseToolArguments(toolArgs);
+                 parts.push({
+                   type: "tool-params-end",
+                   id: event.item.call_id
+@@ -1556,10 +1517,9 @@
+                 const {
+                   toolName,
+                   params
+-                } = yield* normalizeMcpToolCall({
++                } = normalizeMcpToolCall({
+                   toolNameMapper,
+-                  toolParams: event.item.arguments,
+-                  method: "makeStreamResponse"
++                  toolParams: event.item.arguments
+                 });
+                 parts.push({
+                   type: "tool-call",
+@@ -1605,10 +1565,9 @@
+                 const {
+                   toolName,
+                   params
+-                } = yield* normalizeMcpToolCall({
++                } = normalizeMcpToolCall({
+                   toolNameMapper,
+-                  toolParams: event.item.arguments,
+-                  method: "makeStreamResponse"
++                  toolParams: event.item.arguments
+                 });
+                 parts.push({
+                   type: "tool-call",
+@@ -1806,19 +1765,7 @@
+           const toolCall = activeToolCalls[event.output_index];
+           if (Predicate.isNotUndefined(toolCall?.functionCall) && !toolCall.functionCall.emitted) {
+             hasToolCalls = true;
+-            const toolParams = yield* Effect.try({
+-              try: () => Tool.unsafeSecureJsonParse(event.arguments),
+-              catch: cause => AiError.make({
+-                module: "OpenAiLanguageModel",
+-                method: "makeStreamResponse",
+-                reason: new AiError.ToolParameterValidationError({
+-                  toolName: toolCall.name,
+-                  toolParams: {},
+-                  description: `Failed securely JSON parse tool parameters: ${cause}`
+-                })
+-              })
+-            });
+-            const params = yield* transformToolCallParams(options.tools, toolCall.name, toolParams);
++            const params = parseToolArguments(event.arguments);
+             parts.push({
+               type: "tool-params-end",
+               id: toolCall.id
+@@ -2294,10 +2241,6 @@
+     description: error instanceof Error ? error.message : String(error)
+   })
+ });
+-const tryCodecTransform = (schema, method) => Effect.try({
+-  try: () => toCodecOpenAI(schema),
+-  catch: error => unsupportedSchemaError(error, method)
+-});
+ const tryJsonSchema = (schema, method) => Effect.try({
+   try: () => Tool.getJsonSchemaFromSchema(schema, {
+     transformer: toCodecOpenAI
+@@ -2366,34 +2309,12 @@
+   }
+   return mapping;
+ };
+-const normalizeMcpToolCall = /*#__PURE__*/Effect.fnUntraced(function* ({
++const normalizeMcpToolCall = ({
+   toolNameMapper,
+-  toolParams,
+-  method
+-}) {
+-  const toolName = toolNameMapper.getCustomName("mcp");
+-  if (typeof toolParams !== "string") {
+-    return {
+-      toolName,
+-      params: toolParams
+-    };
+-  }
+-  const params = yield* Effect.try({
+-    try: () => Tool.unsafeSecureJsonParse(toolParams),
+-    catch: cause => AiError.make({
+-      module: "OpenAiLanguageModel",
+-      method,
+-      reason: new AiError.ToolParameterValidationError({
+-        toolName,
+-        toolParams,
+-        description: `Failed to securely JSON parse tool parameters: ${cause}`
+-      })
+-    })
+-  });
+-  return {
+-    toolName,
+-    params
+-  };
++  toolParams
++}) => ({
++  toolName: toolNameMapper.getCustomName("mcp"),
++  params: typeof toolParams === "string" ? parseToolArguments(toolParams) : toolParams
+ });
+ const getUsage = usage => {
+   if (Predicate.isNullish(usage)) {
+@@ -2449,30 +2370,14 @@
+   }
+ };
+ const getUsageTokenDetail = (details, key) => Predicate.hasProperty(details, key) && typeof details[key] === "number" ? details[key] : undefined;
+-const transformToolCallParams = /*#__PURE__*/Effect.fnUntraced(function* (tools, toolName, toolParams) {
+-  const tool = tools.find(tool => tool.name === toolName);
+-  if (Predicate.isUndefined(tool)) {
+-    return yield* AiError.make({
+-      module: "OpenAiLanguageModel",
+-      method: "makeResponse",
+-      reason: new AiError.ToolNotFoundError({
+-        toolName,
+-        availableTools: tools.map(tool => tool.name)
+-      })
+-    });
++// Argument text which is not valid JSON is passed through verbatim.
++// `LanguageModel` validates every tool call against its schema and reports the
++// failure, so the adapter only translates the wire format.
++const parseToolArguments = text => {
++  try {
++    return Tool.unsafeSecureJsonParse(text);
++  } catch {
++    return text;
+   }
+-  const {
+-    codec
+-  } = yield* tryCodecTransform(tool.parametersSchema, "makeResponse");
+-  const transform = Schema.decodeEffect(codec);
+-  return yield* transform(toolParams).pipe(Effect.mapError(error => AiError.make({
+-    module: "OpenAiLanguageModel",
+-    method: "makeResponse",
+-    reason: new AiError.ToolParameterValidationError({
+-      toolName,
+-      toolParams,
+-      description: formatIssue(error.issue)
+-    })
+-  })));
+-});
++};
+ //# sourceMappingURL=OpenAiLanguageModel.js.map
+\ No newline at end of file
+diff --git a/src/OpenAiLanguageModel.ts b/src/OpenAiLanguageModel.ts
+--- a/src/OpenAiLanguageModel.ts
++++ b/src/OpenAiLanguageModel.ts
+@@ -19,7 +19,6 @@
+ import * as Redactable from "effect/Redactable"
+ import * as Schema from "effect/Schema"
+ import * as AST from "effect/SchemaAST"
+-import * as SchemaIssue from "effect/SchemaIssue"
+ import * as Stream from "effect/Stream"
+ import type { Span } from "effect/Tracer"
+ import type { DeepMutable, Mutable, Simplify } from "effect/Types"
+@@ -40,8 +39,6 @@
+ import { addGenAIAnnotations } from "./OpenAiTelemetry.ts"
+ import type * as OpenAiTool from "./OpenAiTool.ts"
+
+-const formatIssue = SchemaIssue.makeFormatterDefault()
+-
+ const ResponseModelIds = Generated.ModelIdsResponses.members[1]
+ const SharedModelIds = Generated.ModelIdsShared.members[1]
+
+@@ -760,94 +757,12 @@
+  * @since 4.0.0
+  */
+ export const withConfigOverride: {
+-  /**
+-   * Provides scoped config overrides for OpenAI language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenAI Responses API config overrides around one or more
+-   * language model operations without changing the defaults passed to `model`,
+-   * `make`, or `layer`.
+-   *
+-   * **Details**
+-   *
+-   * The override is dual, so it can be used in pipe form or as
+-   * `withConfigOverride(effect, overrides)`. Overrides are merged with any
+-   * existing `Config` service in the current context, and the override values take
+-   * precedence.
+-   *
+-   * @see {@link Config} for the scoped configuration service consumed by this function
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+   (overrides: typeof Config.Service): <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>
+-  /**
+-   * Provides scoped config overrides for OpenAI language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenAI Responses API config overrides around one or more
+-   * language model operations without changing the defaults passed to `model`,
+-   * `make`, or `layer`.
+-   *
+-   * **Details**
+-   *
+-   * The override is dual, so it can be used in pipe form or as
+-   * `withConfigOverride(effect, overrides)`. Overrides are merged with any
+-   * existing `Config` service in the current context, and the override values take
+-   * precedence.
+-   *
+-   * @see {@link Config} for the scoped configuration service consumed by this function
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+   <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service): Effect.Effect<A, E, Exclude<R, Config>>
+ } = dual<
+-  /**
+-   * Provides scoped config overrides for OpenAI language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenAI Responses API config overrides around one or more
+-   * language model operations without changing the defaults passed to `model`,
+-   * `make`, or `layer`.
+-   *
+-   * **Details**
+-   *
+-   * The override is dual, so it can be used in pipe form or as
+-   * `withConfigOverride(effect, overrides)`. Overrides are merged with any
+-   * existing `Config` service in the current context, and the override values take
+-   * precedence.
+-   *
+-   * @see {@link Config} for the scoped configuration service consumed by this function
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
+-  (overrides: typeof Config.Service) => <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>,
+-  /**
+-   * Provides scoped config overrides for OpenAI language model operations.
+-   *
+-   * **When to use**
+-   *
+-   * Use to apply OpenAI Responses API config overrides around one or more
+-   * language model operations without changing the defaults passed to `model`,
+-   * `make`, or `layer`.
+-   *
+-   * **Details**
+-   *
+-   * The override is dual, so it can be used in pipe form or as
+-   * `withConfigOverride(effect, overrides)`. Overrides are merged with any
+-   * existing `Config` service in the current context, and the override values take
+-   * precedence.
+-   *
+-   * @see {@link Config} for the scoped configuration service consumed by this function
+-   *
+-   * @category configuration
+-   * @since 4.0.0
+-   */
++  (
++    overrides: typeof Config.Service
++  ) => <A, E, R>(self: Effect.Effect<A, E, R>) => Effect.Effect<A, E, Exclude<R, Config>>,
+   <A, E, R>(self: Effect.Effect<A, E, R>, overrides: typeof Config.Service) => Effect.Effect<A, E, Exclude<R, Config>>
+ >(2, (self, overrides) =>
+   Effect.flatMap(
+@@ -1119,21 +1034,11 @@
+
+                 const toolName = toolNameMapper.getProviderName(part.name)
+
++                // History parts carry the parameters `LanguageModel` already
++                // decoded for this provider-defined tool, so they are the
++                // schema's `Type` and are re-serialized without decoding again
+                 if (Predicate.isNotUndefined(localShellTool) && toolName === "local_shell") {
+-                  const params = yield* Schema.decodeUnknownEffect(localShellTool.parametersSchema)(part.params).pipe(
+-                    Effect.mapError((error) =>
+-                      AiError.make({
+-                        module: "OpenAiLanguageModel",
+-                        method: "prepareMessages",
+-                        reason: new AiError.ToolParameterValidationError({
+-                          toolName: "local_shell",
+-                          toolParams: part.params as Schema.Json,
+-                          description: error.message
+-                        })
+-                      })
+-                    )
+-                  )
+-
++                  const params = part.params as typeof localShellTool.parametersSchema.Type
+                   messages.push({
+                     id: id!,
+                     type: "local_shell_call",
+@@ -1146,20 +1051,7 @@
+                 }
+
+                 if (Predicate.isNotUndefined(shellTool) && toolName === "shell") {
+-                  const params = yield* Schema.decodeUnknownEffect(shellTool.parametersSchema)(part.params).pipe(
+-                    Effect.mapError((error) =>
+-                      AiError.make({
+-                        module: "OpenAiLanguageModel",
+-                        method: "prepareMessages",
+-                        reason: new AiError.ToolParameterValidationError({
+-                          toolName: "shell",
+-                          toolParams: part.params as Schema.Json,
+-                          description: error.message
+-                        })
+-                      })
+-                    )
+-                  )
+-
++                  const params = part.params as typeof shellTool.parametersSchema.Type
+                   messages.push({
+                     id: id!,
+                     type: "shell_call",
+@@ -1175,7 +1067,9 @@
+                   type: "function_call",
+                   name: toolName,
+                   call_id: part.id,
+-                  arguments: JSON.stringify(part.params),
++                  // Argument text the model produced is sent back verbatim,
++                  // including text which never parsed as JSON
++                  arguments: typeof part.params === "string" ? part.params : JSON.stringify(part.params),
+                   ...(Predicate.isNotNull(id) ? { id } : {}),
+                   ...(Predicate.isNotNull(status) ? { status } : {})
+                 })
+@@ -1472,21 +1366,7 @@
+
+           const toolName = part.name
+
+-          const toolParams = yield* Effect.try({
+-            try: () => Tool.unsafeSecureJsonParse(part.arguments),
+-            catch: (cause) =>
+-              AiError.make({
+-                module: "OpenAiLanguageModel",
+-                method: "makeResponse",
+-                reason: new AiError.ToolParameterValidationError({
+-                  toolName,
+-                  toolParams: {},
+-                  description: `Faled to securely JSON parse tool parameters: ${cause}`
+-                })
+-              })
+-          })
+-
+-          const params = yield* transformToolCallParams(options.tools, part.name, toolParams)
++          const params = parseToolArguments(part.arguments)
+
+           parts.push({
+             type: "tool-call",
+@@ -1534,10 +1414,9 @@
+             ? (approvalRequests.get(part.approval_request_id) ?? part.id)
+             : part.id
+
+-          const { toolName, params } = yield* normalizeMcpToolCall({
++          const { toolName, params } = normalizeMcpToolCall({
+             toolNameMapper,
+-            toolParams: part.arguments,
+-            method: "makeResponse"
++            toolParams: part.arguments
+           })
+
+           parts.push({
+@@ -1577,10 +1456,9 @@
+           const approvalRequestId = (part as any).approval_request_id ?? part.id
+           const toolId = yield* idGenerator.generateId()
+
+-          const { toolName, params } = yield* normalizeMcpToolCall({
++          const { toolName, params } = normalizeMcpToolCall({
+             toolNameMapper,
+-            toolParams: part.arguments,
+-            method: "makeResponse"
++            toolParams: part.arguments
+           })
+
+           parts.push({
+@@ -2221,21 +2099,7 @@
+                 const toolName = event.item.name
+                 const toolArgs = event.item.arguments
+
+-                const toolParams = yield* Effect.try({
+-                  try: () => Tool.unsafeSecureJsonParse(toolArgs),
+-                  catch: (cause) =>
+-                    AiError.make({
+-                      module: "OpenAiLanguageModel",
+-                      method: "makeStreamResponse",
+-                      reason: new AiError.ToolParameterValidationError({
+-                        toolName,
+-                        toolParams: {},
+-                        description: `Failed securely JSON parse tool parameters: ${cause}`
+-                      })
+-                    })
+-                })
+-
+-                const params = yield* transformToolCallParams(options.tools, toolName, toolParams)
++                const params = parseToolArguments(toolArgs)
+
+                 parts.push({
+                   type: "tool-params-end",
+@@ -2287,10 +2151,9 @@
+                     event.item.id)
+                   : event.item.id
+
+-                const { toolName, params } = yield* normalizeMcpToolCall({
++                const { toolName, params } = normalizeMcpToolCall({
+                   toolNameMapper,
+-                  toolParams: event.item.arguments,
+-                  method: "makeStreamResponse"
++                  toolParams: event.item.arguments
+                 })
+
+                 parts.push({
+@@ -2330,10 +2193,9 @@
+                 const toolId = yield* idGenerator.generateId()
+                 const approvalRequestId = (event.item as any).approval_request_id ?? event.item.id
+                 streamApprovalRequests.set(approvalRequestId, toolId)
+-                const { toolName, params } = yield* normalizeMcpToolCall({
++                const { toolName, params } = normalizeMcpToolCall({
+                   toolNameMapper,
+-                  toolParams: event.item.arguments,
+-                  method: "makeStreamResponse"
++                  toolParams: event.item.arguments
+                 })
+                 parts.push({
+                   type: "tool-call",
+@@ -2524,21 +2386,7 @@
+             ) {
+               hasToolCalls = true
+
+-              const toolParams = yield* Effect.try({
+-                try: () => Tool.unsafeSecureJsonParse(event.arguments),
+-                catch: (cause) =>
+-                  AiError.make({
+-                    module: "OpenAiLanguageModel",
+-                    method: "makeStreamResponse",
+-                    reason: new AiError.ToolParameterValidationError({
+-                      toolName: toolCall.name,
+-                      toolParams: {},
+-                      description: `Failed securely JSON parse tool parameters: ${cause}`
+-                    })
+-                  })
+-              })
+-
+-              const params = yield* transformToolCallParams(options.tools, toolCall.name, toolParams)
++              const params = parseToolArguments(event.arguments)
+
+               parts.push({
+                 type: "tool-params-end",
+@@ -3051,12 +2899,6 @@
+     })
+   })
+
+-const tryCodecTransform = <S extends Schema.Constraint>(schema: S, method: string) =>
+-  Effect.try({
+-    try: () => toCodecOpenAI(schema),
+-    catch: (error) => unsupportedSchemaError(error, method)
+-  })
+-
+ const tryJsonSchema = <S extends Schema.Constraint>(schema: S, method: string) =>
+   Effect.try({
+     try: () => Tool.getJsonSchemaFromSchema(schema, { transformer: toCodecOpenAI }),
+@@ -3160,39 +3002,18 @@
+   return mapping
+ }
+
+-const normalizeMcpToolCall = Effect.fnUntraced(function*<Tools extends ReadonlyArray<Tool.Any>>({
++const normalizeMcpToolCall = <Tools extends ReadonlyArray<Tool.Any>>({
+   toolNameMapper,
+-  toolParams,
+-  method
++  toolParams
+ }: {
+   readonly toolNameMapper: Tool.NameMapper<Tools>
+   readonly toolParams: unknown
+-  readonly method: string
+-}): Effect.fn.Return<{
++}): {
+   readonly toolName: string
+   readonly params: unknown
+-}, AiError.AiError> {
+-  const toolName = toolNameMapper.getCustomName("mcp")
+-
+-  if (typeof toolParams !== "string") {
+-    return { toolName, params: toolParams }
+-  }
+-
+-  const params = yield* Effect.try({
+-    try: () => Tool.unsafeSecureJsonParse(toolParams),
+-    catch: (cause) =>
+-      AiError.make({
+-        module: "OpenAiLanguageModel",
+-        method,
+-        reason: new AiError.ToolParameterValidationError({
+-          toolName,
+-          toolParams,
+-          description: `Failed to securely JSON parse tool parameters: ${cause}`
+-        })
+-      })
+-  })
+-
+-  return { toolName, params }
++} => ({
++  toolName: toolNameMapper.getCustomName("mcp"),
++  params: typeof toolParams === "string" ? parseToolArguments(toolParams) : toolParams
+ })
+
+ const getUsage = (usage: OpenAiSchema.ResponseUsage | null | undefined): Response.Usage => {
+@@ -3257,39 +3078,13 @@
+ const getUsageTokenDetail = (details: unknown, key: string): number | undefined =>
+   Predicate.hasProperty(details, key) && typeof details[key] === "number" ? details[key] : undefined
+
+-const transformToolCallParams = Effect.fnUntraced(function*<Tools extends ReadonlyArray<Tool.Any>>(
+-  tools: Tools,
+-  toolName: string,
+-  toolParams: unknown
+-): Effect.fn.Return<unknown, AiError.AiError> {
+-  const tool = tools.find((tool) => tool.name === toolName)
+-
+-  if (Predicate.isUndefined(tool)) {
+-    return yield* AiError.make({
+-      module: "OpenAiLanguageModel",
+-      method: "makeResponse",
+-      reason: new AiError.ToolNotFoundError({
+-        toolName,
+-        availableTools: tools.map((tool) => tool.name)
+-      })
+-    })
++// Argument text which is not valid JSON is passed through verbatim.
++// `LanguageModel` validates every tool call against its schema and reports the
++// failure, so the adapter only translates the wire format.
++const parseToolArguments = (text: string): unknown => {
++  try {
++    return Tool.unsafeSecureJsonParse(text)
++  } catch {
++    return text
+   }
+-
+-  const { codec } = yield* tryCodecTransform(tool.parametersSchema, "makeResponse")
+-
+-  const transform = Schema.decodeEffect(codec)
+-
+-  return yield* (
+-    transform(toolParams) as Effect.Effect<unknown, Schema.SchemaError>
+-  ).pipe(Effect.mapError((error) =>
+-    AiError.make({
+-      module: "OpenAiLanguageModel",
+-      method: "makeResponse",
+-      reason: new AiError.ToolParameterValidationError({
+-        toolName,
+-        toolParams,
+-        description: formatIssue(error.issue)
+-      })
+-    })
+-  ))
+-})
++}

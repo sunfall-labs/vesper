@@ -46,7 +46,7 @@
     "@sunfall/vesper-agent": "0.1.0-alpha.1"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109"
+    "effect": "4.0.0-rc.112"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",

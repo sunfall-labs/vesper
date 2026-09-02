@@ -200,13 +200,16 @@ const expectMalformedParameterOutcome = (
     throw new Error('expected release_optional ToolOutcome');
   }
   expect(outcome.outcome).toBe('failure');
-  const error = Schema.decodeUnknownSync(AiError.AiError)(outcome.result);
-  expect(error.reason._tag).toBe('ToolParameterValidationError');
-  if (error.reason._tag !== 'ToolParameterValidationError') {
+  const error = Schema.decodeUnknownSync(
+    Schema.Union([AiError.ToolParameterValidationError, AiError.AiError]),
+  )(outcome.result);
+  const reason = AiError.isAiError(error) ? error.reason : error;
+  expect(reason._tag).toBe('ToolParameterValidationError');
+  if (reason._tag !== 'ToolParameterValidationError') {
     throw new Error('expected ToolParameterValidationError');
   }
-  expect(error.reason.toolName).toBe('release_optional');
-  expect(error.reason.toolParams).toEqual({
+  expect(reason.toolName).toBe('release_optional');
+  expect(reason.toolParams).toEqual({
     id: 'r1',
     environment: null,
   });
@@ -461,10 +464,33 @@ describe('durable tool approval', () => {
         // No new input: the decision is what there is to act on, so the
         // continuation runs from durable state alone rather than appending a
         // second user message the person never said.
-        const result = yield* conversation.run();
+        const events = yield* conversation.stream().pipe(Stream.runCollect);
+        const result = Array.from(events).find(
+          (event) => event._tag === 'Completed',
+        );
 
         expect(ran.count).toBe(1);
-        expect(result.outcome).toBe('success');
+        expect(result).toMatchObject({ outcome: 'success' });
+        expect(
+          Array.from(events).find(
+            (event) =>
+              event._tag === 'Part' &&
+              event.part.type === 'tool-result' &&
+              event.part.id === CALL_ID,
+          ),
+        ).toMatchObject({
+          _tag: 'Part',
+          step: 1,
+          part: {
+            type: 'tool-result',
+            id: CALL_ID,
+            name: 'release',
+            result: { released: true },
+            encodedResult: { released: true },
+            isFailure: false,
+            resultSource: 'recovered',
+          },
+        });
 
         const records = yield* conversation.records().pipe(Stream.runCollect);
         const outcomes = Array.from(records).flatMap((envelope) =>
@@ -493,10 +519,33 @@ describe('durable tool approval', () => {
 
         yield* conversation.run('release r1');
         yield* conversation.resolveApproval(CALL_ID, 'deny', 'not this week');
-        const result = yield* conversation.run('release r1');
+        const events = yield* conversation
+          .stream('release r1')
+          .pipe(Stream.runCollect);
+        const result = Array.from(events).find(
+          (event) => event._tag === 'Completed',
+        );
 
         expect(ran.count).toBe(0);
-        expect(result.outcome).toBe('success');
+        expect(result).toMatchObject({ outcome: 'success' });
+        expect(
+          Array.from(events).find(
+            (event) =>
+              event._tag === 'Part' &&
+              event.part.type === 'tool-result' &&
+              event.part.id === CALL_ID,
+          ),
+        ).toMatchObject({
+          _tag: 'Part',
+          step: 1,
+          part: {
+            type: 'tool-result',
+            id: CALL_ID,
+            name: 'release',
+            isFailure: true,
+            resultSource: 'recovered',
+          },
+        });
 
         const records = yield* conversation.records().pipe(Stream.runCollect);
         const tags = Array.from(records).map(

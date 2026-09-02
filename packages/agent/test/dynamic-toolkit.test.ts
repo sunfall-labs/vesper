@@ -280,6 +280,7 @@ describe('Agent dynamic tools', () => {
         .flatMap((message) => (message.role === 'tool' ? message.content : []))
         .find((part) => part.type === 'tool-result');
       expect(returned?.name).toBe('mcp__linear__create_issue');
+      expect(returned?.isFailure).toBe(true);
       const error = yield* Schema.decodeUnknownEffect(AiError.AiError)(
         returned?.result,
       );

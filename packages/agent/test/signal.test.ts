@@ -1140,7 +1140,10 @@ describe('a signal that arrives while the run is in flight', () => {
                 scripted.prompts.push(JSON.stringify(options.prompt));
                 return Stream.concat(
                   Stream.make(CALL('call-1', 'work')),
-                  Stream.never,
+                  Stream.concat(
+                    Stream.make({ type: 'text-start', id: 'stalled' }),
+                    Stream.never,
+                  ),
                 );
               },
             }),

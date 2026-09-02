@@ -35,7 +35,7 @@ Official Effect AI packages provide `LanguageModel` directly.
 
 Vesper packages require Node.js 22 or newer; the bundled agent code executor
 requires Node.js 22.13.0 for native type stripping. Effect and its provider
-packages are pinned together as one family (`4.0.0-rc.109`) while the
+packages are pinned together as one family (`4.0.0-rc.112`) while the
 interfaces are release candidates, ensuring one Effect service identity in the
 application; [releasing](docs/releasing.md) states the version policy.
 
@@ -44,8 +44,8 @@ application; [releasing](docs/releasing.md) states the version policy.
 ```bash
 npm install @sunfall/vesper-agent \
             @sunfall/vesper-log \
-            @effect/ai-anthropic@4.0.0-rc.109 \
-            @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
+            @effect/ai-anthropic@4.0.0-rc.112 \
+            @effect/platform-node@4.0.0-rc.112 effect@4.0.0-rc.112
 ```
 
 The following is a complete, in-memory example: one typed tool, one agent,

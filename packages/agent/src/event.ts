@@ -177,16 +177,27 @@ export type SubstitutedToolResult<
   readonly isFailure: Failure;
 };
 
+/** A settled result replayed from durable recovery into the live stream. */
+export type RecoveredToolResult<
+  Name extends string = string,
+  Failure extends boolean = boolean,
+> = Response.ToolResultPart<Name, unknown, unknown> & {
+  /** Recording sinks must not persist this already-durable result again. */
+  readonly resultSource: 'recovered';
+  readonly isFailure: Failure;
+};
+
 export type StreamPart<Tools extends Record<string, Tool.Any>> =
-  | Response.ModelStreamPart<Tools>
-  | SubstitutedToolResult<keyof Tools & string>;
+  | Response.StreamPart<Tools, false, 'return'>
+  | SubstitutedToolResult<keyof Tools & string>
+  | RecoveredToolResult;
 
 export type Event<Tools extends Record<string, Tool.Any>> =
   | Lifecycle
   | {
       readonly _tag: 'Part';
       readonly step: number;
-      readonly part: Response.ModelStreamPart<Tools>;
+      readonly part: StreamPart<Tools>;
       /**
        * The provider-facing representation of `part`.
        *

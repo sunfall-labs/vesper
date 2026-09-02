@@ -164,7 +164,7 @@ First public alpha of the six-package Vesper framework:
   dependency auditing, and provenance-ready npm publishing.
 
 Compatibility: Node.js 22 or newer is required. `effect` and the official
-Effect provider packages must resolve to `4.0.0-rc.109`. This is the first
+Effect provider packages must resolve to `4.0.0-rc.112`. This is the first
 published version, so there is no package migration; adopters of the earlier
 repository API should follow [Migrating to Conversation](docs/migrating-to-conversation.md).
 The former public `DynamicToolkit.append` helper is no longer exported;

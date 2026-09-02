@@ -503,7 +503,10 @@ export const merge = <
     Object.hasOwn(excepted.tools, name)
       ? exceptedHandle(name, params, toolCallId)
       : visibleHandle(name, params, toolCallId);
-  return { tools, handle: route as Toolkit.WithHandler<Merged>['handle'] };
+  return {
+    tools,
+    handle: route as Toolkit.WithHandler<Merged>['handle'],
+  };
 };
 
 /** Build the one model-visible tool around an already gated hidden toolkit. */

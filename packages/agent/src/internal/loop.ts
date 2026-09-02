@@ -29,7 +29,7 @@ import { TurnControl } from '../turn-control.js';
 import { CompactionRuntime } from './compaction.js';
 import { AgentEventRuntime } from './event.js';
 import * as Observability from './observability.js';
-import { encodePart } from './part-encoding.js';
+import { encodePart, type ModelTurnPart } from './part-encoding.js';
 import {
   incompleteOutputError,
   interactionRequiresConversationError,
@@ -429,6 +429,11 @@ export const makeEntry = <
               prompt: input,
               toolkit: resolvedToolkit,
               concurrency: definition.concurrency,
+              // A call that never reaches a handler (an invented tool name,
+              // invalid or unparseable arguments) is returned to the model as
+              // a failed tool result instead of failing the turn. Handler
+              // failures keep obeying each tool's own `failureMode`.
+              invalidToolCalls: 'return',
             })
             .pipe(
               Stream.mapEffect((part) =>
@@ -436,7 +441,7 @@ export const makeEntry = <
                   ? Effect.fail(
                       normalizeProviderError(part.error, part.metadata),
                     )
-                  : encodePart(part).pipe(
+                  : encodePart(resolvedToolkit, part).pipe(
                       Effect.map((encodedPart) => ({ part, encodedPart })),
                     ),
               ),
@@ -1226,7 +1231,6 @@ export const makeEntry = <
             }
 
             const arbitration = yield* ToolDispatch.makeTurnArbitration;
-            const cancelObserved = yield* Ref.make(false);
             const cancelDuringRecovery = session
               .signalPages(runtime.limits.maxSignalsPerBoundary)
               .pipe(
@@ -1243,7 +1247,6 @@ export const makeEntry = <
                     index,
                   ),
                 ),
-                Stream.tap(() => Ref.set(cancelObserved, true)),
                 Stream.tap(() => arbitration.cancel),
                 Stream.runHead,
                 Effect.flatMap((cancel) =>
@@ -1291,8 +1294,16 @@ export const makeEntry = <
                         ),
                     }),
                   );
-                  yield* Effect.raceFirst(recovery, cancelDuringRecovery);
-                  if (yield* Ref.get(cancelObserved)) {
+                  const recoveryOutcome = yield* Effect.raceFirst(
+                    Effect.map(recovery, (results) => ({
+                      _tag: 'Recovered' as const,
+                      results,
+                    })),
+                    Effect.as(cancelDuringRecovery, {
+                      _tag: 'Cancelled' as const,
+                    }),
+                  );
+                  if (recoveryOutcome._tag === 'Cancelled') {
                     const after = yield* session.drainSignalsBounded(
                       runtime.limits.maxSignalsPerBoundary,
                     );
@@ -1342,6 +1353,7 @@ export const makeEntry = <
                       ),
                     );
                   }
+                  const recovered = recoveryOutcome.results;
 
                   // `resolveIndeterminate` settles every durable approval this
                   // session already has a decision for, but it does not — and
@@ -1411,15 +1423,18 @@ export const makeEntry = <
                           return batches.flat();
                         });
                   if (stillPendingInteractions.length > 0) {
-                    return Stream.make(
-                      AgentEventRuntime.suspended(
-                        0,
-                        // No model call happened on this path — the run was
-                        // refused before turn 1 — so there is no partial text
-                        // to preserve.
-                        '',
-                        wiring.initialUsage ?? { input: 0, output: 0 },
-                        stillPendingInteractions,
+                    return Stream.concat(
+                      Stream.fromIterable(recovered),
+                      Stream.make(
+                        AgentEventRuntime.suspended(
+                          0,
+                          // No model call happened on this path — the run was
+                          // refused before turn 1 — so there is no partial text
+                          // to preserve.
+                          '',
+                          wiring.initialUsage ?? { input: 0, output: 0 },
+                          stillPendingInteractions,
+                        ),
                       ),
                     );
                   }
@@ -1433,33 +1448,29 @@ export const makeEntry = <
                       AgentHistory.messagesFrom(yield* session.recorded),
                     ),
                   );
-                  return entryFor({
-                    session: wiring.session,
-                    interceptor: wiring.interceptor,
-                    runtime,
-                    ...(wiring.dynamicToolkit === undefined
-                      ? {}
-                      : { dynamicToolkit: wiring.dynamicToolkit }),
-                    ...(wiring.startRun === undefined
-                      ? {}
-                      : { startRun: wiring.startRun }),
-                    ...(wiring.initialUsage === undefined
-                      ? {}
-                      : { initialUsage: wiring.initialUsage }),
-                    ...(wiring.lastTurn === undefined
-                      ? {}
-                      : { lastTurn: wiring.lastTurn }),
-                    ...(wiring.codeState === undefined
-                      ? {}
-                      : { codeState: wiring.codeState }),
-                  }).streamIn(chat, effective) as Stream.Stream<
-                    AgentEvents.Event<ModelTools>,
-                    RunFailure,
-                    | WithOwnHandlers<RuntimeTools>
-                    | StopR
-                    | TurnControlR
-                    | InterceptorR
-                  >;
+                  return Stream.concat(
+                    Stream.fromIterable(recovered),
+                    entryFor({
+                      session: wiring.session,
+                      interceptor: wiring.interceptor,
+                      runtime,
+                      ...(wiring.dynamicToolkit === undefined
+                        ? {}
+                        : { dynamicToolkit: wiring.dynamicToolkit }),
+                      ...(wiring.startRun === undefined
+                        ? {}
+                        : { startRun: wiring.startRun }),
+                      ...(wiring.initialUsage === undefined
+                        ? {}
+                        : { initialUsage: wiring.initialUsage }),
+                      ...(wiring.lastTurn === undefined
+                        ? {}
+                        : { lastTurn: wiring.lastTurn }),
+                      ...(wiring.codeState === undefined
+                        ? {}
+                        : { codeState: wiring.codeState }),
+                    }).streamIn(chat, effective),
+                  );
                 }),
               ),
             ) as Stream.Stream<
@@ -1672,7 +1683,7 @@ const emptyTurnState = (): TurnState => ({
  */
 const observe = <PartTools extends Record<string, Tool.Any>>(
   state: TurnState,
-  part: Response.ModelStreamPart<PartTools>,
+  part: ModelTurnPart<PartTools>,
   encoded: Response.StreamPartEncoded,
   toolkit: { readonly tools: Record<string, Tool.Any> },
 ): void => {
@@ -1701,6 +1712,27 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
           ...(interaction === undefined ? {} : { interaction }),
         });
       }
+      break;
+    case 'tool-call-error':
+      state.toolCalls.push({
+        type: 'tool-call',
+        id: encoded.id,
+        name: encoded.name,
+        params: encoded.params,
+        ...(encoded.providerExecuted === true
+          ? { providerExecuted: true }
+          : {}),
+      });
+      state.toolResults.push({
+        type: 'tool-result',
+        id: encoded.id,
+        name: encoded.name,
+        result: encoded.error,
+        isFailure: true,
+        ...(encoded.providerExecuted === true
+          ? { providerExecuted: true }
+          : {}),
+      });
       break;
     case 'tool-result':
       if (encoded.preliminary !== true) {

@@ -1,12 +1,25 @@
 import { Effect, Schema } from 'effect';
-import { AiError, Response, type Tool } from 'effect/unstable/ai';
+import { AiError, Response, type Tool, type Toolkit } from 'effect/unstable/ai';
+
+/**
+ * A part of one model turn as the Vesper loop requests it: tool parameters
+ * decoded, and a call that never reaches a handler returned to the model as a
+ * `tool-call-error` part (`invalidToolCalls: 'return'`) rather than failing
+ * the turn.
+ */
+export type ModelTurnPart<PartTools extends Record<string, Tool.Any>> =
+  Response.StreamPart<PartTools, false, 'return'>;
+
+const modelTurnPartSchema = <PartTools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<PartTools>,
+) => Response.StreamPart(toolkit, { invalidToolCalls: 'return' });
 
 type EncodableToolResult<PartTools extends Record<string, Tool.Any>> = Extract<
-  Response.ModelStreamPart<PartTools>,
+  ModelTurnPart<PartTools>,
   { readonly type: 'tool-result' }
 >;
 type EncodableFile<PartTools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<PartTools>,
+  ModelTurnPart<PartTools>,
   { readonly type: 'file' }
 >;
 const StandardPart = Schema.Union([
@@ -42,16 +55,32 @@ const encodeStandardPart = (
     Effect.mapError(encodePartError),
   );
 
-const encodeToolCall = (
-  part: Response.ToolCallPart<string, unknown>,
-): Effect.Effect<Response.StreamPartEncoded> =>
-  Effect.succeed({
-    type: 'tool-call',
-    id: part.id,
-    name: part.name,
-    params: part.params,
-    providerExecuted: part.providerExecuted,
-  });
+const encodeToolCall = <PartTools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<PartTools>,
+  part: Extract<ModelTurnPart<PartTools>, { readonly type: 'tool-call' }>,
+): Effect.Effect<
+  Response.StreamPartEncoded,
+  AiError.AiError,
+  Tool.ResultEncodingServices<PartTools[keyof PartTools]>
+> =>
+  Schema.encodeEffect(modelTurnPartSchema(toolkit))(part).pipe(
+    Effect.mapError(encodePartError),
+  );
+
+const encodeToolCallError = <PartTools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<PartTools>,
+  part: Extract<ModelTurnPart<PartTools>, { readonly type: 'tool-call-error' }>,
+): Effect.Effect<
+  Response.StreamPartEncoded,
+  AiError.AiError,
+  Tool.ResultEncodingServices<PartTools[keyof PartTools]>
+> =>
+  // The part is only admitted by a schema built for an
+  // `invalidToolCalls: 'return'` operation, so it is encoded through the same
+  // stream part schema the model turn decodes with.
+  Schema.encodeEffect(modelTurnPartSchema(toolkit))(part).pipe(
+    Effect.mapError(encodePartError),
+  );
 
 const encodeToolResult = <PartTools extends Record<string, Tool.Any>>(
   part: EncodableToolResult<PartTools>,
@@ -82,11 +111,18 @@ const assertPartEncodingStrategy = (part: never): never => {
 
 /** Preserve a model part in its provider-facing form for persistence. */
 export const encodePart = <PartTools extends Record<string, Tool.Any>>(
-  part: Response.ModelStreamPart<PartTools>,
-): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
+  toolkit: Toolkit.WithHandler<PartTools>,
+  part: ModelTurnPart<PartTools>,
+): Effect.Effect<
+  Response.StreamPartEncoded,
+  AiError.AiError,
+  Tool.ResultEncodingServices<PartTools[keyof PartTools]>
+> => {
   switch (part.type) {
     case 'tool-call':
-      return encodeToolCall(part);
+      return encodeToolCall(toolkit, part);
+    case 'tool-call-error':
+      return encodeToolCallError(toolkit, part);
     case 'tool-result':
       return encodeToolResult(part);
     case 'file':
