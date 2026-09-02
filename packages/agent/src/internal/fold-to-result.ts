@@ -27,8 +27,22 @@ export const foldToResult = <
     // either means the loop and this fold have drifted, which is a defect
     // rather than a recoverable caller failure.
     if (terminal?._tag === 'Completed') {
+      if (terminal.outcome === 'success') {
+        return {
+          outcome: 'success',
+          text: terminal.text,
+          steps: terminal.steps,
+          usage: terminal.usage,
+          ...(terminal.response === undefined
+            ? {}
+            : { response: terminal.response }),
+          ...(terminal.exhausted === undefined
+            ? {}
+            : { exhausted: terminal.exhausted }),
+        } satisfies Agent.Result;
+      }
       return {
-        outcome: terminal.outcome,
+        outcome: 'cancelled',
         text: terminal.text,
         steps: terminal.steps,
         usage: terminal.usage,

@@ -1,6 +1,7 @@
 import { Schema } from 'effect';
 import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
 
+import { RunPolicy } from './run-policy.js';
 import { Stop } from './stop.js';
 
 // What a caller observes while an agent runs.
@@ -28,6 +29,20 @@ export interface PendingInteraction extends Schema.Struct.Type<
   typeof PendingInteraction.fields
 > {}
 
+/**
+ * Which hard run budget `RunPolicy.Limits.onExhaustion: 'final-answer'`
+ * caught, and by how much, when it settled a run with one extra no-tools
+ * model call instead of failing it.
+ */
+export const Exhausted = Schema.Struct({
+  limit: RunPolicy.Limit,
+  used: Schema.Natural,
+  maximum: Schema.Natural,
+});
+export interface Exhausted extends Schema.Struct.Type<
+  typeof Exhausted.fields
+> {}
+
 export const Lifecycle = Schema.TaggedUnion({
   TurnStarted: {
     step: Schema.Natural,
@@ -43,6 +58,15 @@ export const Lifecycle = Schema.TaggedUnion({
     usage: Stop.Usage,
     /** Full final turn; absent only when no provider turn ran. */
     response: Schema.optionalKey(Prompt.Prompt),
+    /**
+     * Present only when `RunPolicy.Limits.onExhaustion: 'final-answer'`
+     * settled this run with the one extra no-tools call it allows instead of
+     * failing with `RunPolicyExhausted`. Always paired with `outcome:
+     * 'success'` — the fallback call either produces an answer or fails the
+     * run outright (a hard limit, chiefly the wall-clock deadline, crossed
+     * during the fallback call itself), never a `'cancelled'` Completed.
+     */
+    exhausted: Schema.optionalKey(Exhausted),
   },
   /**
    * The run ended durably parked on one or more external interactions
