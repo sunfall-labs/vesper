@@ -571,7 +571,7 @@ export const openWith = (
               settlementResume.completed,
               settlementResume.latestTurnUsage,
               settlementState,
-              settlementCodeState,
+              settlementCodeState.committed,
             );
             persisted = records.map((record, index) =>
               index === settlementIndex

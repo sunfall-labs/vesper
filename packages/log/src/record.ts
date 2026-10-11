@@ -427,8 +427,15 @@ export const Record = Schema.TaggedUnion({
     value: Schema.Unknown,
   },
 
-  /** Complete JSON scratch state committed by one successful code execution. */
+  /**
+   * Complete JSON scratch state committed by one successful code execution.
+   *
+   * `producer` is the `exec` step that committed it. The state takes effect
+   * only once that step settles, so a crash between the checkpoint and the
+   * step's `StepSettled` leaves the state the retried execution started from.
+   */
   CodeStateCheckpoint: {
+    producer: Schema.optionalKey(LogVocabulary.ToolCallId),
     state: Schema.Record(Schema.String, Schema.Unknown),
   },
 

@@ -269,6 +269,12 @@ answer or denial writes `StepSettled` directly, and an approval writes
 `StepStarted` before its handler. They share the records and the fold rather
 than a separate step runner.
 
+**Code state follows its step.** A `CodeStateCheckpoint` names the `exec`
+step that committed it (`producer`) and takes effect only when that step
+settles; a new run drops whatever a crashed one left pending. A crash between
+the commit and `StepSettled` used to advance the state a retried `exec` then
+started from.
+
 ## Invariants it must keep
 
 - A call is durable before it starts; a start is durable before its handler.
@@ -317,8 +323,5 @@ adapted.
 
 ## Open questions
 
-- Should `CodeStateCheckpoint` become part of the `exec` step's settlement, so
-  a crash cannot advance code state while `exec` is still indeterminate (today
-  it can)?
 - Does delegation become a step whose settlement is the child's `Completed`,
   retiring `ChildSession`'s parent-side copy?

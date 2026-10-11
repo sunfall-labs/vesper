@@ -71,6 +71,10 @@ fields, and code that exhaustively matches it must handle them.
   `TurnFinished` preceded the answer resume recorded, so the prompt rebuild
   split the call from its answer and dropped both. A finished turn now stays
   open for its outstanding results.
+- `CodeStateCheckpoint.producer` names the `exec` call that committed the
+  scratch state, which takes effect only once that call settles. A crash
+  after a script committed but before `exec` settled used to advance the state
+  the retried execution started from.
 - An approved handler is now a started call: resuming it writes
   `StepStarted`, so a crash while it runs leaves the call indeterminate and
   resume asks `onIndeterminateToolCall` instead of running the handler again.

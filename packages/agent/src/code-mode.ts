@@ -274,7 +274,7 @@ export const openState = (
     const checkpoint =
       session === undefined
         ? undefined
-        : ResumeProjection.codeStateFrom(session.stateHistory);
+        : ResumeProjection.codeStateFrom(session.stateHistory).committed;
     const initial =
       checkpoint === undefined
         ? {}
@@ -289,8 +289,14 @@ export const openState = (
       Effect.gen(function* () {
         const prepared = yield* checkedState(next, limits);
         if (session !== undefined) {
+          // Committed by the `exec` call running now, and in effect only once
+          // that call settles.
+          const producer = yield* Effect.serviceOption(ToolExecution.Current);
           const record: ConversationRecord.Record = {
             _tag: 'CodeStateCheckpoint',
+            ...(Option.isSome(producer)
+              ? { producer: producer.value.toolCallId }
+              : {}),
             state: prepared,
           };
           yield* session.append([record]);

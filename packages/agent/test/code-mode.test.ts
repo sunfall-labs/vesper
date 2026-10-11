@@ -999,6 +999,31 @@ describe('code mode durable nested calls', () => {
       }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 
+  // A script can finish and commit its scratch state, and the process die
+  // before `exec` settles. The retried execution must start from the state
+  // the crashed one started from, not from what it went on to commit.
+  it.effect('retries an exec from the state before its unsettled commit', () =>
+    Effect.gen(function* () {
+      yield* seed([
+        ...crashedExec,
+        {
+          _tag: 'CodeStateCheckpoint',
+          producer: EXEC,
+          state: { charged: true },
+        },
+      ]);
+      const r = rig(script(), [answeringTurn]);
+      const conversation = Conversation.make(
+        agentWith(newCounts()).intercepting(retry),
+        CONVERSATION,
+      );
+
+      yield* conversation.run('go').pipe(Effect.provide(r.layer));
+
+      expect((yield* r.executor.requests)[0]?.state).toEqual({});
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
   // Recovery's rule for a top-level call, at the sandbox boundary: a start
   // recorded replay-safe may run again, because running it twice was declared
   // to leave the world as running it once.
