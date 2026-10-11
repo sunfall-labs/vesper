@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -13,12 +14,16 @@ import { join } from 'node:path';
 
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Schema, Stream } from 'effect';
-import { Tool as ToolNamespace } from 'effect/unstable/ai';
-import type { Tool, Toolkit } from 'effect/unstable/ai';
+import { Effect, Layer, PlatformError, Schema, Stream } from 'effect';
+import { ChildProcessSpawner } from 'effect/process';
+import { AiError, Tool as ToolNamespace } from 'effect/ai';
+import type { Tool, Toolkit } from 'effect/ai';
 
 import { WorkspaceDriver } from '../src/driver.js';
-import { layer as localLayer } from '../src/layer-local.js';
+import {
+  layer as localLayer,
+  sandboxed as sandboxedLayer,
+} from '../src/layer-local.js';
 import {
   CommandTimedOut,
   EditTargetAmbiguous,
@@ -907,15 +912,18 @@ describe('edit_file', () => {
 
       // An empty string matches at every position, so there is no sound answer
       // to give; the schema refuses it before the handler has to invent one.
-      expect(outcome).toMatchObject({
-        kind: 'tool-failure',
-        tag: 'AiError',
-        error: {
-          reason: {
-            _tag: 'ToolParameterValidationError',
-            toolName: 'edit_file',
-          },
-        },
+      // The tool's `failureMode: 'return'` hands that refusal back to the
+      // model as a failed result it can correct.
+      expect(outcome.kind).toBe('tool-failure');
+      if (outcome.kind !== 'tool-failure') {
+        throw new Error('expected parameter validation to return a failure');
+      }
+      const failure = yield* Schema.decodeUnknownEffect(AiError.AiError)(
+        outcome.error,
+      );
+      expect(failure.reason).toMatchObject({
+        _tag: 'ToolParameterValidationError',
+        toolName: 'edit_file',
       });
       expect(readFileSync(join(directory, 'f.txt'), 'utf8')).toBe('abc');
     }),
@@ -1358,6 +1366,71 @@ describe('run_shell', () => {
     }),
   );
 
+  it.live(
+    'returns SandboxRequired when a required sandbox is unavailable',
+    () =>
+      Effect.gen(function* () {
+        const directory = workspace();
+        const noSpawn = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.fail(
+              PlatformError.systemError({
+                _tag: 'NotFound',
+                module: 'ChildProcess',
+                method: 'spawn',
+              }),
+            ),
+          ),
+        );
+        const failure = expectFailure(
+          yield* call(
+            directory,
+            'run_shell',
+            { command: 'echo should-not-run' },
+            WorkspaceTools.shellEnabledCommandPolicyLayer,
+            sandboxedLayer({ mode: 'required', root: directory }).pipe(
+              Layer.provide(noSpawn),
+            ),
+          ),
+          'SandboxRequired',
+        );
+        expect(failure['command']).toBe('echo should-not-run');
+      }),
+  );
+
+  it.live.skipIf(process.platform !== 'darwin')(
+    'reports the sandbox backend and refuses writes outside the root',
+    () =>
+      Effect.gen(function* () {
+        const directory = workspace();
+        const sandboxedDriver = sandboxedLayer({
+          mode: 'required',
+          root: realpathSync(directory),
+        }).pipe(Layer.provide(NodeServices.layer));
+        const ok = expectOk(
+          yield* call(
+            directory,
+            'run_shell',
+            { command: 'echo in > f' },
+            WorkspaceTools.shellEnabledCommandPolicyLayer,
+            sandboxedDriver,
+          ),
+        );
+        expect(ok['sandbox']).toBe('sandbox-exec');
+        const denied = expectOk(
+          yield* call(
+            directory,
+            'run_shell',
+            { command: `echo out > ${join(tmpdir(), 'ai-escape-probe')}` },
+            WorkspaceTools.shellEnabledCommandPolicyLayer,
+            sandboxedDriver,
+          ),
+        );
+        expect(denied['exitCode']).not.toBe(0);
+      }),
+  );
+
   it.live('runs a command and separates its streams', () =>
     Effect.gen(function* () {
       const directory = workspace();
@@ -1524,7 +1597,15 @@ describe('the JSON schema these tools advertise', () => {
     ['search_files', 'limit'],
     ['run_shell', 'timeoutMs'],
   ])('advertises %s.%s as a plain integer', (tool, property) => {
-    expect(propertyOf(tool, property)).toEqual({ type: 'integer' });
+    // Effect adds the safe-integer bounds, which are true and harmless. What
+    // must not appear is an alternative a model could read as permission to
+    // send a string.
+    const schema = propertyOf(tool, property);
+    expect(schema).toEqual({
+      type: 'integer',
+      minimum: Number.MIN_SAFE_INTEGER,
+      maximum: Number.MAX_SAFE_INTEGER,
+    });
   });
 
   it('offers a model no string alternative anywhere in its parameters', () => {

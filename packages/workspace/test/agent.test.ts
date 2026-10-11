@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 import { WorkspaceAgent } from '../src/agent.js';
 

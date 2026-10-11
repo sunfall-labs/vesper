@@ -12,7 +12,9 @@ import { Context, Schema, type Effect } from 'effect';
 // full authority of the host process, and paths are not confined to a root.
 // If the requirement is containment of hostile code, that has to come from
 // the driver's own substrate (a container, a VM, a jailed remote worker), and
-// the value of this seam is only that swapping to one is a layer change.
+// the value of this seam is only that swapping to one is a layer change. The
+// local driver's opt-in substrate is an OS sandbox around each command; see
+// `./shell-sandbox.ts` for what it does and does not contain.
 //
 // The operation set is the conventional one — read, write, edit, list,
 // search, exec — because it is a good shape and because adapters for other
@@ -90,6 +92,14 @@ export const ShellResult = Schema.Struct({
   stdoutTruncated: Schema.Boolean,
   stderrTruncated: Schema.Boolean,
   exitCode: Schema.Int,
+  /**
+   * How the command was confined, present only when a sandbox was requested:
+   * the backend that enforced it, or `fallback` when `preferred` found none
+   * and ran the command unconfined. Absent means no sandbox was asked for.
+   */
+  sandbox: Schema.optionalKey(
+    Schema.Literals(['sandbox-exec', 'bwrap', 'fallback']),
+  ),
 });
 export interface ShellResult extends Schema.Struct.Type<
   typeof ShellResult.fields
@@ -136,6 +146,20 @@ export class CommandTimeout extends Schema.TaggedError<CommandTimeout>(
 }) {}
 
 /**
+ * A sandbox was required and none is available, so the command was not run.
+ *
+ * A failure rather than a result because nothing ran, and distinct from
+ * {@link PermissionDenied}: the fix is on the host (install `bwrap`, enable
+ * user namespaces), not a different path.
+ */
+export class SandboxUnavailable extends Schema.TaggedError<SandboxUnavailable>(
+  '@sunfall/vesper-workspace/SandboxUnavailable',
+)('SandboxUnavailable', {
+  command: Schema.String,
+  reason: Schema.String,
+}) {}
+
+/**
  * Anything else the substrate refused.
  *
  * The residual case, not the general one: `EEXIST` on `mkdir`, `ENOTDIR`,
@@ -170,6 +194,7 @@ export type ExecError =
   | CommandTimeout
   | PathNotFound
   | PermissionDenied
+  | SandboxUnavailable
   | WorkspaceFailure;
 
 /** Every typed failure this seam produces. */

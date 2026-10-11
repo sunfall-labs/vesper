@@ -1,12 +1,13 @@
 import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 
-import { Duration, Effect, Layer, Predicate, Stream } from 'effect';
+import { Config, Duration, Effect, Layer, Predicate, Stream } from 'effect';
 import type { PlatformError } from 'effect/PlatformError';
-import { ChildProcess, ChildProcessSpawner } from 'effect/unstable/process';
+import { ChildProcess, ChildProcessSpawner } from 'effect/process';
 
 import { WorkspaceDriver } from './driver.js';
 import { DEFAULT_MAX_BYTES } from './output.js';
+import { ShellSandbox } from './shell-sandbox.js';
 
 // The local driver: `node:fs/promises` for files, Effect's
 // `ChildProcessSpawner` for commands.
@@ -17,7 +18,10 @@ import { DEFAULT_MAX_BYTES } from './output.js';
 //
 // The default layer does not inherit the host environment, but it still runs
 // local commands with the authority of the host process. See the boundary
-// note in `./driver.ts`: a driver layer is not a sandbox.
+// note in `./driver.ts`: a driver layer is not a sandbox. `sandboxed` is the
+// opt-in that wraps every command in an OS sandbox (`./shell-sandbox.ts`);
+// file operations stay in-process and are confined by the tools' path checks,
+// not by the sandbox.
 //
 // Interruption is the spawner's, not ours. `ChildProcessSpawner.spawn`
 // acquires the process with `Effect.acquireRelease` and kills the whole
@@ -196,6 +200,7 @@ const SAFE_PATH = '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
 
 const makeLayer = (
   inheritEnvironment: boolean,
+  sandbox?: ShellSandbox.Policy,
 ): Layer.Layer<
   WorkspaceDriver.Service,
   never,
@@ -205,6 +210,50 @@ const makeLayer = (
     WorkspaceDriver.Service,
     Effect.gen(function* () {
       const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+
+      // Resolved once, at construction: the backend probe runs real
+      // processes, and the plan needs the root's real path because both
+      // sandboxes match on resolved paths (`/tmp` is `/private/tmp` on macOS).
+      const confinement =
+        sandbox === undefined || sandbox.mode === 'none'
+          ? undefined
+          : yield* Effect.gen(function* () {
+              // A private temp directory rather than the shared `$TMPDIR`, so
+              // a confined command cannot read or clobber other programs'
+              // temp files. Removed with the layer.
+              const tmp = yield* Config.String('TMPDIR').pipe(
+                Config.withDefault('/tmp'),
+                Effect.orElseSucceed(() => '/tmp'),
+              );
+              const tempDir = yield* Effect.acquireRelease(
+                Effect.promise(() =>
+                  fs
+                    .mkdtemp(`${tmp}/vesper-sandbox-`)
+                    .then((dir) => fs.realpath(dir)),
+                ),
+                (dir) =>
+                  Effect.promise(() =>
+                    fs.rm(dir, { recursive: true, force: true }),
+                  ),
+              );
+              const root = yield* Effect.promise(() =>
+                fs.realpath(sandbox.root).catch(() => sandbox.root),
+              );
+              const plan = ShellSandbox.makePlan(sandbox, { root, tempDir });
+              // Probed with the real plan, so the probe cannot pass where a
+              // real command's mounts and namespaces would fail.
+              const backend = yield* ShellSandbox.detect(
+                process.platform,
+                spawner,
+                plan,
+              );
+              if (backend === undefined && sandbox.mode === 'preferred') {
+                yield* Effect.logWarning(
+                  'No shell sandbox is available; commands will run unconfined',
+                );
+              }
+              return { mode: sandbox.mode, backend, plan };
+            });
 
       // `Effect.fn` with plain functions rather than generators wherever the
       // body has nothing to yield: an empty generator trips `require-yield`.
@@ -314,24 +363,70 @@ const makeLayer = (
         WorkspaceDriver.ShellResult,
         WorkspaceDriver.ExecError
       > => {
-        const run = Effect.gen(function* () {
-          const handle = yield* spawner.spawn(
-            ChildProcess.make(command, {
-              // A command string, not an argv: the caller writes shell, so
-              // pipelines and redirection work. It is also why an unknown
-              // command comes back as exit 127 rather than a spawn failure —
-              // the shell started fine, and reporting what it exited with is
-              // the whole point of returning the code as data.
-              shell: true,
-              cwd: options?.cwd,
-              env: inheritEnvironment
-                ? options?.env
-                : { PATH: SAFE_PATH, ...options?.env },
-              // The safe local layer supplies a small executable PATH and no
-              // other host variables. `unrestricted` opts into ambient env
-              // inheritance for callers that explicitly need it.
-              extendEnv: inheritEnvironment,
+        if (
+          confinement?.backend === undefined &&
+          confinement?.mode === 'required'
+        ) {
+          return Effect.fail(
+            new WorkspaceDriver.SandboxUnavailable({
+              command,
+              reason:
+                'no working sandbox backend on this host (macOS needs sandbox-exec, Linux needs bwrap with user namespaces)',
             }),
+          );
+        }
+        const backend = confinement?.backend;
+        const sandboxLabel: WorkspaceDriver.ShellResult['sandbox'] =
+          confinement === undefined ? undefined : (backend ?? 'fallback');
+        const environment = inheritEnvironment
+          ? options?.env
+          : { PATH: SAFE_PATH, ...options?.env };
+
+        const run = Effect.gen(function* () {
+          // The sandbox matches and binds resolved paths, so the working
+          // directory must be expressed in that same space (`/var` vs
+          // `/private/var`, a symlinked workspace root). Unconfined commands
+          // keep the caller's cwd untouched.
+          const requested = options?.cwd;
+          const cwd =
+            backend === undefined || requested === undefined
+              ? requested
+              : yield* Effect.promise(() =>
+                  fs.realpath(requested).catch(() => requested),
+                );
+          const invocation =
+            confinement === undefined || backend === undefined
+              ? undefined
+              : backend === 'sandbox-exec'
+                ? ShellSandbox.sandboxExecInvocation(confinement.plan, command)
+                : ShellSandbox.bwrapInvocation(confinement.plan, command, cwd);
+          const handle = yield* spawner.spawn(
+            invocation !== undefined && confinement !== undefined
+              ? ChildProcess.make(invocation.file, [...invocation.args], {
+                  cwd,
+                  // Private temp for both backends: the tmpfs on Linux, the
+                  // per-layer directory on macOS.
+                  env: {
+                    TMPDIR:
+                      backend === 'bwrap' ? '/tmp' : confinement.plan.tempDir,
+                    ...environment,
+                  },
+                  extendEnv: inheritEnvironment,
+                })
+              : ChildProcess.make(command, {
+                  // A command string, not an argv: the caller writes shell, so
+                  // pipelines and redirection work. It is also why an unknown
+                  // command comes back as exit 127 rather than a spawn failure —
+                  // the shell started fine, and reporting what it exited with is
+                  // the whole point of returning the code as data.
+                  shell: true,
+                  cwd: options?.cwd,
+                  env: environment,
+                  // The safe local layer supplies a small executable PATH and no
+                  // other host variables. `unrestricted` opts into ambient env
+                  // inheritance for callers that explicitly need it.
+                  extendEnv: inheritEnvironment,
+                }),
           );
 
           // Concurrently, and that is load-bearing: `exitCode` waits for the
@@ -363,6 +458,7 @@ const makeLayer = (
             stderr: stderr.text(),
             stdoutTruncated: stdout.truncated,
             stderrTruncated: stderr.truncated,
+            ...(sandboxLabel === undefined ? {} : { sandbox: sandboxLabel }),
           };
         }).pipe(
           Effect.scoped,
@@ -399,6 +495,20 @@ const makeLayer = (
 
 /** Local driver with an isolated command environment by default. */
 export const layer = makeLayer(false);
+
+/**
+ * Local driver whose commands run inside an OS sandbox, per `policy.mode`.
+ *
+ * Same isolated environment as {@link layer}. With `mode: 'required'` and no
+ * working backend, `exec` fails with `SandboxUnavailable` instead of running.
+ */
+export const sandboxed = (
+  policy: ShellSandbox.Policy,
+): Layer.Layer<
+  WorkspaceDriver.Service,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> => makeLayer(false, policy);
 
 /** Explicit opt-in to the legacy full host-local environment behavior. */
 export const unrestricted = makeLayer(true);

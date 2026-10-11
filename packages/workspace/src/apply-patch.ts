@@ -1,5 +1,5 @@
 import { Effect, Schema } from 'effect';
-import { Tool } from 'effect/unstable/ai';
+import { Tool } from 'effect/ai';
 
 import { WorkspaceDriver } from './driver.js';
 import { WorkspaceOutput } from './output.js';
