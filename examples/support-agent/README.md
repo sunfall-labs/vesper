@@ -1,7 +1,7 @@
 # The support-agent example
 
 This walkthrough is the complete, credential-free story behind
-`nub run example:support-agent`. The example is compiled with
+`bun run example:support-agent`. The example is compiled with
 requirement-channel assertions and runs entirely against a scripted model,
 in-memory application adapters, and the in-memory conversation log. The
 definition below introduces the core composition; the source also exercises
@@ -42,7 +42,7 @@ import { Skill } from '@sunfall/vesper-agent/skill';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { AgentWorkflow } from '@sunfall/vesper-agent/workflow';
 import { Context, Effect, Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 /** An ordinary application service. Nothing here is AI-specific. */
 export class OrderRepo extends Context.Service<
@@ -218,7 +218,7 @@ Effect.gen(function* () {
 Run the complete credential-free story with:
 
 ```bash
-nub run example:support-agent
+bun run example:support-agent
 ```
 
 It loads a skill, delegates policy research, invokes stateful tools whose typed
@@ -226,7 +226,7 @@ handlers enforce authorization, suspends on a typed approval, performs the
 refund as an idempotent Workflow activity, accepts a steer, resumes, prints the full
 durable trail, and evaluates the same researcher definition used as a
 subagent. The mocked supervisor completes the approval automatically; use the
-focused `approval-cli` example (`nub run example:approval-cli`) to choose
+focused `approval-cli` example (`bun run example:approval-cli`) to choose
 approve or deny interactively.
 
 Workflow input can also be any application-owned Effect Schema rather than a

@@ -1,9 +1,10 @@
-import { SqlClient } from 'effect/unstable/sql';
-import type * as SqlError from 'effect/unstable/sql/SqlError';
-import { Reactivity } from 'effect/unstable/reactivity/Reactivity';
+import { SqlClient } from 'effect/sql';
+import type { SqlError } from 'effect/sql';
+import { Reactivity } from 'effect/reactivity';
 import { Crypto, Effect, Layer, Option, Schema, Stream } from 'effect';
 
 import { LogStoreAdapter } from '@sunfall/vesper-log/adapter';
+import { LogChain } from '@sunfall/vesper-log/chain';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { RecordBatch } from '@sunfall/vesper-log/record-batch';
@@ -30,7 +31,14 @@ const asError =
   (error: SqlError.SqlError | LogStore.LogStoreError): LogStore.LogStoreError =>
     Schema.is(LogStore.LogStoreError)(error)
       ? error
-      : LogStore.makeError(path, operation, 'storage', error.message);
+      : LogStore.makeError(
+          path,
+          operation,
+          'storage',
+          // The structured reason (UniqueViolation, LockTimeoutError, ...) is
+          // the part an operator acts on; the message alone often omits it.
+          `${error.reason._tag}: ${error.message}`,
+        );
 
 class RowDecodeError extends Schema.TaggedError<RowDecodeError>(
   '@sunfall/vesper-log-sqlite/RowDecodeError',
@@ -107,6 +115,8 @@ interface StreamRow {
   readonly nextProducerSequence: LogVocabulary.ProducerSequence;
   readonly lastFingerprint: string;
   readonly lastOffset: LogOffset.Offset;
+  /** Empty until the first batch is appended. */
+  readonly chainHead: string;
 }
 
 const readStream = (row: Row): Effect.Effect<StreamRow, RowDecodeError> =>
@@ -156,6 +166,7 @@ const readStream = (row: Row): Effect.Effect<StreamRow, RowDecodeError> =>
       lastOffset: yield* LogOffset.decode(
         yield* asString('last_offset', row['last_offset']),
       ),
+      chainHead: yield* asString('chain_head', row['chain_head']),
     };
   }).pipe(
     Effect.mapError((error) =>
@@ -190,6 +201,26 @@ const readRecord = (
     });
   });
 
+const readStoredRow = (
+  row: Row,
+): Effect.Effect<LogChain.StoredRow, RowDecodeError | Schema.SchemaError> =>
+  Effect.gen(function* () {
+    return {
+      envelope: yield* readRecord(row),
+      producerId: yield* Schema.decodeEffect(LogVocabulary.ProducerId)(
+        yield* asString('producer_id', row['producer_id']),
+      ),
+      epoch: yield* Schema.decodeEffect(LogVocabulary.Epoch)(
+        yield* asNumber('producer_epoch', row['producer_epoch']),
+      ),
+      sequence: yield* Schema.decodeEffect(LogVocabulary.ProducerSequence)(
+        yield* asNumber('producer_sequence', row['producer_sequence']),
+      ),
+      batchIndex: yield* asNumber('batch_index', row['batch_index']),
+      digest: yield* asString('batch_digest', row['batch_digest']),
+    };
+  });
+
 const metaOf = (path: string, row: StreamRow): LogStore.StreamMeta => ({
   path,
   identity: row.identity,
@@ -198,6 +229,7 @@ const metaOf = (path: string, row: StreamRow): LogStore.StreamMeta => ({
     row.producerId === undefined ? Option.none() : Option.some(row.producerId),
   head: row.lastOffset,
   records: Number(row.nextSequence),
+  chainHead: row.chainHead === '' ? Option.none() : Option.some(row.chainHead),
 });
 
 export interface Options {
@@ -223,7 +255,8 @@ export const migrate = (
         next_sequence TEXT NOT NULL DEFAULT '0',
         next_producer_sequence INTEGER NOT NULL DEFAULT 0,
         last_fingerprint TEXT NOT NULL DEFAULT '',
-        last_offset TEXT NOT NULL DEFAULT '-1'
+        last_offset TEXT NOT NULL DEFAULT '-1',
+        chain_head TEXT NOT NULL DEFAULT ''
       )`,
     ).unprepared;
     yield* client.unsafe(
@@ -238,6 +271,7 @@ export const migrate = (
         conversation_id TEXT NOT NULL,
         record_timestamp INTEGER NOT NULL,
         record TEXT NOT NULL,
+        batch_digest TEXT NOT NULL,
         PRIMARY KEY (path, record_offset)
       )`,
     ).unprepared;
@@ -261,10 +295,14 @@ const tableName = (prefix: string, table: string): string => {
 export const make = (
   client: SqlClient.SqlClient,
   options?: Options,
-): Effect.Effect<LogStore.Interface, never, Crypto.Crypto | Reactivity> =>
+): Effect.Effect<
+  LogStore.Interface,
+  never,
+  Crypto.Crypto | Reactivity.Reactivity
+> =>
   Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
-    const reactivity = yield* Reactivity;
+    const reactivity = yield* Reactivity.Reactivity;
     const prefix = options?.tablePrefix ?? 'vesper_log_';
     const streams = tableName(prefix, 'streams');
     const records = tableName(prefix, 'records');
@@ -277,7 +315,7 @@ export const make = (
       client.withoutTransforms().unsafe<A>(sql, params).unprepared;
 
     const streamColumns =
-      'identity, epoch, producer_id, next_sequence, next_producer_sequence, last_fingerprint, last_offset';
+      'identity, epoch, producer_id, next_sequence, next_producer_sequence, last_fingerprint, last_offset, chain_head';
 
     const create = Effect.fn('LogStoreSqlite.create')(function* (
       path: string,
@@ -430,6 +468,17 @@ export const make = (
               return state.lastOffset;
             }
 
+            const digest = yield* LogChain.forAppend({
+              path: input.path,
+              identity: state.identity,
+              head: state.chainHead,
+              firstOffset: LogOffset.fromSeq(state.nextSequence),
+              producerId: validated.producerId,
+              epoch: validated.epoch,
+              sequence: validated.sequence,
+              encoded: decision.prepared.encoded,
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+
             const nextSequence =
               state.nextSequence + BigInt(decision.prepared.entries.length);
             const offset = LogOffset.fromSeq(nextSequence - 1n);
@@ -459,28 +508,31 @@ export const make = (
             yield* unsafe<Row>(
               `INSERT INTO ${records}
                (path, seq, record_offset, producer_id, producer_epoch, producer_sequence,
-                batch_index, conversation_id, record_timestamp, record)
+                batch_index, conversation_id, record_timestamp, record, batch_digest)
                SELECT ?, json_extract(value, '$.seq'), json_extract(value, '$.offset'),
                       ?, ?, ?, CAST(key AS INTEGER), json_extract(value, '$.conversationId'),
-                      json_extract(value, '$.timestamp'), json_extract(value, '$.record')
+                      json_extract(value, '$.timestamp'), json_extract(value, '$.record'), ?
                FROM json_each(?)`,
               [
                 input.path,
                 validated.producerId,
                 validated.epoch,
                 validated.sequence,
+                digest,
                 payload,
               ],
             );
             yield* unsafe<Row>(
               `UPDATE ${streams}
                SET next_sequence = ?, next_producer_sequence = ?,
-                   last_fingerprint = ?, last_offset = ? WHERE path = ?`,
+                   last_fingerprint = ?, last_offset = ?, chain_head = ?
+               WHERE path = ?`,
               [
                 nextSequence.toString(),
                 decision.nextSequence,
                 decision.prepared.fingerprint,
                 offset,
+                digest,
                 input.path,
               ],
             );
@@ -607,6 +659,68 @@ export const make = (
       } satisfies LogStore.BackwardsPage;
     });
 
+    const readBatches = Effect.fn('LogStoreSqlite.readBatches')(function* (
+      path: string,
+      readOptions?: LogStore.ReadOptions,
+    ) {
+      const { after, limit } = yield* LogStore.normalizeReadOptions(
+        readOptions,
+      ).pipe(
+        Effect.mapError((error) =>
+          failure(path, 'readBatches', 'invalid', error.detail),
+        ),
+      );
+      const present = yield* unsafe<Row>(
+        `SELECT 1 AS present FROM ${streams} WHERE path = ?`,
+        [path],
+      ).pipe(Effect.mapError(asError(path, 'readBatches')));
+      if (present[0] === undefined) {
+        return yield* failure(
+          path,
+          'readBatches',
+          'not_found',
+          'no stream at this path',
+        );
+      }
+      // Batch starts bound the page: the row after the last wanted batch's
+      // start is where the next page begins.
+      const starts = yield* unsafe<Row>(
+        `SELECT record_offset FROM ${records}
+         WHERE path = ? AND batch_index = 0 AND record_offset > ?
+         ORDER BY record_offset ASC LIMIT ?`,
+        [path, after, limit + 1],
+      ).pipe(Effect.mapError(asError(path, 'readBatches')));
+      const upToDate = starts.length <= limit;
+      const bound = upToDate
+        ? null
+        : (starts[limit]?.['record_offset'] ?? null);
+      const rows = yield* unsafe<Row>(
+        `SELECT record_offset, conversation_id, record_timestamp, record,
+                producer_id, producer_epoch, producer_sequence, batch_index,
+                batch_digest
+         FROM ${records}
+         WHERE path = ? AND record_offset > ? AND (? IS NULL OR record_offset < ?)
+         ORDER BY record_offset ASC`,
+        [path, after, bound, bound],
+      ).pipe(Effect.mapError(asError(path, 'readBatches')));
+      const batches = yield* Effect.forEach(rows, readStoredRow).pipe(
+        Effect.map(LogChain.groupRows),
+        Effect.mapError((error) =>
+          failure(
+            path,
+            'readBatches',
+            'storage',
+            `stored record does not decode: ${String(error)}`,
+          ),
+        ),
+      );
+      return {
+        batches,
+        cursor: batches.at(-1)?.records.at(-1)?.offset ?? after,
+        upToDate,
+      } satisfies LogStore.BatchPage;
+    });
+
     const meta = Effect.fn('LogStoreSqlite.meta')(function* (path: string) {
       const rows = yield* unsafe<Row>(
         `SELECT ${streamColumns} FROM ${streams} WHERE path = ?`,
@@ -646,6 +760,7 @@ export const make = (
       append,
       read,
       readBackwards,
+      readBatches,
       meta,
       changes,
     });
@@ -656,7 +771,7 @@ export const layer = (
 ): Layer.Layer<
   LogStore.Service,
   never,
-  SqlClient.SqlClient | Crypto.Crypto | Reactivity
+  SqlClient.SqlClient | Crypto.Crypto | Reactivity.Reactivity
 > =>
   Layer.effect(
     LogStore.Service,

@@ -25,12 +25,7 @@ import {
 } from 'effect';
 import { Schema } from 'effect';
 import { AgentEvents } from '@sunfall/vesper-agent/event';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, type Response, Tool, Toolkit } from 'effect/ai';
 
 import {
   CONVERSATION_MESSAGES,
@@ -75,7 +70,7 @@ import {
   type ComparisonWorkload,
   stepsFor,
 } from './comparison-workload.ts';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 // ------------------------------------------------------------------- agent
 
@@ -518,6 +513,13 @@ const runComparisonConcurrency = async (): Promise<ComparisonResult> => {
   };
 };
 
+/** The budget a hand-written `RunStarted` records; every run carries one. */
+const benchBudget = {
+  id: 'bench-budget',
+  root: LogVocabulary.ConversationId.make('bench-root'),
+  limits: {},
+};
+
 export const runConformance = async (): Promise<ConformanceResult> => {
   const { handle, runtime } = await readyRuntime();
   let cancellationCalls = 0;
@@ -566,15 +568,17 @@ export const runConformance = async (): Promise<ConformanceResult> => {
       yield* recoverySeed.append([
         {
           _tag: 'RunStarted',
+          budget: benchBudget,
           agent: 'bench',
           agentRevision: LogVocabulary.AgentRevision.make('1'),
           formatVersion: 1,
           prompt: [],
         },
         {
-          _tag: 'ToolStarted',
+          _tag: 'StepStarted',
           id: LogVocabulary.ToolCallId.make('uncertain'),
           name: TOOL_NAME,
+          replay: 'unsafe',
         },
       ]);
       const recovered = yield* AgentLog.open(recoveryId, {
@@ -606,6 +610,7 @@ export const runConformance = async (): Promise<ConformanceResult> => {
       yield* old.append([
         {
           _tag: 'RunStarted',
+          budget: benchBudget,
           agent: 'bench',
           agentRevision: LogVocabulary.AgentRevision.make('old'),
           formatVersion: 1,
@@ -634,6 +639,7 @@ export const runConformance = async (): Promise<ConformanceResult> => {
       );
       yield* AgentLog.start(file, {
         agent: 'bench',
+        budget: benchBudget,
         revision: LogVocabulary.AgentRevision.make('1'),
         input: [
           {
@@ -729,7 +735,7 @@ export const runConformance = async (): Promise<ConformanceResult> => {
       {
         axis: 'indeterminate tool handling',
         status: 'verified',
-        evidence: 'ToolStarted without ToolOutcome opens as Indeterminate',
+        evidence: 'StepStarted without StepSettled opens as Indeterminate',
       },
       {
         axis: 'revision compatibility',
@@ -1223,15 +1229,17 @@ const runHistoryOpen = async (): Promise<ScenarioResult> => {
           session.append([
             {
               _tag: 'RunStarted',
+              budget: benchBudget,
               agent: 'bench',
               formatVersion: 1,
               agentRevision: LogVocabulary.AgentRevision.make('1'),
               prompt: [],
             },
             {
-              _tag: 'ToolStarted',
+              _tag: 'StepStarted',
               id: LogVocabulary.ToolCallId.make('orphan'),
               name: TOOL_NAME,
+              replay: 'unsafe',
             },
           ]),
         );

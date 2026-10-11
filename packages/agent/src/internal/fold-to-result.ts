@@ -1,5 +1,5 @@
 import { Effect, Stream } from 'effect';
-import type { Tool } from 'effect/unstable/ai';
+import type { Tool } from 'effect/ai';
 
 import type { Agent } from '../agent.js';
 import type { AgentEvents } from '../event.js';
@@ -43,7 +43,7 @@ export const foldToResult = <
         text: terminal.text,
         steps: terminal.step,
         usage: terminal.usage,
-        pendingApprovals: terminal.pendingApprovals,
+        pendingInteractions: terminal.pendingInteractions,
         ...(terminal.response === undefined
           ? {}
           : { response: terminal.response }),

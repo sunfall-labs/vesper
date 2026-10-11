@@ -16,8 +16,8 @@ import {
   Stdio,
   Stream,
 } from 'effect';
-import { AiError, LanguageModel, type Tool, Toolkit } from 'effect/unstable/ai';
-import { Argument, Command, Flag } from 'effect/unstable/cli';
+import { AiError, LanguageModel, type Tool, Toolkit } from 'effect/ai';
+import { Argument, Command, Flag } from 'effect/cli';
 
 import { bySentence } from './sentences.js';
 
@@ -93,9 +93,10 @@ const judge = Agent.make({
  * wiring is what the context is for, and a tag makes `review` depend on *a
  * judge model existing* rather than on being handed one.
  */
-class JudgeModel extends Context.Service<JudgeModel, LanguageModel.Service>()(
-  'compliance/JudgeModel',
-) {}
+class JudgeModel extends Context.Service<
+  JudgeModel,
+  LanguageModel.LanguageModel
+>()('compliance/JudgeModel') {}
 
 /**
  * Bind a model to {@link JudgeModel} by re-tagging it.
@@ -110,7 +111,7 @@ const anthropicModel = (model: string) =>
   AnthropicLanguageModel.model(model).pipe(
     Layer.provide(
       AnthropicClient.layerConfig({
-        apiKey: Config.redacted('ANTHROPIC_API_KEY'),
+        apiKey: Config.Redacted('ANTHROPIC_API_KEY'),
       }),
     ),
   );
@@ -194,14 +195,14 @@ const review = (prompt: string) =>
 const command = Command.make(
   'compliance',
   {
-    prompt: Argument.string('prompt').pipe(
+    prompt: Argument.String('prompt').pipe(
       Argument.withDescription('What to ask the speaker.'),
     ),
-    speakerModel: Flag.string('speaker').pipe(
+    speakerModel: Flag.String('speaker').pipe(
       Flag.withDescription('Model that answers.'),
       Flag.withDefault('claude-sonnet-4-6'),
     ),
-    judgeModel: Flag.string('judge').pipe(
+    judgeModel: Flag.String('judge').pipe(
       Flag.withDescription(
         'Model that rules on each sentence. It runs once per sentence, so a ' +
           'small model is the right default.',

@@ -1,5 +1,5 @@
 import { Layer } from 'effect';
-import { type Tool, Toolkit } from 'effect/unstable/ai';
+import { type Tool, Toolkit } from 'effect/ai';
 
 import { WorkspaceTools } from './tools.js';
 

@@ -38,6 +38,10 @@
       "types": "./dist/layer-native.d.ts",
       "default": "./dist/layer-native.js"
     },
+    "./layer-cloudflare": {
+      "types": "./dist/layer-cloudflare.d.ts",
+      "default": "./dist/layer-cloudflare.js"
+    },
     "./migrations/001-initial.sql": "./migrations/001-initial.sql"
   },
   "publishConfig": {
@@ -50,12 +54,12 @@
     "@sunfall/vesper-log": "0.1.0-alpha.1"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109"
+    "effect": "^4.0.3"
   },
   "devDependencies": {
     "@effect/platform-node": "catalog:",
     "@effect/vitest": "catalog:",
     "effect": "catalog:",
-    "vitest": "^4.1.9"
+    "vitest": "^5.0.3"
   }
 }

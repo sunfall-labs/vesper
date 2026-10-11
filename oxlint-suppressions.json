@@ -15,14 +15,6 @@
       "count": 1
     }
   },
-  "examples/approval-cli/src/cli-wrapper.test.ts": {
-    "effecttsgo/async-function": {
-      "count": 1
-    },
-    "effecttsgo/node-builtin-import": {
-      "count": 1
-    }
-  },
   "examples/approval-cli/src/main.ts": {
     "typescript/switch-exhaustiveness-check": {
       "count": 1
@@ -31,11 +23,6 @@
   "examples/compliance-relay/src/main.ts": {
     "effecttsgo/multiple-effect-provide": {
       "count": 1
-    }
-  },
-  "examples/compliance-relay/src/sentences.test.ts": {
-    "effecttsgo/return-effect-in-gen": {
-      "count": 3
     }
   },
   "examples/live-smoke/src/main.ts": {
@@ -85,6 +72,9 @@
     }
   },
   "packages/agent/src/code-mode.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    },
     "effecttsgo/extends-native-error": {
       "count": 1
     },
@@ -98,7 +88,7 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 6
+      "count": 5
     }
   },
   "packages/agent/src/dispatch.ts": {
@@ -112,15 +102,15 @@
       "count": 1
     },
     "typescript/no-unnecessary-condition": {
-      "count": 2
+      "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 4
+      "count": 5
     }
   },
   "packages/agent/src/dynamic-toolkit.ts": {
     "effecttsgo/any-unknown-in-error-context": {
-      "count": 3
+      "count": 4
     }
   },
   "packages/agent/src/interception.ts": {
@@ -138,7 +128,7 @@
       "count": 9
     },
     "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 7
+      "count": 6
     },
     "typescript/consistent-return": {
       "count": 1
@@ -147,20 +137,9 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 9
+      "count": 7
     },
     "typescript/switch-exhaustiveness-check": {
-      "count": 1
-    }
-  },
-  "packages/agent/src/internal/part-encoding.ts": {
-    "effecttsgo/any-unknown-in-error-context": {
-      "count": 1
-    },
-    "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 1
-    },
-    "typescript/no-unsafe-type-assertion": {
       "count": 1
     }
   },
@@ -179,9 +158,23 @@
       "count": 3
     }
   },
+  "packages/agent/src/internal/tool-resolution.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 2
+    }
+  },
   "packages/agent/src/model-plan.ts": {
     "effecttsgo/any-unknown-in-error-context": {
       "count": 2
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 3
     }
   },
   "packages/agent/src/result-overflow.ts": {
@@ -234,31 +227,12 @@
       "count": 2
     }
   },
-  "packages/agent/test/assertions.test.ts": {
-    "typescript/no-explicit-any": {
-      "count": 1
-    },
-    "unicorn/no-array-sort": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/child-session.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 2
-    },
-    "effecttsgo/unnecessary-effect-gen": {
-      "count": 1
-    },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
-    }
-  },
   "packages/agent/test/code-mode.test.ts": {
     "effecttsgo/prefer-schema-over-json": {
-      "count": 9
+      "count": 2
     },
     "typescript/no-unsafe-assignment": {
-      "count": 2
+      "count": 1
     },
     "typescript/no-unsafe-return": {
       "count": 1
@@ -270,24 +244,7 @@
       "count": 1
     }
   },
-  "packages/agent/test/compaction.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 3
-    },
-    "effecttsgo/unnecessary-fail-yieldable-error": {
-      "count": 1
-    }
-  },
   "packages/agent/test/compatibility.test.ts": {
-    "effecttsgo/instance-of-schema": {
-      "count": 1
-    },
-    "typescript/no-unnecessary-condition": {
-      "count": 2
-    },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
-    },
     "typescript/no-unsafe-type-assertion": {
       "count": 1
     }
@@ -302,33 +259,12 @@
       "count": 2
     }
   },
-  "packages/agent/test/dispatch.test.ts": {
-    "effecttsgo/global-date": {
-      "count": 2
-    },
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/dynamic-toolkit.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 1
-    }
-  },
   "packages/agent/test/eval.test.ts": {
     "effecttsgo/prefer-typed-schema-decoder": {
       "count": 1
     },
     "effecttsgo/schema-sync-in-effect": {
       "count": 2
-    },
-    "typescript/no-unnecessary-condition": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/fork.test.ts": {
-    "effecttsgo/new-promise": {
-      "count": 1
     }
   },
   "packages/agent/test/interception-typing.test.ts": {
@@ -338,34 +274,7 @@
   },
   "packages/agent/test/interception.test.ts": {
     "effecttsgo/prefer-schema-over-json": {
-      "count": 5
-    },
-    "effecttsgo/unnecessary-effect-gen": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/log.test.ts": {
-    "effecttsgo/multiple-effect-provide": {
-      "count": 2
-    },
-    "effecttsgo/redundant-or-die": {
-      "count": 1
-    },
-    "typescript/no-unsafe-argument": {
-      "count": 1
-    },
-    "typescript/no-unsafe-type-assertion": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/model-plan.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/prompt-transport.test.ts": {
-    "typescript/no-unsafe-type-assertion": {
-      "count": 1
+      "count": 3
     }
   },
   "packages/agent/test/recording-policy.test.ts": {
@@ -375,68 +284,16 @@
   },
   "packages/agent/test/result-overflow.test.ts": {
     "effecttsgo/prefer-schema-over-json": {
-      "count": 2
-    },
-    "unicorn/no-array-sort": {
       "count": 1
-    }
-  },
-  "packages/agent/test/resume.test.ts": {
-    "effecttsgo/redundant-or-die": {
-      "count": 4
     }
   },
   "packages/agent/test/settlement.test.ts": {
-    "effecttsgo/multiple-effect-provide": {
-      "count": 2
-    },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/signal.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 2
-    },
-    "effecttsgo/redundant-or-die": {
-      "count": 7
-    },
     "typescript/no-unsafe-assignment": {
       "count": 1
     }
   },
   "packages/agent/test/state.test.ts": {
     "effecttsgo/schema-number": {
-      "count": 1
-    },
-    "unicorn/no-array-sort": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/stop.test.ts": {
-    "typescript/no-unsafe-type-assertion": {
-      "count": 1
-    }
-  },
-  "packages/agent/test/subagent.test.ts": {
-    "effecttsgo/layer-merge-all-with-dependencies": {
-      "count": 2
-    },
-    "effecttsgo/unnecessary-effect-gen": {
-      "count": 1
-    },
-    "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 4
-    },
-    "typescript/no-unsafe-assignment": {
-      "count": 1
-    },
-    "typescript/no-unsafe-type-assertion": {
-      "count": 4
-    }
-  },
-  "packages/agent/test/testing.test.ts": {
-    "typescript/no-unnecessary-condition": {
       "count": 1
     }
   },
@@ -476,9 +333,6 @@
     "effecttsgo/prefer-schema-over-json": {
       "count": 1
     },
-    "typescript/consistent-return": {
-      "count": 4
-    },
     "typescript/no-unsafe-assignment": {
       "count": 1
     }
@@ -508,55 +362,14 @@
       "count": 1
     }
   },
-  "packages/attachments/test/layer-memory.test.ts": {
-    "effecttsgo/missing-layer-context": {
-      "count": 1
-    }
-  },
-  "packages/attachments/test/ref.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 2
-    },
-    "effecttsgo/prefer-typed-schema-decoder": {
-      "count": 2
-    },
-    "effecttsgo/schema-sync-in-effect": {
-      "count": 2
-    }
-  },
-  "packages/log-pg/src/internal/pg-listen.ts": {
-    "effecttsgo/async-function": {
-      "count": 2
-    }
-  },
   "packages/log-pg/src/layer.ts": {
     "effecttsgo/extends-native-error": {
       "count": 1
     }
   },
-  "packages/log-pg/test/layer.fencing-race.integration.test.ts": {
-    "effecttsgo/any-unknown-in-error-context": {
-      "count": 2
-    },
-    "effecttsgo/async-function": {
-      "count": 6
-    },
-    "effecttsgo/process-env": {
-      "count": 1
-    },
-    "typescript/no-unnecessary-condition": {
-      "count": 4
-    },
-    "typescript/strict-boolean-expressions": {
-      "count": 2
-    },
-    "vitest/no-conditional-expect": {
-      "count": 1
-    }
-  },
   "packages/log-pg/test/layer.integration.test.ts": {
     "effecttsgo/async-function": {
-      "count": 6
+      "count": 5
     },
     "effecttsgo/global-timers": {
       "count": 1
@@ -575,23 +388,6 @@
     },
     "typescript/strict-boolean-expressions": {
       "count": 2
-    }
-  },
-  "packages/log-pg/test/layer.test.ts": {
-    "effecttsgo/new-promise": {
-      "count": 2
-    },
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 1
-    },
-    "effecttsgo/schema-number": {
-      "count": 1
-    },
-    "effecttsgo/schema-sync-in-effect": {
-      "count": 1
-    },
-    "typescript/restrict-template-expressions": {
-      "count": 1
     }
   },
   "packages/log-pg/test/pg-test-harness.ts": {
@@ -615,25 +411,6 @@
     },
     "typescript/no-unsafe-type-assertion": {
       "count": 1
-    }
-  },
-  "packages/log/test/adapter.test.ts": {
-    "typescript/no-unsafe-type-assertion": {
-      "count": 3
-    },
-    "typescript/unbound-method": {
-      "count": 1
-    }
-  },
-  "packages/log/test/layer-memory.scaling.test.ts": {
-    "effecttsgo/global-console-in-effect": {
-      "count": 1
-    },
-    "effecttsgo/process-env": {
-      "count": 1
-    },
-    "typescript/restrict-template-expressions": {
-      "count": 2
     }
   },
   "packages/log/test/log-store-contract.ts": {
@@ -662,16 +439,6 @@
       "count": 1
     }
   },
-  "packages/log/test/record-batch.test.ts": {
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 1
-    }
-  },
-  "packages/log/test/vocabulary.test.ts": {
-    "effecttsgo/prefer-typed-schema-decoder": {
-      "count": 4
-    }
-  },
   "packages/mcp/src/mcp.ts": {
     "effecttsgo/async-function": {
       "count": 3
@@ -694,25 +461,19 @@
   },
   "packages/mcp/test/mcp.test.ts": {
     "effecttsgo/any-unknown-in-error-context": {
-      "count": 5
+      "count": 2
     },
     "effecttsgo/async-function": {
-      "count": 13
+      "count": 5
     },
     "effecttsgo/new-promise": {
-      "count": 2
-    },
-    "effecttsgo/prefer-schema-over-json": {
-      "count": 2
-    },
-    "typescript/no-unsafe-argument": {
       "count": 1
     },
     "typescript/no-unsafe-return": {
-      "count": 4
+      "count": 2
     },
     "typescript/require-await": {
-      "count": 11
+      "count": 5
     }
   },
   "packages/workspace/src/glob.ts": {
@@ -764,11 +525,8 @@
     "effecttsgo/unsafe-effect-type-assertion": {
       "count": 1
     },
-    "typescript/no-unnecessary-condition": {
-      "count": 2
-    },
     "typescript/no-unsafe-type-assertion": {
-      "count": 2
+      "count": 1
     }
   },
   "packages/workspace/test/workspace-contract.ts": {
@@ -803,12 +561,6 @@
     }
   },
   "scripts/check-packed-consumer.mjs": {
-    "typescript/no-unsafe-argument": {
-      "count": 1
-    },
-    "typescript/restrict-template-expressions": {
-      "count": 1
-    },
     "typescript/strict-boolean-expressions": {
       "count": 1
     }

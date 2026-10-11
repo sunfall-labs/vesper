@@ -1,7 +1,8 @@
 import { AttachmentRef } from '@sunfall/vesper-attachments/ref';
 import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
-import { Encoding, Effect, Result, Schema } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Effect, Result, Schema } from 'effect';
+import { Base64 } from 'effect/encoding';
+import { Prompt } from 'effect/ai';
 
 const TAG = '@sunfall/vesper-agent/PromptFileData';
 const ATTACHMENT_TAG = '@sunfall/vesper-agent/PromptAttachment';
@@ -40,7 +41,7 @@ export const encode = (prompt: unknown): unknown =>
         _tag: TAG,
         version: 1,
         encoding: 'base64',
-        value: Encoding.encodeBase64(data),
+        value: Base64.encode(data),
       } satisfies Envelope;
     }
     if (data instanceof URL) {
@@ -54,7 +55,7 @@ export const encode = (prompt: unknown): unknown =>
     return data;
   });
 
-/** Restore file data from Vesper's transport envelope, accepting legacy prompts. */
+/** Restore file data from Vesper's transport envelope. */
 export const decode = (prompt: unknown): unknown =>
   mapFileData(prompt, (data) => {
     if (!isEnvelopeCandidate(data)) {
@@ -76,7 +77,7 @@ export const decode = (prompt: unknown): unknown =>
       }
     }
     return Result.getOrThrowWith(
-      Encoding.decodeBase64(data['value']),
+      Base64.decode(data['value']),
       () => new Error('Malformed base64 in Vesper prompt file-data envelope'),
     );
   });

@@ -22,14 +22,14 @@ import {
   Context,
   Duration,
   Effect,
-  Encoding,
   Layer,
   RcMap,
   Redacted,
   Schema,
   type Scope,
 } from 'effect';
-import { AiError, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, Tool, Toolkit } from 'effect/ai';
+import { Hex } from 'effect/encoding';
 
 import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';
 
@@ -891,7 +891,7 @@ const fingerprintOf = (input: {
       'SHA-256',
       new TextEncoder().encode(material),
     );
-    return Encoding.encodeHex(new Uint8Array(digest));
+    return Hex.encode(new Uint8Array(digest));
   });
 };
 

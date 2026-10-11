@@ -121,8 +121,8 @@ const execute = async (request) => {
   let outputBytes = 0;
   let nestedCalls = 0;
 
-  /** @param {string} name @param {unknown} input */
-  const callTool = (name, input) => {
+  /** @param {string} name @param {unknown} input @param {string | undefined} key */
+  const callTool = (name, input, key) => {
     if (!toolNames.has(name)) {
       throw new Error(`Unknown tool: ${name}`);
     }
@@ -136,7 +136,13 @@ const execute = async (request) => {
     const promise = new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
     });
-    send({ _tag: 'ToolCall', id, name, input: cloneJson(input) });
+    send({
+      _tag: 'ToolCall',
+      id,
+      name,
+      input: cloneJson(input),
+      ...(key === undefined ? {} : { key }),
+    });
     return promise;
   };
   /** @param {string} output */
@@ -196,9 +202,13 @@ const execute = async (request) => {
           if (typeof name !== "string" || !toolNames.has(name)) {
             throw new Error(\`Unknown tool: \${String(name)}\`)
           }
-          return async (input) => {
+          return async (input, options) => {
+            const key = options == null ? undefined : options.key
+            if (key !== undefined && (typeof key !== "string" || key === "" || key.length > 256)) {
+              throw new TypeError("Tool call key must be a non-empty string of at most 256 characters")
+            }
             try {
-              return clone(await Reflect.apply(callTool, undefined, [name, clone(input)]))
+              return clone(await Reflect.apply(callTool, undefined, [name, clone(input), key]))
             } catch (cause) {
               if (
                 cause !== null &&

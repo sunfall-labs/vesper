@@ -161,15 +161,17 @@ const renderSchema = (
           )
         : [];
       const additional = member(value, 'additionalProperties');
-      if (additional !== false) {
+      // Effect marks a plain struct `additionalProperties: true` because
+      // decoding ignores excess keys, but an index signature on every object
+      // would hide a misspelled key from the program's type check. Only keys
+      // a schema actually models (`Record`, `StructWithRest`) get one.
+      if (isRecord(additional)) {
         fields.push(
-          `readonly [key: string]: ${isRecord(additional) ? renderSchema(additional, root, depth + 1, references) : 'unknown'}`,
+          `readonly [key: string]: ${renderSchema(additional, root, depth + 1, references)}`,
         );
       }
       return fields.length === 0
-        ? additional === false
-          ? 'Record<string, never>'
-          : 'Record<string, unknown>'
+        ? 'Record<string, never>'
         : `{ ${fields.join('; ')} }`;
     }
     default:
@@ -191,12 +193,13 @@ export const renderCodeSdk = (
     const documentation = comment(tool.description);
     return [
       ...(documentation.length === 0 ? [] : [`  /** ${documentation} */`]),
-      `  readonly ${property(tool.name)}: (input: ${schemaType(tool.parameters)}) => Promise<${schemaType(tool.result)}>;`,
+      `  readonly ${property(tool.name)}: (input: ${schemaType(tool.parameters)}, options?: ToolCallOptions) => Promise<${schemaType(tool.result)}>;`,
     ];
   });
   return [
     'type JsonValue = null | boolean | number | string | ReadonlyArray<JsonValue> | { readonly [key: string]: JsonValue };',
-    'type ToolFailureCode = "tool_failure" | "approval_required" | "dispatch_failed";',
+    'type ToolFailureCode = "tool_failure" | "approval_required" | "dispatch_failed" | "indeterminate";',
+    'type ToolCallOptions = { readonly key?: string };',
     'declare class ToolCallError extends Error {',
     '  readonly name: "ToolCallError";',
     '  readonly code: ToolFailureCode;',

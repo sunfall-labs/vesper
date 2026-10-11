@@ -1,4 +1,5 @@
-import { Clock, Effect, Ref, Semaphore, Stream } from 'effect';
+import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { Clock, Effect, Random, Ref, Semaphore, Stream } from 'effect';
 
 import { RunPolicy } from './run-policy.js';
 import type { Stop } from './stop.js';
@@ -55,6 +56,10 @@ export const acceptsCancel = (
 /** One root run's shared, lexical budget state. */
 export interface Runtime {
   readonly limits: RunPolicy.Limits;
+  /** Unique per root run; recorded so the audit can group shared draws. */
+  readonly id: string;
+  /** The recorded conversation that owns this budget, if the root records. */
+  readonly root: LogVocabulary.ConversationId | undefined;
   readonly turn: Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly modelCall: Effect.Effect<void, RunPolicy.RunPolicyExhausted>;
   readonly addUsage: (
@@ -79,7 +84,11 @@ export const error = (exhaustion: Exhaustion): RunPolicy.RunPolicyExhausted =>
 
 export const create = Effect.fn('RunPolicy.create')(function* (
   configured: RunPolicy.Limits,
+  root?: LogVocabulary.ConversationId,
 ) {
+  // Groups the runs that drew from this budget when it is audited from the
+  // log; it needs to differ between runs, not to be unguessable.
+  const id = `${(yield* Random.nextInt).toString(36)}${(yield* Random.nextInt).toString(36)}`;
   const limits = RunPolicy.make(configured);
   const started = yield* Clock.currentTimeMillis;
   const counters = yield* Ref.make(emptyCounters);
@@ -197,6 +206,8 @@ export const create = Effect.fn('RunPolicy.create')(function* (
 
   return {
     limits,
+    id,
+    root,
     turn: increment('turns', 'turns', limits.maxTurns),
     modelCall: increment('modelCalls', 'model_calls', limits.maxModelCalls),
     addUsage,

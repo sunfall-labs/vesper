@@ -1,34 +1,13 @@
 import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
-import * as NodeServices from '@effect/platform-node/NodeServices';
-import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Layer, Metric, Option, Schema, Stream, Tracer } from 'effect';
-import { Tool, Toolkit, type Response } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import * as Observability from '../src/internal/observability.js';
 import { ScriptedModel } from '../src/testing.js';
-
-const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
-  type: 'finish' as const,
-  reason,
-  usage: {
-    inputTokens: { total: 3, uncached: 3, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 1 },
-  },
-});
-
-const textTurn = (
-  id: string,
-  deltas: ReadonlyArray<string>,
-): Response.StreamPartEncoded[] => [
-  { type: 'text-start' as const, id },
-  ...deltas.map((delta) => ({ type: 'text-delta' as const, id, delta })),
-  { type: 'text-end' as const, id },
-  finish(),
-];
+import { textTurn, testLogLayer, toolTurn } from './scenario-fixtures.js';
 
 /**
  * A span-capturing test `Tracer`.
@@ -72,22 +51,19 @@ const spanNamed = (
 ): CapturedSpan | undefined =>
   spans.find((candidate) => candidate.name === name);
 
-const testLogLayer = Layer.mergeAll(
-  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
-  NodeServices.layer,
-);
+// Metrics are a published contract (dashboards key on the names), so read them
+// back by name from the registry the run wrote to.
+const counter = (name: string) =>
+  Metric.snapshot.pipe(
+    Effect.map((all) => {
+      const state = all.find((metric) => metric.id === name)?.state;
+      return state !== undefined && 'count' in state ? Number(state.count) : 0;
+    }),
+  );
 
 describe('agent observability metrics', () => {
-  it.effect('records provider cache usage through Agent.stream', () =>
+  it.effect('records model calls, tokens, and cache usage', () =>
     Effect.gen(function* () {
-      const before = {
-        calls: yield* Metric.value(Observability.modelCalls),
-        input: yield* Metric.value(Observability.modelInputTokens),
-        output: yield* Metric.value(Observability.modelOutputTokens),
-        uncached: yield* Metric.value(Observability.modelUncachedInputTokens),
-        cacheRead: yield* Metric.value(Observability.modelCacheReadTokens),
-        cacheWrite: yield* Metric.value(Observability.modelCacheWriteTokens),
-      };
       const model = ScriptedModel.make([
         [
           {
@@ -103,7 +79,7 @@ describe('agent observability metrics', () => {
               outputTokens: { total: 5 },
             },
           },
-        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+        ],
       ]);
       const agent = Agent.make({
         name: 'observability-test',
@@ -116,30 +92,14 @@ describe('agent observability metrics', () => {
         .stream('hi')
         .pipe(Stream.runDrain, Effect.provide(model.layer));
 
-      expect(
-        (yield* Metric.value(Observability.modelCalls)).count -
-          before.calls.count,
-      ).toBe(1);
-      expect(
-        (yield* Metric.value(Observability.modelInputTokens)).count -
-          before.input.count,
-      ).toBe(13);
-      expect(
-        (yield* Metric.value(Observability.modelOutputTokens)).count -
-          before.output.count,
-      ).toBe(5);
-      expect(
-        (yield* Metric.value(Observability.modelUncachedInputTokens)).count -
-          before.uncached.count,
-      ).toBe(4);
-      expect(
-        (yield* Metric.value(Observability.modelCacheReadTokens)).count -
-          before.cacheRead.count,
-      ).toBe(7);
-      expect(
-        (yield* Metric.value(Observability.modelCacheWriteTokens)).count -
-          before.cacheWrite.count,
-      ).toBe(2);
+      expect(yield* counter('vesper_agent_model_calls')).toBe(1);
+      expect(yield* counter('vesper_agent_model_input_tokens')).toBe(13);
+      expect(yield* counter('vesper_agent_model_output_tokens')).toBe(5);
+      expect(yield* counter('vesper_agent_model_uncached_input_tokens')).toBe(
+        4,
+      );
+      expect(yield* counter('vesper_agent_model_cache_read_tokens')).toBe(7);
+      expect(yield* counter('vesper_agent_model_cache_write_tokens')).toBe(2);
     }).pipe(Effect.provideService(Metric.MetricRegistry, new Map())),
   );
 });
@@ -169,16 +129,8 @@ describe('agent observability spans', () => {
         }).withHandlers({ echo: ({ text }) => Effect.succeed({ text }) });
 
         const model = ScriptedModel.make([
-          [
-            {
-              type: 'tool-call' as const,
-              id: 'echo-call',
-              name: 'echo',
-              params: { text: 'hi' },
-            },
-            finish('tool-calls'),
-          ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
-          textTurn('a', ['done']),
+          toolTurn('echo', { text: 'hi' }, 'echo-call'),
+          textTurn('done'),
         ]);
 
         yield* agent
@@ -225,12 +177,11 @@ describe('agent observability spans', () => {
 
         // Parent-child structure, cheap to check because the capturing tracer
         // already recorded each span's parent by name: run -> turn -> model.
-        // The tool span nests one level deeper still, under Effect ai's own
-        // `Chat.streamText` span — dispatch happens while that provider
-        // stream is still being pulled, not after `Agent.model` closes.
+        // The tool span is the model span's sibling: the agent runs a turn's
+        // calls after the response that made them has finished.
         expect(turns[0]?.parentName).toBe('Agent.run');
         expect(models[0]?.parentName).toBe('Agent.turn');
-        expect(tool?.parentName).toBe('Chat.streamText');
+        expect(tool?.parentName).toBe('Agent.turn');
       }),
   );
 
@@ -254,17 +205,9 @@ describe('agent observability spans', () => {
         });
 
         const model = ScriptedModel.make([
-          [
-            {
-              type: 'tool-call' as const,
-              id: 'delegate-call',
-              name: 'task_child-span',
-              params: { prompt: 'go' },
-            },
-            finish('tool-calls'),
-          ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
-          textTurn('c', ['child done']),
-          textTurn('p', ['done']),
+          toolTurn('task_child-span', { prompt: 'go' }, 'delegate-call'),
+          textTurn('child done'),
+          textTurn('done'),
         ]);
 
         yield* parent.stream('hi').pipe(
@@ -312,8 +255,8 @@ describe('agent observability spans', () => {
           false,
         );
 
-        // The delegating tool call nests under the model's own
-        // `Chat.streamText` span, like any tool call (see the sibling test).
+        // The delegating tool call nests under the turn, like any tool call
+        // (see the sibling test).
         // `Agent.delegate` itself, though, does not nest under that
         // `Agent.tool` span: the dispatch runtime runs tool handlers on a
         // separately forked fiber, so the ambient span when the delegation
@@ -322,7 +265,7 @@ describe('agent observability spans', () => {
         // nest under `Agent.delegate`, which is the parent-child edge that
         // actually matters for reading a delegation trace.
         expect(parentRun?.parentName).toBeUndefined();
-        expect(delegateTool?.parentName).toBe('Chat.streamText');
+        expect(delegateTool?.parentName).toBe('Agent.turn');
         expect(delegate?.parentName).toBe('Agent.run');
         expect(childRun?.parentName).toBe('Agent.delegate');
       }),
@@ -342,7 +285,7 @@ describe('agent observability spans', () => {
           instructions: 'be terse',
           toolkit: Toolkit.make(),
         });
-        const model = ScriptedModel.make([textTurn('a', ['done'])]);
+        const model = ScriptedModel.make([textTurn('done')]);
 
         yield* Conversation.make(agent, CONVERSATION)
           .run('hi')

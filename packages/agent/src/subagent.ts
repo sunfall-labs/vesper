@@ -1,5 +1,5 @@
 import { Context, Schema, type Crypto } from 'effect';
-import { Tool } from 'effect/unstable/ai';
+import { Tool } from 'effect/ai';
 
 import type { Agent } from './agent.js';
 import { RunPolicy } from './run-policy.js';

@@ -1,5 +1,5 @@
 import { Effect, Schema } from 'effect';
-import type { Prompt, Response, Tool } from 'effect/unstable/ai';
+import type { Prompt, Response, Tool } from 'effect/ai';
 
 // When to stop looping. Kept as a first-class value rather than a boolean
 // option because the interesting policies are compositions: "stop when the

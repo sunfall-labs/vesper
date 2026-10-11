@@ -1,8 +1,8 @@
 import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, beforeAll, describe, expect, it } from '@effect/vitest';
-import { ClusterWorkflowEngine, SingleRunner } from 'effect/unstable/cluster';
-import { type LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { ClusterWorkflowEngine, SingleRunner } from 'effect/cluster';
+import { type LanguageModel, type Response, Toolkit } from 'effect/ai';
 import { Layer, ManagedRuntime, Option, Redacted, Schema } from 'effect';
 
 import { VesperPgClient } from '@sunfall/vesper-log-pg/client';

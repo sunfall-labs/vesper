@@ -71,6 +71,47 @@ export class ApprovalResolutionError extends Schema.TaggedError<ApprovalResoluti
   '@sunfall/vesper-agent/ApprovalResolutionError',
 )('ApprovalResolutionError', ApprovalResolutionErrorFields) {}
 
+/** An externally answered interaction could not be completed. */
+const InteractionResolutionErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly conversationId: typeof ConversationId;
+  readonly toolCallId: typeof ToolCallId;
+  readonly interaction: typeof Schema.String;
+  readonly reason: Schema.Literals<['not_found', 'already_resolved']>;
+} = {
+  message: Schema.String,
+  conversationId: ConversationId,
+  toolCallId: ToolCallId,
+  interaction: Schema.String,
+  reason: Schema.Literals(['not_found', 'already_resolved']),
+};
+
+export class InteractionResolutionError extends Schema.TaggedError<InteractionResolutionError>(
+  '@sunfall/vesper-agent/InteractionResolutionError',
+)('InteractionResolutionError', InteractionResolutionErrorFields) {}
+
+const SignalRequestConflictErrorFields: {
+  readonly message: typeof Schema.String;
+  readonly conversationId: typeof ConversationId;
+  readonly requestId: typeof Schema.String;
+} = {
+  message: Schema.String,
+  conversationId: ConversationId,
+  requestId: Schema.String,
+};
+
+/**
+ * A `Conversation.send` reused a `requestId` with a different signal.
+ *
+ * A retry carries the identical payload and is acknowledged against the
+ * original. The same key with different content is a caller bug (or a key
+ * collision); applying either silently would drop or duplicate an
+ * instruction, so it surfaces as a typed conflict.
+ */
+export class SignalRequestConflictError extends Schema.TaggedError<SignalRequestConflictError>(
+  '@sunfall/vesper-agent/SignalRequestConflictError',
+)('SignalRequestConflictError', SignalRequestConflictErrorFields) {}
+
 /** A conversation checkpoint could not be made durable. */
 export class DurabilityError extends Schema.TaggedError<DurabilityError>(
   '@sunfall/vesper-agent/DurabilityError',

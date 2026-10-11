@@ -1,16 +1,22 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
+import { LogStore } from '@sunfall/vesper-log/log-store';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Layer, Schema, Stream } from 'effect';
-import { type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { CodeExecutor } from '../src/code-executor.js';
+import { NodeCodeExecutor } from '../src/code-executor-node.js';
 import { Conversation } from '../src/conversation.js';
 import { DynamicToolkit } from '../src/dynamic-toolkit.js';
 import { Interception } from '../src/interception.js';
+import * as AgentLog from '../src/log.js';
 import { ScriptedModel } from '../src/testing.js';
+import { testBudget } from './budget-fixture.js';
+import { digestOf } from './tool-fixtures.js';
 
 const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   type: 'finish' as const,
@@ -21,12 +27,67 @@ const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   },
 });
 
-const answeringTurn: ReadonlyArray<Response.StreamPartEncoded> = [
+type Turn = ReadonlyArray<Response.StreamPartEncoded>;
+
+const answeringTurn: Turn = [
   { type: 'text-start', id: 'answer' },
   { type: 'text-delta', id: 'answer', delta: 'done' },
   { type: 'text-end', id: 'answer' },
   finish(),
 ];
+
+/** A model turn that calls `exec` (or any other tool) once. */
+const callTurn = (
+  name: string,
+  params: Record<string, unknown>,
+  id = 'exec-1',
+): Turn => [{ type: 'tool-call', id, name, params }, finish('tool-calls')];
+const execTurn = (source = 'compose', id = 'exec-1'): Turn =>
+  callTurn('exec', { source }, id);
+
+/** A scripted model and a scripted executor, ready to provide to a run. */
+const rig = (
+  events: ReadonlyArray<CodeExecutor.Event>,
+  turns: ReadonlyArray<Turn> = [execTurn(), answeringTurn],
+) => {
+  const executor = CodeExecutor.fake(events);
+  const model = ScriptedModel.make(turns);
+  return {
+    executor,
+    model,
+    layer: Layer.merge(model.layer, executor.layer),
+  };
+};
+
+const toolCall = (
+  id: string,
+  name: string,
+  input: CodeExecutor.JsonValue,
+  key?: string,
+): CodeExecutor.Event => ({
+  _tag: 'ToolCall',
+  id,
+  name,
+  input,
+  ...(key === undefined ? {} : { key }),
+});
+const done: CodeExecutor.Event = { _tag: 'Completion', state: {} };
+
+const logLayer = Layer.mergeAll(
+  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
+  NodeServices.layer,
+);
+
+const recordsOf = <E, R>(conversation: {
+  readonly records: () => Stream.Stream<ConversationRecord.Envelope, E, R>;
+}) =>
+  conversation.records().pipe(
+    Stream.runCollect,
+    Effect.map((all) => Array.from(all).map(({ record }) => record)),
+  );
+
+const promptOf = (request: { readonly prompt: unknown } | undefined) =>
+  JSON.stringify(request?.prompt);
 
 const hiddenForTyping = Tool.make('hidden_for_typing', {
   parameters: Schema.Struct({}),
@@ -92,167 +153,20 @@ void exceptHiddenStaysHidden;
 void exceptExecutorIsRequired;
 void exceptNameIsChecked;
 
-const logLayer = Layer.mergeAll(
-  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
-  NodeServices.layer,
-);
-
-describe('code mode executor protocol', () => {
-  it.effect(
-    'provides a deterministic executor session for code-mode runs',
-    () =>
-      Effect.gen(function* () {
-        const fake = CodeExecutor.fake([
-          {
-            _tag: 'ToolCall',
-            id: 'nested-1',
-            name: 'lookup',
-            input: { id: '42' },
-          },
-          { _tag: 'Output', value: 'order:42' },
-          { _tag: 'Completion', state: { remembered: '42' } },
-        ]);
-        const request: CodeExecutor.Request = {
-          source: 'text(await tools.lookup({ id: "42" }))',
-          tools: [
-            {
-              name: 'lookup',
-              description: 'Look up an order.',
-              parameters: { type: 'object' },
-              result: { type: 'object' },
-            },
-          ],
-          state: {},
-          limits: CodeExecutor.defaultLimits,
-        };
-
-        const observed = yield* Effect.gen(function* () {
-          const executor = yield* CodeExecutor.Service;
-          const session = yield* executor.start(request);
-          yield* session.respond({
-            id: 'nested-1',
-            outcome: 'success',
-            value: { status: 'open' },
-          });
-          return yield* Stream.runCollect(session.events);
-        }).pipe(Effect.provide(fake.layer));
-
-        expect(Array.from(observed)).toEqual([
-          {
-            _tag: 'ToolCall',
-            id: 'nested-1',
-            name: 'lookup',
-            input: { id: '42' },
-          },
-          { _tag: 'Output', value: 'order:42' },
-          { _tag: 'Completion', state: { remembered: '42' } },
-        ]);
-        expect(yield* fake.requests).toEqual([request]);
-        expect(yield* fake.responses).toEqual([
-          {
-            id: 'nested-1',
-            outcome: 'success',
-            value: { status: 'open' },
-          },
-        ]);
-      }),
-  );
-
-  it('accepts code mode in an agent definition', () => {
-    expect(() =>
-      Agent.make({
-        name: 'coder',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(),
-        codeMode: true,
-      }),
-    ).not.toThrow();
-  });
+const lookup = Tool.make('lookup', {
+  description: 'Look up an order.',
+  parameters: Schema.Struct({ id: Schema.String }),
+  success: Schema.Struct({ status: Schema.String }),
+});
+const charge = Tool.make('charge', {
+  description: 'Charge an order.',
+  parameters: Schema.Struct({ amount: Schema.Finite }),
+  success: Schema.Struct({ receipt: Schema.String }),
 });
 
-describe('code mode tool broker', () => {
-  it.effect('returns text output and a structured result separately', () =>
-    Effect.gen(function* () {
-      const agent = Agent.make({
-        name: 'structured-code-result',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(),
-        codeMode: true,
-      }).withHandlers({});
-      const executor = CodeExecutor.fake([
-        { _tag: 'Output', value: 'working' },
-        { _tag: 'Completion', state: {}, result: { answer: 42 } },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-structured-result',
-            name: 'exec',
-            params: { source: 'return { answer: 42 }' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-      const requests = yield* model.requests;
-      const prompt = JSON.stringify(requests[1]?.prompt);
-
-      expect(prompt).toContain('"output":"working"');
-      expect(prompt).toContain('"result":{"answer":42}');
-    }),
-  );
-
-  it.effect('returns a structured outer execution failure', () =>
-    Effect.gen(function* () {
-      const agent = Agent.make({
-        name: 'structured-code-error',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(),
-        codeMode: true,
-      });
-      const executor = CodeExecutor.fake([
-        { _tag: 'Failure', message: 'sandbox failed' },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-structured-error',
-            name: 'exec',
-            params: { source: 'throw new Error("no")' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-      const requests = yield* model.requests;
-      const prompt = JSON.stringify(requests[1]?.prompt);
-
-      expect(prompt).toContain('"isFailure":true');
-      expect(prompt).toContain('"result":{"code":"execution_failed"');
-      expect(prompt).toContain('sandbox failed');
-    }),
-  );
-
+describe('code mode broker', () => {
   it.effect('advertises only exec and composes hidden typed tools', () =>
     Effect.gen(function* () {
-      const lookup = Tool.make('lookup', {
-        description: 'Look up an order.',
-        parameters: Schema.Struct({ id: Schema.String }),
-        success: Schema.Struct({ status: Schema.String }),
-      });
       const summarize = Tool.make('summarize', {
         description: 'Summarize an order status.',
         parameters: Schema.Struct({ status: Schema.String }),
@@ -268,140 +182,206 @@ describe('code mode tool broker', () => {
         lookup: ({ id }) => Effect.succeed({ status: `open:${id}` }),
         summarize: ({ status }) => Effect.succeed(status.toUpperCase()),
       });
-      const executor = CodeExecutor.fake([
-        {
-          _tag: 'ToolCall',
-          id: 'nested-1',
-          name: 'lookup',
-          input: { id: '42' },
-        },
-        {
-          _tag: 'ToolCall',
-          id: 'nested-2',
-          name: 'summarize',
-          input: { status: 'open:42' },
-        },
-        { _tag: 'Output', value: 'OPEN:42' },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-1',
-            name: 'exec',
-            params: { source: 'compose hidden tools' },
-          },
-          finish('tool-calls'),
-        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
-        [
-          { type: 'text-start', id: 'answer' },
-          { type: 'text-delta', id: 'answer', delta: 'done' },
-          { type: 'text-end', id: 'answer' },
-          finish(),
-        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
+      const { executor, model, layer } = rig([
+        toolCall('nested-1', 'lookup', { id: '42' }),
+        toolCall('nested-2', 'summarize', { status: 'open:42' }),
+        { _tag: 'Output', value: 'working' },
+        { _tag: 'Completion', state: {}, result: { answer: 42 } },
       ]);
 
-      const result = yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
+      const result = yield* agent.run('go').pipe(Effect.provide(layer));
       const requests = yield* model.requests;
-      const executions = yield* executor.requests;
 
       expect(result.text).toBe('done');
       expect(requests.map((request) => request.tools)).toEqual([
         ['exec'],
         ['exec'],
       ]);
-      const execDescription = requests[0]?.toolDefinitions.find(
+      // The generated SDK the model writes against is in the exec description.
+      const description = requests[0]?.toolDefinitions.find(
         ({ name }) => name === 'exec',
       )?.description;
-      expect(execDescription).toContain(
+      expect(description).toContain(
         'Execute erasable TypeScript that composes the hidden tools below.',
       );
-      expect(execDescription).toContain(
-        'readonly lookup: (input: { readonly id: string }) => Promise<{ readonly status: string }>;',
+      expect(description).toContain(
+        'readonly lookup: (input: { readonly id: string }, options?: ToolCallOptions) => Promise<{ readonly status: string }>;',
       );
-      expect(execDescription).toContain(
-        'readonly summarize: (input: { readonly status: string }) => Promise<string>;',
+      expect(description).toContain(
+        'readonly summarize: (input: { readonly status: string }, options?: ToolCallOptions) => Promise<string>;',
       );
-      expect(execDescription).toContain(
+      expect(description).toContain(
         'declare function text(value: string | JsonValue): void;',
       );
-      expect(execDescription).toContain(
+      expect(description).toContain(
         'declare class ToolCallError extends Error',
       );
-      expect(execDescription).not.toContain('Node');
-      expect(executions[0]?.tools.map((tool) => tool.name)).toEqual([
-        'lookup',
-        'summarize',
-      ]);
+      expect(description).not.toContain('Node');
+      expect(
+        (yield* executor.requests)[0]?.tools.map(({ name }) => name),
+      ).toEqual(['lookup', 'summarize']);
       expect(yield* executor.responses).toEqual([
-        {
-          id: 'nested-1',
-          outcome: 'success',
-          value: { status: 'open:42' },
-        },
+        { id: 'nested-1', outcome: 'success', value: { status: 'open:42' } },
         { id: 'nested-2', outcome: 'success', value: 'OPEN:42' },
       ]);
-      expect(JSON.stringify(requests[1]?.prompt)).toContain('OPEN:42');
-      expect(JSON.stringify(requests[1]?.prompt)).not.toContain('open:42');
+      // Text output and the structured result reach the model separately,
+      // and the nested intermediate value does not.
+      const prompt = promptOf(requests[1]);
+      expect(prompt).toContain('"output":"working"');
+      expect(prompt).toContain('"result":{"answer":42}');
+      expect(prompt).not.toContain('open:42');
     }),
   );
 
-  it.effect('preserves a hidden tool declared failure as structured data', () =>
+  it.effect('returns a structured outer execution failure', () =>
     Effect.gen(function* () {
-      const reject = Tool.make('reject', {
-        parameters: Schema.Struct({}),
-        success: Schema.String,
-        failure: Schema.Struct({ code: Schema.String }),
-        failureMode: 'return',
-      });
       const agent = Agent.make({
-        name: 'structured-code-failure',
+        name: 'structured-code-error',
         revision: '1',
         instructions: 'Use code mode.',
-        toolkit: Toolkit.make(reject),
+        toolkit: Toolkit.make(),
         codeMode: true,
-      }).withHandlers({
-        reject: () => Effect.fail({ code: 'denied' }),
       });
-      const executor = CodeExecutor.fake([
-        { _tag: 'ToolCall', id: 'nested-reject', name: 'reject', input: {} },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-reject',
-            name: 'exec',
-            params: { source: 'await tools.reject({})' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
+      const { model, layer } = rig([
+        { _tag: 'Failure', message: 'sandbox failed' },
       ]);
 
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
+      yield* agent.run('go').pipe(Effect.provide(layer));
+      const prompt = promptOf((yield* model.requests)[1]);
 
-      expect(yield* executor.responses).toEqual([
-        {
-          id: 'nested-reject',
+      expect(prompt).toContain('"isFailure":true');
+      expect(prompt).toContain('"result":{"code":"execution_failed"');
+      expect(prompt).toContain('sandbox failed');
+    }),
+  );
+
+  it.effect(
+    'validates nested calls and honors declared failures, policy and approval',
+    () =>
+      Effect.gen(function* () {
+        let handled = 0;
+        const reject = Tool.make('reject', {
+          parameters: Schema.Struct({}),
+          success: Schema.String,
+          failure: Schema.Struct({ code: Schema.String }),
+          failureMode: 'return',
+        });
+        const broken = Tool.make('broken', {
+          parameters: Schema.Struct({}),
+          success: Schema.String,
+        });
+        const policed = Tool.make('policed', {
+          parameters: Schema.Struct({}),
+          success: Schema.Struct({ status: Schema.String }),
+        });
+        const approve = Tool.make('approve', {
+          parameters: Schema.Struct({}),
+          success: Schema.String,
+          needsApproval: true,
+        });
+        const approvalToolkit = Toolkit.make(approve);
+        const dynamic = DynamicToolkit.make(
+          approvalToolkit.pipe(
+            Effect.provide(
+              approvalToolkit.toLayer({
+                approve: () =>
+                  Effect.sync(() => {
+                    handled += 1;
+                    return 'approved';
+                  }),
+              }),
+            ),
+          ),
+        );
+        const agent = Agent.make({
+          name: 'validated-code',
+          revision: '1',
+          instructions: 'Use code mode.',
+          toolkit: Toolkit.make(lookup, reject, broken, policed),
+          dynamicTools: [dynamic],
+          codeMode: true,
+        })
+          .withHandlers({
+            lookup: ({ id }) => Effect.succeed({ status: id }),
+            reject: () => Effect.fail({ code: 'denied' }),
+            broken: () => Effect.sync((): string => JSON.parse('42')),
+            policed: () =>
+              Effect.sync(() => {
+                handled += 1;
+                return { status: 'handler' };
+              }),
+          })
+          .intercepting({
+            beforeToolCall: ({ name }) =>
+              Effect.succeed(
+                name === 'policed'
+                  ? Interception.answer({ status: 'policy' })
+                  : Interception.dispatch,
+              ),
+          });
+        const { executor, layer } = rig([
+          toolCall('invalid', 'lookup', { id: 42 }),
+          toolCall('declared', 'reject', {}),
+          toolCall('result', 'broken', {}),
+          toolCall('policy', 'policed', {}),
+          toolCall('approval', 'approve', {}),
+          done,
+        ]);
+
+        yield* agent.run('go').pipe(Effect.provide(layer));
+        const responses = yield* executor.responses;
+        const byId = (id: string) => responses.find((r) => r.id === id);
+
+        const invalid = byId('invalid');
+        if (invalid?.outcome !== 'failure') {
+          throw new Error('expected a parameter validation failure');
+        }
+        expect(invalid.error.code).toBe('tool_failure');
+        const parameterError = yield* Schema.decodeUnknownEffect(
+          AiError.AiError,
+        )(invalid.error.value);
+        expect(parameterError.reason).toMatchObject({
+          _tag: 'ToolParameterValidationError',
+          toolName: 'lookup',
+        });
+        expect(byId('declared')).toEqual({
+          id: 'declared',
           outcome: 'failure',
           error: {
             code: 'tool_failure',
             message: 'Tool "reject" failed',
             value: { code: 'denied' },
           },
-        },
-      ]);
-    }),
+        });
+        expect(byId('result')).toEqual({
+          id: 'result',
+          outcome: 'failure',
+          error: {
+            code: 'dispatch_failed',
+            message: expect.stringContaining(
+              "Failed to encode result for tool 'broken'",
+            ),
+          },
+        });
+        expect(byId('policy')).toEqual({
+          id: 'policy',
+          outcome: 'success',
+          value: { status: 'policy' },
+        });
+        expect(byId('approval')).toEqual({
+          id: 'approval',
+          outcome: 'failure',
+          error: {
+            code: 'approval_required',
+            message:
+              'Tool "approve" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except',
+          },
+        });
+        expect(handled).toBe(0);
+      }).pipe(Effect.scoped),
   );
 
-  it.live('lets the run policy govern concurrent nested calls', () =>
+  it.live('runs concurrent nested calls under the run policy', () =>
     Effect.gen(function* () {
       const bothEntered = yield* Deferred.make<void>();
       let entered = 0;
@@ -423,34 +403,20 @@ describe('code mode tool broker', () => {
             if (entered === 2) {
               yield* Deferred.succeed(bothEntered, undefined);
             }
+            // Each call only returns once the other has entered.
             yield* Deferred.await(bothEntered);
             return id;
           }),
       });
-      const executor = CodeExecutor.fake([
-        { _tag: 'ToolCall', id: 'nested-1', name: 'work', input: { id: '1' } },
-        { _tag: 'ToolCall', id: 'nested-2', name: 'work', input: { id: '2' } },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-concurrent',
-            name: 'exec',
-            params: { source: 'await Promise.all([call1, call2])' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
+      const { layer } = rig([
+        toolCall('nested-1', 'work', { id: '1' }),
+        toolCall('nested-2', 'work', { id: '2' }),
+        done,
       ]);
 
       yield* agent
         .run('go')
-        .pipe(
-          Effect.provide(Layer.merge(model.layer, executor.layer)),
-          Effect.timeout('500 millis'),
-        );
+        .pipe(Effect.provide(layer), Effect.timeout('500 millis'));
       expect(entered).toBe(2);
     }),
   );
@@ -479,6 +445,24 @@ describe('code mode tool broker', () => {
           };
         }),
     });
+    const model = ScriptedModel.make([
+      [
+        {
+          type: 'tool-call',
+          id: 'exec-sequential-1',
+          name: 'exec',
+          params: { source: 'first' },
+        },
+        {
+          type: 'tool-call',
+          id: 'exec-sequential-2',
+          name: 'exec',
+          params: { source: 'second' },
+        },
+        finish('tool-calls'),
+      ],
+      answeringTurn,
+    ]);
 
     return Effect.gen(function* () {
       const agent = Agent.make({
@@ -489,25 +473,6 @@ describe('code mode tool broker', () => {
         codeMode: true,
         concurrency: 'unbounded',
       });
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-sequential-1',
-            name: 'exec',
-            params: { source: 'first' },
-          },
-          {
-            type: 'tool-call',
-            id: 'exec-sequential-2',
-            name: 'exec',
-            params: { source: 'second' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-
       yield* agent
         .run('go')
         .pipe(Effect.provide(Layer.merge(model.layer, executorLayer)));
@@ -516,291 +481,9 @@ describe('code mode tool broker', () => {
   });
 
   it.effect(
-    'rejects invalid nested tool parameters at the broker boundary',
+    'keeps excepted tools beside exec and dispatches them directly',
     () =>
       Effect.gen(function* () {
-        const lookup = Tool.make('lookup', {
-          parameters: Schema.Struct({ id: Schema.String }),
-          success: Schema.String,
-        });
-        const agent = Agent.make({
-          name: 'validated-code',
-          revision: '1',
-          instructions: 'Use code mode.',
-          toolkit: Toolkit.make(lookup),
-          codeMode: true,
-        }).withHandlers({ lookup: ({ id }) => Effect.succeed(id) });
-        const executor = CodeExecutor.fake([
-          {
-            _tag: 'ToolCall',
-            id: 'nested-invalid',
-            name: 'lookup',
-            input: { id: 42 },
-          },
-          { _tag: 'Completion', state: {} },
-        ]);
-        const model = ScriptedModel.make([
-          [
-            {
-              type: 'tool-call',
-              id: 'exec-invalid',
-              name: 'exec',
-              params: { source: 'invalid call' },
-            },
-            finish('tool-calls'),
-          ],
-          answeringTurn,
-        ]);
-
-        yield* agent
-          .run('go')
-          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-
-        expect(yield* executor.responses).toEqual([
-          {
-            id: 'nested-invalid',
-            outcome: 'failure',
-            error: {
-              code: 'dispatch_failed',
-              message: expect.stringContaining(
-                "Invalid parameters for tool 'lookup'",
-              ),
-            },
-          },
-        ]);
-      }),
-  );
-
-  it.effect('rejects invalid nested tool results at the broker boundary', () =>
-    Effect.gen(function* () {
-      const broken = Tool.make('broken', {
-        parameters: Schema.Struct({}),
-        success: Schema.String,
-      });
-      const agent = Agent.make({
-        name: 'result-validated-code',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(broken),
-        codeMode: true,
-      }).withHandlers({
-        broken: () => Effect.sync((): string => JSON.parse('42')),
-      });
-      const executor = CodeExecutor.fake([
-        {
-          _tag: 'ToolCall',
-          id: 'nested-invalid-result',
-          name: 'broken',
-          input: {},
-        },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-invalid-result',
-            name: 'exec',
-            params: { source: 'invalid result' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-
-      expect(yield* executor.responses).toEqual([
-        {
-          id: 'nested-invalid-result',
-          outcome: 'failure',
-          error: {
-            code: 'dispatch_failed',
-            message: expect.stringContaining(
-              "Failed to encode result for tool 'broken'",
-            ),
-          },
-        },
-      ]);
-    }),
-  );
-
-  it.effect('applies beforeToolCall policy to hidden nested calls', () =>
-    Effect.gen(function* () {
-      let handled = 0;
-      const lookup = Tool.make('lookup', {
-        parameters: Schema.Struct({ id: Schema.String }),
-        success: Schema.Struct({ status: Schema.String }),
-      });
-      const agent = Agent.make({
-        name: 'intercepted-code',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(lookup),
-        codeMode: true,
-      })
-        .withHandlers({
-          lookup: () =>
-            Effect.sync(() => {
-              handled += 1;
-              return { status: 'handler' };
-            }),
-        })
-        .intercepting({
-          beforeToolCall: ({ name }) =>
-            Effect.succeed(
-              name === 'lookup'
-                ? Interception.answer({ status: 'policy' })
-                : Interception.dispatch,
-            ),
-        });
-      const executor = CodeExecutor.fake([
-        {
-          _tag: 'ToolCall',
-          id: 'nested-policy',
-          name: 'lookup',
-          input: { id: '42' },
-        },
-        { _tag: 'Output', value: 'policy' },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-policy',
-            name: 'exec',
-            params: { source: 'policy call' },
-          },
-          finish('tool-calls'),
-        ],
-        [
-          { type: 'text-start', id: 'answer' },
-          { type: 'text-delta', id: 'answer', delta: 'done' },
-          { type: 'text-end', id: 'answer' },
-          finish(),
-        ],
-      ]);
-
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-
-      expect(handled).toBe(0);
-      expect(yield* executor.responses).toEqual([
-        {
-          id: 'nested-policy',
-          outcome: 'success',
-          value: { status: 'policy' },
-        },
-      ]);
-    }),
-  );
-
-  it('requires approval-gated tools to be excepted from code mode', () => {
-    const approve = Tool.make('approve', {
-      parameters: Schema.Struct({}),
-      success: Schema.String,
-      needsApproval: true,
-    });
-
-    expect(() =>
-      Agent.make({
-        name: 'approval-code',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(approve),
-        codeMode: true,
-      }),
-    ).toThrow(
-      'Agent codeMode brokers approval-gated tool "approve"; add it to codeMode.except',
-    );
-  });
-
-  it.effect(
-    'returns approval_required for a dynamically resolved approval tool',
-    () =>
-      Effect.gen(function* () {
-        let handled = 0;
-        const approve = Tool.make('approve', {
-          parameters: Schema.Struct({}),
-          success: Schema.String,
-          needsApproval: true,
-        });
-        const dynamic = Toolkit.make(approve);
-        const source = DynamicToolkit.make(
-          dynamic.pipe(
-            Effect.provide(
-              dynamic.toLayer({
-                approve: () =>
-                  Effect.sync(() => {
-                    handled += 1;
-                    return 'approved';
-                  }),
-              }),
-            ),
-          ),
-        );
-        const agent = Agent.make({
-          name: 'dynamic-approval-code',
-          revision: '1',
-          instructions: 'Use code mode.',
-          toolkit: Toolkit.make(),
-          dynamicTools: [source],
-          codeMode: true,
-        });
-        const executor = CodeExecutor.fake([
-          {
-            _tag: 'ToolCall',
-            id: 'nested-approval',
-            name: 'approve',
-            input: {},
-          },
-          { _tag: 'Completion', state: {} },
-        ]);
-        const model = ScriptedModel.make([
-          [
-            {
-              type: 'tool-call',
-              id: 'exec-approval',
-              name: 'exec',
-              params: { source: 'await tools.approve({})' },
-            },
-            finish('tool-calls'),
-          ],
-          answeringTurn,
-        ]);
-
-        yield* agent
-          .run('go')
-          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-
-        expect(yield* executor.responses).toEqual([
-          {
-            id: 'nested-approval',
-            outcome: 'failure',
-            error: {
-              code: 'approval_required',
-              message:
-                'Tool "approve" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except',
-            },
-          },
-        ]);
-        expect(handled).toBe(0);
-      }).pipe(Effect.scoped),
-  );
-
-  it.effect(
-    'excepted tools stay advertised beside exec and dispatch directly',
-    () =>
-      Effect.gen(function* () {
-        const lookup = Tool.make('lookup', {
-          description: 'Look up an order.',
-          parameters: Schema.Struct({ id: Schema.String }),
-          success: Schema.Struct({ status: Schema.String }),
-        });
         const release = Tool.make('release', {
           description: 'Release a build.',
           parameters: Schema.Struct({ id: Schema.String }),
@@ -816,154 +499,119 @@ describe('code mode tool broker', () => {
           lookup: ({ id }) => Effect.succeed({ status: `open:${id}` }),
           release: ({ id }) => Effect.succeed(`released:${id}`),
         });
-        const executor = CodeExecutor.fake([
-          {
-            _tag: 'ToolCall',
-            id: 'nested-lookup',
-            name: 'lookup',
-            input: { id: '42' },
-          },
-          { _tag: 'Output', value: 'open:42' },
-          { _tag: 'Completion', state: {} },
-        ]);
-        const model = ScriptedModel.make([
+        const { executor, model, layer } = rig(
+          [toolCall('nested-lookup', 'lookup', { id: '42' }), done],
           [
-            {
-              type: 'tool-call',
-              id: 'direct-release',
-              name: 'release',
-              params: { id: 'r1' },
-            },
-            finish('tool-calls'),
+            callTurn('release', { id: 'r1' }, 'direct-release'),
+            execTurn('nested lookup', 'exec-lookup'),
+            answeringTurn,
           ],
-          [
-            {
-              type: 'tool-call',
-              id: 'exec-lookup',
-              name: 'exec',
-              params: { source: 'nested lookup' },
-            },
-            finish('tool-calls'),
-          ],
-          answeringTurn,
-        ]);
+        );
 
-        const result = yield* agent
-          .run('go')
-          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
+        const result = yield* agent.run('go').pipe(Effect.provide(layer));
         const requests = yield* model.requests;
-        const executions = yield* executor.requests;
 
         expect(result.text).toBe('done');
-        // Both halves advertised on every request, nothing else.
         expect(
           [...(requests[0]?.tools ?? [])].sort((a, b) => a.localeCompare(b)),
         ).toEqual(['exec', 'release']);
-        // The broker catalogs only the brokered half.
-        expect(executions[0]?.tools.map((tool) => tool.name)).toEqual([
-          'lookup',
-        ]);
-        // The direct call's result reached the model without the executor.
-        expect(JSON.stringify(requests[1]?.prompt)).toContain('released:r1');
+        expect(
+          (yield* executor.requests)[0]?.tools.map(({ name }) => name),
+        ).toEqual(['lookup']);
+        expect(promptOf(requests[1])).toContain('released:r1');
       }),
   );
 
-  it.effect(
-    'an excepted approval tool suspends durably and resolves in code mode',
-    () =>
-      Effect.gen(function* () {
-        let released = 0;
-        const release = Tool.make('release', {
-          parameters: Schema.Struct({ id: Schema.String }),
-          success: Schema.String,
-          needsApproval: true,
-        });
-        const agent = Agent.make({
-          name: 'except-approval',
-          revision: '1',
-          instructions: 'Use code mode, release with approval.',
-          toolkit: Toolkit.make(release),
-          codeMode: { except: ['release'] },
-        }).withHandlers({
-          release: ({ id }) =>
-            Effect.sync(() => {
-              released += 1;
-              return `released:${id}`;
-            }),
-        });
-        const conversation = Conversation.make(
-          agent,
-          LogVocabulary.ConversationId.make('except-approval-conversation'),
-        );
-        const executor = CodeExecutor.fake([]);
-        const model = ScriptedModel.make([
-          [
-            {
-              type: 'tool-call',
-              id: 'release-call',
-              name: 'release',
-              params: { id: 'r1' },
-            },
-            finish('tool-calls'),
-          ],
-          answeringTurn,
-        ]);
+  it.effect('suspends an excepted approval tool durably and resumes it', () =>
+    Effect.gen(function* () {
+      let released = 0;
+      const release = Tool.make('release', {
+        parameters: Schema.Struct({ id: Schema.String }),
+        success: Schema.String,
+        needsApproval: true,
+      });
+      const agent = Agent.make({
+        name: 'except-approval',
+        revision: '1',
+        instructions: 'Use code mode, release with approval.',
+        toolkit: Toolkit.make(release),
+        codeMode: { except: ['release'] },
+      }).withHandlers({
+        release: ({ id }) =>
+          Effect.sync(() => {
+            released += 1;
+            return `released:${id}`;
+          }),
+      });
+      const conversation = Conversation.make(
+        agent,
+        LogVocabulary.ConversationId.make('except-approval-conversation'),
+      );
+      const { layer } = rig(
+        [],
+        [callTurn('release', { id: 'r1' }, 'release-call'), answeringTurn],
+      );
 
-        const suspended = yield* conversation
-          .run('release r1')
-          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-        expect(suspended.outcome).toBe('suspended');
-        if (suspended.outcome !== 'suspended') {
-          throw new Error('expected the approval-gated tool to suspend');
-        }
-        expect(suspended.pendingApprovals).toEqual([
-          {
-            toolCallId: 'release-call',
-            toolName: 'release',
-            input: { id: 'r1' },
-          },
-        ]);
-        expect(released).toBe(0);
+      const suspended = yield* conversation
+        .run('release r1')
+        .pipe(Effect.provide(layer));
+      if (suspended.outcome !== 'suspended') {
+        throw new Error('expected the approval-gated tool to suspend');
+      }
+      expect(suspended.pendingInteractions).toEqual([
+        {
+          toolCallId: 'release-call',
+          toolName: 'release',
+          kind: 'approval',
+          request: { id: 'r1' },
+        },
+      ]);
+      expect(released).toBe(0);
 
-        yield* conversation.resolveApproval('release-call', 'approve');
-        const resolved = yield* conversation
-          .run()
-          .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
+      yield* conversation.resolveApproval('release-call', 'approve');
+      const resolved = yield* conversation.run().pipe(Effect.provide(layer));
 
-        expect(resolved.outcome).toBe('success');
-        expect(released).toBe(1);
-      }).pipe(Effect.provide(logLayer), Effect.scoped),
+      expect(resolved.outcome).toBe('success');
+      expect(released).toBe(1);
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 
-  it('rejects an except name the toolkit does not define at construction', () => {
-    const lookup = Tool.make('lookup', {
+  it('rejects invalid code mode definitions at construction', () => {
+    const approve = Tool.make('approve', {
       parameters: Schema.Struct({}),
       success: Schema.String,
+      needsApproval: true,
     });
-    expect(() =>
-      Agent.make({
-        name: 'except-typo-runtime',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(lookup),
-        // The compile-time key check only covers literal arrays; a
-        // dynamically built list degrades to this runtime rejection. The
-        // lying literal stands in for a value TypeScript cannot see through.
-        codeMode: { except: ['nope' as 'lookup'] },
-      }),
-    ).toThrow('codeMode excepts tool "nope"');
-  });
-
-  it('reserves the exec name whenever code mode is enabled', () => {
     const exec = Tool.make('exec', {
       parameters: Schema.Struct({}),
       success: Schema.String,
     });
+    const base = { revision: '1', instructions: 'Use code mode.' };
+
     expect(() =>
       Agent.make({
+        ...base,
+        name: 'approval-code',
+        toolkit: Toolkit.make(approve),
+        codeMode: true,
+      }),
+    ).toThrow(
+      'Agent codeMode brokers approval-gated tool "approve"; add it to codeMode.except',
+    );
+    expect(() =>
+      Agent.make({
+        ...base,
+        name: 'except-typo',
+        toolkit: Toolkit.make(lookup),
+        // The compile-time key check only covers literal arrays; a
+        // dynamically built list degrades to this runtime rejection.
+        codeMode: { except: ['nope' as 'lookup'] },
+      }),
+    ).toThrow('codeMode excepts tool "nope"');
+    expect(() =>
+      Agent.make({
+        ...base,
         name: 'exec-collision',
-        revision: '1',
-        instructions: 'Use code mode.',
         toolkit: Toolkit.make(exec),
         codeMode: true,
       }),
@@ -972,245 +620,106 @@ describe('code mode tool broker', () => {
 });
 
 describe('code mode scratch state', () => {
+  /** A conversation whose turns each get a fresh scripted model and executor. */
+  const scratch = (
+    name: string,
+    options?: Parameters<typeof Conversation.make>[2],
+  ) => {
+    const conversation = Conversation.make(
+      Agent.make({
+        name,
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(),
+        codeMode: true,
+      }),
+      `${name}-conversation`,
+      options ?? {},
+    );
+    const turn = (events: ReadonlyArray<CodeExecutor.Event>, prompt = 'go') => {
+      const turnRig = rig(events);
+      return conversation
+        .run(prompt)
+        .pipe(Effect.provide(turnRig.layer), Effect.as(turnRig));
+    };
+    return { conversation, turn };
+  };
+
   it.effect(
-    'restores successful checkpoints without adding them to prompts',
+    'restores checkpoints without prompting them and drops failed writes',
     () =>
       Effect.gen(function* () {
-        const agent = Agent.make({
-          name: 'stateful-code',
-          revision: '1',
-          instructions: 'Use code mode.',
-          toolkit: Toolkit.make(),
-          codeMode: true,
-        });
-        const conversation = Conversation.make(
-          agent,
-          LogVocabulary.ConversationId.make('code-state-conversation'),
+        const { conversation, turn: runTurn } = scratch('stateful-code');
+
+        const first = yield* runTurn(
+          [
+            { _tag: 'Output', value: 'first' },
+            { _tag: 'Completion', state: { secret: 'remembered' } },
+          ],
+          'first',
         );
-        const firstExecutor = CodeExecutor.fake([
-          { _tag: 'Output', value: 'first' },
-          { _tag: 'Completion', state: { secret: 'remembered' } },
-        ]);
-        const secondExecutor = CodeExecutor.fake([
-          { _tag: 'Output', value: 'second' },
-          { _tag: 'Completion', state: { secret: 'remembered' } },
-        ]);
-        const turn = (id: string) =>
-          ScriptedModel.make([
-            [
-              {
-                type: 'tool-call',
-                id,
-                name: 'exec',
-                params: { source: 'use scratch state' },
-              },
-              finish('tool-calls'),
-            ],
-            [
-              { type: 'text-start', id: `${id}-answer` },
-              { type: 'text-delta', id: `${id}-answer`, delta: 'done' },
-              { type: 'text-end', id: `${id}-answer` },
-              finish(),
-            ],
-          ]);
-        const firstModel = turn('exec-state-1');
-        const secondModel = turn('exec-state-2');
+        const second = yield* runTurn(
+          [{ _tag: 'Completion', state: { secret: 'remembered' } }],
+          'second',
+        );
+        // A failed execution's earlier stores are not committed.
+        yield* runTurn(
+          [
+            { _tag: 'Completion', state: { leaked: 'no' } },
+            { _tag: 'Failure', message: 'execution failed' },
+          ],
+          'fail',
+        );
+        const after = yield* runTurn([done], 'after');
 
-        yield* conversation
-          .run('first')
-          .pipe(
-            Effect.provide(Layer.merge(firstModel.layer, firstExecutor.layer)),
-          );
-        yield* conversation
-          .run('second')
-          .pipe(
-            Effect.provide(
-              Layer.merge(secondModel.layer, secondExecutor.layer),
-            ),
-          );
-        const records = yield* conversation.records().pipe(Stream.runCollect);
-        const prompts = [
-          ...(yield* firstModel.requests),
-          ...(yield* secondModel.requests),
-        ].map((request) => JSON.stringify(request.prompt));
-
-        expect((yield* firstExecutor.requests)[0]?.state).toEqual({});
-        expect((yield* secondExecutor.requests)[0]?.state).toEqual({
+        expect((yield* first.executor.requests)[0]?.state).toEqual({});
+        expect((yield* second.executor.requests)[0]?.state).toEqual({
           secret: 'remembered',
         });
-        expect(Array.from(records).map(({ record }) => record._tag)).toContain(
-          'CodeStateCheckpoint',
-        );
-        expect(prompts.every((prompt) => !prompt.includes('remembered'))).toBe(
-          true,
-        );
+        expect((yield* after.executor.requests)[0]?.state).toEqual({
+          secret: 'remembered',
+        });
+        expect(
+          (yield* recordsOf(conversation)).some(
+            (record) => record._tag === 'CodeStateCheckpoint',
+          ),
+        ).toBe(true);
+        for (const r of [first, second, after]) {
+          for (const request of yield* r.model.requests) {
+            expect(promptOf(request)).not.toContain('remembered');
+          }
+        }
       }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 
-  it.effect('does not commit scratch writes from a failed execution', () =>
+  it.effect('rejects scratch state over the per-value and total limits', () =>
     Effect.gen(function* () {
-      const agent = Agent.make({
-        name: 'atomic-code-state',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(),
-        codeMode: true,
-      });
-      const conversation = Conversation.make(
-        agent,
-        'atomic-code-state-conversation',
-      );
-      const failedExecutor = CodeExecutor.fake([
-        { _tag: 'Completion', state: { leaked: 'no' } },
-        { _tag: 'Failure', message: 'execution failed' },
-      ]);
-      const failedModel = ScriptedModel.make([
+      const cases = [
+        ['per-value', { oversized: 'x'.repeat(64 * 1024 + 1) }, '65536'],
         [
-          {
-            type: 'tool-call',
-            id: 'exec-failed-state',
-            name: 'exec',
-            params: { source: 'fail after store' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-      yield* conversation
-        .run('fail')
-        .pipe(
-          Effect.provide(Layer.merge(failedModel.layer, failedExecutor.layer)),
-        );
-
-      const nextExecutor = CodeExecutor.fake([
-        { _tag: 'Output', value: 'clean' },
-        { _tag: 'Completion', state: {} },
-      ]);
-      const nextModel = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-after-failure',
-            name: 'exec',
-            params: { source: 'check state' },
-          },
-          finish('tool-calls'),
-        ],
-        [
-          { type: 'text-start', id: 'answer' },
-          { type: 'text-delta', id: 'answer', delta: 'done' },
-          { type: 'text-end', id: 'answer' },
-          finish(),
-        ],
-      ]);
-      yield* conversation
-        .run('continue')
-        .pipe(Effect.provide(Layer.merge(nextModel.layer, nextExecutor.layer)));
-
-      expect((yield* nextExecutor.requests)[0]?.state).toEqual({});
-    }).pipe(Effect.provide(logLayer), Effect.scoped),
-  );
-
-  it.effect('rejects scratch values over the per-value byte limit', () =>
-    Effect.gen(function* () {
-      const agent = Agent.make({
-        name: 'bounded-code-state',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(),
-        codeMode: true,
-      });
-      const conversation = Conversation.make(
-        agent,
-        'bounded-code-state-conversation',
-      );
-      const executor = CodeExecutor.fake([
-        {
-          _tag: 'Completion',
-          state: { oversized: 'x'.repeat(64 * 1024 + 1) },
-        },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-oversized-state',
-            name: 'exec',
-            params: { source: 'store oversized value' },
-          },
-          finish('tool-calls'),
-        ],
-        answeringTurn,
-      ]);
-
-      yield* conversation
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-      const records = yield* conversation.records().pipe(Stream.runCollect);
-      const requests = yield* model.requests;
-
-      expect(JSON.stringify(requests[1]?.prompt)).toContain(
-        'exceeds 65536 bytes',
-      );
-      expect(
-        Array.from(records).some(
-          ({ record }) => record._tag === 'CodeStateCheckpoint',
-        ),
-      ).toBe(false);
-    }).pipe(Effect.provide(logLayer), Effect.scoped),
-  );
-
-  it.effect('rejects scratch state over the total byte limit', () =>
-    Effect.gen(function* () {
-      const agent = Agent.make({
-        name: 'bounded-total-code-state',
-        revision: '1',
-        instructions: 'Use code mode.',
-        toolkit: Toolkit.make(),
-        codeMode: true,
-      });
-      const conversation = Conversation.make(
-        agent,
-        'bounded-total-code-state-conversation',
-      );
-      const executor = CodeExecutor.fake([
-        {
-          _tag: 'Completion',
-          state: Object.fromEntries(
-            Array.from({ length: 5 }, (_, index) => [
-              `value-${String(index)}`,
+          'total',
+          Object.fromEntries(
+            Array.from({ length: 5 }, (_, i) => [
+              `v${String(i)}`,
               'x'.repeat(60 * 1024),
             ]),
           ),
-        },
-      ]);
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'exec-oversized-total-state',
-            name: 'exec',
-            params: { source: 'store too many values' },
-          },
-          finish('tool-calls'),
+          '262144',
         ],
-        answeringTurn,
-      ]);
+      ] as const;
+      for (const [name, state, limit] of cases) {
+        const { conversation, turn } = scratch(`bounded-${name}`);
+        const r = yield* turn([{ _tag: 'Completion', state }]);
 
-      yield* conversation
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, executor.layer)));
-      const records = yield* conversation.records().pipe(Stream.runCollect);
-      const requests = yield* model.requests;
-
-      expect(JSON.stringify(requests[1]?.prompt)).toContain(
-        'exceeds 262144 bytes',
-      );
-      expect(
-        Array.from(records).some(
-          ({ record }) => record._tag === 'CodeStateCheckpoint',
-        ),
-      ).toBe(false);
+        expect(promptOf((yield* r.model.requests)[1])).toContain(
+          `exceeds ${limit} bytes`,
+        );
+        expect(
+          (yield* recordsOf(conversation)).some(
+            (record) => record._tag === 'CodeStateCheckpoint',
+          ),
+        ).toBe(false);
+      }
     }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 
@@ -1218,61 +727,461 @@ describe('code mode scratch state', () => {
     'applies the recording policy before persisting scratch state',
     () =>
       Effect.gen(function* () {
-        const agent = Agent.make({
-          name: 'redacted-code-state',
-          revision: '1',
-          instructions: 'Use code mode.',
-          toolkit: Toolkit.make(),
-          codeMode: true,
+        const { conversation, turn: run } = scratch('redacted-code-state', {
+          codeState: () => Effect.succeed({ token: '[redacted]' }),
         });
-        const conversation = Conversation.make(
-          agent,
-          'redacted-code-state-conversation',
-          {
-            codeState: () => Effect.succeed({ token: '[redacted]' }),
-          },
-        );
-        const firstExecutor = CodeExecutor.fake([
-          { _tag: 'Completion', state: { token: 'raw-secret' } },
-        ]);
-        const secondExecutor = CodeExecutor.fake([
-          { _tag: 'Output', value: 'ok' },
-          { _tag: 'Completion', state: {} },
-        ]);
-        const model = (id: string) =>
-          ScriptedModel.make([
-            [
-              {
-                type: 'tool-call',
-                id,
-                name: 'exec',
-                params: { source: 'use state' },
-              },
-              finish('tool-calls'),
-            ],
-            answeringTurn,
-          ]);
-        const firstModel = model('exec-redact-1');
-        const secondModel = model('exec-redact-2');
 
-        yield* conversation
-          .run('first')
-          .pipe(
-            Effect.provide(Layer.merge(firstModel.layer, firstExecutor.layer)),
-          );
-        yield* conversation
-          .run('second')
-          .pipe(
-            Effect.provide(
-              Layer.merge(secondModel.layer, secondExecutor.layer),
-            ),
-          );
+        yield* run([{ _tag: 'Completion', state: { token: 'raw-secret' } }]);
+        const second = yield* run([done]);
 
-        expect((yield* secondExecutor.requests)[0]?.state).toEqual({
+        expect((yield* second.executor.requests)[0]?.state).toEqual({
           token: '[redacted]',
         });
-        const records = yield* conversation.records().pipe(Stream.runCollect);
-        expect(JSON.stringify(Array.from(records))).not.toContain('raw-secret');
+        expect(JSON.stringify(yield* recordsOf(conversation))).not.toContain(
+          'raw-secret',
+        );
       }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+});
+
+// Nested calls made by a script are recorded durably, keyed by the parent
+// `exec` call and a deterministic key, and served from the log when the same
+// `exec` call is entered again after a crash.
+interface Counts {
+  lookup: number;
+  charge: number;
+  intercepted: number;
+}
+const newCounts = (): Counts => ({ lookup: 0, charge: 0, intercepted: 0 });
+
+describe('code mode durable nested calls', () => {
+  const agentWith = (counts: Counts) =>
+    Agent.make({
+      name: 'nested',
+      revision: '1',
+      instructions: 'Use code mode.',
+      toolkit: Toolkit.make(lookup, charge),
+      codeMode: true,
+    }).withHandlers({
+      lookup: ({ id }) =>
+        Effect.sync(() => {
+          counts.lookup += 1;
+          return { status: `fresh:${id}` };
+        }),
+      charge: ({ amount }) =>
+        Effect.sync(() => {
+          counts.charge += 1;
+          return { receipt: `fresh:${String(amount)}` };
+        }),
+    });
+  const script = (...events: ReadonlyArray<CodeExecutor.Event>) =>
+    [...events, { _tag: 'Output', value: 'ok' }, done] as const;
+  const retry = {
+    onIndeterminateToolCall: () => Effect.succeed(Interception.retry),
+  };
+
+  const CONVERSATION = LogVocabulary.ConversationId.make('nested-conversation');
+  const PATH = AgentLog.pathFor(CONVERSATION);
+  const EXEC = LogVocabulary.ToolCallId.make('exec-1');
+
+  /** Write an earlier, crashed run's records straight into the conversation. */
+  const seed = Effect.fn('test.seed')(function* (
+    records: ReadonlyArray<ConversationRecord.Record>,
+  ) {
+    const store = yield* LogStore.Service;
+    yield* store.create(PATH, CONVERSATION).pipe(Effect.orDie);
+    const claim = yield* store
+      .acquire(PATH, LogVocabulary.ProducerId.make('previous-run'))
+      .pipe(Effect.orDie);
+    yield* store
+      .append({
+        path: PATH,
+        producerId: claim.producerId,
+        epoch: claim.epoch,
+        sequence: claim.nextSequence,
+        records: records.map((record) => ({
+          conversationId: CONVERSATION,
+          timestamp: 1_700_000_000_000,
+          record,
+        })),
+      })
+      .pipe(Effect.orDie);
+  });
+
+  const crashedExec: ReadonlyArray<ConversationRecord.Record> = [
+    {
+      _tag: 'RunStarted',
+      budget: testBudget,
+      agent: 'nested',
+      formatVersion: 1,
+      agentRevision: LogVocabulary.AgentRevision.make('1'),
+      prompt: [],
+    },
+    {
+      _tag: 'StepOpened',
+      step: 1,
+      id: EXEC,
+      name: 'exec',
+      inputDigest: digestOf('exec', { source: 'compose' }),
+      params: { source: 'compose' },
+    },
+    { _tag: 'StepStarted', id: EXEC, name: 'exec', replay: 'unsafe' },
+  ];
+
+  /** The persisted records of one nested call, up to the given stage. */
+  const nested = (
+    key: string,
+    name: string,
+    input: CodeExecutor.JsonValue,
+    stage: 'called' | 'started' | 'settled',
+    result?: unknown,
+    replay: 'safe' | 'unsafe' = 'unsafe',
+  ): ReadonlyArray<ConversationRecord.Record> => {
+    const id = LogVocabulary.ToolCallId.make(key);
+    return [
+      {
+        _tag: 'StepOpened',
+        id,
+        parent: EXEC,
+        name,
+        inputDigest: digestOf(name, input),
+        params: input,
+      },
+      ...(stage === 'called'
+        ? []
+        : [
+            {
+              _tag: 'StepStarted',
+              id,
+              parent: EXEC,
+              name,
+              replay,
+            } as const,
+          ]),
+      ...(stage === 'settled'
+        ? [
+            {
+              _tag: 'StepSettled',
+              id,
+              parent: EXEC,
+              name,
+              outcome: 'success',
+              result,
+            } as const,
+          ]
+        : []),
+    ];
+  };
+
+  it.effect('records nested calls durably without touching the prompt', () =>
+    Effect.gen(function* () {
+      const events = script(
+        toolCall('n1', 'lookup', { id: '42' }),
+        toolCall('n2', 'charge', { amount: 5 }, 'charge-once'),
+      );
+      const counts = newCounts();
+      const durable = rig(events);
+      const conversation = Conversation.make(agentWith(counts), CONVERSATION);
+      const plain = rig(events);
+
+      yield* conversation.run('go').pipe(Effect.provide(durable.layer));
+      yield* agentWith(newCounts()).run('go').pipe(Effect.provide(plain.layer));
+      const written = (yield* recordsOf(conversation)).filter(
+        (record) => 'parent' in record && record.parent !== undefined,
+      );
+
+      expect(
+        ['StepOpened', 'StepStarted', 'StepSettled'].map(
+          (tag) => written.filter((record) => record._tag === tag).length,
+        ),
+      ).toEqual([2, 2, 2]);
+      expect(
+        written.every((record) => 'parent' in record && record.parent === EXEC),
+      ).toBe(true);
+      expect(
+        written.flatMap((record) =>
+          record._tag === 'StepSettled'
+            ? [[record.id, record.name, record.result]]
+            : [],
+        ),
+      ).toEqual(
+        expect.arrayContaining([
+          ['#1', 'lookup', { status: 'fresh:42' }],
+          ['k:charge-once', 'charge', { receipt: 'fresh:5' }],
+        ]),
+      );
+      expect(counts).toEqual({ lookup: 1, charge: 1, intercepted: 0 });
+      // Recording is invisible to the model.
+      const prompts = (rigged: typeof durable) =>
+        rigged.model.requests.pipe(
+          Effect.map((requests) => requests.map(promptOf)),
+        );
+      expect(yield* prompts(durable)).toEqual(yield* prompts(plain));
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  it.effect(
+    'serves settled calls from the log and fails an unsettled one closed on Retry',
+    () =>
+      Effect.gen(function* () {
+        const counts = newCounts();
+        yield* seed([
+          ...crashedExec,
+          ...nested('#1', 'lookup', { id: '42' }, 'settled', {
+            status: 'from-log',
+          }),
+          ...nested('#2', 'charge', { amount: 5 }, 'started'),
+          ...nested('#3', 'lookup', { id: '43' }, 'called'),
+          ...nested('k:once', 'charge', { amount: 6 }, 'settled', {
+            receipt: 'keyed-from-log',
+          }),
+        ]);
+        const r = rig(
+          script(
+            toolCall('n1', 'lookup', { id: '42' }),
+            toolCall('n2', 'charge', { amount: 5 }),
+            toolCall('n3', 'lookup', { id: '43' }),
+            toolCall('n4', 'lookup', { id: '44' }),
+            toolCall('n5', 'charge', { amount: 6 }, 'once'),
+          ),
+          [answeringTurn],
+        );
+        const conversation = Conversation.make(
+          agentWith(counts).intercepting({
+            ...retry,
+            beforeToolCall: () => {
+              counts.intercepted += 1;
+              return Effect.succeed(Interception.dispatch);
+            },
+          }),
+          CONVERSATION,
+        );
+
+        const result = yield* conversation
+          .run('go')
+          .pipe(Effect.provide(r.layer));
+        const responses = yield* r.executor.responses;
+        const byId = (id: string) =>
+          responses.find((response) => response.id === id);
+        const written = yield* recordsOf(conversation);
+
+        expect(result.outcome).toBe('success');
+        // Only calls the earlier run never executed did real work (and were
+        // intercepted); served and refused calls bypass both.
+        expect(counts).toEqual({ lookup: 2, charge: 0, intercepted: 2 });
+        expect(byId('n1')).toEqual({
+          id: 'n1',
+          outcome: 'success',
+          value: { status: 'from-log' },
+        });
+        expect(byId('n2')).toMatchObject({
+          outcome: 'failure',
+          error: { code: 'indeterminate' },
+        });
+        expect(byId('n3')).toMatchObject({
+          outcome: 'success',
+          value: { status: 'fresh:43' },
+        });
+        expect(byId('n4')).toMatchObject({
+          outcome: 'success',
+          value: { status: 'fresh:44' },
+        });
+        expect(byId('n5')).toEqual({
+          id: 'n5',
+          outcome: 'success',
+          value: { receipt: 'keyed-from-log' },
+        });
+        expect(
+          written.some(
+            (record) => record._tag === 'StepSettled' && record.id === EXEC,
+          ),
+        ).toBe(true);
+      }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  // A script can finish and commit its scratch state, and the process die
+  // before `exec` settles. The retried execution must start from the state
+  // the crashed one started from, not from what it went on to commit.
+  it.effect('retries an exec from the state before its unsettled commit', () =>
+    Effect.gen(function* () {
+      yield* seed([
+        ...crashedExec,
+        {
+          _tag: 'CodeStateCheckpoint',
+          producer: EXEC,
+          state: { charged: true },
+        },
+      ]);
+      const r = rig(script(), [answeringTurn]);
+      const conversation = Conversation.make(
+        agentWith(newCounts()).intercepting(retry),
+        CONVERSATION,
+      );
+
+      yield* conversation.run('go').pipe(Effect.provide(r.layer));
+
+      expect((yield* r.executor.requests)[0]?.state).toEqual({});
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  // Recovery's rule for a top-level call, at the sandbox boundary: a start
+  // recorded replay-safe may run again, because running it twice was declared
+  // to leave the world as running it once.
+  it.effect('runs a replay-safe nested call that never settled again', () =>
+    Effect.gen(function* () {
+      const counts = newCounts();
+      yield* seed([
+        ...crashedExec,
+        ...nested('#1', 'lookup', { id: '42' }, 'started', undefined, 'safe'),
+      ]);
+      const r = rig(script(toolCall('n1', 'lookup', { id: '42' })), [
+        answeringTurn,
+      ]);
+      const conversation = Conversation.make(
+        agentWith(counts).intercepting(retry),
+        CONVERSATION,
+      );
+
+      yield* conversation.run('go').pipe(Effect.provide(r.layer));
+      const responses = yield* r.executor.responses;
+      const written = yield* recordsOf(conversation);
+
+      expect(counts.lookup).toBe(1);
+      expect(responses.find((response) => response.id === 'n1')).toMatchObject({
+        outcome: 'success',
+        value: { status: 'fresh:42' },
+      });
+      // The same step, settled: not a second call under the same key.
+      const steps = written.filter(
+        (record) => 'parent' in record && record.parent === EXEC,
+      );
+      expect(steps.map((record) => record._tag)).toEqual([
+        'StepOpened',
+        'StepStarted',
+        'StepStarted',
+        'StepSettled',
+      ]);
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  it.effect(
+    'refuses to serve a recorded call that a drifted script remakes',
+    () =>
+      Effect.gen(function* () {
+        const counts = newCounts();
+        yield* seed([
+          ...crashedExec,
+          ...nested('#1', 'lookup', { id: '42' }, 'settled', {
+            status: 'from-log',
+          }),
+        ]);
+        const r = rig(script(toolCall('n1', 'lookup', { id: 'other' })), [
+          answeringTurn,
+        ]);
+
+        yield* Conversation.make(
+          agentWith(counts).intercepting(retry),
+          CONVERSATION,
+        )
+          .run('go')
+          .pipe(Effect.provide(r.layer));
+
+        expect(counts.lookup).toBe(0);
+        expect((yield* r.executor.responses)[0]).toMatchObject({
+          outcome: 'failure',
+          error: { code: 'dispatch_failed' },
+        });
+      }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  it.effect('rejects a key reused within one execution', () =>
+    Effect.gen(function* () {
+      const counts = newCounts();
+      const r = rig(
+        script(
+          toolCall('n1', 'lookup', { id: '1' }, 'same'),
+          toolCall('n2', 'lookup', { id: '2' }, 'same'),
+        ),
+      );
+
+      yield* Conversation.make(agentWith(counts), CONVERSATION)
+        .run('go')
+        .pipe(Effect.provide(r.layer));
+
+      expect(counts.lookup).toBe(1);
+      expect(
+        (yield* r.executor.responses).filter(
+          ({ outcome }) => outcome === 'failure',
+        ),
+      ).toHaveLength(1);
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  it.effect('runs nested calls as before when the run is not recorded', () =>
+    Effect.gen(function* () {
+      const counts = newCounts();
+      const r = rig(
+        script(
+          toolCall('n1', 'lookup', { id: '42' }, 'explicit'),
+          toolCall('n2', 'charge', { amount: 5 }),
+        ),
+      );
+
+      const result = yield* agentWith(counts)
+        .run('go')
+        .pipe(Effect.provide(r.layer));
+
+      expect(result.text).toBe('done');
+      expect(counts).toEqual({ lookup: 1, charge: 1, intercepted: 0 });
+      expect(yield* r.executor.responses).toHaveLength(2);
+    }),
+  );
+});
+
+describe('code mode with the real sandbox executor', () => {
+  it.effect('runs a model-written script end to end across turns', () =>
+    Effect.gen(function* () {
+      const agent = Agent.make({
+        name: 'real-sandbox',
+        revision: '1',
+        instructions: 'Use code mode.',
+        toolkit: Toolkit.make(lookup),
+        codeMode: true,
+      }).withHandlers({
+        lookup: ({ id }) => Effect.succeed({ status: `open:${id}` }),
+      });
+      const conversation = Conversation.make(
+        agent,
+        'real-sandbox-conversation',
+      );
+      const sources = [
+        'const r = await tools.lookup({ id: "42" }); store("seen", r.status); return { status: r.status }',
+        'text("restored:" + load("seen"))',
+      ];
+      const models = sources.map((source, index) =>
+        ScriptedModel.make([
+          execTurn(source, `exec-real-${String(index)}`),
+          answeringTurn,
+        ]),
+      );
+
+      for (const [index, model] of models.entries()) {
+        yield* conversation
+          .run(`turn ${String(index)}`)
+          .pipe(
+            Effect.provide(Layer.merge(model.layer, NodeCodeExecutor.layer())),
+          );
+      }
+      const [first = [], second = []] = yield* Effect.all(
+        models.map((m) => m.requests),
+      );
+
+      expect(
+        first.at(0)?.toolDefinitions.find(({ name }) => name === 'exec')
+          ?.description,
+      ).toContain('readonly lookup: (input: { readonly id: string }');
+      expect(promptOf(first[1])).toContain('"result":{"status":"open:42"}');
+      expect(promptOf(second[1])).toContain('restored:open:42');
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 });

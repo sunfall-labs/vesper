@@ -11,9 +11,9 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
-import { Command, Flag, Prompt } from 'effect/unstable/cli';
-import { WorkflowEngine } from 'effect/unstable/workflow';
+} from 'effect/ai';
+import { Command, Flag, Prompt } from 'effect/cli';
+import { WorkflowEngine } from 'effect/workflow';
 
 // This is deliberately a story, not a real deployment. The scripted model
 // makes the example deterministic and keeps the approval API visible instead
@@ -198,7 +198,7 @@ const AppLive = binding.layer.pipe(
 const choose = (mode: DecisionMode) =>
   mode === 'ask'
     ? Prompt.run(
-        Prompt.select({
+        Prompt.Select({
           message: 'What should happen?',
           choices: [
             {
@@ -254,24 +254,26 @@ const runStory = (mode: DecisionMode) =>
     yield* Console.log(`\nAgent\n  ${result.text}`);
 
     const records = yield* conversation.records().pipe(Stream.runCollect);
-    const conversationTrail = Array.from(records)
-      .map(({ record }) => record._tag)
-      .flatMap((tag): ReadonlyArray<string> => {
-        switch (tag) {
-          case 'ToolStarted':
-            return ['handler entered'];
-          case 'ToolSuspended':
+    const conversationTrail = Array.from(records).flatMap(
+      ({ record }): ReadonlyArray<string> => {
+        switch (record._tag) {
+          case 'StepStarted':
+            return [
+              record.resumes === undefined
+                ? 'handler entered'
+                : 'handler re-entered',
+            ];
+          case 'StepSuspended':
             return ['approval requested'];
-          case 'ToolResumed':
-            return ['handler re-entered'];
-          case 'ToolWaitCompleted':
+          case 'StepResolved':
             return ['decision consumed'];
-          case 'ToolOutcome':
+          case 'StepSettled':
             return ['tool completed'];
           default:
             return [];
         }
-      });
+      },
+    );
     yield* Console.log(
       `\nConversation trail\n  ${conversationTrail.join(' -> ')}\n`,
     );
@@ -280,7 +282,7 @@ const runStory = (mode: DecisionMode) =>
 const command = Command.make(
   'approval-story',
   {
-    decision: Flag.choice('decision', ['ask', 'approve', 'deny']).pipe(
+    decision: Flag.Literals('decision', ['ask', 'approve', 'deny']).pipe(
       Flag.withDescription(
         'Prompt interactively, or choose a branch non-interactively.',
       ),

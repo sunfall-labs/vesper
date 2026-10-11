@@ -16,7 +16,7 @@
   <a href="./docs/releasing.md">Releasing</a>
 </p>
 
-Vesper is an agent loop built directly on `effect/unstable/ai`. Effect supplies
+Vesper is an agent loop built directly on `effect/ai`. Effect supplies
 the provider seam, tools, prompts, responses, and chat; Vesper adds the repeated
 turn loop and makes two difficult properties ordinary:
 
@@ -34,25 +34,25 @@ Official Effect AI packages provide `LanguageModel` directly.
 > [Migrating to Conversation](docs/migrating-to-conversation.md).
 
 Vesper packages require Node.js 22 or newer; the bundled agent code executor
-requires Node.js 22.13.0 for native type stripping. Effect and its provider
-packages are pinned together as one family (`4.0.0-rc.109`) while the
-interfaces are release candidates, ensuring one Effect service identity in the
-application; [releasing](docs/releasing.md) states the version policy.
+requires Node.js 22.13.0 for native type stripping. Effect releases `effect` and
+every `@effect/*` package together at one version; install them all at the
+same version (`4.0.3` or later) so the application has one Effect service
+identity; [releasing](docs/releasing.md) states the version policy.
 
 ## Quick start
 
 ```bash
 npm install @sunfall/vesper-agent \
             @sunfall/vesper-log \
-            @effect/ai-anthropic@4.0.0-rc.109 \
-            @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
+            @effect/ai-anthropic@4.0.3 \
+            @effect/platform-node@4.0.3 effect@4.0.3
 ```
 
 The following is a complete, in-memory example: one typed tool, one agent,
 one unrecorded run, and the same definition bound to durable conversation
 history. It makes a handful of real Anthropic requests — the model will call
 the tool — so set `ANTHROPIC_API_KEY` before running it. For a
-credential-free example, run `nub run example:support-agent` from a checkout
+credential-free example, run `bun run example:support-agent` from a checkout
 of this repository.
 
 ```ts
@@ -64,7 +64,7 @@ import { Agent } from '@sunfall/vesper-agent/agent';
 import { Conversation } from '@sunfall/vesper-agent/conversation';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { Config, Effect, Layer, Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 const orderStatus = Tool.make('order_status', {
   description: 'Look up the fulfilment status of one order.',
@@ -101,7 +101,7 @@ const program = Effect.gen(function* () {
 const model = AnthropicLanguageModel.model('claude-sonnet-4-6').pipe(
   Layer.provide(
     AnthropicClient.layerConfig({
-      apiKey: Config.redacted('ANTHROPIC_API_KEY'),
+      apiKey: Config.Redacted('ANTHROPIC_API_KEY'),
     }),
   ),
 );
@@ -171,7 +171,7 @@ mocked world are walked through section by section in
 [the example's README](examples/support-agent/README.md).
 
 ```bash
-nub run example:support-agent
+bun run example:support-agent
 ```
 
 ## Compile-time guarantees
@@ -243,7 +243,8 @@ each with a type that admits exactly what it is for. Spans observe; an
 interceptor intervenes.
 
 **[Durable conversations](docs/conversations.md).** The conversation log is a
-durability mechanism, not an audit trail: recording and redaction, resumption,
+durability mechanism with a tamper-evident hash chain, not a full audit
+trail: recording and redaction, resumption,
 settlement and what an orphan looks like, child sessions, signals and
 steering, crash recovery for tool calls, and durable tool approvals — with
 the invariants a reader of the log can rely on.
@@ -253,25 +254,25 @@ the invariants a reader of the log can rely on.
 ### Durable approval locally
 
 ```bash
-nub run example:approval-cli
+bun run example:approval-cli
 ```
 
 `examples/approval-cli` needs no API key. A scripted agent asks its release
 tool to change production; the handler yields one keyed durable approval
 through `AgentWorkflow.wait`, the CLI lets you approve or deny it, and the
 same handler resumes before the agent reacts to the result. For a
-non-interactive run, use `nub run example:approval-cli --decision approve` or
+non-interactive run, use `bun run example:approval-cli --decision approve` or
 `--decision deny`.
 
 This is the `Effect Workflow`-backed form, for an external step with its own
 request/result shape. For a plain approve/deny gate on one tool, with no
 workflow engine at all, see
-[Tool approval](packages/agent/README.md#tool-approval).
+[Tool interactions](packages/agent/README.md#tool-interactions).
 
 ### Real providers
 
 ```bash
-ANTHROPIC_API_KEY=... nub run example:compliance-relay \
+ANTHROPIC_API_KEY=... bun run example:compliance-relay \
   "Explain the refund options without making a promise."
 ```
 
@@ -286,7 +287,7 @@ finite record snapshots, following, queued signals, resumption, branching,
 independent forks, the workspace toolkit, and both compaction triggers against
 a real provider. Everything else in the repository runs against scripted
 Effect `LanguageModel` implementations. Run only the conversation phase with
-`nub run example:live-smoke -- --phase log`.
+`bun run example:live-smoke -- --phase log`.
 
 The opt-in `durability` phase uses PostgreSQL instead of the memory backend. It
 writes a run and queued signal, disposes that PostgreSQL runtime and pool, then
@@ -298,7 +299,7 @@ replacement; it does not spawn a second OS process. Apply
 ```bash
 OPENROUTER_API_KEY=... \
 VESPER_DATABASE_URL=postgres://... \
-nub run example:live-smoke -- \
+bun run example:live-smoke -- \
   --phase durability \
   --provider openrouter \
   --model openrouter/free
@@ -316,8 +317,8 @@ replay shape independently of the live smoke test.
 ## Development
 
 ```bash
-npx @nubjs/nub@0.7.5 install   # bootstraps the pinned nub, then installs
-nub run verify                 # build, then format + lint + typecheck, then tests
+bun install      # Bun 1.4.3 or newer; see docs/contributing.md
+bun run verify   # build, then format + lint + typecheck, then tests
 ```
 
 [`docs/contributing.md`](docs/contributing.md) has the full toolchain, the
@@ -355,8 +356,10 @@ adoption can provide or explicit design constraints:
   cancels may preempt provider streaming but never leapfrog backlog or interrupt
   a tool after its side effect has begun.
 - **Indeterminate external side effects require application reconciliation.**
-  A `ToolStarted` without an outcome cannot prove whether another system
-  committed. The dedicated interceptor must explicitly Answer or Retry.
+  A `StepStarted` without a `StepSettled` cannot prove whether another
+  system committed. The dedicated interceptor must explicitly Answer or Retry;
+  only a start that resumed a workflow wait, which replays its own durable
+  steps, is re-entered on its own.
 - **Legacy, manual, and orphaned histories may require a proportional scan.**
   Successful current runs write the bounded `RunSettled.resume` aggregate, and
   compacted prompts read only their live suffix. Benchmarks keep the remaining

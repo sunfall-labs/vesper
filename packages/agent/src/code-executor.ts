@@ -48,6 +48,11 @@ export interface ToolCall {
   readonly id: string;
   readonly name: string;
   readonly input: JsonValue;
+  /**
+   * The script's explicit identity for this call, from
+   * `tools.name(input, { key })`. Absent calls are keyed by ordinal.
+   */
+  readonly key?: string;
 }
 
 export interface Output {
@@ -71,7 +76,8 @@ export type Event = ToolCall | Output | Completion | Failure;
 export type ToolFailureCode =
   | 'tool_failure'
   | 'approval_required'
-  | 'dispatch_failed';
+  | 'dispatch_failed'
+  | 'indeterminate';
 
 export interface ToolFailure {
   readonly code: ToolFailureCode;

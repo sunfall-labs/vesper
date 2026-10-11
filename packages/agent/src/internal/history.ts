@@ -1,7 +1,7 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Effect, Schema } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 import { AgentBranch } from '../branch.js';
 import { PromptTransport } from '../prompt-transport.js';
@@ -37,7 +37,7 @@ import { CompactionRuntime } from './compaction.js';
 // assistant tool call with no matching result. So an unanswered call is
 // dropped. A resumed agent resolves indeterminate starts before rebuilding this
 // prompt, so the active recovery path supplies an outcome first. The filtering
-// remains necessary for malformed/legacy history and non-resuming readers.
+// remains necessary for crashed histories read without a resume (non-resuming readers).
 //
 // ## Compaction is honoured, not ignored
 //
@@ -278,6 +278,13 @@ const fold = (
   // "this message and everything after".
   let assistantAt = LogOffset.START;
   let resultsAt = LogOffset.START;
+  // A turn can finish before every call in it is answered: a truncated turn
+  // interrupts a started handler, and resume answers it afterwards
+  // (`onIndeterminateToolCall`). Its `TurnFinished` then precedes the
+  // answer. Closing the turn there would split each call from its result, and
+  // the rule below would drop both. Instead the turn stays open for its
+  // results, and closes once they are all in or when anything else begins.
+  let awaitingResults = false;
 
   /**
    * Close the turn being accumulated.
@@ -318,6 +325,27 @@ const fold = (
     results = [];
     assistantAt = LogOffset.START;
     resultsAt = LogOffset.START;
+    awaitingResults = false;
+  };
+
+  const unanswered = (): boolean => {
+    const answered = new Set(results.map((result) => result.id));
+    return assistant.some(
+      (part) =>
+        part.type === 'tool-call' &&
+        !part.providerExecuted &&
+        !answered.has(part.id),
+    );
+  };
+
+  /** New model output starts the next turn, so the held one closes first. */
+  const beginAssistant = (): void => {
+    if (awaitingResults) {
+      flush();
+    }
+    if (assistant.length === 0) {
+      assistantAt = currentOffset;
+    }
   };
 
   let currentOffset = LogOffset.START;
@@ -335,16 +363,17 @@ const fold = (
     },
 
     Text: (record) => {
-      if (assistant.length === 0) {
-        assistantAt = currentOffset;
-      }
+      beginAssistant();
       assistant.push(Prompt.makePart('text', { text: record.text }));
     },
 
-    ToolCall: (record) => {
-      if (assistant.length === 0) {
-        assistantAt = currentOffset;
+    // A step with a parent is a code-mode call inside an `exec` the model
+    // sees as one call; only the `exec` itself reaches the prompt.
+    StepOpened: (record) => {
+      if (record.parent !== undefined) {
+        return;
       }
+      beginAssistant();
       assistant.push(
         Prompt.makePart('tool-call', {
           id: record.id,
@@ -355,7 +384,10 @@ const fold = (
       );
     },
 
-    ToolOutcome: (record) => {
+    StepSettled: (record) => {
+      if (record.parent !== undefined) {
+        return;
+      }
       if (results.length === 0) {
         resultsAt = currentOffset;
       }
@@ -366,15 +398,22 @@ const fold = (
           isFailure: record.outcome === 'failure',
           providerExecuted: record.providerExecuted ?? false,
           // Already the toolkit's encoding — the form `Prompt` puts in front
-          // of the model — which is why `ToolOutcome.result` stores that and
+          // of the model — which is why `StepSettled.result` stores that and
           // not the decoded value.
           result: record.result,
         }),
       );
+      if (awaitingResults && !unanswered()) {
+        flush();
+      }
     },
 
     TurnFinished: () => {
-      flush();
+      if (unanswered()) {
+        awaitingResults = true;
+      } else {
+        flush();
+      }
     },
 
     SignalReceived: (record) => {
@@ -406,11 +445,13 @@ const fold = (
     // fold and one that did would say nothing about the conversation.
     Compacted: () => {},
     BranchedFrom: () => {},
-    ToolStarted: () => {},
-    ToolSuspended: () => {},
-    ToolResumed: () => {},
-    ToolWaitCompleted: () => {},
-    ToolWaitRestarted: () => {},
+    // Progress toward a `Text` the turn never finished: output the model did
+    // not complete is not something it said, so it is never replayed to it.
+    PartialOutput: () => {},
+    StepStarted: () => {},
+    StepSuspended: () => {},
+    StepResolved: () => {},
+    StepRestarted: () => {},
     Completed: () => {},
     ChildSession: () => {},
     RunSettled: () => {},
@@ -473,13 +514,13 @@ export const usageFrom = (
       run = { input: 0, output: 0 };
     },
     Text: () => {},
-    ToolCall: () => {},
-    ToolStarted: () => {},
-    ToolSuspended: () => {},
-    ToolResumed: () => {},
-    ToolWaitCompleted: () => {},
-    ToolWaitRestarted: () => {},
-    ToolOutcome: () => {},
+    PartialOutput: () => {},
+    StepOpened: () => {},
+    StepStarted: () => {},
+    StepSuspended: () => {},
+    StepResolved: () => {},
+    StepRestarted: () => {},
+    StepSettled: () => {},
     Compacted: () => {},
     BranchedFrom: () => {},
     StateCheckpoint: () => {},

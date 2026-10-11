@@ -2,12 +2,13 @@ import { Effect, Exit, Layer, Option, Ref, Stream } from 'effect';
 import {
   AiError,
   Chat,
+  IdGenerator,
   LanguageModel,
   Prompt,
   type Response,
   type Tool,
   type Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import type { RunFailure, VisibleTools, WithOwnHandlers } from '../agent.js';
 import { CodeMode } from '../code-mode.js';
@@ -18,6 +19,7 @@ import type { AgentEvents } from '../event.js';
 import { AgentHistory } from '../history.js';
 import { DynamicToolkit } from '../dynamic-toolkit.js';
 import type { Interception } from '../interception.js';
+import { Interaction } from '../interaction.js';
 import type * as AgentLog from '../log.js';
 import { ResultOverflow } from '../result-overflow.js';
 import type { RunPolicy } from '../run-policy.js';
@@ -29,14 +31,16 @@ import { CompactionRuntime } from './compaction.js';
 import { AgentEventRuntime } from './event.js';
 import * as Observability from './observability.js';
 import { encodePart } from './part-encoding.js';
+import * as ToolResolution from './tool-resolution.js';
 import {
-  approvalRequiresConversationError,
   incompleteOutputError,
+  interactionRequiresConversationError,
   normalizeProviderError,
 } from './provider-error.js';
+import * as ToolLookup from './tool-lookup.js';
 
 // The loop, in CONTEXT.md's sense: repeated turns until a stop condition
-// holds, which is the piece `effect/unstable/ai` does not have. `agent.ts`
+// holds, which is the piece `effect/ai` does not have. `agent.ts`
 // keeps the public surface — the `Agent.*` types, `make`'s compile step, and
 // the method attachment — and threads the run's session and interceptor into
 // {@link makeEntry} lexically. Nothing here reads them from the context.
@@ -83,7 +87,7 @@ export interface Entry<
     EntryRequirements
   >;
   readonly streamIn: (
-    chat: Chat.Service,
+    chat: Chat.Chat,
     input: Prompt.RawInput,
   ) => Stream.Stream<
     AgentEvents.Event<EntryTools>,
@@ -134,6 +138,7 @@ export interface Wiring<
   readonly startRun?:
     | ((
         input: Prompt.RawInput,
+        runtime: RunPolicyRuntime.Runtime,
       ) => Effect.Effect<void, AgentLog.DurabilityError>)
     | undefined;
   readonly initialUsage?: Stop.Usage | undefined;
@@ -276,6 +281,57 @@ export const makeEntry = <
     //
     // An agent with no dispatch seams takes the first branch. A root runtime
     // is also a seam because its tool semaphore is shared by descendants.
+    //
+    // The brokered half of a code-mode toolkit: `exec` built over the hidden
+    // tools behind their own gate, and the excepted tools ungated. Shared by
+    // `dispatching`, which gates both for the model, and by indeterminate-call
+    // recovery, which needs `exec` to be a tool it can retry — against the
+    // bare `runToolkit` a recorded `exec` call is an unknown tool.
+    const brokered = (
+      arbitration: ToolDispatch.TurnArbitration,
+      except: ReadonlyArray<
+        CodeMode.Except<CodeModeOption> & keyof RunTools & string
+      >,
+    ) =>
+      Effect.gen(function* () {
+        const { hidden, excepted } = CodeMode.split(yield* runToolkit, except);
+        // The hidden gate is narrower than the model-facing one on purpose: it
+        // has no session of its own. `exec` owns the durable record of its
+        // nested calls (see `code-mode.ts`) and hands the gate only their
+        // start, so interception and metering stay here, once per real run.
+        const hiddenGated = yield* ToolDispatch.gate(Effect.succeed(hidden), {
+          agent: definition.name,
+          conversationId: session?.conversationId,
+          interceptor,
+          runtime,
+          unmeteredToolNames: delegationToolNames,
+          arbitration,
+        });
+        const visible = yield* CodeMode.toolkit(
+          hiddenGated,
+          wiring.codeState ?? CodeMode.emptyState,
+        );
+        return { visible, excepted };
+      });
+
+    // What indeterminate-call recovery retries against. Direct tools are the
+    // bare toolkit, as before: `resolveIndeterminate` does their recording,
+    // arbitration and metering itself. In code mode the recorded call may be
+    // `exec`, which only the brokered toolkit knows how to run.
+    const recoverable = (arbitration: ToolDispatch.TurnArbitration) =>
+      CodeMode.selectToolkit(
+        definition.codeMode,
+        () => runToolkit,
+        (except) =>
+          Effect.gen(function* () {
+            const { visible, excepted } = yield* brokered(arbitration, except);
+            return CodeMode.merge<
+              RunTools,
+              CodeMode.Except<CodeModeOption> & keyof RunTools & string
+            >(visible, excepted);
+          }),
+      );
+
     const dispatching = (arbitration: ToolDispatch.TurnArbitration) =>
       CodeMode.selectToolkit(
         definition.codeMode,
@@ -290,25 +346,7 @@ export const makeEntry = <
           }),
         (except) =>
           Effect.gen(function* () {
-            const { hidden, excepted } = CodeMode.split(
-              yield* runToolkit,
-              except,
-            );
-            const hiddenGated = yield* ToolDispatch.gate(
-              Effect.succeed(hidden),
-              {
-                agent: definition.name,
-                conversationId: session?.conversationId,
-                interceptor,
-                runtime,
-                unmeteredToolNames: delegationToolNames,
-                arbitration,
-              },
-            );
-            const visible = yield* CodeMode.toolkit(
-              hiddenGated,
-              wiring.codeState ?? CodeMode.emptyState,
-            );
+            const { visible, excepted } = yield* brokered(arbitration, except);
             const visibleGated = yield* ToolDispatch.gate(
               Effect.succeed(visible),
               {
@@ -388,7 +426,7 @@ export const makeEntry = <
      * description of one.
      */
     const askModel = (
-      chat: Chat.Service,
+      chat: Chat.Chat,
       seen: TurnState,
       step: number,
       input: Prompt.RawInput,
@@ -401,10 +439,8 @@ export const makeEntry = <
     > =>
       Stream.unwrap(
         Effect.gen(function* () {
-          // Chat exposes decoded parts so tool handlers receive their typed
-          // parameters. Resolve the same toolkit here to encode each part
-          // back to the provider representation before it reaches observers
-          // or the durable recording sink.
+          // Resolve the same toolkit the turn dispatches through, so observers
+          // see the interaction metadata of the tools the model was offered.
           const resolvedToolkit = yield* dispatching(arbitration);
           if (interceptor?.beforeModelCall !== undefined) {
             yield* interceptor.beforeModelCall({
@@ -423,66 +459,131 @@ export const makeEntry = <
           yield* Observability.modelCall;
           const remaining =
             runtime === undefined ? undefined : yield* runtime.remainingMillis;
-          const asked = chat
+          // The agent runs its own tool calls (see `ToolResolution`). The
+          // model is asked with resolution disabled and deferred validation,
+          // so a call to a tool this turn did not offer — ordinary, because
+          // the toolkit can change between turns — or with parameters that do
+          // not decode arrives as a call, never as a failed turn.
+          const response: Array<Response.AnyPart> = [];
+          let finishReason: Response.FinishReason | undefined;
+          const answer = chat
             .streamText({
               prompt: input,
               toolkit: resolvedToolkit,
-              concurrency: definition.concurrency,
+              disableToolCallResolution: true,
+              toolCallValidation: 'deferred',
             })
             .pipe(
-              // `part` is reasserted to the same `Response.StreamPart<RunTools>`
-              // at each of the three points below that need it, rather than
-              // cast once and reused. Effect's mapped tool-part union is not
-              // idempotent under this compiled intersection: TypeScript's
-              // control-flow narrowing (excluding the `'error'` member below)
-              // produces a structural type this generic union no longer
-              // recognises as itself, so a single upstream cast stops
-              // type-checking at exactly the two downstream call sites that
-              // need the full, unnarrowed union again. Reasserting the same
-              // target type at each site is what the toolkit value passed
-              // alongside it already guarantees at runtime; nothing here
-              // asserts a *different* type than the one Chat actually decoded
-              // the part against.
-              Stream.mapEffect((part) =>
-                part.type === 'error'
-                  ? Effect.fail(
-                      normalizeProviderError(part.error, part.metadata),
-                    )
-                  : encodePart(
-                      part as Response.StreamPart<ModelTools>,
-                      resolvedToolkit,
-                    ).pipe(
-                      Effect.map((encodedPart) => ({ part, encodedPart })),
-                    ),
-              ),
-              Stream.tap(({ part, encodedPart }) =>
-                Effect.gen(function* () {
-                  seen.started = true;
-                  observe(
-                    seen,
-                    part as Response.StreamPart<RunTools>,
-                    encodedPart,
-                  );
-                  if (encodedPart.type === 'finish') {
-                    yield* Observability.usage(encodedPart.usage);
-                  }
-                  if (runtime !== undefined) {
-                    yield* runtime.remainingMillis;
+              Stream.tap((part) =>
+                Effect.sync(() => {
+                  response.push(part);
+                  if (part.type === 'finish') {
+                    finishReason = part.reason;
                   }
                 }),
               ),
-              Stream.map(
-                ({ part, encodedPart }): AgentEvents.Event<ModelTools> => ({
+              // The model span covers the response only. The calls it made
+              // run after it, as siblings under the turn.
+              Stream.withSpan('Agent.model', {
+                attributes: {
+                  'vesper.agent.step': step,
+                  'vesper.model.attempt': attempt,
+                  ...(session === undefined
+                    ? {}
+                    : { 'vesper.conversation.id': session.conversationId }),
+                },
+              }),
+            );
+          // After the response, never during it. `Chat.streamText` has
+          // written the response into history by the time this runs; the
+          // resolution's own parts follow it there. A response the provider
+          // cut off resolves nothing: the turn fails on its finish, and none
+          // of its calls has started.
+          const resolution = Stream.unwrap(
+            Effect.gen(function* () {
+              if (
+                finishReason !== undefined &&
+                incompleteOutputError('streamText', finishReason) !== undefined
+              ) {
+                return Stream.empty;
+              }
+              const { calls, answered } = ToolResolution.callsOf(response);
+              if (calls.length === 0) {
+                return Stream.empty;
+              }
+              const history = yield* Ref.get(chat.history);
+              const settled: Array<ToolResolution.Resolution<ModelTools>> = [];
+              return ToolResolution.resolve(resolvedToolkit, calls, {
+                answered,
+                messages: history.content,
+                concurrency: definition.concurrency,
+              }).pipe(
+                Stream.tap((part) =>
+                  Effect.sync(() => {
+                    if (part.type !== 'tool-result' || !part.preliminary) {
+                      settled.push(part);
+                    }
+                  }),
+                ),
+                // Like `Chat`, history keeps what was produced even when a
+                // later call fails, so a retry sees the calls that settled.
+                Stream.onExit(() =>
+                  settled.length === 0
+                    ? Effect.void
+                    : Ref.update(chat.history, (current) =>
+                        Prompt.concat(
+                          current,
+                          Prompt.fromResponseParts(settled),
+                        ),
+                      ),
+                ),
+              );
+            }),
+          );
+          const asked = Stream.concat(answer, resolution).pipe(
+            (stream) =>
+              session === undefined
+                ? stream
+                : Stream.provideService(
+                    stream,
+                    IdGenerator.IdGenerator,
+                    session.idGenerator,
+                  ),
+            Stream.mapEffect((part) =>
+              part.type === 'error'
+                ? Effect.fail(normalizeProviderError(part.error, part.metadata))
+                : encodePart(part).pipe(
+                    Effect.map((encodedPart) => ({ part, encodedPart })),
+                  ),
+            ),
+            Stream.tap(({ part, encodedPart }) =>
+              Effect.gen(function* () {
+                seen.started = true;
+                observe(seen, part, encodedPart, resolvedToolkit);
+                if (encodedPart.type === 'finish') {
+                  yield* Observability.usage(encodedPart.usage);
+                }
+                if (runtime !== undefined) {
+                  yield* runtime.remainingMillis;
+                }
+              }),
+            ),
+            Stream.map(
+              ({ part, encodedPart }): AgentEvents.Event<ModelTools> => {
+                const interaction =
+                  encodedPart.type === 'tool-approval-request'
+                    ? seen.callsById.get(encodedPart.toolCallId)?.interaction
+                    : undefined;
+                return {
                   _tag: 'Part',
                   step,
-                  // Effect's mapped tool-part union is not idempotent under
-                  // this compiled intersection, although the toolkit value is
-                  // exactly the one Chat used to decode the part.
-                  part: part as Response.StreamPart<ModelTools>,
+                  part,
                   encodedPart,
-                }),
-              ),
-            );
+                  ...(interaction === undefined ? {} : { interaction }),
+                };
+              },
+            ),
+          );
           const model =
             remaining === undefined
               ? asked
@@ -499,17 +600,7 @@ export const makeEntry = <
                       ),
                   }),
                 );
-          return model.pipe(
-            Stream.withSpan('Agent.model', {
-              attributes: {
-                'vesper.agent.step': step,
-                'vesper.model.attempt': attempt,
-                ...(session === undefined
-                  ? {}
-                  : { 'vesper.conversation.id': session.conversationId }),
-              },
-            }),
-          );
+          return model;
         }),
       ) as Stream.Stream<
         AgentEvents.Event<ModelTools>,
@@ -558,7 +649,7 @@ export const makeEntry = <
      * the question is whether the *next* request fits, not the last one.
      */
     const compactAhead = (
-      chat: Chat.Service,
+      chat: Chat.Chat,
       lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
       input: Prompt.RawInput,
     ): Effect.Effect<
@@ -607,7 +698,7 @@ export const makeEntry = <
       });
 
     const compactWithBudget = (
-      chat: Chat.Service,
+      chat: Chat.Chat,
       policy: Compaction.Policy,
     ): Effect.Effect<
       CompactionRuntime.Summarized | undefined,
@@ -639,7 +730,7 @@ export const makeEntry = <
       });
 
     const turn = (
-      chat: Chat.Service,
+      chat: Chat.Chat,
       usage: Ref.Ref<Stop.Usage>,
       toolCallCounts: Ref.Ref<Readonly<Record<string, number>>>,
       lastTurn: Ref.Ref<ContextWindow.TurnUsage | undefined>,
@@ -658,15 +749,21 @@ export const makeEntry = <
             pending,
           ).pipe(
             Effect.catch((error) =>
-              step === 1 && wiring.startRun !== undefined
+              step === 1 &&
+              wiring.startRun !== undefined &&
+              runtime !== undefined
                 ? wiring
-                    .startRun(pending)
+                    .startRun(pending, runtime)
                     .pipe(Effect.andThen(Effect.fail(error)))
                 : Effect.fail(error),
             ),
           );
-          if (step === 1 && wiring.startRun !== undefined) {
-            yield* wiring.startRun(input);
+          if (
+            step === 1 &&
+            wiring.startRun !== undefined &&
+            runtime !== undefined
+          ) {
+            yield* wiring.startRun(input, runtime);
           }
           if (runtime !== undefined) {
             yield* runtime.turn;
@@ -941,16 +1038,16 @@ export const makeEntry = <
               // from — an unrecorded run has nowhere to record the decision
               // this would wait on, so it fails outright instead of
               // returning a `Result` nothing can ever act on.
-              const pendingApprovals = seen.pendingApprovals;
-              if (pendingApprovals.length > 0 && session === undefined) {
+              const pendingInteractions = seen.pendingInteractions;
+              if (pendingInteractions.length > 0 && session === undefined) {
                 return Stream.fail(
-                  approvalRequiresConversationError(pendingApprovals),
+                  interactionRequiresConversationError(pendingInteractions),
                 );
               }
 
               const prepared =
                 cancelled ||
-                pendingApprovals.length > 0 ||
+                pendingInteractions.length > 0 ||
                 nextTurn === undefined
                   ? TurnControl.keep
                   : yield* nextTurn({
@@ -981,7 +1078,7 @@ export const makeEntry = <
               // cancel outranks everything.
               const stop =
                 cancelled ||
-                pendingApprovals.length > 0 ||
+                pendingInteractions.length > 0 ||
                 (policyWantsStop && steers.length === 0 && !drained.backlog);
               const completedSteps = seen.started ? step : step - 1;
 
@@ -997,12 +1094,12 @@ export const makeEntry = <
                             'cancelled',
                             seen.started ? response : undefined,
                           )
-                        : pendingApprovals.length > 0
+                        : pendingInteractions.length > 0
                           ? AgentEventRuntime.suspended(
                               completedSteps,
                               seen.text,
                               totals,
-                              pendingApprovals,
+                              pendingInteractions,
                               seen.started ? response : undefined,
                             )
                           : AgentEventRuntime.completed(
@@ -1109,7 +1206,7 @@ export const makeEntry = <
         WithOwnHandlers<RuntimeTools> | StopR | TurnControlR | InterceptorR
       >;
 
-    const streamIn = (chat: Chat.Service, input: Prompt.RawInput) =>
+    const streamIn = (chat: Chat.Chat, input: Prompt.RawInput) =>
       Stream.unwrap(
         Effect.gen(function* () {
           if (
@@ -1163,7 +1260,10 @@ export const makeEntry = <
             >;
           }
           if (runtime === undefined) {
-            const root = yield* RunPolicyRuntime.create(runPolicy);
+            const root = yield* RunPolicyRuntime.create(
+              runPolicy,
+              session?.conversationId,
+            );
             return entryFor({ ...wiring, runtime: root }).streamIn(
               chat,
               input,
@@ -1225,7 +1325,7 @@ export const makeEntry = <
             );
             if (delivered.some((signal) => signal.kind === 'cancel')) {
               if (wiring.startRun !== undefined) {
-                yield* wiring.startRun(effective);
+                yield* wiring.startRun(effective, runtime);
               }
               return Stream.concat(
                 announced,
@@ -1241,7 +1341,6 @@ export const makeEntry = <
             }
 
             const arbitration = yield* ToolDispatch.makeTurnArbitration;
-            const cancelObserved = yield* Ref.make(false);
             const cancelDuringRecovery = session
               .signalPages(runtime.limits.maxSignalsPerBoundary)
               .pipe(
@@ -1258,7 +1357,6 @@ export const makeEntry = <
                     index,
                   ),
                 ),
-                Stream.tap(() => Ref.set(cancelObserved, true)),
                 Stream.tap(() => arbitration.cancel),
                 Stream.runHead,
                 Effect.flatMap((cancel) =>
@@ -1284,7 +1382,7 @@ export const makeEntry = <
                 Effect.gen(function* () {
                   const remaining = yield* runtime.remainingMillis;
                   const recovery = ToolDispatch.resolveIndeterminate(
-                    runToolkit,
+                    recoverable(arbitration),
                     {
                       agent: definition.name,
                       session,
@@ -1306,8 +1404,16 @@ export const makeEntry = <
                         ),
                     }),
                   );
-                  yield* Effect.raceFirst(recovery, cancelDuringRecovery);
-                  if (yield* Ref.get(cancelObserved)) {
+                  const recoveryOutcome = yield* Effect.raceFirst(
+                    Effect.map(recovery, (results) => ({
+                      _tag: 'Recovered' as const,
+                      results,
+                    })),
+                    Effect.as(cancelDuringRecovery, {
+                      _tag: 'Cancelled' as const,
+                    }),
+                  );
+                  if (recoveryOutcome._tag === 'Cancelled') {
                     const after = yield* session.drainSignalsBounded(
                       runtime.limits.maxSignalsPerBoundary,
                     );
@@ -1333,7 +1439,7 @@ export const makeEntry = <
                             Prompt.make(steeringInput(afterSteers)),
                           );
                     if (wiring.startRun !== undefined) {
-                      yield* wiring.startRun(cancelledInput);
+                      yield* wiring.startRun(cancelledInput, runtime);
                     }
                     return Stream.concat(
                       Stream.fromIterable(
@@ -1357,6 +1463,7 @@ export const makeEntry = <
                       ),
                     );
                   }
+                  const recovered = recoveryOutcome.results;
 
                   // `resolveIndeterminate` settles every durable approval this
                   // session already has a decision for, but it does not — and
@@ -1367,13 +1474,13 @@ export const makeEntry = <
                   // index it is read through here is the same one
                   // `resolveIndeterminate` just updated.
                   const approvalWaits = session.suspendedToolCalls.filter(
-                    (call) => call.wait === ToolDispatch.APPROVAL_WAIT,
+                    (call) => call.wait === ToolDispatch.INTERACTION_WAIT,
                   );
                   // The toolkit is resolved once, and only when an approval
                   // wait exists at all: resolution may include dynamic
                   // sources whose work is real (an MCP discovery
                   // round-trip), and almost every run has nothing suspended.
-                  const stillPendingApprovals: AgentEvents.PendingApproval[] =
+                  const stillPendingInteractions: AgentEvents.PendingInteraction[] =
                     approvalWaits.length === 0
                       ? []
                       : yield* Effect.gen(function* () {
@@ -1392,9 +1499,10 @@ export const makeEntry = <
                                 current.value._tag !== 'Suspended'
                               ) {
                                 return Effect.succeed<
-                                  ReadonlyArray<AgentEvents.PendingApproval>
+                                  ReadonlyArray<AgentEvents.PendingInteraction>
                                 >([]);
                               }
+                              const pendingRecovery = current.value;
                               // Re-decoded against the tool's current
                               // parameter schema rather than surfaced from
                               // the durable encoded form: a caller
@@ -1407,11 +1515,16 @@ export const makeEntry = <
                                   call.name,
                                   call.request,
                                 ),
-                                (decodedInput) => [
+                                (
+                                  decodedInput,
+                                ): ReadonlyArray<AgentEvents.PendingInteraction> => [
                                   {
                                     toolCallId: call.toolCallId,
                                     toolName: call.name,
-                                    input: decodedInput,
+                                    kind:
+                                      pendingRecovery.interaction?.name ??
+                                      'approval',
+                                    request: decodedInput,
                                   },
                                 ],
                               );
@@ -1419,16 +1532,19 @@ export const makeEntry = <
                           );
                           return batches.flat();
                         });
-                  if (stillPendingApprovals.length > 0) {
-                    return Stream.make(
-                      AgentEventRuntime.suspended(
-                        0,
-                        // No model call happened on this path — the run was
-                        // refused before turn 1 — so there is no partial text
-                        // to preserve.
-                        '',
-                        wiring.initialUsage ?? { input: 0, output: 0 },
-                        stillPendingApprovals,
+                  if (stillPendingInteractions.length > 0) {
+                    return Stream.concat(
+                      Stream.fromIterable(recovered),
+                      Stream.make(
+                        AgentEventRuntime.suspended(
+                          0,
+                          // No model call happened on this path — the run was
+                          // refused before turn 1 — so there is no partial text
+                          // to preserve.
+                          '',
+                          wiring.initialUsage ?? { input: 0, output: 0 },
+                          stillPendingInteractions,
+                        ),
                       ),
                     );
                   }
@@ -1442,33 +1558,29 @@ export const makeEntry = <
                       AgentHistory.messagesFrom(yield* session.recorded),
                     ),
                   );
-                  return entryFor({
-                    session: wiring.session,
-                    interceptor: wiring.interceptor,
-                    runtime,
-                    ...(wiring.dynamicToolkit === undefined
-                      ? {}
-                      : { dynamicToolkit: wiring.dynamicToolkit }),
-                    ...(wiring.startRun === undefined
-                      ? {}
-                      : { startRun: wiring.startRun }),
-                    ...(wiring.initialUsage === undefined
-                      ? {}
-                      : { initialUsage: wiring.initialUsage }),
-                    ...(wiring.lastTurn === undefined
-                      ? {}
-                      : { lastTurn: wiring.lastTurn }),
-                    ...(wiring.codeState === undefined
-                      ? {}
-                      : { codeState: wiring.codeState }),
-                  }).streamIn(chat, effective) as Stream.Stream<
-                    AgentEvents.Event<ModelTools>,
-                    RunFailure,
-                    | WithOwnHandlers<RuntimeTools>
-                    | StopR
-                    | TurnControlR
-                    | InterceptorR
-                  >;
+                  return Stream.concat(
+                    Stream.fromIterable(recovered),
+                    entryFor({
+                      session: wiring.session,
+                      interceptor: wiring.interceptor,
+                      runtime,
+                      ...(wiring.dynamicToolkit === undefined
+                        ? {}
+                        : { dynamicToolkit: wiring.dynamicToolkit }),
+                      ...(wiring.startRun === undefined
+                        ? {}
+                        : { startRun: wiring.startRun }),
+                      ...(wiring.initialUsage === undefined
+                        ? {}
+                        : { initialUsage: wiring.initialUsage }),
+                      ...(wiring.lastTurn === undefined
+                        ? {}
+                        : { lastTurn: wiring.lastTurn }),
+                      ...(wiring.codeState === undefined
+                        ? {}
+                        : { codeState: wiring.codeState }),
+                    }).streamIn(chat, effective),
+                  );
                 }),
               ),
             ) as Stream.Stream<
@@ -1621,7 +1733,7 @@ function withDynamicToolkit(
 }
 
 const replaceSystemInstructions = (
-  chat: Chat.Service,
+  chat: Chat.Chat,
   instructions: string,
 ): Effect.Effect<void> =>
   Ref.update(chat.history, (history) => {
@@ -1645,10 +1757,17 @@ interface TurnState {
   finishReason: Response.FinishReason | undefined;
   emitted: boolean;
   started: boolean;
-  /** Decoded call params seen this turn, keyed by tool call id. */
-  callsById: Map<string, { readonly name: string; readonly input: unknown }>;
-  /** `tool-approval-request` parts observed this turn, in provider order. */
-  pendingApprovals: AgentEvents.PendingApproval[];
+  /** Raw provider call params seen this turn, keyed by tool call id. */
+  callsById: Map<
+    string,
+    {
+      readonly name: string;
+      readonly input: unknown;
+      readonly interaction?: Interaction.Metadata;
+    }
+  >;
+  /** External interaction requests observed this turn, in provider order. */
+  pendingInteractions: AgentEvents.PendingInteraction[];
 }
 
 const emptyTurnState = (): TurnState => ({
@@ -1662,25 +1781,26 @@ const emptyTurnState = (): TurnState => ({
   emitted: false,
   started: false,
   callsById: new Map(),
-  pendingApprovals: [],
+  pendingInteractions: [],
 });
 
 /**
  * Accumulate what the stop decision and the result need from one turn.
  *
- * Takes both the decoded and encoded sibling of the same part: `encoded` is
- * what every existing accumulation here reads, and a `tool-approval-request`
- * carries no parameters of its own — the params worth showing an approver are
- * the same tool call's decoded ones, tracked from `decoded` as calls stream
- * by and looked up when the matching approval request arrives.
+ * Takes both the live and provider-facing sibling of the same part. A
+ * `tool-approval-request` carries no parameters of its own, so the raw request
+ * is tracked from its tool call and looked up when the approval arrives.
  */
 const observe = <PartTools extends Record<string, Tool.Any>>(
   state: TurnState,
-  decoded: Response.StreamPart<PartTools>,
+  part:
+    | Response.StreamPart<PartTools, 'deferred'>
+    | ToolResolution.Resolution<PartTools>,
   encoded: Response.StreamPartEncoded,
+  toolkit: { readonly tools: Record<string, Tool.Any> },
 ): void => {
   state.emitted = true;
-  state.parts.push(decoded);
+  state.parts.push(part);
   switch (encoded.type) {
     case 'text-delta':
       state.text += encoded.delta;
@@ -1690,10 +1810,16 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
       break;
     case 'tool-call':
       state.toolCalls.push(encoded);
-      if (decoded.type === 'tool-call') {
-        state.callsById.set(decoded.id, {
-          name: decoded.name,
-          input: decoded.params,
+      if (part.type === 'tool-call') {
+        const tool = ToolLookup.toolNamed(toolkit.tools, part.name);
+        const interaction =
+          tool === undefined
+            ? undefined
+            : Option.getOrUndefined(Interaction.metadata(tool));
+        state.callsById.set(part.id, {
+          name: part.name,
+          input: part.params,
+          ...(interaction === undefined ? {} : { interaction }),
         });
       }
       break;
@@ -1704,10 +1830,11 @@ const observe = <PartTools extends Record<string, Tool.Any>>(
       break;
     case 'tool-approval-request': {
       const call = state.callsById.get(encoded.toolCallId);
-      state.pendingApprovals.push({
+      state.pendingInteractions.push({
         toolCallId: encoded.toolCallId,
         toolName: call?.name ?? '',
-        input: call?.input,
+        kind: call?.interaction?.name ?? 'approval',
+        request: call?.input,
       });
       break;
     }

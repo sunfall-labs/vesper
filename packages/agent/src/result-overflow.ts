@@ -1,7 +1,7 @@
 import { AttachmentRef } from '@sunfall/vesper-attachments/ref';
 import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
 import { Effect, Schema, Stream } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 // Oversized tool results, spilled instead of rejected.
 //
@@ -239,11 +239,11 @@ export function wrap<ToolSet extends Record<string, Tool.Any>, E, R>(
     const resolved = yield* toolkit;
     const store = yield* AttachmentStore.Service;
 
-    const handle = <Name extends keyof ToolSet>(
-      name: Name,
-      params: Tool.Parameters<ToolSet[Name]>,
-      toolCallId?: string,
-    ): ReturnType<Toolkit.WithHandler<ToolSet>['handle']> =>
+    const handle: Toolkit.WithHandler<ToolSet>['handle'] = (
+      name,
+      params,
+      toolCallId,
+    ) =>
       resolved
         .handle(name, params, toolCallId)
         .pipe(

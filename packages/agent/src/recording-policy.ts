@@ -6,13 +6,23 @@ type SignalRecord = ConversationRecord.RecordOf<'Signal'>;
 /** Persistence-only filtering. Returned values must remain record-schema valid. */
 export interface Policy<R = never> {
   readonly prompt?: (value: unknown) => Effect.Effect<unknown, never, R>;
+  /**
+   * Filters a step's persisted parameters, top-level and code-mode nested
+   * alike.
+   *
+   * The step's `inputDigest` is a SHA-256 of the unfiltered name and
+   * parameters, so a resumed run can still recognise the call. A digest does
+   * not reveal its input, but anyone holding the log can test a guess against
+   * it, so it hides a low-entropy value — a yes/no, a short code — no better
+   * than the value itself would.
+   */
   readonly toolParameters?: (
     value: unknown,
-    record: ConversationRecord.RecordOf<'ToolCall'>,
+    record: ConversationRecord.RecordOf<'StepOpened'>,
   ) => Effect.Effect<unknown, never, R>;
   readonly toolResult?: (
     value: unknown,
-    record: ConversationRecord.RecordOf<'ToolOutcome'>,
+    record: ConversationRecord.RecordOf<'StepSettled'>,
   ) => Effect.Effect<unknown, never, R>;
   readonly codeState?: (
     value: Readonly<Record<string, unknown>>,
@@ -20,17 +30,30 @@ export interface Policy<R = never> {
   ) => Effect.Effect<Readonly<Record<string, unknown>>, never, R>;
   readonly externalRequest?: (
     value: unknown,
-    record: ConversationRecord.RecordOf<'ToolSuspended'>,
+    record: ConversationRecord.RecordOf<'StepSuspended'>,
   ) => Effect.Effect<unknown, never, R>;
   readonly externalResult?: (
     value: unknown,
-    record: ConversationRecord.RecordOf<'ToolWaitCompleted'>,
+    record: ConversationRecord.RecordOf<'StepResolved'>,
   ) => Effect.Effect<unknown, never, R>;
   readonly signal?: (
     signal: Pick<SignalRecord, 'kind' | 'text' | 'source'>,
   ) => Effect.Effect<Pick<SignalRecord, 'kind' | 'text' | 'source'>, never, R>;
   readonly cause?: (rendered: string) => Effect.Effect<string, never, R>;
+  /**
+   * How often streamed model output is committed before its turn settles.
+   *
+   * While a response streams, a delta waits at most `intervalMillis` before
+   * being appended as `PartialOutput`, so a crash mid-answer loses at most
+   * that window rather than the whole answer. `false` commits output only at
+   * the turn boundaries, as before. Defaults to
+   * {@link DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS}.
+   */
+  readonly partialOutput?: false | { readonly intervalMillis: number };
 }
+
+/** Default bound on how much streamed output a crash can lose. */
+export const DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS = 200;
 
 /**
  * Build a type-preserving redaction hook for one schema-shaped value.

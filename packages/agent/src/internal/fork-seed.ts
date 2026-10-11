@@ -246,13 +246,13 @@ const reseat = (
 
     case 'RunStarted':
     case 'Text':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'ToolOutcome':
+    case 'PartialOutput':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'StateCheckpoint':
     case 'CodeStateCheckpoint':
     case 'TurnFinished':

@@ -1,130 +1,92 @@
 import { describe, expect, it } from '@effect/vitest';
-import { Deferred, Effect, Ref, Schema, Stream } from 'effect';
-import { AiError, type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { Deferred, Effect, Ref, Result, Schema } from 'effect';
+import { AiError, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { DynamicToolkit } from '../src/dynamic-toolkit.js';
 import { ScriptedModel } from '../src/testing.js';
+import { callTurn, textTurn, toolResultsIn } from './tool-fixtures.js';
 
-const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
-  type: 'finish' as const,
-  reason,
-  usage: {
-    inputTokens: { total: 1, uncached: 1, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 1 },
-  },
-});
+// Dynamic toolkits, observed through an agent run: what the model is offered,
+// what runs, and what the model is shown when a source is down.
 
-const remote = Tool.dynamic('mcp__linear__search_issues', {
-  description: 'Search Linear issues.',
-  parameters: {
-    type: 'object',
-    properties: { query: { type: 'string' } },
-    required: ['query'],
-  },
-  success: Schema.String,
-  failure: Schema.String,
-  failureMode: 'return',
-});
+const dynamicTool = (name: string) =>
+  Tool.dynamic(name, {
+    description: 'An externally supplied tool.',
+    parameters: {
+      type: 'object',
+      properties: { query: { type: 'string' } },
+      required: ['query'],
+    },
+    success: Schema.String,
+    failure: Schema.String,
+    failureMode: 'return',
+  });
 
-const remoteToolkit = Toolkit.make(remote);
+const SEARCH = 'mcp__linear__search_issues';
+const remote = dynamicTool(SEARCH);
 
-describe('Agent dynamic tools', () => {
-  it.effect(
-    'opens independent sources concurrently while preserving order',
-    () =>
-      Effect.gen(function* () {
-        const started = yield* Ref.make(0);
-        const bothStarted = yield* Deferred.make<void>();
-        const source = () =>
-          DynamicToolkit.make(
-            Effect.gen(function* () {
-              const count = yield* Ref.updateAndGet(
-                started,
-                (value) => value + 1,
-              );
-              if (count === 2) {
-                yield* Deferred.succeed(bothStarted, undefined);
-              }
-              yield* Deferred.await(bothStarted);
-              return DynamicToolkit.empty;
-            }),
-          );
-
-        yield* Effect.raceFirst(
-          DynamicToolkit.open([source(), source()]),
-          Effect.sleep('1 second').pipe(
-            Effect.andThen(
-              Effect.fail(
-                new AiError.AiError({
-                  module: 'DynamicTest',
-                  method: 'parallelOpen',
-                  reason: new AiError.InvalidRequestError({
-                    description: 'dynamic sources opened sequentially',
-                  }),
-                }),
-              ),
-            ),
-          ),
-        );
-
-        expect(yield* Ref.get(started)).toBe(2);
-      }).pipe(Effect.scoped),
+/** A source offering `tool`, answered by `handler`. */
+const sourceOf = (
+  tool: typeof remote,
+  handler: () => Effect.Effect<string, string>,
+) => {
+  const toolkit = Toolkit.make(tool);
+  return DynamicToolkit.make(
+    toolkit.pipe(Effect.provide(toolkit.toLayer({ [tool.name]: handler }))),
   );
+};
 
+const agentOf = (dynamicTools: ReadonlyArray<DynamicToolkit.Any>) =>
+  Agent.make({
+    name: 'dynamic',
+    revision: '1',
+    instructions: 'Use the available tools.',
+    toolkit: Toolkit.make(),
+    dynamicTools,
+  });
+
+const search = (id: string) =>
+  callTurn({ id, name: SEARCH, params: { query: 'vesper' } });
+
+const unavailable = (method: string) =>
+  new AiError.AiError({
+    module: 'DynamicTest',
+    method,
+    reason: new AiError.InvalidRequestError({ description: 'unavailable' }),
+  });
+
+describe('dynamic tools in an agent run', () => {
   it.effect(
     'opens once per run, keeps one snapshot across turns, dispatches, and closes',
-    () =>
-      Effect.gen(function* () {
-        const lifecycle = { opened: 0, called: 0, closed: 0 };
-        const source = DynamicToolkit.make(
-          Effect.acquireRelease(
-            Effect.sync(() => {
-              lifecycle.opened += 1;
-              return remoteToolkit.pipe(
-                Effect.provide(
-                  remoteToolkit.toLayer({
-                    mcp__linear__search_issues: () =>
-                      Effect.sync(() => {
-                        lifecycle.called += 1;
-                        return 'VES-42';
-                      }),
-                  }),
-                ),
-              );
-            }).pipe(Effect.flatten),
-            () =>
-              Effect.sync(() => {
-                lifecycle.closed += 1;
-              }),
-          ),
-        );
-        const agent = Agent.make({
-          name: 'dynamic',
-          revision: '1',
-          instructions: 'Use the available tools.',
-          toolkit: Toolkit.make(),
-          dynamicTools: [source],
-        });
-        const model = ScriptedModel.make([
-          [
-            {
-              type: 'tool-call',
-              id: 'call-1',
-              name: 'mcp__linear__search_issues',
-              params: { query: 'vesper' },
-            },
-            finish('tool-calls'),
-          ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
-          [
-            { type: 'text-start', id: 'answer' },
-            { type: 'text-delta', id: 'answer', delta: 'Found VES-42.' },
-            { type: 'text-end', id: 'answer' },
-            finish(),
-          ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
-        ]);
-
-        const result = yield* agent
+    () => {
+      const lifecycle = { opened: 0, called: 0, closed: 0 };
+      const toolkit = Toolkit.make(remote);
+      const source = DynamicToolkit.make(
+        Effect.acquireRelease(
+          Effect.sync(() => {
+            lifecycle.opened += 1;
+            return toolkit.pipe(
+              Effect.provide(
+                toolkit.toLayer({
+                  [SEARCH]: () =>
+                    Effect.sync(() => {
+                      lifecycle.called += 1;
+                      return 'VES-42';
+                    }),
+                }),
+              ),
+            );
+          }).pipe(Effect.flatten),
+          () => Effect.sync(() => void (lifecycle.closed += 1)),
+        ),
+      );
+      const model = ScriptedModel.make([
+        search('call-1'),
+        textTurn('Found VES-42.'),
+      ]);
+      return Effect.gen(function* () {
+        const result = yield* agentOf([source])
           .run('Find it.')
           .pipe(Effect.provide(model.layer));
         const requests = yield* model.requests;
@@ -132,66 +94,35 @@ describe('Agent dynamic tools', () => {
         expect(result.text).toBe('Found VES-42.');
         expect(lifecycle).toEqual({ opened: 1, called: 1, closed: 1 });
         expect(requests.map((request) => request.tools)).toEqual([
-          ['mcp__linear__search_issues'],
-          ['mcp__linear__search_issues'],
+          [SEARCH],
+          [SEARCH],
         ]);
-      }),
+      });
+    },
   );
 
   it.effect(
-    'keeps one advertised schema while execution availability changes',
-    () =>
-      Effect.gen(function* () {
-        const enabled = yield* Ref.make(false);
-        let calls = 0;
-        const source = DynamicToolkit.make(
-          remoteToolkit.pipe(
-            Effect.provide(
-              remoteToolkit.toLayer({
-                mcp__linear__search_issues: () =>
-                  Effect.gen(function* () {
-                    if (!(yield* Ref.get(enabled))) {
-                      yield* Ref.set(enabled, true);
-                      return yield* Effect.fail(
-                        'Linear is temporarily unavailable.',
-                      );
-                    }
-                    calls += 1;
-                    return 'VES-42';
-                  }),
-              }),
-            ),
-          ),
-        );
-        const agent = Agent.make({
-          name: 'conditionally-available',
-          revision: '1',
-          instructions: 'Use the available tools.',
-          toolkit: Toolkit.make(),
-          dynamicTools: [source],
-        });
-        const call = (id: string) =>
-          [
-            {
-              type: 'tool-call',
-              id,
-              name: 'mcp__linear__search_issues',
-              params: { query: 'vesper' },
-            },
-            finish('tool-calls'),
-          ] satisfies ReadonlyArray<Response.StreamPartEncoded>;
-        const model = ScriptedModel.make([
-          call('call-disabled'),
-          call('call-enabled'),
-          [
-            { type: 'text-start', id: 'answer' },
-            { type: 'text-delta', id: 'answer', delta: 'Found VES-42.' },
-            { type: 'text-end', id: 'answer' },
-            finish(),
-          ],
-        ]);
-
-        const result = yield* agent
+    'keeps one advertised schema while execution availability changes between turns',
+    () => {
+      let calls = 0;
+      let enabled = false;
+      const source = sourceOf(remote, () =>
+        Effect.suspend(() => {
+          if (!enabled) {
+            enabled = true;
+            return Effect.fail('Linear is temporarily unavailable.');
+          }
+          calls += 1;
+          return Effect.succeed('VES-42');
+        }),
+      );
+      const model = ScriptedModel.make([
+        search('call-disabled'),
+        search('call-enabled'),
+        textTurn('Found VES-42.'),
+      ]);
+      return Effect.gen(function* () {
+        const result = yield* agentOf([source])
           .run('Find it.')
           .pipe(Effect.provide(model.layer));
         const requests = yield* model.requests;
@@ -205,219 +136,154 @@ describe('Agent dynamic tools', () => {
             (request) => request.toolDefinitions[0] === advertised,
           ),
         ).toBe(true);
-        expect(requests.map((request) => request.tools)).toEqual([
-          ['mcp__linear__search_issues'],
-          ['mcp__linear__search_issues'],
-          ['mcp__linear__search_issues'],
-        ]);
-        expect(JSON.stringify(requests[1]?.prompt)).toContain(
+        expect(toolResultsIn(requests[1]?.prompt)[0]?.result).toBe(
           'Linear is temporarily unavailable.',
         );
-      }),
-  );
-
-  it.effect('rejects a model-emitted tool that was not advertised', () =>
-    Effect.gen(function* () {
-      let calls = 0;
-      const source = DynamicToolkit.make(
-        remoteToolkit.pipe(
-          Effect.provide(
-            remoteToolkit.toLayer({
-              mcp__linear__search_issues: () => {
-                calls += 1;
-                return Effect.succeed('VES-42');
-              },
-            }),
-          ),
-        ),
-      );
-      const agent = Agent.make({
-        name: 'advertised-only',
-        revision: '1',
-        instructions: 'Use the available tools.',
-        toolkit: Toolkit.make(),
-        dynamicTools: [source],
       });
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call',
-            id: 'call-unknown',
-            name: 'mcp__linear__create_issue',
-            params: { query: 'vesper' },
-          },
-          finish('tool-calls'),
-        ] satisfies ReadonlyArray<Response.StreamPartEncoded>,
-      ]);
-
-      const result = yield* agent
-        .stream('Create it.')
-        .pipe(Stream.runDrain, Effect.provide(model.layer), Effect.result);
-      const requests = yield* model.requests;
-
-      expect(result._tag).toBe('Failure');
-      if (result._tag === 'Failure') {
-        expect(result.failure).toMatchObject({
-          reason: { _tag: 'InvalidOutputError' },
-        });
-      }
-      expect(calls).toBe(0);
-      expect(requests).toHaveLength(1);
-      expect(requests[0]?.tools).toEqual(['mcp__linear__search_issues']);
-      expect(requests[0]?.toolDefinitions).toHaveLength(1);
-      expect(requests[0]?.toolDefinitions[0]?.name).toBe(
-        'mcp__linear__search_issues',
-      );
-    }),
+    },
   );
-
-  it.effect('fails source resolution before making a model request', () =>
-    Effect.gen(function* () {
-      const source = DynamicToolkit.make(
-        Effect.fail(
-          new AiError.AiError({
-            module: 'DynamicTest',
-            method: 'open',
-            reason: new AiError.InvalidRequestError({
-              description: 'unavailable',
-            }),
-          }),
-        ),
-      );
-      const agent = Agent.make({
-        name: 'dynamic-failure',
-        revision: '1',
-        instructions: 'Use the available tools.',
-        toolkit: Toolkit.make(),
-        dynamicTools: [source],
-      });
-      const model = ScriptedModel.make([]);
-
-      const result = yield* agent
-        .stream('hello')
-        .pipe(Stream.runDrain, Effect.provide(model.layer), Effect.result);
-
-      expect(result._tag).toBe('Failure');
-      expect(yield* model.requests).toEqual([]);
-    }),
-  );
-
-  it('rejects duplicate names between resolved sources', () => {
-    const handled = Effect.runSync(
-      remoteToolkit.pipe(
-        Effect.provide(
-          remoteToolkit.toLayer({
-            mcp__linear__search_issues: () => Effect.succeed('ok'),
-          }),
-        ),
-      ),
-    );
-
-    expect(() => DynamicToolkit.merge(handled, handled)).toThrow(
-      'Dynamic tool name collision',
-    );
-  });
-
-  it('keeps prototype-like tool names as inert own properties', () => {
-    const prototypeTool = Tool.dynamic('__proto__', {
-      description: 'Exercise an unusual but valid external tool name.',
-      parameters: { type: 'object', properties: {} },
-      success: Schema.String,
-      failure: Schema.String,
-      failureMode: 'return',
-    });
-    const prototypeToolkit = Toolkit.make(prototypeTool);
-    const handled = Effect.runSync(
-      prototypeToolkit.pipe(
-        Effect.provide(
-          prototypeToolkit.toLayer({
-            ['__proto__']: () => Effect.succeed('ok'),
-          }),
-        ),
-      ),
-    );
-
-    const merged = DynamicToolkit.merge(handled);
-
-    expect(Object.keys(merged.tools)).toEqual(['__proto__']);
-    expect(Object.hasOwn(merged.tools, '__proto__')).toBe(true);
-    expect(Object.getPrototypeOf(merged.tools)).toBe(Object.prototype);
-  });
-
-  it.effect('reports source collisions in the typed error channel', () => {
-    const handled = remoteToolkit.pipe(
-      Effect.provide(
-        remoteToolkit.toLayer({
-          mcp__linear__search_issues: () => Effect.succeed('ok'),
-        }),
-      ),
-    );
-    const source = DynamicToolkit.make(handled);
-
-    return Effect.gen(function* () {
-      const result = yield* DynamicToolkit.open([source, source]).pipe(
-        Effect.result,
-      );
-
-      expect(result._tag).toBe('Failure');
-    }).pipe(Effect.scoped);
-  });
-
-  it.effect('rejects duplicate resource identities even without tools', () => {
-    const source = DynamicToolkit.make(Effect.succeed(DynamicToolkit.empty), {
-      resource: {
-        id: 'mcp:linear',
-        description: 'MCP server "linear"',
-      },
-    });
-
-    return Effect.gen(function* () {
-      const result = yield* DynamicToolkit.open([source, source]).pipe(
-        Effect.result,
-      );
-
-      expect(result._tag).toBe('Failure');
-    }).pipe(Effect.scoped);
-  });
 
   it.effect(
-    'keeps optional failures model-visible without advertising tools',
-    () =>
-      Effect.gen(function* () {
-        const unavailable = DynamicToolkit.optional(
-          DynamicToolkit.make<Record<never, never>>(
-            Effect.fail(
-              new AiError.AiError({
-                module: 'DynamicTest',
-                method: 'open',
-                reason: new AiError.InvalidRequestError({
-                  description: 'offline',
-                }),
-              }),
-            ),
-          ),
-          {
-            id: 'mcp:linear',
-            description: 'MCP server "linear"',
-          },
+    'answers a tool that was not advertised with ToolNotFound, and runs nothing',
+    () => {
+      let calls = 0;
+      const source = sourceOf(remote, () =>
+        Effect.sync(() => (calls += 1)).pipe(Effect.as('VES-42')),
+      );
+      const model = ScriptedModel.make([
+        callTurn({
+          id: 'call-unknown',
+          name: 'mcp__linear__create_issue',
+          params: { query: 'vesper' },
+        }),
+        textTurn('I used the advertised tool list.'),
+      ]);
+      return Effect.gen(function* () {
+        yield* agentOf([source])
+          .run('Create it.')
+          .pipe(Effect.provide(model.layer));
+        const requests = yield* model.requests;
+        const returned = toolResultsIn(requests[1]?.prompt).at(0);
+        const error = yield* Schema.decodeUnknownEffect(AiError.AiError)(
+          returned?.result,
         );
-        const agent = Agent.make({
-          name: 'optional-dynamic',
-          revision: '1',
-          instructions: 'Use available tools.',
-          toolkit: Toolkit.make(),
-          dynamicTools: [unavailable],
-        });
-        const model = ScriptedModel.make([
-          [
-            { type: 'text-start', id: 'answer' },
-            { type: 'text-delta', id: 'answer', delta: 'No tools.' },
-            { type: 'text-end', id: 'answer' },
-            finish(),
-          ],
-        ]);
 
-        yield* agent.run('Try Linear.').pipe(Effect.provide(model.layer));
+        expect(calls).toBe(0);
+        expect(requests[0]?.tools).toEqual([SEARCH]);
+        expect(returned?.name).toBe('mcp__linear__create_issue');
+        expect(error.reason._tag).toBe('ToolNotFoundError');
+      });
+    },
+  );
+
+  it.effect('treats prototype-like tool names as ordinary, inert names', () => {
+    let calls = 0;
+    const source = sourceOf(dynamicTool('__proto__'), () =>
+      Effect.sync(() => (calls += 1)).pipe(Effect.as('ok')),
+    );
+    const model = ScriptedModel.make([
+      callTurn({ id: 'call-proto', name: '__proto__', params: { query: 'x' } }),
+      textTurn('done'),
+    ]);
+    return Effect.gen(function* () {
+      const result = yield* agentOf([source])
+        .run('go')
+        .pipe(Effect.provide(model.layer));
+      const requests = yield* model.requests;
+
+      expect(result.text).toBe('done');
+      expect(calls).toBe(1);
+      expect(requests[0]?.tools).toEqual(['__proto__']);
+      expect(toolResultsIn(requests[1]?.prompt)[0]?.result).toBe('ok');
+    });
+  });
+
+  it.effect('opens independent sources concurrently', () => {
+    const bothStarted = Deferred.makeUnsafe<void>();
+    const started = Ref.makeUnsafe(0);
+    const source = () =>
+      DynamicToolkit.make(
+        Effect.gen(function* () {
+          if ((yield* Ref.updateAndGet(started, (n) => n + 1)) === 2) {
+            yield* Deferred.succeed(bothStarted, undefined);
+          }
+          // Each source waits for the other: opening them one at a time deadlocks.
+          yield* Deferred.await(bothStarted);
+          return DynamicToolkit.empty;
+        }),
+      );
+    return agentOf([source(), source()])
+      .run('hello')
+      .pipe(
+        Effect.timeout('1 second'),
+        Effect.provide(ScriptedModel.make([textTurn('ok')]).layer),
+        Effect.map((result) => {
+          expect(result.text).toBe('ok');
+        }),
+      );
+  });
+});
+
+describe('dynamic sources that are down or conflict', () => {
+  it.effect(
+    'fails before making a model request when a source cannot be resolved',
+    () => {
+      const model = ScriptedModel.make([]);
+      return Effect.gen(function* () {
+        const result = yield* agentOf([
+          DynamicToolkit.make(Effect.fail(unavailable('open'))),
+        ])
+          .run('hello')
+          .pipe(Effect.provide(model.layer), Effect.result);
+
+        expect(Result.isFailure(result)).toBe(true);
+        expect(yield* model.requests).toEqual([]);
+      });
+    },
+  );
+
+  const resource = { id: 'mcp:linear', description: 'MCP server "linear"' };
+  const conflicts = [
+    [
+      'two sources offer the same tool name',
+      () => sourceOf(remote, () => Effect.succeed('ok')),
+    ],
+    [
+      'two sources claim the same resource even without tools',
+      () =>
+        DynamicToolkit.make(Effect.succeed(DynamicToolkit.empty), { resource }),
+    ],
+  ] as const;
+
+  for (const [name, make] of conflicts) {
+    it.effect(`fails the run, before any model request, when ${name}`, () => {
+      const source = make();
+      const model = ScriptedModel.make([]);
+      return Effect.gen(function* () {
+        const result = yield* agentOf([source, source])
+          .run('hello')
+          .pipe(Effect.provide(model.layer), Effect.result);
+
+        expect(Result.isFailure(result)).toBe(true);
+        expect(yield* model.requests).toEqual([]);
+      });
+    });
+  }
+
+  it.effect(
+    'keeps an optional source’s failure model-visible without advertising tools',
+    () => {
+      const optional = DynamicToolkit.optional(
+        DynamicToolkit.make<Record<never, never>>(
+          Effect.fail(unavailable('open')),
+        ),
+        resource,
+      );
+      const model = ScriptedModel.make([textTurn('No tools.')]);
+      return Effect.gen(function* () {
+        yield* agentOf([optional])
+          .run('Try Linear.')
+          .pipe(Effect.provide(model.layer));
         const request = (yield* model.requests).at(0);
         const system = request?.prompt.content
           .filter((message) => message.role === 'system')
@@ -429,37 +295,7 @@ describe('Agent dynamic tools', () => {
         expect(system).toContain(
           'supersedes dynamic-resource state in earlier messages',
         );
-      }),
+      });
+    },
   );
 });
-
-type Assert<T extends true> = T;
-type DynamicNameIsVisible = Assert<
-  'mcp__linear__search_issues' extends keyof Agent.Tools<
-    ReturnType<typeof typedAgent>
-  >
-    ? true
-    : false
->;
-
-const typedAgent = () =>
-  Agent.make({
-    name: 'typed-dynamic',
-    revision: '1',
-    instructions: 'Use tools.',
-    toolkit: Toolkit.make(),
-    dynamicTools: [
-      DynamicToolkit.make(
-        remoteToolkit.pipe(
-          Effect.provide(
-            remoteToolkit.toLayer({
-              mcp__linear__search_issues: () => Effect.succeed('ok'),
-            }),
-          ),
-        ),
-      ),
-    ],
-  });
-
-const dynamicNameIsVisible: DynamicNameIsVisible = true;
-void dynamicNameIsVisible;

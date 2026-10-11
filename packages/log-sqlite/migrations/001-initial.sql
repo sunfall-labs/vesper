@@ -1,6 +1,8 @@
 -- Vesper SQLite append-only conversation log schema.
 -- `next_sequence` and `seq` are text so JS drivers cannot round them through
--- IEEE-754 numbers. Offsets remain the canonical ordering key.
+-- IEEE-754 numbers. Offsets remain the canonical ordering key. `chain_head`
+-- and `batch_digest` hold the hash chain (see `@sunfall/vesper-log/chain`);
+-- every row carries the digest of the batch it belongs to.
 CREATE TABLE IF NOT EXISTS vesper_log_streams (
   path TEXT PRIMARY KEY,
   identity TEXT NOT NULL,
@@ -9,7 +11,8 @@ CREATE TABLE IF NOT EXISTS vesper_log_streams (
   next_sequence TEXT NOT NULL DEFAULT '0',
   next_producer_sequence INTEGER NOT NULL DEFAULT 0,
   last_fingerprint TEXT NOT NULL DEFAULT '',
-  last_offset TEXT NOT NULL DEFAULT '-1'
+  last_offset TEXT NOT NULL DEFAULT '-1',
+  chain_head TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS vesper_log_records (
@@ -23,6 +26,7 @@ CREATE TABLE IF NOT EXISTS vesper_log_records (
   conversation_id TEXT NOT NULL,
   record_timestamp INTEGER NOT NULL,
   record TEXT NOT NULL,
+  batch_digest TEXT NOT NULL,
   PRIMARY KEY (path, record_offset)
 );
 

@@ -1,10 +1,10 @@
 # Benchmarks
 
-`nub run benchmark` is the default Vesper in-memory recording-cost suite. The external
+`bun run benchmark` is the default Vesper in-memory recording-cost suite. The external
 Flue comparison is opt-in:
 
 ```bash
-nub run --filter @sunfall/vesper-benchmarks bench:compare:flue
+bun run --filter @sunfall/vesper-benchmarks bench:compare:flue
 ```
 
 Set `VESPER_BENCH_SMOKE=1` for a one-sample wiring check. The normal comparison
@@ -37,7 +37,7 @@ The report deliberately keeps three kinds of evidence separate:
 The workflow operational probe is separate from latency comparisons:
 
 ```bash
-nub run --filter @sunfall/vesper-benchmarks bench:workflow
+bun run --filter @sunfall/vesper-benchmarks bench:workflow
 ```
 
 It exercises accepted execution, durable wait suspension, completion, wake-up,

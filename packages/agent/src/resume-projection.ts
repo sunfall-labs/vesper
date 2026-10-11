@@ -1,6 +1,6 @@
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Schema } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 import { AgentBranch } from './branch.js';
 import type { Stop } from './stop.js';
@@ -49,7 +49,7 @@ export const update = (
           text: record.text,
           steps: record.steps,
           usage: record.usage,
-          outcome: record.outcome ?? 'success',
+          outcome: record.outcome,
           ...(record.response === undefined
             ? {}
             : { response: decodeResponse(record.response) }),
@@ -81,7 +81,7 @@ export const update = (
                     text: record.resume.completed.text,
                     steps: record.resume.completed.steps,
                     usage: record.resume.completed.usage,
-                    outcome: record.resume.completed.outcome ?? 'success',
+                    outcome: record.resume.completed.outcome,
                     ...(record.resume.completed.response === undefined
                       ? {}
                       : {
@@ -93,13 +93,13 @@ export const update = (
             latestTurnUsage: record.resume.latestTurnUsage,
           };
     case 'Text':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'ToolOutcome':
+    case 'PartialOutput':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'BranchedFrom':
     case 'StateCheckpoint':
     case 'CodeStateCheckpoint':
@@ -139,13 +139,13 @@ export const updateState = (
         : current;
     case 'RunStarted':
     case 'Text':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'ToolOutcome':
+    case 'PartialOutput':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'TurnFinished':
     case 'Compacted':
     case 'BranchedFrom':
@@ -171,9 +171,19 @@ export const stateFrom = (
     undefined,
   );
 
-export type CodeState =
-  | ConversationRecord.RecordOf<'CodeStateCheckpoint'>
-  | undefined;
+type Checkpoint = ConversationRecord.RecordOf<'CodeStateCheckpoint'>;
+
+export interface CodeState {
+  /** The latest checkpoint in effect. */
+  readonly committed: Checkpoint | undefined;
+  /** Checkpoints whose `exec` step has not settled, by that step's id. */
+  readonly pending: ReadonlyMap<string, Checkpoint>;
+}
+
+export const emptyCodeState: CodeState = {
+  committed: undefined,
+  pending: new Map(),
+};
 
 /** Fold one record into the durable code scratch-state projection. */
 export const updateCodeState = (
@@ -182,20 +192,45 @@ export const updateCodeState = (
 ): CodeState => {
   switch (record._tag) {
     case 'CodeStateCheckpoint':
-      return record;
-    case 'RunSettled':
-      return record.resume?.codeState === undefined
-        ? current
-        : { _tag: 'CodeStateCheckpoint', state: record.resume.codeState };
+      return record.producer === undefined
+        ? { ...current, committed: record }
+        : {
+            ...current,
+            pending: new Map(current.pending).set(record.producer, record),
+          };
+    case 'StepSettled': {
+      const held =
+        record.parent === undefined
+          ? current.pending.get(record.id)
+          : undefined;
+      if (held === undefined) {
+        return current;
+      }
+      const pending = new Map(current.pending);
+      pending.delete(record.id);
+      return { committed: held, pending };
+    }
+    // A new run abandons what a crashed one left pending: a retried `exec`
+    // commits again, and one answered without running commits nothing.
     case 'RunStarted':
+      return current.pending.size === 0
+        ? current
+        : { ...current, pending: new Map() };
+    case 'RunSettled':
+      return {
+        committed:
+          record.resume?.codeState === undefined
+            ? current.committed
+            : { _tag: 'CodeStateCheckpoint', state: record.resume.codeState },
+        pending: new Map(),
+      };
     case 'Text':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'ToolOutcome':
+    case 'PartialOutput':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
     case 'TurnFinished':
     case 'Compacted':
     case 'BranchedFrom':
@@ -218,7 +253,7 @@ export const codeStateFrom = (
 ): CodeState =>
   AgentBranch.activePath(records).reduce<CodeState>(
     (current, { record }) => updateCodeState(current, record),
-    undefined,
+    emptyCodeState,
   );
 
 export * as ResumeProjection from './resume-projection.js';

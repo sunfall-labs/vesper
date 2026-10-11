@@ -11,6 +11,7 @@ import {
 } from 'effect';
 
 import { LogStoreAdapter } from '../adapter.js';
+import { LogChain } from '../chain.js';
 import { LogStore } from '../log-store.js';
 import { LogOffset } from '../offset.js';
 import type { ConversationRecord } from '../record.js';
@@ -33,6 +34,17 @@ import { LogVocabulary } from '../vocabulary.js';
 // on a reader, and a dropped wake-up is only safe if a newer one replaces
 // it — which sliding guarantees and dropping does not.
 
+/** Where one appended batch sits in `records`, and the digest it chained to. */
+interface BatchState {
+  readonly producerId: LogVocabulary.ProducerId;
+  readonly epoch: LogVocabulary.Epoch;
+  readonly sequence: LogVocabulary.ProducerSequence;
+  /** Index of the batch's first record in `StreamState.records`. */
+  readonly first: number;
+  readonly count: number;
+  readonly digest: string;
+}
+
 interface StreamState {
   readonly identity: string;
   epoch: LogVocabulary.Epoch;
@@ -46,7 +58,10 @@ interface StreamState {
   /** Digest of the batch `lastSequence` wrote, for exact retry detection. */
   lastFingerprint: string;
   lastOffset: LogOffset.Offset;
+  /** Chained digest of the newest batch; empty before the first append. */
+  chainHead: string;
   readonly records: ConversationRecord.Envelope[];
+  readonly batches: BatchState[];
 }
 
 interface SignalState {
@@ -64,6 +79,8 @@ const metaOf = (path: string, state: StreamState): LogStore.StreamMeta => ({
       : Option.some(state.producerId),
   head: state.lastOffset,
   records: state.records.length,
+  chainHead:
+    state.chainHead === '' ? Option.none() : Option.some(state.chainHead),
 });
 
 /** First record whose offset is strictly greater than the exclusive cursor. */
@@ -176,7 +193,9 @@ export const build = (
           lastSequence: -1,
           lastFingerprint: '',
           lastOffset: LogOffset.START,
+          chainHead: '',
           records: [],
+          batches: [],
         };
         MutableHashMap.set(streams, path, state);
         return metaOf(path, state);
@@ -251,6 +270,18 @@ export const build = (
           return state.lastOffset;
         }
 
+        const firstIndex = state.records.length;
+        const digest = yield* LogChain.forAppend({
+          path: input.path,
+          identity: state.identity,
+          head: state.chainHead,
+          firstOffset: LogOffset.fromSeq(BigInt(firstIndex)),
+          producerId: validated.producerId,
+          epoch: validated.epoch,
+          sequence: validated.sequence,
+          encoded: decision.prepared.encoded,
+        }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+
         // Everything above rejects without writing; nothing below can fail.
         // That is what makes the batch atomic, and it is why the validation is
         // exhaustive up front rather than interleaved with the writes.
@@ -259,6 +290,15 @@ export const build = (
           offset = LogOffset.fromSeq(BigInt(state.records.length));
           state.records.push(RecordBatch.envelope(offset, entry));
         }
+        state.batches.push({
+          producerId: validated.producerId,
+          epoch: validated.epoch,
+          sequence: validated.sequence,
+          first: firstIndex,
+          count: decision.prepared.entries.length,
+          digest,
+        });
+        state.chainHead = digest;
         state.lastOffset = offset;
         state.lastSequence = validated.sequence;
         state.lastFingerprint = decision.prepared.fingerprint;
@@ -349,6 +389,55 @@ export const build = (
         options,
       ) => exclusive(readBackwardsUnlocked(path, options));
 
+      const readBatchesUnlocked = Effect.fn('LogStore.readBatches')(function* (
+        path: string,
+        options?: LogStore.ReadOptions,
+      ) {
+        const { after, limit } = yield* LogStore.normalizeReadOptions(
+          options,
+        ).pipe(
+          Effect.mapError((error) =>
+            failure(path, 'readBatches', 'invalid', error.detail),
+          ),
+        );
+        const state = yield* lookup(path, 'readBatches');
+        // First batch whose first record is strictly after the cursor.
+        let low = 0;
+        let high = state.batches.length;
+        while (low < high) {
+          const middle = low + Math.floor((high - low) / 2);
+          const held = state.batches[middle];
+          const head = held && state.records[held.first];
+          if (head === undefined) {
+            throw new Error(
+              `batch index ${String(middle)} unexpectedly missing`,
+            );
+          }
+          if (LogOffset.isAfter(head.offset, after)) {
+            high = middle;
+          } else {
+            low = middle + 1;
+          }
+        }
+        const end = Math.min(low + limit, state.batches.length);
+        const batches = state.batches.slice(low, end).map(
+          (held): LogStore.StoredBatch => ({
+            producerId: held.producerId,
+            epoch: held.epoch,
+            sequence: held.sequence,
+            records: state.records.slice(held.first, held.first + held.count),
+            digest: held.digest,
+          }),
+        );
+        return {
+          batches,
+          cursor: batches.at(-1)?.records.at(-1)?.offset ?? after,
+          upToDate: end >= state.batches.length,
+        } satisfies LogStore.BatchPage;
+      });
+      const readBatches: LogStore.Interface['readBatches'] = (path, options) =>
+        exclusive(readBatchesUnlocked(path, options));
+
       const metaUnlocked = (path: string) =>
         Effect.sync(() =>
           Option.map(MutableHashMap.get(streams, path), (state) =>
@@ -401,6 +490,7 @@ export const build = (
         append,
         read,
         readBackwards,
+        readBatches,
         meta,
         changes,
       });

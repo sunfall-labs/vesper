@@ -1,5 +1,5 @@
 import { Context, Effect, Layer, Schema, Semaphore } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 import { ApplyPatchTool, applyPatchHandler } from './apply-patch.js';
 import { WorkspaceDriver } from './driver.js';
@@ -253,6 +253,11 @@ export class CommandTimedOut extends Schema.TaggedError<CommandTimedOut>(
 export class ShellDisabled extends Schema.TaggedError<ShellDisabled>(
   '@sunfall/vesper-workspace/ShellDisabled',
 )('ShellDisabled', {}) {}
+
+/** A required sandbox is unavailable, so the command was not run. */
+export class SandboxRequired extends Schema.TaggedError<SandboxRequired>(
+  '@sunfall/vesper-workspace/SandboxRequired',
+)('SandboxRequired', { command: Schema.String, reason: Schema.String }) {}
 
 /**
  * The workspace failed in a way none of the above describes.
@@ -669,9 +674,9 @@ const TruncatedBy = Schema.NullOr(Schema.Literals(['lines', 'bytes']));
  * turn — it kills the run. Found by the live smoke script the
  * first time this toolkit met a non-Anthropic provider.
  *
- * `Schema.Int` renders as `{"type":"integer"}`, which is both what these
- * parameters actually are — line offsets, item counts, a millisecond timeout —
- * and a schema with nothing in it for a model to misread. The handlers still
+ * `Schema.Int` renders as `{"type":"integer"}` with safe-integer bounds, which
+ * is both what these parameters actually are — line offsets, item counts, a
+ * millisecond timeout — and a schema with nothing in it for a model to misread. The handlers still
  * clamp and truncate, because a model can send `-3` inside a valid integer.
  */
 const Count = Schema.Int;
@@ -707,7 +712,7 @@ const readFileTool = Tool.make('read_file', {
   // instead would make a mistyped filename fatal.
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const writeFileTool = Tool.make('write_file', {
   description:
@@ -727,7 +732,7 @@ const writeFileTool = Tool.make('write_file', {
   failure: Schema.Union([PathOutsideWorkspace, ...pathFailureSchemas]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const editFileTool = Tool.make('edit_file', {
   description:
@@ -758,7 +763,7 @@ const editFileTool = Tool.make('edit_file', {
   ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const ListedEntry = Schema.Struct({
   path: Schema.String,
@@ -792,7 +797,7 @@ const listFilesTool = Tool.make('list_files', {
   ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const SearchMatch = Schema.Struct({
   path: Schema.String,
@@ -835,7 +840,7 @@ const searchFilesTool = Tool.make('search_files', {
   ]),
   failureMode: 'return',
   dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-});
+}).annotate(Tool.Strict, true);
 
 const runShellTool = Tool.make('run_shell', {
   description:
@@ -856,11 +861,16 @@ const runShellTool = Tool.make('run_shell', {
     stderr: Schema.String,
     stdoutTruncated: Schema.Boolean,
     stderrTruncated: Schema.Boolean,
+    /** Present when the command ran under (or fell back from) a sandbox. */
+    sandbox: Schema.optionalKey(
+      Schema.Literals(['sandbox-exec', 'bwrap', 'fallback']),
+    ),
   }),
   failure: Schema.Union([
     PathOutsideWorkspace,
     CommandTimedOut,
     ShellDisabled,
+    SandboxRequired,
     ...pathFailureSchemas,
   ]),
   failureMode: 'return',
@@ -870,7 +880,7 @@ const runShellTool = Tool.make('run_shell', {
     CommandPolicy,
     FilesystemPolicy,
   ],
-});
+}).annotate(Tool.Strict, true);
 
 /**
  * Approval switches for the workspace's mutating or host-authoritative tools.
@@ -1290,10 +1300,19 @@ const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
   const result = yield* driver
     .exec(params.command, { cwd: absolute, timeoutMs })
     .pipe(
-      Effect.mapError((error): CommandTimedOut | PathFailure =>
-        error._tag === 'CommandTimeout'
-          ? new CommandTimedOut({ command: params.command, timeoutMs })
-          : fromFileError('run', display)(error),
+      Effect.mapError(
+        (error): CommandTimedOut | SandboxRequired | PathFailure => {
+          if (error._tag === 'CommandTimeout') {
+            return new CommandTimedOut({ command: params.command, timeoutMs });
+          }
+          if (error._tag === 'SandboxUnavailable') {
+            return new SandboxRequired({
+              command: params.command,
+              reason: error.reason,
+            });
+          }
+          return fromFileError('run', display)(error);
+        },
       ),
     );
 
@@ -1309,6 +1328,7 @@ const handleRun = Effect.fn('WorkspaceTools.runShell')(function* (params: {
     stderr: stderr.content,
     stdoutTruncated: result.stdoutTruncated || stdout.truncated,
     stderrTruncated: result.stderrTruncated || stderr.truncated,
+    ...(result.sandbox === undefined ? {} : { sandbox: result.sandbox }),
   };
 });
 

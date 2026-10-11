@@ -1,5 +1,5 @@
 import { Effect, Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 // Skills are reusable instructions the model loads on demand.
 //

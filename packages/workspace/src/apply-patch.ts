@@ -1,5 +1,5 @@
 import { Effect, Schema } from 'effect';
-import { Tool } from 'effect/unstable/ai';
+import { Tool } from 'effect/ai';
 
 import { WorkspaceDriver } from './driver.js';
 import { WorkspaceOutput } from './output.js';
@@ -313,7 +313,7 @@ export const makeApplyPatchTool = (needsApproval: boolean) =>
     failureMode: 'return',
     needsApproval,
     dependencies: [Root, WorkspaceDriver.Service, FilesystemPolicy],
-  });
+  }).annotate(Tool.Strict, true);
 
 export const ApplyPatchTool = makeApplyPatchTool(false);
 

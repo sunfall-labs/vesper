@@ -1,4 +1,5 @@
-import { Crypto, Effect, Encoding, Schema } from 'effect';
+import { Crypto, Effect, Schema } from 'effect';
+import { Hex } from 'effect/encoding';
 
 import type { LogOffset } from './offset.js';
 import { Entry, Envelope } from './record.js';
@@ -224,7 +225,8 @@ export const prepareUnknown = (
           }),
   });
 
-const sha256 = (
+/** Hex SHA-256 of UTF-8 text; the one digest every backend and verifier uses. */
+export const sha256 = (
   material: string,
 ): Effect.Effect<string, EncodeError, Crypto.Crypto> =>
   Effect.gen(function* () {
@@ -235,11 +237,11 @@ const sha256 = (
         Effect.mapError(
           (cause) =>
             new EncodeError({
-              detail: `cannot fingerprint records: ${String(cause)}`,
+              detail: `cannot digest records: ${String(cause)}`,
             }),
         ),
       );
-    return Encoding.encodeHex(digest);
+    return Hex.encode(digest);
   });
 
 export interface PreparedBatch {

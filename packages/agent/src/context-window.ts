@@ -1,5 +1,5 @@
 import { Context } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 // How full the context window is, and whether that is too full.
 //

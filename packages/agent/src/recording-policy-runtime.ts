@@ -1,17 +1,22 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Effect, type Context } from 'effect';
 
-import type { RecordingPolicy } from './recording-policy.js';
+import { RecordingPolicy } from './recording-policy.js';
 
 /** Compiled policy carried by a session; it no longer has a requirement channel. */
 export interface Runtime {
   readonly filter: (
     record: ConversationRecord.Record,
   ) => Effect.Effect<ConversationRecord.Record>;
+  readonly partialOutputIntervalMillis: number | undefined;
 }
 
 /** Explicit default: records are persisted raw. */
-export const raw: Runtime = { filter: Effect.succeed };
+export const raw: Runtime = {
+  filter: Effect.succeed,
+  partialOutputIntervalMillis:
+    RecordingPolicy.DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS,
+};
 
 type CompiledFilter<R> = (
   record: ConversationRecord.Record,
@@ -24,6 +29,11 @@ export const compile = <R>(
   const compiled = compileFilter(policy);
   return {
     filter: (record) => compiled(record).pipe(Effect.provide(context)),
+    partialOutputIntervalMillis:
+      policy.partialOutput === false
+        ? undefined
+        : (policy.partialOutput?.intervalMillis ??
+          RecordingPolicy.DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS),
   };
 };
 
@@ -49,7 +59,9 @@ const compileFilter = <R>(
               prompt,
             }),
           ),
-    ToolCall: (record) =>
+    // A nested code-mode step is a tool call too, and gets the same
+    // redaction; its `parent` tells the hook which `exec` call it belongs to.
+    StepOpened: (record) =>
       policy.toolParameters === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
@@ -59,25 +71,24 @@ const compileFilter = <R>(
               params,
             }),
           ),
-    ToolStarted: (record) => Effect.succeed<ConversationRecord.Record>(record),
-    ToolSuspended: (record) =>
+    StepStarted: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    StepSuspended: (record) =>
       policy.externalRequest === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
             policy.externalRequest(record.request, record),
             (request): ConversationRecord.Record => ({ ...record, request }),
           ),
-    ToolResumed: (record) => Effect.succeed<ConversationRecord.Record>(record),
-    ToolWaitCompleted: (record) =>
+    StepResolved: (record) =>
       policy.externalResult === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
             policy.externalResult(record.result, record),
             (result): ConversationRecord.Record => ({ ...record, result }),
           ),
-    ToolWaitRestarted: (record) =>
+    StepRestarted: (record) =>
       Effect.succeed<ConversationRecord.Record>(record),
-    ToolOutcome: (record) =>
+    StepSettled: (record) =>
       policy.toolResult === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
@@ -118,6 +129,8 @@ const compileFilter = <R>(
             }),
           ),
     Text: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    PartialOutput: (record) =>
+      Effect.succeed<ConversationRecord.Record>(record),
     TurnFinished: (record) => Effect.succeed<ConversationRecord.Record>(record),
     Compacted: (record) => Effect.succeed<ConversationRecord.Record>(record),
     BranchedFrom: (record) => Effect.succeed<ConversationRecord.Record>(record),

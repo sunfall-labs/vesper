@@ -1,367 +1,280 @@
 import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
 import { AttachmentStoreMemory } from '@sunfall/vesper-attachments/layer-memory';
 import { AttachmentRef } from '@sunfall/vesper-attachments/ref';
-import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
-import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, Schema, Stream } from 'effect';
-import { type Prompt, Tool, Toolkit } from 'effect/unstable/ai';
+import { Effect, Layer, Schema } from 'effect';
+import { type Prompt, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { ResultOverflow } from '../src/result-overflow.js';
 import { ScriptedModel } from '../src/testing.js';
+import {
+  callTurn,
+  modelBy,
+  outcomesOf,
+  provide,
+  readRecords,
+  textTurn,
+  toolResultsIn,
+} from './tool-fixtures.js';
 
-// The overflow policy.
-//
-// What these have to prove:
-//
-//   - unset, an agent compiles and dispatches exactly as before: no extra
-//     tool, no extra requirement, every result reaches the model unchanged;
-//   - a result at or under the threshold is untouched;
-//   - a result over it is replaced everywhere that matters — what the model
-//     is shown and what a durable conversation records — by a small pointer,
-//     and the bytes it points at are exactly what overflowed;
-//   - `read_attachment` reads the stored bytes back, in ranges;
-//   - the two ways an agent runs (plain and recorded) both work.
+// Result overflow: an oversized tool result is replaced, for the model and in
+// the durable record, by a small pointer; read_attachment pages the rest back.
 
 const attachments = AttachmentStoreMemory.layer.pipe(
   Layer.provide(NodeCrypto.layer),
 );
 
-const testLogLayer = Layer.mergeAll(
-  LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
-  NodeServices.layer,
-);
-
-const required = <A>(value: A | undefined): A => {
-  if (value === undefined) {
-    throw new Error('expected a value');
-  }
-  return value;
-};
-
-const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
-  type: 'finish' as const,
-  reason,
-  usage: {
-    inputTokens: { total: 1, uncached: 1, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 1 },
-  },
-});
-
-const answerTurn = [
-  { type: 'text-start' as const, id: 'a' },
-  { type: 'text-delta' as const, id: 'a', delta: 'done' },
-  { type: 'text-end' as const, id: 'a' },
-  finish(),
-];
+const THRESHOLD = 40;
+const PREVIEW = 10;
+const BIG = 5_000;
 
 const echo = Tool.make('echo', {
   description: 'return a string of the requested size',
   parameters: Schema.Struct({ size: Schema.Natural }),
   success: Schema.String,
 });
+const failsBig = Tool.make('fails_big', {
+  description: 'always fails with a long message',
+  parameters: Schema.Struct({}),
+  success: Schema.String,
+  failure: Schema.String,
+  failureMode: 'return',
+});
 
-/** One tool-call turn asking `echo` for `size` bytes of `'x'`. */
-const callTurn = (size: number, id = 'call-1') => [
-  { type: 'tool-call' as const, id, name: 'echo', params: { size } },
-  finish('tool-calls'),
-];
-
-/** Every `tool-result` part in a prompt, across every message. */
-interface ToolResultPart {
-  readonly type: 'tool-result';
-  readonly id: string;
-  readonly result: unknown;
-}
-const toolResultsOf = (prompt: Prompt.Prompt): ReadonlyArray<ToolResultPart> =>
-  prompt.content.flatMap((message) =>
-    message.role === 'tool'
-      ? (message.content.filter(
-          (part) => part.type === 'tool-result',
-        ) as ReadonlyArray<ToolResultPart>)
-      : [],
-  );
-
-const THRESHOLD = 40;
-const PREVIEW = 10;
-
-const agentWith = (
-  calls: { count: number },
-  resultOverflow: ResultOverflow.Policy | undefined,
-) =>
+const agentWith = (resultOverflow: ResultOverflow.Policy | undefined) =>
   Agent.make({
     name: 'overflow-test',
     revision: '1',
     instructions: 'be terse',
-    toolkit: Toolkit.make(echo),
+    toolkit: Toolkit.make(echo, failsBig),
     ...(resultOverflow === undefined ? {} : { resultOverflow }),
   }).withHandlers({
+    // Distinguishable characters, so a page read back can be located in the whole.
     echo: ({ size }) =>
-      Effect.sync(() => {
-        calls.count += 1;
-        return 'x'.repeat(size);
-      }),
+      Effect.succeed('0123456789'.repeat(Math.ceil(size / 10)).slice(0, size)),
+    fails_big: () => Effect.fail('e'.repeat(THRESHOLD + 60)),
   });
 
-describe('toolkit composition', () => {
-  it('omits read_attachment when resultOverflow is unset', () => {
-    const agent = agentWith({ count: 0 }, undefined);
+const readPolicy = { threshold: 300, preview: PREVIEW };
+const policy = { threshold: THRESHOLD, preview: PREVIEW };
+const results = (model: ScriptedModel.Handle, request: number) =>
+  Effect.map(model.requests, (requests) =>
+    toolResultsIn(requests[request]?.prompt),
+  );
 
-    expect(Object.keys(agent.toolkit.tools)).toEqual(['echo']);
-  });
+describe('an agent without resultOverflow', () => {
+  it.effect(
+    'offers no read_attachment and shows every result unchanged',
+    () => {
+      const model = ScriptedModel.make([
+        callTurn({ id: 'big', name: 'echo', params: { size: BIG } }),
+        textTurn('done'),
+      ]);
+      return Effect.gen(function* () {
+        yield* agentWith(undefined).run('go').pipe(Effect.provide(model.layer));
+        const shown = (yield* results(model, 1)).at(0);
 
-  it('adds read_attachment only when resultOverflow is set', () => {
-    const agent = agentWith({ count: 0 }, { threshold: THRESHOLD });
-
-    expect(
-      Object.keys(agent.toolkit.tools).sort((a, b) => a.localeCompare(b)),
-    ).toEqual(['echo', 'read_attachment']);
-  });
+        expect(new Set((yield* model.requests)[0]?.tools)).toEqual(
+          new Set(['echo', 'fails_big']),
+        );
+        expect(shown?.result).toHaveLength(BIG);
+      }).pipe(Effect.provide(attachments));
+    },
+  );
 });
 
-describe('spilling', () => {
-  it.effect('passes a result at or under the threshold through unchanged', () =>
-    Effect.gen(function* () {
-      const calls = { count: 0 };
-      const agent = agentWith(calls, {
-        threshold: THRESHOLD,
-        preview: PREVIEW,
-      });
-      const small = 'x'.repeat(THRESHOLD);
-      const model = ScriptedModel.make([callTurn(THRESHOLD), answerTurn]);
+describe('an agent with resultOverflow', () => {
+  it.effect(
+    'passes small results through, spills big successes and failures, and records only pointers',
+    () => {
+      const model = ScriptedModel.make([
+        callTurn(
+          { id: 'small', name: 'echo', params: { size: THRESHOLD } },
+          { id: 'big', name: 'echo', params: { size: BIG } },
+          { id: 'fail', name: 'fails_big', params: {} },
+        ),
+        textTurn('done'),
+      ]);
+      return provide(
+        Effect.gen(function* () {
+          const result = yield* Conversation.make(
+            agentWith(policy),
+            'spill',
+          ).run('go');
+          const requests = yield* model.requests;
+          const shown = Object.fromEntries(
+            (yield* results(model, 1)).map((part) => [part.id, part.result]),
+          );
+          const pointer = shown['big'];
+          const stored = outcomesOf(yield* readRecords('spill'));
 
-      const result = yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, attachments)));
-      const requests = yield* model.requests;
-      const results = toolResultsOf(required(requests[1]).prompt);
+          expect(result.text).toBe('done');
+          expect(new Set(requests[0]?.tools)).toEqual(
+            new Set(['echo', 'fails_big', 'read_attachment']),
+          );
+          // At the threshold: untouched.
+          expect(shown['small']).toBe('0123456789'.repeat(4));
+          if (!ResultOverflow.isPointer(pointer)) {
+            throw new Error('expected an overflow pointer');
+          }
+          expect(pointer).toMatchObject({
+            _tag: 'ToolResultOverflow',
+            byteLength: BIG,
+            mediaType: 'text/plain; charset=utf-8',
+            preview: '0123456789',
+          });
+          expect(ResultOverflow.isPointer(shown['fail'])).toBe(true);
 
-      expect(result.text).toBe('done');
-      expect(calls.count).toBe(1);
-      expect(results).toHaveLength(1);
-      expect(required(results[0]).result).toBe(small);
-    }),
+          // The bytes the pointer names are exactly what overflowed.
+          const bytes = yield* (yield* AttachmentStore.Service).get({
+            digest: pointer.attachmentId,
+            mediaType: pointer.mediaType,
+            byteLength: pointer.byteLength,
+          });
+          expect(new TextDecoder().decode(bytes)).toBe(
+            '0123456789'.repeat(BIG / 10),
+          );
+          // The durable record holds the pointer, never the payload.
+          expect(JSON.stringify(stored)).not.toContain('0123456789'.repeat(10));
+          expect(
+            stored.find((outcome) => outcome.id === 'big')?.result,
+          ).toMatchObject({
+            _tag: 'ToolResultOverflow',
+            byteLength: BIG,
+          });
+        }).pipe(Effect.provide(attachments)),
+        model,
+      );
+    },
   );
 
   it.effect(
-    'spills a result over the threshold into a pointer with matching stored bytes',
-    () =>
-      Effect.gen(function* () {
-        const calls = { count: 0 };
-        const agent = agentWith(calls, {
-          threshold: THRESHOLD,
-          preview: PREVIEW,
-        });
-        const size = 5_000;
-        const big = 'x'.repeat(size);
-        const model = ScriptedModel.make([callTurn(size), answerTurn]);
-
-        const result = yield* agent
-          .run('go')
-          .pipe(Effect.provide(Layer.merge(model.layer, attachments)));
-        const requests = yield* model.requests;
-        const results = toolResultsOf(required(requests[1]).prompt);
-
-        expect(result.text).toBe('done');
-        expect(calls.count).toBe(1);
-        expect(results).toHaveLength(1);
-        const pointerResult = required(results[0]).result;
-        if (!ResultOverflow.isPointer(pointerResult)) {
-          throw new Error('expected an overflow pointer');
+    'pages an overflowed result back through read_attachment; an over-cap read is capped and itself spilled',
+    () => {
+      let lastPrompt: Prompt.Prompt | undefined;
+      const Page = Schema.Struct({
+        content: Schema.String,
+        offset: Schema.Finite,
+        length: Schema.Finite,
+        hasMore: Schema.Boolean,
+      });
+      // The model copies the pointer it was shown. It first asks for far more
+      // than the cap, then reads 100 bytes at a time until hasMore is false.
+      const model = modelBy((options, index) => {
+        lastPrompt = options.prompt;
+        if (index === 0) {
+          return callTurn({ id: 'big', name: 'echo', params: { size: 1_000 } });
         }
-        const pointer = pointerResult;
-
-        expect(pointer._tag).toBe('ToolResultOverflow');
-        expect(pointer.byteLength).toBe(size);
-        expect(pointer.mediaType).toBe('text/plain; charset=utf-8');
-        expect(pointer.preview).toBe(big.slice(0, PREVIEW));
-        // The pointer is small; the payload it replaced is not.
-        expect(JSON.stringify(pointer).length).toBeLessThan(size);
-
-        const store = yield* AttachmentStore.Service;
-        const stored = yield* store.get({
-          digest: pointer.attachmentId,
-          mediaType: pointer.mediaType,
-          byteLength: pointer.byteLength,
-        });
-        expect(new TextDecoder().decode(stored)).toBe(big);
-      }).pipe(Effect.provide(attachments)),
-  );
-
-  it.effect('spills a failure result the same way as a success', () =>
-    Effect.gen(function* () {
-      const failing = Tool.make('fails_big', {
-        description: 'always fails with a long message',
-        parameters: Schema.Struct({}),
-        success: Schema.String,
-        failure: Schema.String,
-        failureMode: 'return',
-      });
-      const agent = Agent.make({
-        name: 'overflow-failure-test',
-        revision: '1',
-        instructions: 'be terse',
-        toolkit: Toolkit.make(failing),
-        resultOverflow: { threshold: THRESHOLD, preview: PREVIEW },
-      }).withHandlers({
-        fails_big: () => Effect.fail('e'.repeat(THRESHOLD + 60)),
-      });
-      const model = ScriptedModel.make([
-        [
-          {
-            type: 'tool-call' as const,
-            id: 'call-1',
-            name: 'fails_big',
-            params: {},
+        const shown = toolResultsIn(options.prompt);
+        const pointer = shown.find((part) => part.name === 'echo')?.result;
+        const reads = shown.filter((part) => part.name === 'read_attachment');
+        const page =
+          reads.length > 1
+            ? Schema.decodeUnknownSync(Page)(reads.at(-1)?.result)
+            : undefined;
+        if (!ResultOverflow.isPointer(pointer) || page?.hasMore === false) {
+          return textTurn('done');
+        }
+        return callTurn({
+          id: `read-${String(index)}`,
+          name: 'read_attachment',
+          params: {
+            attachmentId: pointer.attachmentId,
+            mediaType: pointer.mediaType,
+            byteLength: pointer.byteLength,
+            ...(reads.length === 0
+              ? { length: 5_000 }
+              : {
+                  offset: page === undefined ? 0 : page.offset + page.length,
+                  length: 100,
+                }),
           },
-          finish('tool-calls'),
-        ],
-        answerTurn,
-      ]);
-
-      yield* agent
-        .run('go')
-        .pipe(Effect.provide(Layer.merge(model.layer, attachments)));
-      const requests = yield* model.requests;
-      const results = toolResultsOf(required(requests[1]).prompt);
-
-      expect(ResultOverflow.isPointer(required(results[0]).result)).toBe(true);
-    }).pipe(Effect.provide(attachments)),
-  );
-});
-
-describe('read_attachment', () => {
-  it.effect('reads the full stored content when no range is given', () =>
-    Effect.gen(function* () {
-      const store = yield* AttachmentStore.Service;
-      const content = 'hello world, this is attachment content';
-      const ref = yield* store.put(new TextEncoder().encode(content), {
-        mediaType: 'text/plain',
-      });
-      const { handler } = ResultOverflow.reader({ threshold: 1_000 });
-
-      const result = yield* handler({
-        attachmentId: ref.digest,
-        mediaType: ref.mediaType,
-        byteLength: ref.byteLength,
-      });
-
-      expect(result).toEqual({
-        content,
-        offset: 0,
-        length: ref.byteLength,
-        totalBytes: ref.byteLength,
-        hasMore: false,
-      });
-    }).pipe(Effect.provide(attachments)),
-  );
-
-  it.effect('pages through content by offset and length', () =>
-    Effect.gen(function* () {
-      const store = yield* AttachmentStore.Service;
-      const content = '0123456789abcdefghij';
-      const ref = yield* store.put(new TextEncoder().encode(content), {
-        mediaType: 'text/plain',
-      });
-      const { handler } = ResultOverflow.reader({ threshold: 8 });
-      const base = {
-        attachmentId: ref.digest,
-        mediaType: ref.mediaType,
-        byteLength: ref.byteLength,
-      };
-
-      const first = yield* handler(base);
-      expect(first.content).toBe(content.slice(0, 8));
-      expect(first.hasMore).toBe(true);
-
-      const second = yield* handler({
-        ...base,
-        offset: first.offset + first.length,
-      });
-      expect(second.content).toBe(content.slice(8, 16));
-      expect(second.hasMore).toBe(true);
-
-      const third = yield* handler({
-        ...base,
-        offset: second.offset + second.length,
-      });
-      expect(third.content).toBe(content.slice(16));
-      expect(third.hasMore).toBe(false);
-    }).pipe(Effect.provide(attachments)),
-  );
-
-  it.effect('caps a requested length at the policy threshold', () =>
-    Effect.gen(function* () {
-      const store = yield* AttachmentStore.Service;
-      const ref = yield* store.put(new TextEncoder().encode('0'.repeat(50)), {
-        mediaType: 'text/plain',
-      });
-      const { handler } = ResultOverflow.reader({ threshold: 5 });
-
-      const result = yield* handler({
-        attachmentId: ref.digest,
-        mediaType: ref.mediaType,
-        byteLength: ref.byteLength,
-        length: 1_000,
-      });
-
-      expect(result.length).toBe(5);
-    }).pipe(Effect.provide(attachments)),
-  );
-
-  it.effect('fails with AttachmentNotFound for an unknown id', () =>
-    Effect.gen(function* () {
-      const { handler } = ResultOverflow.reader({ threshold: 100 });
-
-      const outcome = yield* handler({
-        attachmentId: AttachmentRef.Digest.make(`sha256:${'0'.repeat(64)}`),
-        mediaType: 'text/plain',
-        byteLength: 3,
-      }).pipe(Effect.result);
-
-      expect(outcome._tag).toBe('Failure');
-      if (outcome._tag === 'Failure') {
-        expect(outcome.failure).toMatchObject({
-          _tag: 'AttachmentNotFound',
         });
-      }
-    }).pipe(Effect.provide(attachments)),
+      });
+      return provide(
+        Effect.gen(function* () {
+          const result = yield* agentWith(readPolicy).run('go');
+          const store = yield* AttachmentStore.Service;
+          const text = (
+            digest: string,
+            mediaType: string,
+            byteLength: number,
+          ) =>
+            store
+              .get({
+                digest: AttachmentRef.Digest.make(digest),
+                mediaType,
+                byteLength,
+              })
+              .pipe(Effect.map((bytes) => new TextDecoder().decode(bytes)));
+          const shown = toolResultsIn(lastPrompt);
+          const reads = shown.filter((part) => part.name === 'read_attachment');
+          const pointer = shown.find((part) => part.name === 'echo')?.result;
+          const overCap = reads[0]?.result;
+          if (
+            !ResultOverflow.isPointer(pointer) ||
+            !ResultOverflow.isPointer(overCap)
+          ) {
+            throw new Error('expected overflow pointers');
+          }
+          const whole = yield* text(
+            pointer.attachmentId,
+            pointer.mediaType,
+            pointer.byteLength,
+          );
+          const capped = yield* Schema.decodeEffect(
+            Schema.fromJsonString(Schema.Struct({ length: Schema.Finite })),
+          )(
+            yield* text(
+              overCap.attachmentId,
+              overCap.mediaType,
+              overCap.byteLength,
+            ),
+          );
+          const pages = reads
+            .slice(1)
+            .map((part) => Schema.decodeUnknownSync(Page)(part.result));
+
+          expect(result.text).toBe('done');
+          expect(capped.length).toBe(readPolicy.threshold);
+          expect(pages.length).toBeGreaterThan(2);
+          expect(pages.map((page) => page.hasMore)).toEqual(
+            pages.map((_, i) => i < pages.length - 1),
+          );
+          expect(pages.map((page) => page.content).join('')).toBe(whole);
+        }).pipe(Effect.provide(attachments)),
+        model,
+      );
+    },
   );
-});
 
-describe('durable conversations', () => {
-  it.effect('records the pointer, not the spilled payload', () =>
-    Effect.gen(function* () {
-      const calls = { count: 0 };
-      const agent = agentWith(calls, {
-        threshold: THRESHOLD,
-        preview: PREVIEW,
-      });
-      const size = THRESHOLD + 200;
-      const model = ScriptedModel.make([callTurn(size), answerTurn]);
-      const conversation = Conversation.make(agent, 'overflow-conversation');
-
-      yield* conversation.run('go').pipe(Effect.provide(model.layer));
-      const records = yield* conversation.records().pipe(Stream.runCollect);
-      const outcome = Array.from(records)
-        .map((envelope) => envelope.record)
-        .find((record) => record._tag === 'ToolOutcome');
-
-      if (outcome?._tag !== 'ToolOutcome') {
-        throw new Error('missing tool outcome');
-      }
-      const stored = outcome.result;
-      expect(JSON.stringify(stored)).not.toContain('x'.repeat(size));
-      expect(stored).toMatchObject({
-        _tag: 'ToolResultOverflow',
-        byteLength: size,
-      });
-    }).pipe(
-      Effect.provide(Layer.merge(attachments, testLogLayer)),
-      Effect.scoped,
-    ),
+  it.effect(
+    'answers a read of an unknown attachment with AttachmentNotFound',
+    () => {
+      const model = modelBy((options, index) =>
+        index === 0
+          ? callTurn({
+              id: 'read-missing',
+              name: 'read_attachment',
+              params: {
+                attachmentId: `sha256:${'0'.repeat(64)}`,
+                mediaType: 'text/plain',
+                byteLength: 3,
+              },
+            })
+          : textTurn(JSON.stringify(toolResultsIn(options.prompt))),
+      );
+      return provide(
+        Effect.gen(function* () {
+          const result = yield* agentWith(readPolicy).run('go');
+          expect(result.text).toContain('AttachmentNotFound');
+          expect(result.text).toContain('"isFailure":true');
+        }).pipe(Effect.provide(attachments)),
+        model,
+      );
+    },
   );
 });

@@ -1,15 +1,10 @@
-import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
-import { LogStore } from '@sunfall/vesper-log/log-store';
-import { LogOffset } from '@sunfall/vesper-log/offset';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import * as NodeServices from '@effect/platform-node/NodeServices';
+import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import { describe, expect, it } from '@effect/vitest';
+import { LogStore } from '@sunfall/vesper-log/log-store';
 import {
-  Deferred,
   Context,
   Effect,
   Exit,
-  Fiber,
   Layer,
   Option,
   Ref,
@@ -18,23 +13,19 @@ import {
   SchemaTransformation,
   Stream,
 } from 'effect';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import * as AgentLog from '../src/log.js';
 import { AgentState } from '../src/state.js';
+import { ScriptedModel } from '../src/testing.js';
+import {
+  finish,
+  testLogLayer,
+  textTurn,
+  toolTurn,
+} from './scenario-fixtures.js';
 
-const compatibility = {
-  agent: 'state-test',
-  revision: LogVocabulary.AgentRevision.make('1'),
-};
-const conversation = LogVocabulary.ConversationId.make('state-test');
 const Count = AgentState.make({
   id: 'count',
   version: '1',
@@ -47,120 +38,70 @@ const SameIdCount = AgentState.make({
   schema: Schema.Struct({ count: Schema.Finite }),
   initial: () => ({ count: 10 }),
 });
-class StateCodecService extends Context.Service<
-  StateCodecService,
-  { readonly offset: number }
->()('state-test/StateCodecService') {}
-const OffsetState = AgentState.make({
-  id: 'offset-state',
-  version: '1',
-  schema: Schema.String.pipe(
-    Schema.decodeTo(
-      Schema.Finite,
-      SchemaTransformation.transformOrFail<
-        number,
-        string,
-        StateCodecService,
-        StateCodecService
-      >({
-        decode: (value) =>
-          Effect.map(StateCodecService, ({ offset }) => Number(value) + offset),
-        encode: (value) =>
-          Effect.map(StateCodecService, ({ offset }) => String(value - offset)),
-      }),
-    ),
-  ),
-  initial: () => 0,
+
+const increment = Tool.make('increment', {
+  description: 'Increment the count.',
+  parameters: Schema.Struct({}),
+  success: Schema.Struct({ count: Schema.Finite }),
+  failure: AgentState.Error,
+  dependencies: AgentState.dependencies(Count),
 });
-const EncodeFailureState = AgentState.make({
-  id: 'encode-failure',
-  version: '1',
-  schema: Schema.String.pipe(
-    Schema.decodeTo(
-      Schema.Finite,
-      SchemaTransformation.transformOrFail<number, string>({
-        decode: (value) => Effect.succeed(Number(value)),
-        encode: () =>
-          Effect.fail(
-            new SchemaIssue.InvalidValue({ message: 'encode failed' }),
-          ),
-      }),
-    ),
-  ),
-  initial: () => 0,
-});
-const DecodeFailureState = AgentState.make({
-  id: 'decode-failure',
-  version: '1',
-  schema: Schema.Finite,
-  initial: () => 0,
+const setCount = Tool.make('set_count', {
+  description: 'Set the count.',
+  parameters: Schema.Struct({ count: Schema.Finite }),
+  success: Schema.Struct({ count: Schema.Finite }),
+  failure: AgentState.Error,
+  dependencies: AgentState.dependencies(Count),
 });
 
-const testLogLayer = Layer.mergeAll(
-  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
-  NodeServices.layer,
-);
-
-const open = Effect.fnUntraced(function* () {
-  const session = yield* AgentLog.open(conversation, { compatibility });
-  if (session.history.length === 0 && (yield* session.recorded).length === 0) {
-    yield* AgentLog.start(session, {
-      agent: compatibility.agent,
-      revision: compatibility.revision,
-      input: 'state test',
-    });
-  }
-  return session;
+const counter = Agent.make({
+  name: 'state-test',
+  revision: '1',
+  instructions: 'Use the tool.',
+  toolkit: Toolkit.make(increment, setCount),
+  state: Count,
+}).withHandlers({
+  increment: () =>
+    Effect.gen(function* () {
+      const state = yield* Count;
+      return yield* state.update(({ count }) => ({ count: count + 1 }));
+    }),
+  set_count: ({ count }) =>
+    Effect.gen(function* () {
+      const state = yield* Count;
+      yield* state.set({ count });
+      return yield* state.get;
+    }),
 });
 
-const finish: Response.StreamPartEncoded = {
-  type: 'finish',
-  reason: 'stop',
-  usage: {
-    inputTokens: { total: 1, uncached: 1, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 1 },
-  },
+/** One run that increments the count once, then answers. */
+let runs = 0;
+const incrementRun = () => {
+  const n = String(runs++);
+  return [toolTurn('increment', {}, `inc-${n}`), textTurn('ok', `t-${n}`)];
 };
-const model = Layer.effect(
-  LanguageModel.LanguageModel,
-  Effect.gen(function* () {
-    const calls = yield* Ref.make(0);
-    return yield* LanguageModel.make({
-      generateText: () => Effect.succeed([finish]),
-      streamText: () =>
-        Stream.unwrap(
-          Effect.map(
-            Ref.getAndUpdate(calls, (n) => n + 1),
-            (call) =>
-              Stream.fromIterable<Response.StreamPartEncoded>(
-                call % 2 === 0
-                  ? [
-                      {
-                        type: 'tool-call',
-                        id: `increment-${String(call)}`,
-                        name: 'increment',
-                        params: {},
-                      },
-                      { ...finish, reason: 'tool-calls' },
-                    ]
-                  : [
-                      { type: 'text-start', id: `text-${String(call)}` },
-                      {
-                        type: 'text-delta',
-                        id: `text-${String(call)}`,
-                        delta: 'ok',
-                      },
-                      { type: 'text-end', id: `text-${String(call)}` },
-                      finish,
-                    ],
-              ),
-          ),
-        ),
-    });
-  }),
-);
 
-describe('recorded agent state', () => {
+const checkpoints = (conversation: Conversation.Instance<typeof counter>) =>
+  conversation.records().pipe(
+    Stream.runCollect,
+    Effect.map((all) =>
+      Array.from(all).flatMap((envelope) =>
+        envelope.record._tag === 'StateCheckpoint'
+          ? [{ offset: envelope.offset, value: envelope.record.value }]
+          : [],
+      ),
+    ),
+  );
+
+const promptText = (value: unknown): string =>
+  Schema.encodeSync(Schema.fromJsonString(Schema.Unknown))(value);
+
+const errorOf = <A, E>(exit: Exit.Exit<A, E>) =>
+  exit._tag === 'Failure'
+    ? Option.getOrThrow(Exit.findErrorOption(exit))
+    : undefined;
+
+describe('ephemeral agent state', () => {
   it('uses typed definition errors', () => {
     expect(() =>
       AgentState.make({
@@ -169,178 +110,47 @@ describe('recorded agent state', () => {
         schema: Schema.Struct({}),
         initial: () => ({}),
       }),
-    ).toThrow(
-      expect.objectContaining({
-        _tag: 'StateDefinitionError',
-      }),
-    );
+    ).toThrow(expect.objectContaining({ _tag: 'StateDefinitionError' }));
   });
 
   it.effect(
-    'provides state to handlers and restores it across agent runs',
-    () => {
-      const increment = Tool.make('increment', {
-        description: 'Increment the recorded count.',
-        parameters: Schema.Struct({}),
-        success: Schema.Struct({ count: Schema.Finite }),
-        failure: AgentState.Error,
-        dependencies: AgentState.dependencies(Count),
-      });
-      const agent = Agent.make({
-        name: 'state-test',
-        revision: '1',
-        instructions: 'Use the tool once.',
-        toolkit: Toolkit.make(increment),
-        state: Count,
-      }).withHandlers({
-        increment: () =>
-          Effect.gen(function* () {
-            const state = yield* Count;
-            return yield* state.update(({ count }) => ({ count: count + 1 }));
-          }),
-      });
+    'supports typed updates and keeps same-id definitions distinct',
+    () =>
+      Effect.gen(function* () {
+        const state = yield* Count;
+        expect(yield* state.get).toEqual({ count: 0 });
+        expect(
+          yield* state.update(({ count }) => ({ count: count + 1 })),
+        ).toEqual({ count: 1 });
+        expect(
+          yield* state.modify(({ count }) => [count, { count: count + 1 }]),
+        ).toBe(1);
+        expect(yield* state.get).toEqual({ count: 2 });
+        expect(yield* (yield* SameIdCount).get).toEqual({ count: 10 });
 
-      return Effect.gen(function* () {
-        const agentConversation = Conversation.make(agent, 'agent-state');
-        yield* agentConversation.run('first');
-        yield* agentConversation.run('second');
-        const session = yield* AgentLog.open(
-          LogVocabulary.ConversationId.make('agent-state'),
-          { compatibility },
-        );
-        expect(yield* (yield* AgentState.open(Count, session)).get).toEqual({
-          count: 2,
-        });
-      }).pipe(Effect.provide(Layer.merge(model, testLogLayer)), Effect.orDie);
-    },
-  );
-
-  it.effect('supports ephemeral typed updates', () =>
-    Effect.gen(function* () {
-      const state = yield* Count;
-      expect(yield* state.get).toEqual({ count: 0 });
-      expect(
-        yield* state.update(({ count }) => ({ count: count + 1 })),
-      ).toEqual({
-        count: 1,
-      });
-      expect(
-        yield* state.modify(({ count }) => [count, { count: count + 1 }]),
-      ).toBe(1);
-      expect(yield* state.get).toEqual({ count: 2 });
-    }).pipe(Effect.provide(AgentState.layerEphemeral(Count))),
-  );
-
-  it.effect('opens isolated ephemeral handles', () =>
-    Effect.gen(function* () {
-      const left = yield* AgentState.open(Count, undefined);
-      const right = yield* AgentState.open(Count, undefined);
-      yield* left.set({ count: 1 });
-      yield* right.set({ count: 2 });
-      expect(yield* left.get).toEqual({ count: 1 });
-      expect(yield* right.get).toEqual({ count: 2 });
-    }),
-  );
-
-  it.effect('keeps same-id definitions distinct as Context services', () =>
-    Effect.gen(function* () {
-      expect(yield* (yield* Count).get).toEqual({ count: 0 });
-      expect(yield* (yield* SameIdCount).get).toEqual({ count: 10 });
-    }).pipe(
-      Effect.provide(
-        Layer.merge(
-          AgentState.layerEphemeral(Count),
-          AgentState.layerEphemeral(SameIdCount),
+        const left = yield* AgentState.open(Count, undefined);
+        const right = yield* AgentState.open(Count, undefined);
+        yield* left.set({ count: 1 });
+        yield* right.set({ count: 2 });
+        expect(yield* left.get).toEqual({ count: 1 });
+        expect(yield* right.get).toEqual({ count: 2 });
+      }).pipe(
+        Effect.provide(
+          Layer.merge(
+            AgentState.layerEphemeral(Count),
+            AgentState.layerEphemeral(SameIdCount),
+          ),
         ),
       ),
-    ),
-  );
-
-  it.effect('preserves transformed codec service requirements at runtime', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      const codecService = { offset: 1 };
-      const opened = yield* AgentState.open(OffsetState, session).pipe(
-        Effect.provideService(StateCodecService, codecService),
-      );
-      yield* opened
-        .set(41)
-        .pipe(Effect.provideService(StateCodecService, codecService));
-      expect((yield* session.recorded).at(-1)?.record).toMatchObject({
-        _tag: 'StateCheckpoint',
-        value: '40',
-      });
-
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
-      const restored = yield* AgentState.open(OffsetState, reopened).pipe(
-        Effect.provideService(StateCodecService, codecService),
-      );
-      expect(yield* restored.get).toBe(41);
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('reports checkpoint decoding failures as structured errors', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      yield* session.append([
-        {
-          _tag: 'StateCheckpoint',
-          id: DecodeFailureState.id,
-          version: DecodeFailureState.version,
-          value: 'not-a-number',
-        },
-      ]);
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
-      const exit = yield* Effect.exit(
-        AgentState.open(DecodeFailureState, reopened),
-      );
-      expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure') {
-        expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
-          _tag: 'StateDecodeError',
-          stateId: DecodeFailureState.id,
-          stateVersion: DecodeFailureState.version,
-        });
-      }
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('reports checkpoint encoding failures as structured errors', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      const state = yield* AgentState.open(EncodeFailureState, session);
-      const exit = yield* Effect.exit(state.set(1));
-      expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure') {
-        expect(Option.getOrThrow(Exit.findErrorOption(exit))).toMatchObject({
-          _tag: 'StateEncodeError',
-          stateId: EncodeFailureState.id,
-          stateVersion: EncodeFailureState.version,
-        });
-      }
-      expect(yield* state.get).toBe(0);
-      expect(
-        (yield* session.recorded).some(
-          ({ record }) => record._tag === 'StateCheckpoint',
-        ),
-      ).toBe(false);
-    }).pipe(Effect.provide(testLogLayer)),
   );
 
   it.effect('isolates concurrent ordinary runs', () =>
     Effect.gen(function* () {
       const seen = yield* Ref.make<ReadonlyArray<number>>([]);
-      const increment = Tool.make('increment', {
-        description: 'Increment the ephemeral count.',
-        parameters: Schema.Struct({}),
-        success: Schema.Struct({ count: Schema.Finite }),
-        failure: AgentState.Error,
-        dependencies: AgentState.dependencies(Count),
-      });
-      const agent = Agent.make({
+      const recording = Agent.make({
         name: 'ephemeral-state-test',
         revision: '1',
-        instructions: 'Use the tool once.',
+        instructions: 'Use the tool.',
         toolkit: Toolkit.make(increment),
         state: Count,
       }).withHandlers({
@@ -354,388 +164,177 @@ describe('recorded agent state', () => {
             return value;
           }),
       });
-      const ordinaryModel = Layer.effect(
-        LanguageModel.LanguageModel,
-        Effect.gen(function* () {
-          const calls = yield* Ref.make(0);
-          return yield* LanguageModel.make({
-            generateText: () => Effect.succeed([finish]),
-            streamText: () =>
-              Stream.unwrap(
-                Effect.map(
-                  Ref.getAndUpdate(calls, (n) => n + 1),
-                  (call) =>
-                    call < 2
-                      ? Stream.fromIterable<Response.StreamPartEncoded>([
-                          {
-                            type: 'tool-call',
-                            id: `increment-${String(call)}`,
-                            name: 'increment',
-                            params: {},
-                          },
-                          { ...finish, reason: 'tool-calls' },
-                        ])
-                      : Stream.fromIterable<Response.StreamPartEncoded>([
-                          { type: 'text-start', id: `text-${String(call)}` },
-                          {
-                            type: 'text-delta',
-                            id: `text-${String(call)}`,
-                            delta: 'ok',
-                          },
-                          { type: 'text-end', id: `text-${String(call)}` },
-                          finish,
-                        ]),
-                ),
-              ),
-          });
-        }),
-      );
+      // Both runs share one script: tool call, tool call, then two answers.
+      const model = ScriptedModel.make([
+        toolTurn('increment', {}, 'left'),
+        toolTurn('increment', {}, 'right'),
+        textTurn('ok', 'a'),
+        textTurn('ok', 'b'),
+      ]);
 
-      yield* Effect.all([agent.run('left'), agent.run('right')], {
+      yield* Effect.all([recording.run('left'), recording.run('right')], {
         concurrency: 'unbounded',
-      }).pipe(Effect.provide(ordinaryModel));
-      expect([...(yield* Ref.get(seen))].sort((a, b) => a - b)).toEqual([1, 1]);
+      }).pipe(Effect.provide(model.layer));
+
+      expect(yield* Ref.get(seen)).toEqual([1, 1]);
     }).pipe(Effect.orDie),
+  );
+});
+
+const providing = (model: ScriptedModel.Handle) =>
+  Effect.provide(Layer.mergeAll(model.layer, testLogLayer, NodeCrypto.layer));
+
+const failingAgent = <A, Encoded>(
+  name: string,
+  definition: AgentState.Definition<A, Encoded>,
+  value: A,
+) => {
+  const poke = Tool.make('poke', {
+    parameters: Schema.Struct({}),
+    success: Schema.String,
+    failure: AgentState.Error,
+    dependencies: AgentState.dependencies(definition),
+  });
+  return Agent.make({
+    name,
+    revision: '1',
+    instructions: 'x',
+    toolkit: Toolkit.make(poke),
+    state: definition,
+  }).withHandlers({
+    poke: () =>
+      Effect.gen(function* () {
+        const state = yield* definition;
+        const outcome = yield* Effect.result(state.set(value));
+        const failure =
+          outcome._tag === 'Failure' ? outcome.failure._tag : 'none';
+        return failure;
+      }),
+  });
+};
+
+describe('recorded agent state', () => {
+  it.effect(
+    'restores checkpoints across runs and snapshots them on settlement',
+    () =>
+      Effect.gen(function* () {
+        const model = ScriptedModel.make([
+          ...incrementRun(),
+          ...incrementRun(),
+        ]);
+        yield* Effect.gen(function* () {
+          const conversation = Conversation.make(counter, 'agent-state');
+          yield* conversation.run('first');
+          yield* conversation.run('second');
+          const records = Array.from(
+            yield* conversation.records().pipe(Stream.runCollect),
+          );
+          const settled = records.flatMap(({ record }) =>
+            record._tag === 'RunSettled' ? [record] : [],
+          );
+
+          expect(
+            (yield* checkpoints(conversation)).map((c) => c.value),
+          ).toEqual([{ count: 1 }, { count: 2 }]);
+          expect(settled.at(-1)).toMatchObject({
+            resume: {
+              state: { id: 'count', version: '1', value: { count: 2 } },
+            },
+          });
+        }).pipe(providing(model));
+      }).pipe(Effect.orDie),
   );
 
   it.effect(
     'isolates concurrent conversations sharing one recorded layer',
-    () => {
-      const setCount = Tool.make('set_count', {
-        description: 'Set the recorded count.',
-        parameters: Schema.Struct({ count: Schema.Finite }),
-        success: Schema.Struct({ count: Schema.Finite }),
-        failure: AgentState.Error,
-        dependencies: AgentState.dependencies(Count),
-      });
-      const agent = Agent.make({
-        name: 'state-test',
-        revision: '1',
-        instructions: 'Set the requested count.',
-        toolkit: Toolkit.make(setCount),
-        state: Count,
-      }).withHandlers({
-        set_count: ({ count }) =>
-          Effect.gen(function* () {
-            const state = yield* Count;
-            yield* state.set({ count });
-            return yield* state.get;
-          }),
-      });
-      const setCountModel = Layer.effect(
-        LanguageModel.LanguageModel,
-        Effect.gen(function* () {
-          const calls = yield* Ref.make(0);
-          return yield* LanguageModel.make({
-            generateText: () => Effect.succeed([finish]),
-            streamText: (options) =>
-              Stream.unwrap(
-                Effect.map(
-                  Ref.getAndUpdate(calls, (n) => n + 1),
-                  (call) =>
-                    call < 2
-                      ? Stream.fromIterable<Response.StreamPartEncoded>([
-                          {
-                            type: 'tool-call',
-                            id: `set-count-${String(call)}`,
-                            name: 'set_count',
-                            params: {
-                              count: JSON.stringify(options.prompt).includes(
-                                'count to 1',
-                              )
-                                ? 1
-                                : 2,
-                            },
-                          },
-                          { ...finish, reason: 'tool-calls' },
-                        ])
-                      : Stream.fromIterable<Response.StreamPartEncoded>([
-                          { type: 'text-start', id: `text-${String(call)}` },
-                          {
-                            type: 'text-delta',
-                            id: `text-${String(call)}`,
-                            delta: 'ok',
-                          },
-                          { type: 'text-end', id: `text-${String(call)}` },
-                          finish,
-                        ]),
-                ),
-              ),
+    () =>
+      Effect.gen(function* () {
+        const model = ScriptedModel.make([
+          toolTurn('set_count', { count: 1 }, 'left'),
+          toolTurn('set_count', { count: 2 }, 'right'),
+          textTurn('ok', 'a'),
+          textTurn('ok', 'b'),
+        ]);
+        yield* Effect.gen(function* () {
+          const left = Conversation.make(counter, 'state-left');
+          const right = Conversation.make(counter, 'state-right');
+          yield* Effect.all([left.run('one'), right.run('two')], {
+            concurrency: 'unbounded',
           });
-        }),
-      );
+          const values = (c: typeof left) =>
+            Effect.map(checkpoints(c), (all) => all.map(({ value }) => value));
+          // Whichever scripted call each conversation drew, its checkpoint is
+          // its own: one conversation never sees the other's write.
+          const both = [
+            (yield* values(left)).at(-1),
+            (yield* values(right)).at(-1),
+          ];
+          expect(both).toEqual(
+            expect.arrayContaining([{ count: 1 }, { count: 2 }]),
+          );
+        }).pipe(providing(model));
+      }).pipe(Effect.orDie),
+  );
 
-      return Effect.gen(function* () {
-        yield* Effect.all(
-          [
-            Conversation.make(agent, 'state-left').run('set count to 1'),
-            Conversation.make(agent, 'state-right').run('set count to 2'),
-          ],
-          { concurrency: 'unbounded' },
-        );
-        const left = yield* AgentLog.open(
-          LogVocabulary.ConversationId.make('state-left'),
-          { compatibility },
-        );
-        const right = yield* AgentLog.open(
-          LogVocabulary.ConversationId.make('state-right'),
-          { compatibility },
-        );
-        expect(yield* (yield* AgentState.open(Count, left)).get).toEqual({
-          count: 1,
-        });
-        expect(yield* (yield* AgentState.open(Count, right)).get).toEqual({
+  it.effect('branches and forks from the selected state checkpoint', () =>
+    Effect.gen(function* () {
+      const model = ScriptedModel.make(
+        Array.from({ length: 5 }, incrementRun).flat(),
+      );
+      yield* Effect.gen(function* () {
+        const source = Conversation.make(counter, 'state-source');
+        yield* source.run('one');
+        yield* source.run('two');
+        const settledFirst = Array.from(
+          yield* source.records().pipe(Stream.runCollect),
+        ).find(({ record }) => record._tag === 'RunSettled');
+        const at = Option.getOrThrow(Option.fromNullishOr(settledFirst)).offset;
+
+        // Branching behind the second increment restores count 1, so the
+        // branch's own increment lands on 2, not 3.
+        yield* source.branchFrom(at, 'branch');
+        expect((yield* checkpoints(source)).at(-1)?.value).toEqual({
           count: 2,
         });
-      }).pipe(
-        Effect.provide(Layer.merge(setCountModel, testLogLayer)),
-        Effect.orDie,
-      );
-    },
-  );
-
-  it.effect('serializes concurrent first access for a recorded handle', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      const state = yield* AgentState.open(Count, session);
-      yield* Effect.all(
-        Array.from({ length: 20 }, () =>
-          state.update(({ count }) => ({ count: count + 1 })),
-        ),
-        { concurrency: 'unbounded' },
-      );
-      expect(yield* state.get).toEqual({ count: 20 });
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('restores immediate checkpoints after reopening', () =>
-    Effect.gen(function* () {
-      const first = yield* open();
-      const state = yield* AgentState.open(Count, first);
-      yield* state.set({ count: 3 });
-
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
-      const restored = yield* AgentState.open(Count, reopened);
-      expect(yield* restored.get).toEqual({ count: 3 });
-      expect(reopened.stateHistory.at(-1)?.record).toMatchObject({
-        _tag: 'StateCheckpoint',
-        id: 'count',
-        version: '1',
-        value: { count: 3 },
-      });
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('serializes concurrent updates', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      const state = yield* AgentState.open(Count, session);
-      yield* Effect.all(
-        Array.from({ length: 20 }, () =>
-          state.update(({ count }) => ({ count: count + 1 })),
-        ),
-        { concurrency: 'unbounded' },
-      );
-      expect(yield* state.get).toEqual({ count: 20 });
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('restores a pre-compaction checkpoint after an orphaned run', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      yield* (yield* AgentState.open(Count, session)).set({ count: 7 });
-      yield* session.append([{ _tag: 'Text', step: 1, text: 'kept' }]);
-      const lastRecord = (yield* session.recorded).at(-1);
-      if (lastRecord === undefined) {
-        throw new Error('missing kept record');
-      }
-      const firstKept = lastRecord.offset;
-      yield* session.append([
-        {
-          _tag: 'Compacted',
-          formatVersion: 1,
-          agent: compatibility.agent,
-          agentRevision: compatibility.revision,
-          step: 1,
-          summary: 'summary',
-          firstKept,
-          summarizedMessages: 1,
-          keptMessages: 1,
-        },
-        {
-          _tag: 'RunStarted',
-          formatVersion: 1,
-          agent: compatibility.agent,
-          agentRevision: compatibility.revision,
-          prompt: [],
-        },
-      ]);
-
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
-      expect(yield* (yield* AgentState.open(Count, reopened)).get).toEqual({
-        count: 7,
-      });
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('snapshots earlier records from the settlement batch', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      yield* session.append([
-        {
-          _tag: 'StateCheckpoint',
-          id: Count.id,
-          version: Count.version,
-          value: { count: 9 },
-        },
-        {
-          _tag: 'Completed',
-          outcome: 'success',
-          text: 'done',
-          steps: 1,
-          usage: { input: 1, output: 1 },
-        },
-        {
-          _tag: 'RunSettled',
-          outcome: 'success',
-          detail: '',
-          steps: 1,
-          usage: { input: 1, output: 1 },
-        },
-      ]);
-
-      const settled = (yield* session.recorded).find(
-        ({ record }) => record._tag === 'RunSettled',
-      )?.record;
-      expect(settled).toMatchObject({
-        resume: {
-          completed: { text: 'done' },
-          state: { id: 'count', version: '1', value: { count: 9 } },
-        },
-      });
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
-      expect(reopened.completed).toMatchObject({ text: 'done' });
-      expect(yield* (yield* AgentState.open(Count, reopened)).get).toEqual({
-        count: 9,
-      });
-    }).pipe(Effect.provide(testLogLayer)),
-  );
-
-  it.effect('serializes checkpoints with concurrent settlement snapshots', () =>
-    Effect.gen(function* () {
-      const entered = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const delayed = Layer.mergeAll(
-        Layer.effect(
-          LogStore.Service,
-          Effect.gen(function* () {
-            const store = yield* LogStore.Service;
-            return {
-              ...store,
-              append: (input: LogStore.AppendInput) =>
-                input.records.some(
-                  ({ record }) => record._tag === 'StateCheckpoint',
-                )
-                  ? Effect.gen(function* () {
-                      yield* Deferred.succeed(entered, undefined);
-                      yield* Deferred.await(release);
-                      return yield* store.append(input);
-                    })
-                  : store.append(input),
-            } satisfies LogStore.Interface;
-          }),
-        ).pipe(Layer.provide(testLogLayer)),
-        NodeServices.layer,
-      );
-
-      yield* Effect.gen(function* () {
-        const session = yield* open();
-        const checkpoint = yield* session
-          .append([
-            {
-              _tag: 'StateCheckpoint',
-              id: Count.id,
-              version: Count.version,
-              value: { count: 11 },
-            },
-          ])
-          .pipe(Effect.forkChild);
-        yield* Deferred.await(entered);
-        const settlement = yield* session
-          .append([
-            {
-              _tag: 'RunSettled',
-              outcome: 'interrupted',
-              detail: 'concurrent settlement',
-              steps: 0,
-              usage: { input: 0, output: 0 },
-            },
-          ])
-          .pipe(Effect.forkChild);
-        yield* Effect.yieldNow;
-        yield* Deferred.succeed(release, undefined);
-        yield* Fiber.join(checkpoint);
-        yield* Fiber.join(settlement);
-
-        const reopened = yield* AgentLog.open(conversation, { compatibility });
-        expect(yield* (yield* AgentState.open(Count, reopened)).get).toEqual({
-          count: 11,
+        // The next ordinary run continues from the branch, not the abandoned tail.
+        yield* source.run('after branch');
+        expect((yield* checkpoints(source)).at(-1)?.value).toEqual({
+          count: 3,
         });
-      }).pipe(Effect.provide(delayed));
-    }),
+
+        yield* source.forkFrom(at, 'state-fork', 'fork');
+        const fork = Conversation.make(counter, 'state-fork');
+        expect((yield* checkpoints(fork)).at(-1)?.value).toEqual({ count: 2 });
+        expect((yield* checkpoints(source)).at(-1)?.value).toEqual({
+          count: 3,
+        });
+      }).pipe(providing(model));
+    }).pipe(Effect.orDie),
   );
 
-  it.effect('rejects a different state identity before use', () =>
+  it.effect('preserves state error identity at the agent boundary', () =>
     Effect.gen(function* () {
-      const session = yield* open();
-      yield* (yield* AgentState.open(Count, session)).set({ count: 1 });
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
       const Other = AgentState.make({
-        id: 'other',
-        version: '1',
+        id: 'other-agent-state',
+        version: '7',
         schema: Schema.Struct({ count: Schema.Finite }),
         initial: () => ({ count: 0 }),
       });
-      const result = yield* Effect.exit(AgentState.open(Other, reopened));
-      expect(result._tag).toBe('Failure');
-      if (result._tag === 'Failure') {
-        const error = Exit.findErrorOption(result);
-        expect(Option.getOrThrow(error)).toMatchObject({
-          _tag: 'StateCompatibilityError',
-          stateId: 'other',
-          persistedId: 'count',
-        });
-      }
-    }).pipe(Effect.provide(testLogLayer)),
-  );
+      const other = Agent.make({
+        name: counter.name,
+        revision: counter.revision,
+        instructions: 'do nothing',
+        toolkit: Toolkit.empty,
+        state: Other,
+      });
+      const model = ScriptedModel.make([...incrementRun(), textTurn('unused')]);
+      yield* Effect.gen(function* () {
+        yield* Conversation.make(counter, 'state-identity').run('seed');
+        const exit = yield* Effect.exit(
+          Conversation.make(other, 'state-identity').run('hello'),
+        );
 
-  it.effect('preserves state error identity at the agent boundary', () => {
-    const Other = AgentState.make({
-      id: 'other-agent-state',
-      version: '7',
-      schema: Schema.Struct({ count: Schema.Finite }),
-      initial: () => ({ count: 0 }),
-    });
-    const agent = Agent.make({
-      name: compatibility.agent,
-      revision: compatibility.revision,
-      instructions: 'do nothing',
-      toolkit: Toolkit.empty,
-      state: Other,
-    });
-
-    return Effect.gen(function* () {
-      const session = yield* open();
-      yield* (yield* AgentState.open(Count, session)).set({ count: 1 });
-
-      const result = yield* Effect.exit(
-        Conversation.make(agent, conversation)
-          .run('hello')
-          .pipe(Effect.provide(model)),
-      );
-      expect(result._tag).toBe('Failure');
-      if (result._tag === 'Failure') {
-        expect(Option.getOrThrow(Exit.findErrorOption(result))).toMatchObject({
+        expect(errorOf(exit)).toMatchObject({
           _tag: 'AiError',
           reason: {
             _tag: 'InvalidRequestError',
@@ -750,111 +349,218 @@ describe('recorded agent state', () => {
             },
           },
         });
-      }
-    }).pipe(Effect.provide(testLogLayer));
-  });
-
-  it.effect('reports mutation encoding failures without defects', () => {
-    const Invalid = AgentState.make({
-      id: 'invalid',
-      version: '1',
-      schema: Schema.Struct({ count: Schema.Number }),
-      initial: () => ({ count: 0 }),
-    });
-    return Effect.gen(function* () {
-      const session = yield* open();
-      const state = yield* AgentState.open(Invalid, session);
-      const exit = yield* Effect.exit(
-        state.set({ count: Number.POSITIVE_INFINITY }),
-      );
-      expect(exit._tag).toBe('Failure');
-      if (exit._tag === 'Failure') {
-        const error = Exit.findErrorOption(exit);
-        expect(Option.isSome(error)).toBe(true);
-        if (Option.isSome(error)) {
-          expect(error.value).toMatchObject({
-            _tag: 'StateJsonError',
-            message: 'State checkpoint is not JSON-safe',
-            stateId: 'invalid',
-            stateVersion: '1',
-          });
-        }
-      }
-    }).pipe(Effect.provide(testLogLayer));
-  });
-
-  it.effect('branches and forks from the selected state checkpoint', () =>
-    Effect.gen(function* () {
-      const session = yield* open();
-      const state = yield* AgentState.open(Count, session);
-      yield* state.set({ count: 1 });
-      const afterOneRecord = (yield* session.recorded).at(-1);
-      if (afterOneRecord === undefined) {
-        throw new Error('missing state record');
-      }
-      const afterOne = afterOneRecord.offset;
-      yield* state.set({ count: 2 });
-
-      const branched = yield* AgentLog.open(conversation, {
-        compatibility,
-        branchFrom: afterOne,
-      });
-      expect(yield* (yield* AgentState.open(Count, branched)).get).toEqual({
-        count: 1,
-      });
-      yield* branched.append([
-        {
-          _tag: 'RunSettled',
-          outcome: 'interrupted',
-          detail: 'branch state regression',
-          steps: 0,
-          usage: { input: 0, output: 0 },
-        },
-      ]);
-      const reopened = yield* AgentLog.open(conversation, { compatibility });
-      expect(yield* (yield* AgentState.open(Count, reopened)).get).toEqual({
-        count: 1,
-      });
-
-      const forked = yield* AgentLog.fork(
-        conversation,
-        afterOne,
-        LogVocabulary.ConversationId.make('state-fork'),
-        compatibility,
-      );
-      expect(yield* (yield* AgentState.open(Count, forked)).get).toEqual({
-        count: 1,
-      });
-      expect(afterOne).not.toBe(LogOffset.START);
-    }).pipe(Effect.provide(testLogLayer)),
+      }).pipe(providing(model));
+    }).pipe(Effect.orDie),
   );
 
-  it.effect('restores state when branching behind a settled aggregate', () =>
+  it.effect('fails a resume whose persisted checkpoint no longer decodes', () =>
     Effect.gen(function* () {
-      const session = yield* open();
-      yield* (yield* AgentState.open(Count, session)).set({ count: 13 });
-      const checkpointRecord = (yield* session.recorded).at(-1);
-      if (checkpointRecord === undefined) {
-        throw new Error('missing checkpoint record');
-      }
-      const checkpoint = checkpointRecord.offset;
-      yield* session.append([
-        {
-          _tag: 'RunSettled',
-          outcome: 'interrupted',
-          detail: 'settled before branch',
-          steps: 0,
-          usage: { input: 0, output: 0 },
-        },
-      ]);
+      // Same id and version, incompatible schema: the stored { count } cannot
+      // decode, and the run must fail typed rather than reset to initial.
+      const Drifted = AgentState.make({
+        id: Count.id,
+        version: Count.version,
+        schema: Schema.String,
+        initial: () => 'reset',
+      });
+      const drifted = Agent.make({
+        name: counter.name,
+        revision: counter.revision,
+        instructions: 'do nothing',
+        toolkit: Toolkit.empty,
+        state: Drifted,
+      });
+      const model = ScriptedModel.make([...incrementRun(), textTurn('unused')]);
+      yield* Effect.gen(function* () {
+        yield* Conversation.make(counter, 'state-decode').run('seed');
+        const exit = yield* Effect.exit(
+          Conversation.make(drifted, 'state-decode').run('hello'),
+        );
+        expect(errorOf(exit)).toMatchObject({
+          _tag: 'AiError',
+          reason: {
+            metadata: {
+              vesper: {
+                tag: 'StateDecodeError',
+                stateId: Count.id,
+                stateVersion: Count.version,
+              },
+            },
+          },
+        });
+      }).pipe(providing(model));
+    }).pipe(Effect.orDie),
+  );
 
-      const branched = yield* AgentLog.open(conversation, {
-        compatibility,
-        branchFrom: checkpoint,
+  it.live('serializes slow checkpoint writes with the run settlement', () =>
+    Effect.gen(function* () {
+      const slowStore = Layer.effect(
+        LogStore.Service,
+        Effect.gen(function* () {
+          const store = yield* LogStore.Service;
+          return {
+            ...store,
+            append: (input: LogStore.AppendInput) =>
+              input.records.some(
+                ({ record }) => record._tag === 'StateCheckpoint',
+              )
+                ? Effect.sleep('20 millis').pipe(
+                    Effect.andThen(store.append(input)),
+                  )
+                : store.append(input),
+          } satisfies LogStore.Interface;
+        }),
+      ).pipe(Layer.provide(testLogLayer));
+      // Two parallel increments in one turn, each writing a slow checkpoint.
+      const model = ScriptedModel.make([
+        [
+          { type: 'tool-call', id: 'a', name: 'increment', params: {} },
+          { type: 'tool-call', id: 'b', name: 'increment', params: {} },
+          finish('tool-calls'),
+        ],
+        textTurn('done'),
+      ]);
+      yield* Effect.gen(function* () {
+        const conversation = Conversation.make(counter, 'state-race');
+        yield* conversation.run('go');
+        const records = Array.from(
+          yield* conversation.records().pipe(Stream.runCollect),
+        );
+        const settled = records.find(
+          ({ record }) => record._tag === 'RunSettled',
+        );
+        const written = records.filter(
+          ({ record }) => record._tag === 'StateCheckpoint',
+        );
+        // No lost update, and no checkpoint lands after the settlement.
+        expect(written.map(({ record }) => record)).toMatchObject([
+          { value: { count: 1 } },
+          { value: { count: 2 } },
+        ]);
+        const settledAt = Option.getOrThrow(
+          Option.fromNullishOr(settled),
+        ).offset;
+        expect(written.every(({ offset }) => offset < settledAt)).toBe(true);
+        expect(settled?.record).toMatchObject({
+          resume: { state: { value: { count: 2 } } },
+        });
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(model.layer, slowStore, NodeCrypto.layer),
+        ),
+      );
+    }).pipe(Effect.orDie),
+  );
+
+  it.effect('reports encode, JSON, and codec failures without defects', () =>
+    Effect.gen(function* () {
+      class Codec extends Context.Service<Codec, { readonly offset: number }>()(
+        'state-test/Codec',
+      ) {}
+      const OffsetState = AgentState.make({
+        id: 'offset-state',
+        version: '1',
+        schema: Schema.String.pipe(
+          Schema.decodeTo(
+            Schema.Finite,
+            SchemaTransformation.transformEffect<number, string, Codec, Codec>({
+              decode: (value) =>
+                Effect.map(Codec, ({ offset }) => Number(value) + offset),
+              encode: (value) =>
+                Effect.map(Codec, ({ offset }) => String(value - offset)),
+            }),
+          ),
+        ),
+        initial: () => 0,
       });
-      expect(yield* (yield* AgentState.open(Count, branched)).get).toEqual({
-        count: 13,
+      const EncodeFailureState = AgentState.make({
+        id: 'encode-failure',
+        version: '1',
+        schema: Schema.String.pipe(
+          Schema.decodeTo(
+            Schema.Finite,
+            SchemaTransformation.transformEffect<number, string>({
+              decode: (value) => Effect.succeed(Number(value)),
+              encode: () =>
+                Effect.fail(
+                  new SchemaIssue.InvalidValue({ message: 'encode failed' }),
+                ),
+            }),
+          ),
+        ),
+        initial: () => 0,
       });
-    }).pipe(Effect.provide(testLogLayer)),
+      const InfiniteState = AgentState.make({
+        id: 'infinite',
+        version: '1',
+        schema: Schema.Struct({ count: Schema.Number }),
+        initial: () => ({ count: 0 }),
+      });
+      // Codec services flow through to runtime encoding of checkpoints.
+      const setOffset = Tool.make('set_offset', {
+        parameters: Schema.Struct({ value: Schema.Finite }),
+        success: Schema.Finite,
+        failure: AgentState.Error,
+        dependencies: AgentState.dependencies(OffsetState, Codec),
+      });
+      const offsetAgent = Agent.make({
+        name: 'offset',
+        revision: '1',
+        instructions: 'x',
+        toolkit: Toolkit.make(setOffset),
+        state: OffsetState,
+      }).withHandlers({
+        set_offset: ({ value }) =>
+          Effect.gen(function* () {
+            const state = yield* OffsetState;
+            yield* state.set(value);
+            return yield* state.get;
+          }),
+      });
+      const offsetModel = ScriptedModel.make([
+        toolTurn('set_offset', { value: 41 }),
+        textTurn('ok'),
+      ]);
+      yield* Effect.gen(function* () {
+        const conversation = Conversation.make(offsetAgent, 'offset');
+        yield* conversation.run('go');
+        const stored = Array.from(
+          yield* conversation.records().pipe(Stream.runCollect),
+        ).flatMap(({ record }) =>
+          record._tag === 'StateCheckpoint' ? [record.value] : [],
+        );
+        expect(stored).toEqual(['40']);
+      }).pipe(
+        Effect.provideService(Codec, { offset: 1 }),
+        providing(offsetModel),
+      );
+
+      // Failing encodes surface as typed tool failures and write nothing.
+      for (const [agent, expected] of [
+        [failingAgent('encode', EncodeFailureState, 1), 'StateEncodeError'],
+        [
+          failingAgent('json', InfiniteState, { count: Infinity }),
+          'StateJsonError',
+        ],
+      ] as const) {
+        const model = ScriptedModel.make([
+          toolTurn('poke', {}),
+          textTurn('ok'),
+        ]);
+        yield* Effect.gen(function* () {
+          const conversation = Conversation.make(agent, `poke-${agent.name}`);
+          yield* conversation.run('go');
+          const records = Array.from(
+            yield* conversation.records().pipe(Stream.runCollect),
+          );
+          expect(
+            records.some(({ record }) => record._tag === 'StateCheckpoint'),
+          ).toBe(false);
+        }).pipe(providing(model));
+        expect(promptText((yield* model.requests).at(-1)?.prompt)).toContain(
+          expected,
+        );
+      }
+    }).pipe(Effect.orDie),
   );
 });

@@ -5,7 +5,7 @@ What Vesper is, what it borrows, and what it deliberately does not build.
 [`CONTEXT.md`](CONTEXT.md) is the vocabulary; this file is the reasoning
 behind the shape.
 
-Vesper is an agent loop over `effect/unstable/ai`, which supplies
+Vesper is an agent loop over `effect/ai`, which supplies
 `LanguageModel`, `Tool`, `Toolkit`, `Prompt`, `Response`, and `Chat`, and
 stops one round trip short of an agent. Two decisions carry the rest of the
 design:
@@ -27,7 +27,7 @@ adapter here would duplicate that work and lag the same API it targets.
 
 Applications provide `LanguageModel` directly from official packages such as
 `@effect/ai-anthropic` and `@effect/ai-openai`. Vesper's loop sees only
-`effect/unstable/ai`; provider choice therefore changes application wiring, not
+`effect/ai`; provider choice therefore changes application wiring, not
 the loop or a Vesper registry.
 
 This also keeps provider-specific capabilities where they can evolve:
@@ -195,8 +195,8 @@ Worse, checkpointing did not cover the case it was defended with.
 `Durable.wrap` wrapped `generateText` and `streamText`; tool execution happens
 inside `LanguageModel`'s resolution of the turn, past every checkpoint. A run
 that died after tool A and before tool B replayed the model call for free and
-**re-ran tool A**. The log has `ToolStarted`, written immediately before a real
-handler, and `ToolOutcome`, one per settled call. `dispatch.ts` serves completed
+**re-ran tool A**. The log has `StepStarted`, written immediately before a real
+handler, and `StepSettled`, one per settled call. `dispatch.ts` serves completed
 outcomes and refuses to guess when a start has no outcome: only the dedicated
 indeterminate interceptor may explicitly Retry or Answer. The named case is
 therefore covered by the mechanism that was supposed to be insufficient for it.
@@ -238,7 +238,7 @@ re-projects after state-changing records until the requested key appears. The
 tail's notifications are wakeups rather than delivery authority; re-reading
 the log also observes every atomic append as a whole. The lower-level `waits`
 and `followWaits` streams intentionally remain audit lifecycles rather than
-pretending every historical `ToolSuspended` is still actionable. Two active
+pretending every historical `StepSuspended` is still actionable. Two active
 tokens for the same definition, conversation, and key are ambiguous durable
 state and fail as typed `WaitStateError`; log order is not an ownership rule.
 
@@ -260,7 +260,7 @@ a fork from disturbing a run that is live on it.
 
 A suspended workflow token is execution-owned and is never copied as if it
 belonged to the new path. The explicit `{ pendingWait: 'restart' }` policy
-records `ToolWaitRestarted` and freshly dispatches the recorded provider call;
+records `StepRestarted` and freshly dispatches the recorded provider call;
 the workflow binding supplies the new execution context and interrupts the
 superseded source for a branch while leaving it independent for a fork.
 
@@ -278,10 +278,16 @@ they are values you import and call. Until something serves agents remotely,
 routing adds indirection without buying anything. Do not build it
 speculatively.
 
-**A Cloudflare Durable Objects runtime.** It is a plausible home for an agent
-loop, and it is also a second durability story with its own semantics to keep
-aligned with the log's. Postgres already answers the question it would answer,
-and the section above is the argument it has to beat.
+**A Cloudflare Durable Objects runtime.** A Durable Object's SQLite storage is
+synchronous SQLite, the same shape as the native driver, so the log runs there
+as a storage adapter: `@sunfall/vesper-log-sqlite/layer-cloudflare` adapts
+`ctx.storage.sql` and `transactionSync` to the existing `SqlClient` and
+`LogStoreSqlite`. That is not a second durability story, because the log, its
+fencing, and resume stay Vesper's own, and an alarm just calls
+`conversation.run()` to resume an orphan. What stays declined is a runtime
+with its own durability semantics: a Durable Object scheduler, state model, or
+replay engine to keep aligned with the log. The adapter is verified against a
+`node:sqlite` stand-in, not workerd.
 
 **Another fold checkpoint over the log.** Settled runs already carry bounded
 resume aggregates, and compacted prompts page only their live suffix. Legacy,
@@ -296,7 +302,7 @@ unbounded until a later run reaches settlement and writes the sole aggregate.
 
 ## Where evidence still comes from adoption
 
-`ToolStarted` narrows crash recovery to the honest distributed-systems limit;
+`StepStarted` narrows crash recovery to the honest distributed-systems limit;
 it does not make an external side effect atomic with the conversation log. A
 start without an outcome means the handler may or may not have committed. The
 application must reconcile against its external system and explicitly Answer,

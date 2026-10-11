@@ -8,20 +8,14 @@ import { describe, expect, it } from '@effect/vitest';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Compaction } from '@sunfall/vesper-agent/compaction';
 import { ModelPlan } from '@sunfall/vesper-agent/model-plan';
-import { Effect, ExecutionPlan, Layer, Schema, Stream } from 'effect';
-import {
-  AiError,
-  LanguageModel,
-  Prompt,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { Effect, ExecutionPlan, Layer, Ref, Schema, Stream } from 'effect';
+import { AiError, LanguageModel, Prompt, Tool, Toolkit } from 'effect/ai';
 import {
   HttpClient,
   HttpClientError,
   HttpClientResponse,
   type HttpClientRequest,
-} from 'effect/unstable/http';
+} from 'effect/http';
 
 type Reply =
   | {
@@ -199,6 +193,74 @@ const openAiSuccess = sse(
   { type: 'response.completed', response: openAiResponse, sequence_number: 5 },
 );
 
+// A call to a tool the request never offered, named after an
+// `Object.prototype` property. Before Effect #9008 both providers rejected the
+// name themselves, and a lookup through the prototype chain would mistake it
+// for a tool; the agent must answer it once, as an undeclared tool.
+const UNDECLARED = 'toString';
+
+const anthropicUndeclaredCall = sse(
+  { type: 'message_start', message: anthropicMessage },
+  {
+    type: 'content_block_start',
+    index: 0,
+    content_block: {
+      type: 'tool_use',
+      id: 'toolu_undeclared',
+      name: UNDECLARED,
+      input: {},
+    },
+  },
+  {
+    type: 'content_block_delta',
+    index: 0,
+    delta: { type: 'input_json_delta', partial_json: '{"query":"sun"}' },
+  },
+  { type: 'content_block_stop', index: 0 },
+  {
+    type: 'message_delta',
+    delta: { stop_reason: 'tool_use', stop_sequence: null },
+    usage: {
+      cache_creation_input_tokens: 3,
+      cache_read_input_tokens: 5,
+      input_tokens: 11,
+      output_tokens: 7,
+    },
+  },
+  { type: 'message_stop' },
+);
+
+const openAiUndeclaredCall = sse(
+  { type: 'response.created', response: openAiResponse, sequence_number: 0 },
+  {
+    type: 'response.output_item.added',
+    output_index: 0,
+    sequence_number: 1,
+    item: {
+      id: 'fc_undeclared',
+      type: 'function_call',
+      call_id: 'call_undeclared',
+      name: UNDECLARED,
+      arguments: '',
+      status: 'in_progress',
+    },
+  },
+  {
+    type: 'response.output_item.done',
+    output_index: 0,
+    sequence_number: 2,
+    item: {
+      id: 'fc_undeclared',
+      type: 'function_call',
+      call_id: 'call_undeclared',
+      name: UNDECLARED,
+      arguments: '{"query":"sun"}',
+      status: 'completed',
+    },
+  },
+  { type: 'response.completed', response: openAiResponse, sequence_number: 3 },
+);
+
 const openRouterSuccess =
   sse(
     {
@@ -276,7 +338,7 @@ const lookup = Tool.make('lookup', {
   description: 'look up a deterministic value',
   parameters: Schema.Struct({ key: Schema.String }),
   success: Schema.Struct({ value: Schema.String }),
-});
+}).annotate(Tool.Strict, true);
 const toolkit = Toolkit.make(lookup);
 const handlers = toolkit.toLayer({
   lookup: ({ key }) => Effect.succeed({ value: key }),
@@ -297,9 +359,6 @@ const chargeCard = Tool.make('charge_card', {
   success: Schema.Struct({ authorization: Schema.String }),
 });
 const chargeToolkit = Toolkit.make(chargeCard);
-const chargeHandlers = chargeToolkit.toLayer({
-  charge_card: () => Effect.succeed({ authorization: 'approved' }),
-});
 
 const anthropicLayer = (
   http: Layer.Layer<HttpClient.HttpClient>,
@@ -410,6 +469,32 @@ type StructuredErrorCase = readonly [
   requestId: string | undefined,
 ];
 
+/** Every tool result a request sends for one call, in either provider's shape. */
+const resultsFor = (
+  request: unknown,
+  callId: string,
+): ReadonlyArray<Readonly<Record<string, unknown>>> => {
+  const found: Array<Readonly<Record<string, unknown>>> = [];
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!isRecord(value)) {
+      return;
+    }
+    if (
+      (value['type'] === 'tool_result' && value['tool_use_id'] === callId) ||
+      (value['type'] === 'function_call_output' && value['call_id'] === callId)
+    ) {
+      found.push(value);
+    }
+    Object.values(value).forEach(visit);
+  };
+  visit(request);
+  return found;
+};
+
 const textAndCompleted = (
   events: Iterable<{ readonly _tag: string; readonly [key: string]: unknown }>,
 ) => {
@@ -434,6 +519,45 @@ const textAndCompleted = (
 };
 
 describe('official Effect provider seam', () => {
+  it.effect.each([
+    [
+      'Anthropic',
+      anthropicLayer,
+      anthropicUndeclaredCall,
+      anthropicSuccess,
+      'toolu_undeclared',
+    ],
+    [
+      'OpenAI',
+      openAiLayer,
+      openAiUndeclaredCall,
+      openAiSuccess,
+      'call_undeclared',
+    ],
+  ] as const)(
+    'answers a %s call to an undeclared tool once and continues the turn',
+    ([, makeLayer, call, answer, callId]) =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([
+          { status: 200, body: call },
+          { status: 200, body: answer },
+        ]);
+        const events = yield* runAgent(makeLayer(fake.layer));
+        const observed = textAndCompleted(events);
+
+        expect(observed.completed).toBeDefined();
+        expect(fake.requests).toHaveLength(2);
+        // The follow-up request answers the call exactly once, as an error.
+        const followUp = present(requestJson(present(fake.requests[1])));
+        const answers = resultsFor(followUp, callId);
+        expect(answers).toHaveLength(1);
+        const sent = answers[0];
+        const carried = sent?.['content'] ?? sent?.['output'];
+        expect(typeof carried === 'string' ? carried : '').toContain(
+          'ToolNotFoundError',
+        );
+      }),
+  );
   it.effect(
     'runs Anthropic request conversion and SSE parsing through one Vesper turn',
     () =>
@@ -483,7 +607,9 @@ describe('official Effect provider seam', () => {
           stream: true,
           input: [
             {
-              role: 'system',
+              // The provider treats an unrecognised model as a reasoning model,
+              // which takes instructions in the developer role.
+              role: 'developer',
               content: [
                 {
                   type: 'input_text',
@@ -501,12 +627,41 @@ describe('official Effect provider seam', () => {
               type: 'function',
               name: 'lookup',
               description: 'look up a deterministic value',
+              strict: true,
             },
           ],
         });
         expect(observed.text).toBe('world');
         expect(observed.completed).toMatchObject({
           usage: { input: 17, output: 9 },
+        });
+      }),
+  );
+
+  it.effect(
+    'sends strict tool schemas through the native OpenRouter contract',
+    () =>
+      Effect.gen(function* () {
+        const fake = fakeHttp([{ status: 200, body: openRouterSuccess }]);
+
+        yield* runAgent(openRouterLayer(fake.layer));
+        const request = present(fake.requests[0]);
+        const body = present(requestJson(request));
+
+        expect(request.url).toBe(
+          'https://openrouter.invalid/v1/chat/completions',
+        );
+        expect(body).toMatchObject({
+          tools: [
+            {
+              type: 'function',
+              function: {
+                name: 'lookup',
+                description: 'look up a deterministic value',
+                strict: true,
+              },
+            },
+          ],
         });
       }),
   );
@@ -579,6 +734,13 @@ describe('official Effect provider seam', () => {
         const fake = fakeHttp([
           { status: 200, body: openRouterNumericStringToolCall },
         ]);
+        const receivedAmount = yield* Ref.make<number | undefined>(undefined);
+        const chargeHandlers = chargeToolkit.toLayer({
+          charge_card: ({ amountCents }) =>
+            Ref.set(receivedAmount, amountCents).pipe(
+              Effect.as({ authorization: 'approved' }),
+            ),
+        });
 
         const parts = yield* LanguageModel.streamText({
           prompt: 'Charge 4999 cents.',
@@ -590,12 +752,15 @@ describe('official Effect provider seam', () => {
           ),
         );
 
+        // The part carries the model-authored arguments; Toolkit decodes them
+        // for the handler, which receives the number.
         expect(
           Array.from(parts).find((part) => part.type === 'tool-call'),
         ).toMatchObject({
           name: 'charge_card',
-          params: { amountCents: 4999 },
+          params: { amountCents: '4999' },
         });
+        expect(yield* Ref.get(receivedAmount)).toBe(4999);
         expect(
           Array.from(parts).find((part) => part.type === 'tool-result'),
         ).toMatchObject({

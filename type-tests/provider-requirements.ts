@@ -2,8 +2,8 @@ import { AnthropicClient, AnthropicLanguageModel } from '@effect/ai-anthropic';
 import { OpenAiClient, OpenAiLanguageModel } from '@effect/ai-openai';
 import * as NodeHttpClient from '@effect/platform-node/NodeHttpClient';
 import { Config, Layer } from 'effect';
-import type { LanguageModel, Model } from 'effect/unstable/ai';
-import type { HttpClient } from 'effect/unstable/http';
+import type { LanguageModel, Model } from 'effect/ai';
+import type { HttpClient } from 'effect/http';
 
 type Needs<L> =
   L extends Layer.Layer<infer _Out, infer _Err, infer R> ? R : never;
@@ -21,13 +21,13 @@ const openai = OpenAiLanguageModel.model('gpt-5.6-luna', {
 const anthropicConfigured = anthropic.pipe(
   Layer.provide(
     AnthropicClient.layerConfig({
-      apiKey: Config.redacted('ANTHROPIC_API_KEY'),
+      apiKey: Config.Redacted('ANTHROPIC_API_KEY'),
     }),
   ),
 );
 const openaiConfigured = openai.pipe(
   Layer.provide(
-    OpenAiClient.layerConfig({ apiKey: Config.redacted('OPENAI_API_KEY') }),
+    OpenAiClient.layerConfig({ apiKey: Config.Redacted('OPENAI_API_KEY') }),
   ),
 );
 const anthropicLive = anthropicConfigured.pipe(

@@ -1,6 +1,6 @@
 import type { Stop } from '../stop.js';
 import { AgentEvents } from '../event.js';
-import type { Prompt } from 'effect/unstable/ai';
+import type { Prompt } from 'effect/ai';
 
 export const turnStarted = (step: number): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.TurnStarted.make({ step });
@@ -30,14 +30,14 @@ export const suspended = (
   step: number,
   text: string,
   usage: Stop.Usage,
-  pendingApprovals: ReadonlyArray<AgentEvents.PendingApproval>,
+  pendingInteractions: ReadonlyArray<AgentEvents.PendingInteraction>,
   response?: Prompt.Prompt,
 ): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.Suspended.make({
     step,
     text,
     usage,
-    pendingApprovals,
+    pendingInteractions,
     ...(response === undefined ? {} : { response }),
   });
 

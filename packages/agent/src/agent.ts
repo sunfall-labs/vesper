@@ -8,7 +8,7 @@ import {
   type AiError,
   type LanguageModel,
   type Tool,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { Compaction } from './compaction.js';
 import { CodeMode } from './code-mode.js';
@@ -24,7 +24,6 @@ import {
   type Entry,
   type Wiring,
 } from './internal/loop.js';
-import type { ParameterEncodingServices } from './internal/part-encoding.js';
 import {
   hasProtocol,
   register as registerProtocol,
@@ -46,7 +45,7 @@ import { SubagentRuntime } from './subagent-runtime.js';
 /** Recoverable failures produced by an unrecorded agent run. */
 export type RunFailure = AiError.AiError | RunPolicy.RunPolicyExhausted;
 
-// The loop. This is the piece `effect/unstable/ai` does not have:
+// The loop. This is the piece `effect/ai` does not have:
 // `LanguageModel.generateText` performs exactly one turn — prompt, model,
 // resolve tool calls, return — and `Chat` adds history to that, still one
 // turn per call. An autonomous agent is that, repeated until a stop
@@ -236,12 +235,12 @@ export const Result = Schema.Union([
     outcome: Schema.Literal('suspended'),
     ...ResultFields,
     /**
-     * Tool calls durably parked on a `needsApproval` gate.
+     * Tool calls durably parked on an external interaction.
      *
      * Present only when `outcome` is `suspended`. Resolve each one through
-     * `Conversation.resolveApproval` and call `run` again to continue.
+     * Resolve each interaction and call `run` again to continue.
      */
-    pendingApprovals: Schema.Array(AgentEvents.PendingApproval),
+    pendingInteractions: Schema.Array(AgentEvents.PendingInteraction),
   }),
 ]);
 export type Result = typeof Result.Type;
@@ -273,11 +272,7 @@ export type WithOwnHandlers<HandlerTools extends Record<string, Tool.Any>> =
   // `any`. An earlier comment claimed otherwise; `types.test.ts` pins the
   // truth, because the difference decides whether callers inherit an `any`.
   | Tool.HandlerServices<HandlerTools[keyof HandlerTools]>
-  | Tool.ResultDecodingServices<HandlerTools[keyof HandlerTools]>
-  // The live model stream yields decoded tool-call parameters. Recording the
-  // provider-facing form requires encoding those parameters again, so expose
-  // the corresponding codec services at the same boundary.
-  | ParameterEncodingServices<HandlerTools>;
+  | Tool.ResultDecodingServices<HandlerTools[keyof HandlerTools]>;
 
 type WithOwnHandlersForState<
   StateTools extends Record<string, Tool.Any>,
@@ -289,8 +284,7 @@ type WithOwnHandlersForState<
       Tool.HandlerServices<StateTools[keyof StateTools]>,
       StateDefinition
     >
-  | Tool.ResultDecodingServices<StateTools[keyof StateTools]>
-  | ParameterEncodingServices<StateTools>;
+  | Tool.ResultDecodingServices<StateTools[keyof StateTools]>;
 
 /**
  * Discharge an agent's own tool handlers from whatever it required.
@@ -407,7 +401,7 @@ export interface Instance<
    * one. See the recording and resumption helpers below.
    */
   readonly streamIn: (
-    chat: Chat.Service,
+    chat: Chat.Chat,
     input: Prompt.RawInput,
   ) => Stream.Stream<
     AgentEvents.ObservedEvent<ModelTools>,
@@ -416,7 +410,7 @@ export interface Instance<
   >;
 
   readonly runIn: (
-    chat: Chat.Service,
+    chat: Chat.Chat,
     input: Prompt.RawInput,
   ) => Effect.Effect<Result, RunError, AgentRequirements>;
 
@@ -1216,13 +1210,13 @@ const fromParts = <
   // handle, so sharing an entry would share ephemeral state across runs.
   const plain = (input: Prompt.RawInput) =>
     runStream(parts.entry(wiring(undefined)).stream(input), false);
-  const plainIn = (chat: Chat.Service, input: Prompt.RawInput) =>
+  const plainIn = (chat: Chat.Chat, input: Prompt.RawInput) =>
     runStream(parts.entry(wiring(undefined)).streamIn(chat, input), false);
   const publicPlain = {
     stream: plain,
     streamIn: plainIn,
     run: (input: Prompt.RawInput) => foldToResult(plain(input)),
-    runIn: (chat: Chat.Service, input: Prompt.RawInput) =>
+    runIn: (chat: Chat.Chat, input: Prompt.RawInput) =>
       foldToResult(plainIn(chat, input)),
   };
 
@@ -1270,11 +1264,16 @@ const fromParts = <
         const entry = parts.entry(
           wiring(session, {
             runtime,
-            startRun: (effective) =>
+            startRun: (effective, active) =>
               AgentLog.start(session, {
                 agent: parts.name,
                 revision: parts.revision,
                 input: effective,
+                budget: {
+                  id: active.id,
+                  root: active.root ?? session.conversationId,
+                  limits: { ...active.limits },
+                },
               }),
             lastTurn:
               latest === undefined

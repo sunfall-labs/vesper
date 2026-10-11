@@ -53,6 +53,10 @@
       "types": "./dist/log-store.d.ts",
       "default": "./dist/log-store.js"
     },
+    "./chain": {
+      "types": "./dist/chain.d.ts",
+      "default": "./dist/chain.js"
+    },
     "./tail": {
       "types": "./dist/tail.d.ts",
       "default": "./dist/tail.js"
@@ -69,10 +73,10 @@
     "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109"
+    "effect": "^4.0.3"
   },
   "devDependencies": {
     "effect": "catalog:",
-    "vitest": "^4.1.9"
+    "vitest": "^5.0.3"
   }
 }

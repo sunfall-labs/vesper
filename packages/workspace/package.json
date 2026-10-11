@@ -58,6 +58,10 @@
       "types": "./dist/path.d.ts",
       "default": "./dist/path.js"
     },
+    "./shell-sandbox": {
+      "types": "./dist/shell-sandbox.d.ts",
+      "default": "./dist/shell-sandbox.js"
+    },
     "./tools": {
       "types": "./dist/tools.d.ts",
       "default": "./dist/tools.js"
@@ -70,10 +74,10 @@
     "typecheck": "tsc -p tsconfig.json --pretty false --noEmit"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109"
+    "effect": "^4.0.3"
   },
   "devDependencies": {
     "effect": "catalog:",
-    "vitest": "^4.1.9"
+    "vitest": "^5.0.3"
   }
 }

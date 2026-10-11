@@ -1,8 +1,10 @@
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Clock, Effect, Schema, Semaphore, type Crypto } from 'effect';
 
+import { SignalRequestConflictError } from '../conversation-error.js';
 import * as AgentIds from './ids.js';
 
 /** Out-of-band input addressed to a durable conversation. */
@@ -12,6 +14,12 @@ export const Signal = Schema.Struct({
   text: Schema.String,
   /** User or service that sent the signal. */
   source: Schema.String,
+  /**
+   * Optional idempotency key, unique within the conversation. A repeat with
+   * the same payload is acknowledged without appending; a repeat with a
+   * different payload fails with `SignalRequestConflictError`.
+   */
+  requestId: Schema.optionalKey(Schema.String),
 });
 export type Signal = typeof Signal.Type;
 
@@ -81,9 +89,11 @@ const utf8Length = (text: string): number => {
 // to err on: a repeated instruction is visible and recoverable, a dropped one
 // is neither.
 //
-// Sending has no idempotency key. If a caller loses the response after the
-// append may have committed, retrying can duplicate the signal; callers that
-// need exactly-once user-visible actions must deduplicate at their boundary.
+// Sending is idempotent only when the caller supplies a `requestId`. If a
+// caller loses the response after the append may have committed, retrying with
+// the same key finds the original in the signal stream instead of appending a
+// second copy. Without a key every send appends, so callers that need
+// exactly-once user-visible actions must supply one.
 
 /**
  * Where a conversation's signals live.
@@ -140,7 +150,10 @@ const validateSignal = Effect.fn('AgentSignals.validate')(function* (
       ),
     ),
   );
-  const bytes = utf8Length(signal.text) + utf8Length(signal.source);
+  const bytes =
+    utf8Length(signal.text) +
+    utf8Length(signal.source) +
+    utf8Length(signal.requestId ?? '');
   if (bytes > MAX_SIGNAL_BYTES) {
     return yield* LogStore.makeError(
       path,
@@ -156,7 +169,11 @@ const appendRecord = (
   store: LogStore.Interface,
   conversationId: LogVocabulary.ConversationId,
   record: ConversationRecord.RecordOf<'Signal'>,
-): Effect.Effect<void, LogStore.LogStoreError, Crypto.Crypto> => {
+): Effect.Effect<
+  void,
+  LogStore.LogStoreError | SignalRequestConflictError,
+  Crypto.Crypto
+> => {
   const path = pathFor(conversationId);
 
   return Effect.gen(function* () {
@@ -169,9 +186,30 @@ const appendRecord = (
     );
 
     const claim = yield* store.acquire(path, yield* AgentIds.producerId);
+
+    // The dedupe read happens after `acquire` on purpose. Acquiring bumps the
+    // producer epoch, so any other sender (this process or another sharing the
+    // store) that was between its own read and append is fenced and must
+    // retry — and its retry then sees our record. Reading before acquiring
+    // would let two racing submitters both observe "absent" and both append.
+    if (record.requestId !== undefined) {
+      const existing = yield* findByRequestId(store, path, record.requestId);
+      if (existing !== undefined) {
+        // A retry carries the identical payload; anything else is a reused key.
+        return yield* existing.kind === record.kind &&
+        existing.text === record.text &&
+        existing.source === record.source
+          ? Effect.void
+          : new SignalRequestConflictError({
+              message: `Signal requestId "${record.requestId}" was already used with a different signal in conversation ${conversationId}`,
+              conversationId,
+              requestId: record.requestId,
+            });
+      }
+    }
     const timestamp = yield* Clock.currentTimeMillis;
 
-    yield* store.append({
+    return yield* store.append({
       path,
       producerId: claim.producerId,
       epoch: claim.epoch,
@@ -186,3 +224,46 @@ const appendRecord = (
     });
   });
 };
+
+/**
+ * How many of the most recent signals a keyed send checks for its key.
+ *
+ * A retry follows the ambiguous failure it retries, so a duplicate is among
+ * the latest signals; scanning newest-first and stopping here keeps a keyed
+ * send's cost independent of how long the conversation has run. A key reused
+ * further back than this is treated as new.
+ */
+export const REQUEST_ID_WINDOW = 1_024;
+
+const findByRequestId = (
+  store: LogStore.Interface,
+  path: string,
+  requestId: string,
+): Effect.Effect<
+  ConversationRecord.RecordOf<'Signal'> | undefined,
+  LogStore.LogStoreError
+> =>
+  Effect.gen(function* () {
+    let before: LogOffset.Offset | undefined;
+    let scanned = 0;
+    while (scanned < REQUEST_ID_WINDOW) {
+      const page: LogStore.BackwardsPage = yield* store.readBackwards(path, {
+        limit: Math.min(
+          LogStore.DEFAULT_READ_LIMIT,
+          REQUEST_ID_WINDOW - scanned,
+        ),
+        ...(before === undefined ? {} : { before }),
+      });
+      for (const { record } of page.records) {
+        if (record._tag === 'Signal' && record.requestId === requestId) {
+          return record;
+        }
+      }
+      scanned += page.records.length;
+      if (page.upToDate || page.records.length === 0) {
+        return undefined;
+      }
+      before = page.cursor;
+    }
+    return undefined;
+  });

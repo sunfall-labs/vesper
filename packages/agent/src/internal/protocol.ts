@@ -2,7 +2,7 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { type Crypto, type Effect, type Stream } from 'effect';
-import type { Prompt, Tool } from 'effect/unstable/ai';
+import type { Prompt, Tool } from 'effect/ai';
 
 import type { Agent } from '../agent.js';
 import type {

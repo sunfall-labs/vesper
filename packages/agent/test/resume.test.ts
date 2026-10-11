@@ -1,227 +1,65 @@
-import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
-import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import * as NodeServices from '@effect/platform-node/NodeServices';
-import { beforeEach, describe, expect, it } from '@effect/vitest';
-import { type Crypto, Effect, Layer, Ref, Schema, Stream } from 'effect';
-import {
-  type LanguageModel as LanguageModelNamespace,
-  LanguageModel,
-  Prompt,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { describe, expect, it } from '@effect/vitest';
+import { Effect, Stream } from 'effect';
+import { Toolkit, type Response } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
-import { Conversation } from '../src/conversation.js';
 import { ContextWindow } from '../src/context-window.js';
+import { Conversation } from '../src/conversation.js';
 import { AgentEvents } from '../src/event.js';
-import { AgentHistory } from '../src/history.js';
-import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
-import * as AgentLog from '../src/log.js';
+import {
+  callsLookup,
+  finish,
+  lookup,
+  lookupAgent,
+  lookupCall,
+  lookupOutcome,
+  plainAgent,
+  present,
+  provider,
+  readRecords,
+  rolesOf,
+  run,
+  said,
+  says,
+  seed,
+  settled,
+  started,
+  tags,
+  textIn,
+  turn,
+} from './durability-fixtures.js';
 
-const testLogLayer = Layer.mergeAll(
-  LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
-  NodeServices.layer,
-);
-
-const required = <A>(value: A | undefined): A => {
-  if (value === undefined) {
-    throw new Error('expected a value');
-  }
-  return value;
-};
-
-// Resumption from the log — the writer half, and the parity evidence for
-// deleting `@sunfall/vesper-durable`'s checkpointer.
-//
-// The claim being tested is the one the roadmap rests the whole prune on: a
+// Resumption from the log. The claim the whole design rests on: a
 // conversation resumed from records does not re-pay the provider for turns it
 // already completed, and does not re-run the tool calls those turns made.
 // Checkpointing could offer the first of those, and only by replaying the loop
-// from turn one to get there; it never offered the second, because tools run
-// past the checkpoint boundary.
+// from turn one; it never offered the second, because tools run past the
+// checkpoint boundary.
 //
-// Two things make these assertions non-vacuous rather than a restatement of
-// the implementation:
-//
-//   - the provider counts the prompts it is handed, so "was not re-asked" is a
-//     number, not an absence;
-//   - the tool handler counts its own invocations, so "was not re-run" is too.
-//
-// Mutation-checked: making `AgentHistory.messagesFrom` return `Prompt.empty`
-// fails `continues from what the crashed run left`, `carries the conversation
-// into the next turn`, and every reconstruction case below.
+// The assertions are non-vacuous because the provider counts and keeps the
+// prompts it is handed ("was not re-asked" is a number) and the tool handler
+// counts its own invocations ("was not re-run" is too).
 
-const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
-  type: 'finish' as const,
-  reason,
-  usage: {
-    inputTokens: { total: 10, uncached: 10, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 4 },
-  },
-});
-
-const text = (
-  id: string,
-  deltas: ReadonlyArray<string>,
-): Response.StreamPartEncoded[] => [
-  { type: 'text-start' as const, id },
-  ...deltas.map((delta) => ({ type: 'text-delta' as const, id, delta })),
-  { type: 'text-end' as const, id },
-];
-
-/** Turn one: a sentence, then a tool call. */
-const callingTurn: Response.StreamPartEncoded[] = [
-  ...text('a', ['he', 'l', 'lo']),
-  {
-    type: 'tool-call' as const,
-    id: 'call-1',
-    name: 'lookup',
-    params: { id: '42' },
-  },
-  finish('tool-calls'),
-];
-
-/** Turn two: an answer and nothing else, which is what stops the loop. */
-const answeringTurn: Response.StreamPartEncoded[] = [
-  ...text('b', ['do', 'ne']),
-  finish(),
-];
-
-/** Turn three, so a third model call is distinguishable from a replayed one. */
-const laterTurn: Response.StreamPartEncoded[] = [
-  ...text('c', ['again']),
-  finish(),
-];
-
-/** A provider-executed call has no Vesper ToolOutcome by design. */
-const providerExecutedTurn: Response.StreamPartEncoded[] = [
-  ...text('remote', ['searched']),
-  {
-    type: 'tool-call' as const,
-    id: 'provider-call-1',
-    name: 'lookup',
-    params: { id: '42' },
-    providerExecuted: true,
-  },
-  finish('tool-calls'),
-];
-
-/**
- * A scripted provider that keeps every prompt it was handed.
- *
- * The prompts are the evidence. "Did not re-ask for turn one" is
- * `asked.length`, and "resumed with the conversation" is what is in the last
- * one — neither of which can be read off the agent's own result.
- */
-const provider = (
-  turns: ReadonlyArray<ReadonlyArray<Response.StreamPartEncoded>>,
-) => {
-  const asked: Array<Prompt.Prompt> = [];
-
-  const layer = Layer.effect(
-    LanguageModel.LanguageModel,
-    Effect.gen(function* () {
-      const calls = yield* Ref.make(0);
-      return yield* LanguageModel.make({
-        generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
-        streamText: (options: LanguageModelNamespace.ProviderOptions) =>
-          Stream.unwrap(
-            Effect.gen(function* () {
-              asked.push(options.prompt);
-              const index = yield* Ref.getAndUpdate(calls, (n) => n + 1);
-              return Stream.fromIterable(
-                required(turns[Math.min(index, turns.length - 1)]),
-              );
-            }),
-          ),
-      });
-    }),
-  );
-
-  return { asked, layer };
-};
-
-const lookup = Tool.make('lookup', {
-  description: 'look an order up',
-  parameters: Schema.Struct({ id: Schema.String }),
-  success: Schema.Struct({ status: Schema.String }),
-});
-
-/** Counts handler invocations, so "the tool did not run again" is a number. */
-const dispatched = { count: 0 };
-
-const agent = Agent.make({
-  name: 'test',
-  revision: '1',
-  instructions: 'be terse',
-  toolkit: Toolkit.make(lookup),
-}).withHandlers({
-  lookup: ({ id }) =>
-    Effect.sync(() => {
-      dispatched.count += 1;
-      return { status: `shipped:${id}` };
-    }),
-});
-
-const CONVERSATION = 'conversation-1';
-const conversation = Conversation.make(agent, CONVERSATION);
-const PATH = AgentLog.pathFor(LogVocabulary.ConversationId.make(CONVERSATION));
-
-beforeEach(() => {
-  dispatched.count = 0;
-});
-
-const run = <A, E>(
-  effect: Effect.Effect<
-    A,
-    E,
-    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
-  >,
-  models: Layer.Layer<LanguageModel.LanguageModel>,
-) =>
-  effect.pipe(Effect.orDie, Effect.provide(Layer.merge(models, testLogLayer)));
-
-const rolesOf = (prompt: Prompt.Prompt) =>
-  prompt.content.map((message) => message.role);
-
-/** Every text fragment in a prompt, whatever role or part carries it. */
-const textIn = (prompt: Prompt.Prompt): string =>
-  JSON.stringify(prompt.content);
-
-const readAll = Effect.fn('test.readAll')(function* (path: string = PATH) {
-  const store = yield* LogStore.Service;
-  const page = yield* store.read(path, { limit: 1000 });
-  return page.records;
-});
-
-const envelopes = (
-  records: ReadonlyArray<ConversationRecord.Record>,
-): ReadonlyArray<ConversationRecord.Envelope> =>
-  records.map((record, index) => ({
-    offset: LogOffset.fromSeq(BigInt(index)),
-    conversationId: LogVocabulary.ConversationId.make(CONVERSATION),
-    timestamp: 0,
-    record,
-  }));
+const ID = 'conversation-1';
+const answer = says('do', 'ne');
+const later = says('again');
 
 describe('resuming a crashed run', () => {
-  // The parity test. A run is abandoned after its tool call settles — the
-  // consumer walks away mid-conversation, which is what a crash looks like
-  // from the log's side — and the conversation is then resumed.
+  // A run is abandoned after its tool call settles (the consumer walks away
+  // mid-conversation, which is what a crash looks like from the log's side)
+  // and the conversation is then resumed.
   it.effect(
     'continues from what the crashed run left, without re-asking or re-running it',
     () =>
       Effect.gen(function* () {
-        const models = provider([callingTurn, answeringTurn, laterTurn]);
+        const { agent, ran } = lookupAgent();
+        const conversation = Conversation.make(agent, ID);
+        const models = provider([callsLookup('he', 'l', 'lo'), answer, later]);
 
         const observed = yield* run(
           Effect.gen(function* () {
-            // Run one, abandoned the moment the tool result arrives.
             yield* conversation.stream('where is order 42?').pipe(
               Stream.takeUntil(
                 (event) =>
@@ -229,25 +67,15 @@ describe('resuming a crashed run', () => {
                   event.part.type === 'tool-result',
               ),
               Stream.runDrain,
-              Effect.orDie,
             );
-
-            const afterCrash = yield* readAll();
-            const askedDuringCrash = models.asked.length;
-            const dispatchedDuringCrash = dispatched.count;
-
-            // Run two: the same conversation, picked back up.
-            const result = yield* conversation
-              .run('and then?')
-              .pipe(Effect.orDie);
-
+            const afterCrash = tags(yield* readRecords(ID));
+            const crashed = { asked: models.asked.length, ran: ran.count };
+            const result = yield* conversation.run('and then?');
             return {
-              afterCrash: afterCrash.map((envelope) => envelope.record._tag),
-              askedDuringCrash,
-              dispatchedDuringCrash,
-              asked: models.asked,
-              dispatchedTotal: dispatched.count,
+              afterCrash,
+              crashed,
               result,
+              all: tags(yield* readRecords(ID)),
             };
           }),
           models.layer,
@@ -256,26 +84,21 @@ describe('resuming a crashed run', () => {
         // The crashed run got one turn's worth of records and no `Completed`.
         expect(observed.afterCrash).toEqual([
           'RunStarted',
-          'ToolStarted',
           'Text',
-          'ToolCall',
-          'ToolOutcome',
+          'StepOpened',
+          'StepStarted',
+          'StepSettled',
           'RunSettled',
         ]);
-        expect(observed.askedDuringCrash).toBe(1);
-        expect(observed.dispatchedDuringCrash).toBe(1);
+        expect(observed.crashed).toEqual({ asked: 1, ran: 1 });
 
-        // One further provider call, for the turn that had not happened yet. The
-        // completed turn was not re-asked — under replay-from-checkpoint recovery
-        // this number is two, because recovery re-runs the loop from turn one.
-        expect(observed.asked).toHaveLength(2);
-
-        // And the tool that already ran did not run again. Checkpointing never
-        // covered this at all: tool execution happens past the provider seam.
-        expect(observed.dispatchedTotal).toBe(1);
+        // One further provider call, for the turn that had not happened yet.
+        // Replay-from-checkpoint recovery would make this two.
+        expect(models.asked).toHaveLength(2);
+        expect(ran.count).toBe(1);
 
         // The resumed call was given the conversation, not a fresh start.
-        const resumed = required(observed.asked[1]);
+        const resumed = present(models.asked[1]);
         expect(rolesOf(resumed)).toEqual([
           'system',
           'user',
@@ -283,179 +106,115 @@ describe('resuming a crashed run', () => {
           'tool',
           'user',
         ]);
-        expect(textIn(resumed)).toContain('where is order 42?');
-        expect(textIn(resumed)).toContain('hello');
-        expect(textIn(resumed)).toContain('call-1');
-        expect(textIn(resumed)).toContain('shipped:42');
-        expect(textIn(resumed)).toContain('and then?');
-
+        for (const fragment of [
+          'where is order 42?',
+          'hello',
+          'call-1',
+          'shipped:42',
+          'and then?',
+        ]) {
+          expect(textIn(resumed)).toContain(fragment);
+        }
         expect(observed.result.text).toBe('done');
+
+        // The resumed run is an ordinary recorded run appended to the same
+        // conversation, not a second history beside it.
+        expect(observed.all.slice(6)).toEqual([
+          'RunStarted',
+          'Text',
+          'TurnFinished',
+          'Completed',
+          'RunSettled',
+        ]);
       }),
-  );
-
-  // The resumed run is an ordinary recorded run: it appends to the same
-  // conversation rather than starting a second history beside it.
-  it.effect('records the resumed run into the same conversation', () =>
-    Effect.gen(function* () {
-      const models = provider([callingTurn, answeringTurn, laterTurn]);
-
-      const tags = yield* run(
-        Effect.gen(function* () {
-          yield* conversation.stream('hi').pipe(
-            Stream.takeUntil(
-              (event) =>
-                AgentEvents.isPart(event) && event.part.type === 'tool-result',
-            ),
-            Stream.runDrain,
-            Effect.orDie,
-          );
-
-          yield* conversation.run('and then?').pipe(Effect.orDie);
-          return (yield* readAll()).map((envelope) => envelope.record._tag);
-        }),
-        models.layer,
-      );
-
-      expect(tags).toEqual([
-        'RunStarted',
-        'ToolStarted',
-        'Text',
-        'ToolCall',
-        'ToolOutcome',
-        'RunSettled',
-        'RunStarted',
-        'Text',
-        'TurnFinished',
-        'Completed',
-        'RunSettled',
-      ]);
-    }),
   );
 });
 
 describe('resuming an ordinary conversation', () => {
   it.effect('starts a new conversation when there is nothing to resume', () =>
     Effect.gen(function* () {
-      const models = provider([answeringTurn]);
-
-      const asked = yield* run(
-        Effect.gen(function* () {
-          yield* Conversation.make(agent, 'fresh')
-            .run('hello')
-            .pipe(Effect.orDie);
-          return models.asked;
-        }),
+      const models = provider([answer]);
+      yield* run(
+        Conversation.make(plainAgent, 'fresh').run('hello'),
         models.layer,
       );
 
-      expect(rolesOf(required(asked[0]))).toEqual(['system', 'user']);
-      expect(textIn(required(asked[0]))).toContain('be terse');
-    }),
-  );
-
-  // The property that makes this a conversation rather than a series of
-  // unrelated runs.
-  it.effect('carries the conversation into the next turn', () =>
-    Effect.gen(function* () {
-      const models = provider([answeringTurn, laterTurn]);
-
-      const asked = yield* run(
-        Effect.gen(function* () {
-          yield* conversation.run('first').pipe(Effect.orDie);
-          yield* conversation.run('second').pipe(Effect.orDie);
-          return models.asked;
-        }),
-        models.layer,
-      );
-
-      expect(rolesOf(required(asked[1]))).toEqual([
-        'system',
-        'user',
-        'assistant',
-        'user',
-      ]);
-      expect(textIn(required(asked[1]))).toContain('first');
-      expect(textIn(required(asked[1]))).toContain('done');
-      expect(textIn(required(asked[1]))).toContain('second');
-    }),
-  );
-
-  it.effect('streams the same continuation and lifetime usage as run', () =>
-    Effect.gen(function* () {
-      const models = provider([answeringTurn, laterTurn]);
-
-      const observed = yield* run(
-        Effect.gen(function* () {
-          const first = yield* conversation.run('first').pipe(Effect.orDie);
-          const events = yield* conversation
-            .stream('second')
-            .pipe(Stream.runCollect, Effect.orDie);
-          const completed = Array.from(events).find(
-            (event) => event._tag === 'Completed',
-          );
-          return { first, completed, asked: models.asked };
-        }),
-        models.layer,
-      );
-
-      expect(textIn(required(observed.asked[1]))).toContain('first');
-      expect(textIn(required(observed.asked[1]))).toContain('second');
-      expect(observed.completed).toMatchObject({
-        _tag: 'Completed',
-        usage: {
-          input: observed.first.usage.input * 2,
-          output: observed.first.usage.output * 2,
-        },
-      });
-    }),
-  );
-
-  it.effect('keeps separate conversations separate', () =>
-    Effect.gen(function* () {
-      const models = provider([answeringTurn, laterTurn]);
-
-      const asked = yield* run(
-        Effect.gen(function* () {
-          yield* Conversation.make(agent, 'conv-a')
-            .run('first')
-            .pipe(Effect.orDie);
-          yield* Conversation.make(agent, 'conv-b')
-            .run('first')
-            .pipe(Effect.orDie);
-          return models.asked;
-        }),
-        models.layer,
-      );
-
-      expect(rolesOf(required(asked[1]))).toEqual(['system', 'user']);
-    }),
-  );
-
-  // A resumed conversation that reset the count would under-report every turn
-  // after the first, which is the number anyone asking about cost wants.
-  it.effect('accumulates usage across the life of the conversation', () =>
-    Effect.gen(function* () {
-      const models = provider([answeringTurn, laterTurn]);
-
-      const totals = yield* run(
-        Effect.gen(function* () {
-          const first = yield* conversation.run('first').pipe(Effect.orDie);
-          const second = yield* conversation.run('second').pipe(Effect.orDie);
-          return { first: first.usage, second: second.usage };
-        }),
-        models.layer,
-      );
-
-      expect(totals.second.output).toBe(totals.first.output * 2);
-      expect(totals.second.input).toBe(totals.first.input * 2);
+      const first = present(models.asked[0]);
+      expect(rolesOf(first)).toEqual(['system', 'user']);
+      expect(textIn(first)).toContain('be terse');
     }),
   );
 
   it.effect(
+    'carries the conversation, and its lifetime usage, into the next turn',
+    () =>
+      Effect.gen(function* () {
+        const conversation = Conversation.make(plainAgent, ID);
+        const models = provider([answer, later]);
+        const observed = yield* run(
+          Effect.gen(function* () {
+            const first = yield* conversation.run('first');
+            const events = yield* conversation
+              .stream('second')
+              .pipe(Stream.runCollect);
+            return {
+              first,
+              completed: Array.from(events).find(
+                (event) => event._tag === 'Completed',
+              ),
+            };
+          }),
+          models.layer,
+        );
+
+        const second = present(models.asked[1]);
+        expect(rolesOf(second)).toEqual([
+          'system',
+          'user',
+          'assistant',
+          'user',
+        ]);
+        for (const fragment of ['first', 'done', 'second']) {
+          expect(textIn(second)).toContain(fragment);
+        }
+        // `Completed.text` repeats the final turn's `Text`; reading both would
+        // say everything twice, which the model would read as a stutter.
+        expect(textIn(second).match(/done/g)).toHaveLength(1);
+        // A resumed conversation that reset the count would under-report every
+        // turn after the first, which is the number anyone asking about cost
+        // wants. `stream` must report the same lifetime total `run` does.
+        expect(observed.completed).toMatchObject({
+          _tag: 'Completed',
+          usage: {
+            input: observed.first.usage.input * 2,
+            output: observed.first.usage.output * 2,
+          },
+        });
+      }),
+  );
+
+  it.effect('keeps separate conversations separate', () =>
+    Effect.gen(function* () {
+      const models = provider([answer, later]);
+      yield* run(
+        Effect.gen(function* () {
+          yield* Conversation.make(plainAgent, 'conv-a').run('first');
+          yield* Conversation.make(plainAgent, 'conv-b').run('first');
+        }),
+        models.layer,
+      );
+
+      expect(rolesOf(present(models.asked[1]))).toEqual(['system', 'user']);
+    }),
+  );
+
+  // A two-step run records cumulative usage on its second turn. Resuming has to
+  // anchor the context estimator on the latest turn's own usage, not on the
+  // cumulative figure, or the estimate double-counts the first step.
+  it.effect(
     'restores the latest turn usage as the resumed estimator anchor',
     () =>
       Effect.gen(function* () {
-        const models = provider([answeringTurn, laterTurn]);
         const seen: Array<ContextWindow.TurnUsage | undefined> = [];
         const heuristics: ContextWindow.Heuristics = {
           estimate: (_prompt, usage) => {
@@ -465,310 +224,182 @@ describe('resuming an ordinary conversation', () => {
           shouldCompact: () => false,
         };
         const anchored = Agent.make({
-          name: 'anchored',
+          name: 'test',
           revision: '1',
           instructions: 'be terse',
-          toolkit: Toolkit.make(),
+          toolkit: Toolkit.make(lookup),
           compaction: {
             contextWindow: 1_000,
             reserveTokens: 100,
             keepRecentTokens: 10,
             instructions: 'sum',
           },
-        });
+        }).withHandlers({ lookup: () => Effect.succeed({ status: 'ok' }) });
+        const conversation = Conversation.make(anchored, ID);
 
         yield* run(
           Effect.gen(function* () {
-            const anchoredConversation = Conversation.make(
-              anchored,
-              CONVERSATION,
-            );
-            yield* anchoredConversation.run('first');
-            yield* anchoredConversation.run('second');
+            yield* conversation.run('first');
+            seen.length = 0;
+            yield* conversation.run('second');
           }).pipe(Effect.provideService(ContextWindow.Service, heuristics)),
-          models.layer,
+          provider([callsLookup(), answer, later]).layer,
         );
 
-        expect(seen).toEqual([undefined, { inputTokens: 10, outputTokens: 4 }]);
+        expect(seen).toEqual([{ inputTokens: 10, outputTokens: 4 }]);
       }),
   );
-});
 
-describe('resuming provider-executed tool calls', () => {
   it.effect('keeps a provider-executed call without a Vesper outcome', () =>
     Effect.gen(function* () {
-      const models = provider([providerExecutedTurn, answeringTurn, laterTurn]);
-
+      const remote: Response.StreamPartEncoded[] = [
+        ...says('searched').slice(0, -1),
+        {
+          type: 'tool-call',
+          id: 'provider-call-1',
+          name: 'lookup',
+          params: { id: '42' },
+          providerExecuted: true,
+        },
+        finish('tool-calls'),
+      ];
+      const conversation = Conversation.make(plainAgent, ID);
+      const models = provider([remote, answer, later]);
       const records = yield* run(
         Effect.gen(function* () {
           yield* conversation.run('search remotely');
           yield* conversation.run('continue');
-          return yield* conversation.records().pipe(Stream.runCollect);
+          return yield* readRecords(ID);
         }),
         models.layer,
       );
 
-      const recordedCall = Array.from(records).find(
-        (envelope) => envelope.record._tag === 'ToolCall',
-      );
-      expect(recordedCall?.record).toMatchObject({
-        _tag: 'ToolCall',
-        providerExecuted: true,
-      });
-
-      const assistant = required(models.asked[2]).content.find(
+      expect(
+        records.find(({ record }) => record._tag === 'StepOpened')?.record,
+      ).toMatchObject({ providerExecuted: true });
+      const assistant = present(models.asked[2]).content.find(
         (message) => message.role === 'assistant',
       );
-      const toolCall = assistant?.content.find(
-        (part) => part.type === 'tool-call' && part.id === 'provider-call-1',
-      );
-      expect(toolCall).toMatchObject({
-        type: 'tool-call',
-        providerExecuted: true,
-      });
+      expect(
+        assistant?.content.find(
+          (part) => part.type === 'tool-call' && part.id === 'provider-call-1',
+        ),
+      ).toMatchObject({ type: 'tool-call', providerExecuted: true });
     }),
   );
 });
 
-describe('rebuilding a prompt from records', () => {
-  it('groups a turn into an assistant message and its tool results', () => {
-    const rebuilt = AgentHistory.messagesFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: Prompt.make('hi').content,
-        },
-        { _tag: 'Text', step: 1, text: 'looking' },
-        {
-          _tag: 'ToolCall',
-          step: 1,
-          id: LogVocabulary.ToolCallId.make('call-1'),
-          name: 'lookup',
-          params: { id: '42' },
-        },
-        {
-          _tag: 'ToolOutcome',
-          step: 1,
-          id: LogVocabulary.ToolCallId.make('call-1'),
-          name: 'lookup',
-          outcome: 'success',
-          result: { status: 'shipped:42' },
-        },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
-      ]),
-    );
-
-    expect(rolesOf(rebuilt)).toEqual(['user', 'assistant', 'tool']);
-    expect(rebuilt.content[1]?.content).toMatchObject([
-      { type: 'text', text: 'looking' },
-      { type: 'tool-call', id: 'call-1', name: 'lookup' },
-    ]);
-    expect(rebuilt.content[2]?.content).toMatchObject([
-      { type: 'tool-result', id: 'call-1', isFailure: false },
-    ]);
-  });
+const signal = (kind: 'steer' | 'cancel', text: string) =>
+  ({
+    _tag: 'SignalReceived',
+    kind,
+    text,
+    source: 'operator',
+    step: 1,
+    at: LogOffset.fromSeq(1n),
+  }) satisfies ConversationRecord.Record;
+// What the model is shown after a resume is rebuilt from nothing but the
+// recorded history. Each case writes an exact history, resumes it, and reads
+// the prompt the model receives.
+describe('rebuilding the prompt from the recorded history', () => {
+  const promptAfter = (records: ReadonlyArray<ConversationRecord.Record>) =>
+    Effect.gen(function* () {
+      const models = provider([later]);
+      yield* run(
+        Effect.gen(function* () {
+          yield* seed(ID, records);
+          yield* Conversation.make(plainAgent, ID).run('and then?');
+        }),
+        models.layer,
+      );
+      return present(models.asked[0]);
+    });
 
   // The mid-turn crash. An assistant tool call with no matching result is not
-  // a degraded prompt — providers reject the request outright — so it is
+  // a degraded prompt (providers reject the request outright), so it is
   // dropped and the model may ask again.
-  it('drops a tool call whose outcome was never recorded', () => {
-    const rebuilt = AgentHistory.messagesFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: Prompt.make('hi').content,
-        },
-        { _tag: 'Text', step: 1, text: 'looking' },
-        {
-          _tag: 'ToolCall',
-          step: 1,
-          id: LogVocabulary.ToolCallId.make('call-1'),
-          name: 'lookup',
-          params: { id: '42' },
-        },
-        {
-          _tag: 'ToolOutcome',
-          step: 1,
-          id: LogVocabulary.ToolCallId.make('call-1'),
-          name: 'lookup',
-          outcome: 'success',
-          result: { status: 'shipped:42' },
-        },
-        {
-          _tag: 'ToolCall',
-          step: 1,
-          id: LogVocabulary.ToolCallId.make('call-2'),
-          name: 'lookup',
-          params: { id: '43' },
-        },
-      ]),
-    );
+  it.effect(
+    'groups a turn into assistant and tool messages and drops an unanswered call',
+    () =>
+      Effect.gen(function* () {
+        const prompt = yield* promptAfter([
+          started('hi'),
+          said('looking'),
+          lookupCall('call-1'),
+          lookupOutcome('call-1', 'shipped:42'),
+          lookupCall('call-2'),
+          turn(),
+          settled(),
+        ]);
 
-    expect(rolesOf(rebuilt)).toEqual(['user', 'assistant', 'tool']);
-    expect(JSON.stringify(rebuilt.content)).toContain('call-1');
-    expect(JSON.stringify(rebuilt.content)).not.toContain('call-2');
-  });
+        expect(rolesOf(prompt)).toEqual([
+          'system',
+          'user',
+          'assistant',
+          'tool',
+          'user',
+        ]);
+        expect(textIn(prompt)).toContain('call-1');
+        expect(textIn(prompt)).not.toContain('call-2');
+      }),
+  );
 
-  // A steer became a user message on the next turn, so it belongs after the
-  // turn that consumed it — not before the model's own words, which is where
-  // record order alone would put it.
-  it('replays a steer as the user message it became', () => {
-    const rebuilt = AgentHistory.messagesFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: Prompt.make('hi').content,
-        },
-        { _tag: 'Text', step: 1, text: 'working' },
-        {
-          _tag: 'SignalReceived',
-          kind: 'steer',
-          text: 'also check the invoice',
-          source: 'operator',
-          step: 1,
-          at: LogOffset.fromSeq(1n),
-        },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
-      ]),
-    );
+  // A turn can finish before every call in it is answered: an approval is
+  // decided, or an indeterminate call reconciled, after the turn's
+  // `TurnFinished`. The model must still see the call followed by its answer.
+  it.effect('keeps a call and an answer recorded after its turn adjacent', () =>
+    Effect.gen(function* () {
+      const prompt = yield* promptAfter([
+        started('look it up'),
+        lookupCall(),
+        turn(),
+        lookupOutcome('call-1', 'found'),
+        settled(),
+      ]);
 
-    expect(rolesOf(rebuilt)).toEqual(['user', 'assistant', 'user']);
-    expect(JSON.stringify(rebuilt.content[2])).toContain(
-      'also check the invoice',
-    );
-  });
+      expect(rolesOf(prompt)).toEqual([
+        'system',
+        'user',
+        'assistant',
+        'tool',
+        'user',
+      ]);
+      expect(present(prompt.content[3])).toMatchObject({
+        role: 'tool',
+        content: [{ type: 'tool-result', id: 'call-1' }],
+      });
+    }),
+  );
 
-  it('ignores a cancel, which changed no prompt', () => {
-    const rebuilt = AgentHistory.messagesFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: Prompt.make('hi').content,
-        },
-        {
-          _tag: 'SignalReceived',
-          kind: 'cancel',
-          text: 'stop',
-          source: 'operator',
-          step: 1,
-          at: LogOffset.fromSeq(1n),
-        },
-      ]),
-    );
+  // A steer becomes a user message on the next turn, so it belongs after the
+  // turn that consumed it, not before the model's own words (where record
+  // order alone would put it). A cancel changed no prompt.
+  it.effect(
+    'replays a steer as the user message it became and ignores a cancel',
+    () =>
+      Effect.gen(function* () {
+        const prompt = yield* promptAfter([
+          started('hi'),
+          said('working'),
+          signal('steer', 'also check the invoice'),
+          signal('cancel', 'stop'),
+          turn(),
+          settled(),
+        ]);
 
-    expect(rolesOf(rebuilt)).toEqual(['user']);
-  });
-
-  // `Completed.text` repeats the final turn's `Text` records. Reading both
-  // would say everything twice, which the model would read as a stutter.
-  it('does not repeat the final answer from Completed', () => {
-    const rebuilt = AgentHistory.messagesFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: Prompt.make('hi').content,
-        },
-        { _tag: 'Text', step: 1, text: 'done' },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
-        {
-          _tag: 'Completed',
-          text: 'done',
-          steps: 1,
-          usage: { input: 1, output: 1 },
-        },
-        {
-          _tag: 'RunSettled',
-          outcome: 'success',
-          detail: '',
-          steps: 1,
-          usage: { input: 1, output: 1 },
-        },
-      ]),
-    );
-
-    expect(JSON.stringify(rebuilt.content).match(/done/g)).toHaveLength(1);
-  });
-
-  it('is empty for a conversation with no records', () => {
-    expect(AgentHistory.messagesFrom([]).content).toEqual([]);
-  });
-
-  it('sums usage across runs rather than reporting the last one', () => {
-    const usage = AgentHistoryRuntime.usageFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: [],
-        },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 3, output: 1 } },
-        {
-          _tag: 'RunSettled',
-          outcome: 'success',
-          detail: '',
-          steps: 1,
-          usage: { input: 3, output: 1 },
-        },
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: [],
-        },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 5, output: 2 } },
-        {
-          _tag: 'RunSettled',
-          outcome: 'success',
-          detail: '',
-          steps: 1,
-          usage: { input: 5, output: 2 },
-        },
-      ]),
-    );
-
-    expect(usage).toEqual({ input: 8, output: 3 });
-  });
-
-  it('restores only the latest turn own usage from cumulative records', () => {
-    const usage = AgentHistoryRuntime.latestTurnUsageFrom(
-      envelopes([
-        {
-          _tag: 'RunStarted',
-          agent: 'test',
-          formatVersion: 1,
-          agentRevision: LogVocabulary.AgentRevision.make('1'),
-          prompt: [],
-        },
-        { _tag: 'TurnFinished', step: 1, usage: { input: 10, output: 4 } },
-        { _tag: 'TurnFinished', step: 2, usage: { input: 25, output: 10 } },
-        {
-          _tag: 'RunSettled',
-          outcome: 'success',
-          detail: '',
-          steps: 2,
-          usage: { input: 25, output: 10 },
-        },
-      ]),
-    );
-
-    expect(usage).toEqual({ input: 15, output: 6 });
-  });
+        expect(rolesOf(prompt)).toEqual([
+          'system',
+          'user',
+          'assistant',
+          'user',
+          'user',
+        ]);
+        // After the model's own words, where record order alone would put
+        // it before them.
+        expect(
+          textIn(prompt).indexOf('also check the invoice'),
+        ).toBeGreaterThan(textIn(prompt).indexOf('working'));
+        expect(textIn(prompt)).not.toContain('stop');
+      }),
+  );
 });

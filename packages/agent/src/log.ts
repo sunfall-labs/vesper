@@ -7,7 +7,7 @@ import {
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, type Option, type Stream } from 'effect';
 import type { Crypto } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { type IdGenerator, Prompt } from 'effect/ai';
 
 import { AgentBranch } from './branch.js';
 import type {
@@ -49,12 +49,13 @@ import * as RecordingSink from './recording-sink.js';
 
 // Stream addressing is defined beside the claim machinery that uses it and
 // re-exported here, so the writer and `Conversation.follow` still agree on
-// one definition.
+// one definition. `verify` checks the stream's hash chain.
 export {
   childIdFor,
   follow,
   pathFor,
   snapshot,
+  verify,
 } from './internal/conversation-stream.js';
 
 // Recovery types live in the private recovery module and are re-exported below
@@ -65,6 +66,8 @@ export type Settled = RecoveryState.Settled;
 export type Recovery = RecoveryState.Recovery;
 /** An orphaned handler start and the provider call that originally caused it. */
 export type IndeterminateToolCall = RecoveryState.IndeterminateToolCall;
+/** What an orphaned run durably established about a code-mode nested call. */
+export type NestedRecovery = RecoveryState.NestedRecovery;
 /** A deliberately suspended call and its external wait identity. */
 export type SuspendedToolCall = RecoveryState.SuspendedToolCall;
 /** What an external actor durably decided for one wait's token. */
@@ -162,6 +165,25 @@ export interface Session {
   readonly conversationId: LogVocabulary.ConversationId;
   readonly compatibility: Compatibility;
 
+  /**
+   * Ids `LanguageModel` mints during a recorded turn. An approval id becomes
+   * the durable wait token a caller presents to approve the call, so it is
+   * drawn from `Crypto` rather than Effect's default `Random` generator.
+   */
+  readonly idGenerator: IdGenerator.Service;
+
+  /**
+   * Hex SHA-256 of UTF-8 text through the session's `Crypto`, so durable
+   * fingerprints never need a Node built-in.
+   */
+  readonly sha256: (text: string) => Effect.Effect<string>;
+
+  /**
+   * A step's identity beside its name and id: the digest of its name and
+   * input, taken before the recording policy can redact the input.
+   */
+  readonly inputDigest: (name: string, input: unknown) => Effect.Effect<string>;
+
   /** Usage copied from an ancestor when this conversation was forked. */
   readonly inheritedUsage: Stop.Usage;
 
@@ -176,6 +198,12 @@ export interface Session {
 
   /** How long teardown waits for this session's settlement append. */
   readonly settlementTimeoutMillis: number;
+
+  /**
+   * Longest a streamed delta waits before being committed as `PartialOutput`,
+   * or `undefined` when streamed output is not committed before it settles.
+   */
+  readonly partialOutputIntervalMillis: number | undefined;
 
   /**
    * The records required to rebuild the live prompt when this run claimed it.
@@ -238,8 +266,25 @@ export interface Session {
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
   ) => Option.Option<Recovery>;
+  /** @internal The orphaned run's state for this exact call, if it is one. */
+  readonly prior: (
+    name: string,
+    toolCallId: LogVocabulary.ToolCallId,
+    inputDigest: string,
+  ) => Option.Option<Recovery>;
 
-  /** @internal Orphaned calls in their original durable ToolCall order. */
+  /**
+   * The state an unsettled earlier run recorded for one code-mode nested call
+   * of the `exec` call `parent`, by its key within it. Like {@link recovery},
+   * an index of what predates this run.
+   */
+  /** @internal Nested-call recovery index for code mode. */
+  readonly nestedRecovery: (
+    parent: LogVocabulary.ToolCallId,
+    key: string,
+  ) => Option.Option<NestedRecovery>;
+
+  /** @internal Orphaned calls in their original durable StepOpened order. */
   readonly pendingToolCalls: ReadonlyArray<IndeterminateToolCall>;
 
   /** @internal Indeterminate calls requiring an application decision. */
@@ -486,6 +531,7 @@ export const withRecordingPolicy = (
   return {
     ...session,
     append,
+    partialOutputIntervalMillis: recordingPolicy.partialOutputIntervalMillis,
     child: (options) =>
       Effect.map(session.child(options), (child) =>
         withRecordingPolicy(child, recordingPolicy),
@@ -499,6 +545,8 @@ export interface Options {
   readonly revision: LogVocabulary.AgentRevision;
   /** The run's input, written into `RunStarted` as prompt messages. */
   readonly input: Prompt.RawInput;
+  /** The hard run budget in force, recorded so the log can be audited. */
+  readonly budget: ConversationRecord.RunBudget;
 }
 
 /** Persist the effective input before any event from the run can escape. */
@@ -512,6 +560,7 @@ export const start = (
       agent: options.agent,
       agentRevision: options.revision,
       formatVersion: FORMAT_VERSION,
+      budget: options.budget,
       // `beforeTurn` has already run when this is called. Persisting here is
       // what makes reconstruction use the same input the provider saw.
       prompt: Prompt.make(options.input).content,

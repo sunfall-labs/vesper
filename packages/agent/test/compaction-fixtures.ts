@@ -5,21 +5,17 @@ import {
   LanguageModel,
   type Prompt,
   type Response,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { Compaction } from '../src/compaction.js';
 import { ContextWindow } from '../src/context-window.js';
 
-// Fakes shared by the two compaction test files.
+// Fakes for the compaction scenarios.
 //
-// Not a convenience. Compaction is tested from both ends — what one compaction
-// does to a `Chat` in memory, and what a compacted conversation rebuilds to
-// from its log — and both ends need the same thing from a provider: a
-// summarizer behind `generateText`, a turn behind `streamText`, and a record of
-// what each was asked. Three separate transcriptions of that had already
-// drifted into three different shapes for the same fake, which is how the
-// summarization call ended up asserted against a different usage record in each
-// file for no reason anyone could state.
+// Compaction is exercised from both ends — a `Chat` run in memory, and a
+// conversation rebuilt from its log — and both need the same thing from a
+// provider: a summarizer behind `generateText`, a turn behind `streamText`, and
+// a record of what each was asked.
 //
 // This file deliberately holds no assertions and no `describe`. It is a
 // project file rather than a `.test.ts` so vitest does not try to collect it.
@@ -72,8 +68,11 @@ export const turnOf = (
 ];
 
 export interface ProviderOptions {
-  /** Text returned by the summarization call. Defaults to `SUMMARY`. */
-  readonly summaryText?: string;
+  /**
+   * Text returned by the summarization call, or a function of its zero-based
+   * call number. Defaults to `SUMMARY`.
+   */
+  readonly summaryText?: string | ((call: number) => string);
   /** Finish reason reported by the summarization call. Defaults to `stop`. */
   readonly summaryFinishReason?: Response.FinishReason;
   /**
@@ -116,11 +115,12 @@ export const fakeProvider = (options: ProviderOptions = {}) => {
       return yield* LanguageModel.make({
         generateText: (opts: LanguageModelNamespace.ProviderOptions) =>
           Effect.sync(() => {
-            summaries.push(opts.prompt);
+            const call = summaries.push(opts.prompt) - 1;
+            const text = options.summaryText ?? 'SUMMARY';
             return [
               {
                 type: 'text' as const,
-                text: options.summaryText ?? 'SUMMARY',
+                text: typeof text === 'function' ? text(call) : text,
               },
               finish(10, 4, options.summaryFinishReason),
             ] satisfies Response.PartEncoded[];

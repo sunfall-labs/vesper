@@ -2,9 +2,11 @@ import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { RecordBatch } from '@sunfall/vesper-log/record-batch';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Clock,
+  Crypto,
   Effect,
   Exit,
   Option,
@@ -13,7 +15,6 @@ import {
   Stream,
   SynchronizedRef,
 } from 'effect';
-import type { Crypto } from 'effect';
 
 import {
   DurabilityError,
@@ -29,11 +30,13 @@ import type {
   SignalDrain,
 } from '../log.js';
 import * as AgentIds from './ids.js';
+import * as InputDigest from './input-digest.js';
 import * as Observability from './observability.js';
 import { PromptTransport } from '../prompt-transport.js';
 import * as RecoveryState from '../recovery.js';
 import { ResumeProjection } from '../resume-projection.js';
 import * as AgentSignals from './signal-store.js';
+import { RecordingPolicy } from '../recording-policy.js';
 import * as RecordingSink from '../recording-sink.js';
 import {
   compatibilityError,
@@ -94,9 +97,9 @@ const ACQUIRE_ATTEMPTS = 4;
 
 const restartWaits = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
-): ReadonlyArray<ConversationRecord.RecordOf<'ToolWaitRestarted'>> =>
+): ReadonlyArray<ConversationRecord.RecordOf<'StepRestarted'>> =>
   RecoveryState.fold(history).suspended.map((suspended) => ({
-    _tag: 'ToolWaitRestarted',
+    _tag: 'StepRestarted',
     id: suspended.toolCallId,
     name: suspended.name,
     wait: suspended.wait,
@@ -117,7 +120,7 @@ export const validateSuspendedBoundary = (
             `Conversation ${conversationId} cannot branch or fork while ` +
             `tool ${suspended.name} (${suspended.toolCallId}) is waiting at ` +
             `"${suspended.wait}"; choose a boundary before the tool started ` +
-            'or after it records ToolOutcome',
+            'or after it records StepSettled',
           conversationId,
           toolCallId: suspended.toolCallId,
           wait: suspended.wait,
@@ -341,7 +344,7 @@ export const openWith = (
         const existing = yield* readAll(store, path);
         const restarted = new Set(
           existing.flatMap(({ record }) =>
-            record._tag === 'ToolWaitRestarted' ? [record.priorToken] : [],
+            record._tag === 'StepRestarted' ? [record.priorToken] : [],
           ),
         );
         yield* append(
@@ -381,8 +384,7 @@ export const openWith = (
     // and serving those back would answer questions the resumed run never
     // asked. The signal cursor immediately below is the opposite case, and
     // `branch.ts` says why.
-    const recovered = RecoveryState.fold(opened.aggregateSuffix);
-    const toolRecovery = yield* RecoveryState.make(recovered);
+    const toolRecovery = yield* RecoveryState.make(opened.aggregateSuffix);
     const signalCursor = yield* Ref.make(opened.signalCursor);
 
     const readSignalPage = (
@@ -569,7 +571,7 @@ export const openWith = (
               settlementResume.completed,
               settlementResume.latestTurnUsage,
               settlementState,
-              settlementCodeState,
+              settlementCodeState.committed,
             );
             persisted = records.map((record, index) =>
               index === settlementIndex
@@ -582,11 +584,11 @@ export const openWith = (
           yield* Effect.forEach(
             records,
             (record) =>
-              record._tag === 'ToolSuspended'
+              record._tag === 'StepSuspended'
                 ? Observability.waitSuspended
-                : record._tag === 'ToolWaitCompleted'
+                : record._tag === 'StepResolved'
                   ? Observability.waitCompleted
-                  : record._tag === 'ToolWaitRestarted'
+                  : record._tag === 'StepRestarted'
                     ? Observability.waitRestarted
                     : Effect.void,
             { discard: true },
@@ -608,20 +610,36 @@ export const openWith = (
         }),
       );
 
+    const crypto = yield* Crypto.Crypto;
+    const sha256 = (text: string) =>
+      RecordBatch.sha256(text).pipe(
+        Effect.provideService(Crypto.Crypto, crypto),
+        Effect.orDie,
+      );
+
     return {
       [SessionTypeId]: SessionTypeId,
       conversationId,
       compatibility: options.compatibility,
+      sha256,
+      inputDigest: (name, input) => sha256(InputDigest.material(name, input)),
+      idGenerator: {
+        generateId: () => crypto.randomULID.pipe(Effect.orDie),
+      },
       inheritedUsage,
       usage: opened.usage,
       latestTurnUsage: initialResume.latestTurnUsage,
       completed: initialResume.completed,
       settlementTimeoutMillis: RecordingSink.SETTLEMENT_TIMEOUT_MILLIS,
+      partialOutputIntervalMillis:
+        RecordingPolicy.DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS,
       history,
       stateHistory: projectionHistory,
       recorded: orDie(readResumeHistory(store, path)),
       append: trackedAppend,
       recovery: toolRecovery.recovery,
+      prior: toolRecovery.prior,
+      nestedRecovery: toolRecovery.nestedRecovery,
       pendingToolCalls: toolRecovery.pendingToolCalls,
       indeterminateToolCalls: toolRecovery.indeterminateToolCalls,
       suspendedToolCalls: toolRecovery.suspendedToolCalls,

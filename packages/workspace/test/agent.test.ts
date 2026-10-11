@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 import { WorkspaceAgent } from '../src/agent.js';
 
@@ -11,23 +11,6 @@ const custom = Tool.make('lookup_issue', {
 });
 
 describe('WorkspaceAgent', () => {
-  it('provides the standard workspace tools explicitly', () => {
-    expect(new Set(Object.keys(WorkspaceAgent.standard))).toEqual(
-      new Set(['layer', 'toolkit']),
-    );
-    expect(new Set(Object.keys(WorkspaceAgent.standard.toolkit.tools))).toEqual(
-      new Set([
-        'apply_patch',
-        'edit_file',
-        'list_files',
-        'read_file',
-        'run_shell',
-        'search_files',
-        'write_file',
-      ]),
-    );
-  });
-
   it('adds standard tools without losing application tools', () => {
     const adapter = WorkspaceAgent.compose(Toolkit.make(custom));
     expect(new Set(Object.keys(adapter.toolkit.tools))).toEqual(

@@ -1,11 +1,7 @@
 import { performance } from 'node:perf_hooks';
 
 import { Deferred, Effect, Layer, Ref, Schema } from 'effect';
-import {
-  DurableDeferred,
-  Workflow,
-  WorkflowEngine,
-} from 'effect/unstable/workflow';
+import { DurableDeferred, Workflow, WorkflowEngine } from 'effect/workflow';
 
 /**
  * A small deterministic operational probe, intentionally separate from the

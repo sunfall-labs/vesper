@@ -8,12 +8,15 @@ import {
   Stream,
   SynchronizedRef,
 } from 'effect';
-import { AiError, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, Tool, Toolkit } from 'effect/ai';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import { CodeExecutor } from './code-executor.js';
 import { renderCodeSdk } from './code-sdk.js';
+import * as ToolExecution from './internal/tool-execution.js';
 import type * as AgentLog from './log.js';
 import { ResumeProjection } from './resume-projection.js';
+import * as ToolLookup from './internal/tool-lookup.js';
 
 export const TOOL_NAME = 'exec' as const;
 
@@ -271,7 +274,7 @@ export const openState = (
     const checkpoint =
       session === undefined
         ? undefined
-        : ResumeProjection.codeStateFrom(session.stateHistory);
+        : ResumeProjection.codeStateFrom(session.stateHistory).committed;
     const initial =
       checkpoint === undefined
         ? {}
@@ -286,8 +289,14 @@ export const openState = (
       Effect.gen(function* () {
         const prepared = yield* checkedState(next, limits);
         if (session !== undefined) {
+          // Committed by the `exec` call running now, and in effect only once
+          // that call settles.
+          const producer = yield* Effect.serviceOption(ToolExecution.Current);
           const record: ConversationRecord.Record = {
             _tag: 'CodeStateCheckpoint',
+            ...(Option.isSome(producer)
+              ? { producer: producer.value.toolCallId }
+              : {}),
             state: prepared,
           };
           yield* session.append([record]);
@@ -342,7 +351,7 @@ const failedToolResponse = (
   error,
 });
 
-const invoke = <Tools extends Record<string, Tool.Any>>(
+const invokeOnce = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
   event: CodeExecutor.ToolCall,
 ): Effect.Effect<
@@ -351,13 +360,12 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
   Tool.HandlerServices<Tools[keyof Tools]>
 > =>
   Effect.gen(function* () {
-    const tool = Object.hasOwn(toolkit.tools, event.name)
-      ? toolkit.tools[event.name]
-      : undefined;
-    if (tool === undefined) {
+    const name: string = event.name;
+    const tool = ToolLookup.toolNamed(toolkit.tools, name);
+    if (tool === undefined || !ToolLookup.isToolName(toolkit.tools, name)) {
       return yield* aiError(
         'nestedToolCall',
-        `Unknown code-mode tool "${event.name}"`,
+        `Unknown code-mode tool "${name}"`,
       );
     }
     if (tool.needsApproval !== undefined && tool.needsApproval !== false) {
@@ -366,9 +374,13 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
         message: `Tool "${event.name}" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except`,
       });
     }
-    const name = event.name as Extract<keyof Tools, string>;
-    const input = event.input as Tool.Parameters<Tools[typeof name]>;
-    const stream = yield* toolkit.handle(name, input, event.id);
+    // Sandbox input is untyped JSON; `handle` decodes it against the tool's
+    // parameter schema before anything runs.
+    const stream = yield* toolkit.handle(
+      name,
+      event.input as Tool.ParametersEncoded<Tools[typeof name]>,
+      event.id,
+    );
     const result = yield* Stream.runLast(stream);
     if (Option.isNone(result)) {
       return yield* aiError(
@@ -399,6 +411,183 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
           }),
     ),
   );
+
+// ## Nested calls are durable, keyed, and served from the log
+//
+// A script's tool calls used to leave no trace: the hidden gate has no session,
+// so after a crash the `exec` call was indeterminate and whatever its nested
+// calls had done was invisible. When `exec` runs under a recording gate, each
+// nested call writes the same `StepOpened`, `StepStarted` and `StepSettled`
+// records a top-level call does, with `parent` set to the `exec` tool-call id
+// and `id` set to the call's key within that execution. The key is
+// `k:<name>` when the script passed `{ key }` and otherwise `#<n>`, the nth
+// keyless call this execution made. Keyless ordinals are stable across a
+// re-execution because the sandbox is deterministic for the same source, and
+// the recorded name and input digest turn a script that drifts from its
+// earlier run into a loud failure instead of a wrong answer served from the
+// log. Scripts that branch on time or randomness should pass explicit keys.
+//
+// These records stay out of the model's prompt: the model sees one `exec`
+// call and its result, and history rebuilding ignores any step with a parent.
+//
+// The rules mirror `dispatch.ts`'s, applied at the sandbox boundary:
+//
+//   1. a nested call an unsettled earlier run settled is served from the log,
+//      before interception and metering — it already ran, and metering counts
+//      real executions once;
+//   2. one that was started but never settled runs again if its start
+//      recorded the tool replay-safe (`Replay.safe`), and is otherwise
+//      indeterminate: the script sees a `ToolCallError` with code
+//      `indeterminate` and decides for itself, because only the script knows
+//      whether it can carry on without that result;
+//   3. otherwise the call goes to the hidden gate, whose interceptor and
+//      metering run exactly as before, with the nested `StepStarted` appended
+//      where a top-level one would be — after interception, before the handler.
+//
+// Like top-level recovery, the lookup indexes only what an *earlier* run wrote.
+// The serving only matters when the same `exec` call id is entered again,
+// which is `onIndeterminateToolCall` answering Retry.
+
+const StoredFailure = Schema.Struct({
+  code: Schema.Literals([
+    'tool_failure',
+    'approval_required',
+    'dispatch_failed',
+    'indeterminate',
+  ]),
+  message: Schema.String,
+  value: Schema.optionalKey(Schema.Json),
+});
+const decodeStoredFailure = Schema.decodeUnknownOption(StoredFailure);
+
+const servedResponse = (
+  event: CodeExecutor.ToolCall,
+  settled: AgentLog.Settled,
+): CodeExecutor.ToolResponse => {
+  if (settled.outcome === 'success') {
+    return {
+      id: event.id,
+      outcome: 'success',
+      value: jsonValue(settled.result),
+    };
+  }
+  const failure = decodeStoredFailure(settled.result);
+  return failedToolResponse(
+    event,
+    Option.isSome(failure)
+      ? failure.value
+      : {
+          code: 'dispatch_failed',
+          message: `Recorded failure of nested call "${event.name}" is unreadable`,
+        },
+  );
+};
+
+/** The `exec` call whose nested calls are being recorded. */
+interface NestedOwner {
+  readonly session: AgentLog.Session;
+  readonly parent: LogVocabulary.ToolCallId;
+  /** Keys this execution has used, so a duplicate cannot alias another call. */
+  readonly seen: Set<string>;
+}
+
+const invoke = <Tools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<Tools>,
+  event: CodeExecutor.ToolCall,
+  key: string,
+  owner: NestedOwner | undefined,
+): Effect.Effect<
+  CodeExecutor.ToolResponse,
+  AiError.AiError | AgentLog.DurabilityError,
+  Tool.HandlerServices<Tools[keyof Tools]>
+> => {
+  if (owner === undefined) {
+    return invokeOnce(toolkit, event);
+  }
+  const { session, parent, seen } = owner;
+  return Effect.gen(function* () {
+    if (seen.has(key)) {
+      return failedToolResponse(event, {
+        code: 'dispatch_failed',
+        message: `Nested call key "${key}" was used twice in one execution`,
+      });
+    }
+    seen.add(key);
+
+    const id = LogVocabulary.ToolCallId.make(key);
+    const digest = yield* session.inputDigest(event.name, event.input);
+    const prior = session.nestedRecovery(parent, id);
+    if (Option.isSome(prior)) {
+      if (
+        prior.value.name !== event.name ||
+        prior.value.inputDigest !== digest
+      ) {
+        return failedToolResponse(event, {
+          code: 'dispatch_failed',
+          message: `Nested call "${key}" differs from the one a earlier execution recorded under that key (${prior.value.name}); pass explicit keys if the script is not deterministic`,
+        });
+      }
+      if (prior.value.settled !== undefined) {
+        return servedResponse(event, prior.value.settled);
+      }
+      if (prior.value.started === 'unsafe') {
+        return failedToolResponse(event, {
+          code: 'indeterminate',
+          message: `Nested call "${event.name}" (${key}) started in an earlier execution and never settled; it is not re-run because it may have committed`,
+        });
+      }
+    } else {
+      yield* session.append([
+        {
+          _tag: 'StepOpened',
+          id,
+          parent,
+          name: event.name,
+          inputDigest: digest,
+          params: event.input,
+        },
+      ]);
+    }
+
+    let started = false;
+    const response = yield* invokeOnce(toolkit, event).pipe(
+      Effect.provideService(ToolExecution.NestedStart, {
+        // Once only: the context also reaches any gate inside the handler
+        // (a delegated child agent's tools), and those are not this call.
+        started: (replay) =>
+          Effect.suspend(() => {
+            if (started) {
+              return Effect.void;
+            }
+            started = true;
+            return session.append([
+              { _tag: 'StepStarted', id, parent, name: event.name, replay },
+            ]);
+          }),
+      }),
+    );
+    // A dispatch failure is unsettled on purpose: past its `StepStarted` the
+    // handler may have run, and before it a retry is harmless either way.
+    if (
+      response.outcome === 'failure' &&
+      response.error.code === 'dispatch_failed'
+    ) {
+      return response;
+    }
+    yield* session.append([
+      {
+        _tag: 'StepSettled',
+        id,
+        parent,
+        name: event.name,
+        outcome: response.outcome,
+        result:
+          response.outcome === 'success' ? response.value : response.error,
+      },
+    ]);
+    return response;
+  });
+};
 
 const catalogDescription = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
@@ -491,7 +680,7 @@ export const merge = <
   const exceptedHandle = excepted.handle as AnyHandle;
   const visibleHandle = visible.handle as AnyHandle;
   const route: AnyHandle = (name, params, toolCallId) =>
-    Object.hasOwn(excepted.tools, name)
+    ToolLookup.isToolName(excepted.tools, name)
       ? exceptedHandle(name, params, toolCallId)
       : visibleHandle(name, params, toolCallId);
   return { tools, handle: route as Toolkit.WithHandler<Merged>['handle'] };
@@ -526,6 +715,17 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                       aiError('execute', error.message),
                     ),
                   );
+                const owning = yield* Effect.serviceOption(
+                  ToolExecution.Current,
+                );
+                const owner: NestedOwner | undefined = Option.isSome(owning)
+                  ? {
+                      session: owning.value.session,
+                      parent: owning.value.toolCallId,
+                      seen: new Set(),
+                    }
+                  : undefined;
+                let ordinal = 0;
                 const output: string[] = [];
                 let completed = false;
                 let nextState:
@@ -536,13 +736,20 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                   Stream.mapEffect(
                     (event) => {
                       switch (event._tag) {
-                        case 'ToolCall':
+                        case 'ToolCall': {
+                          // Assigned here, synchronously in event order, not
+                          // inside the concurrent effect that follows.
+                          const key =
+                            event.key === undefined
+                              ? `#${String((ordinal += 1))}`
+                              : `k:${event.key}`;
                           return Effect.flatMap(
-                            invoke(hidden, event).pipe(
+                            invoke(hidden, event, key, owner).pipe(
                               Effect.provide(services),
                             ),
                             execution.respond,
                           );
+                        }
                         case 'Output':
                           return Effect.sync(() => {
                             output.push(event.value);

@@ -1,5 +1,5 @@
 import { Effect, type Layer } from 'effect';
-import { AiError, Toolkit, type Tool } from 'effect/unstable/ai';
+import { AiError, Toolkit, type Tool } from 'effect/ai';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { Agent } from './agent.js';

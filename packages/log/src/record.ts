@@ -52,8 +52,35 @@ const Count = Schema.Natural;
 /** Epoch milliseconds may predate Unix epoch, but must be finite integers. */
 const Timestamp = Schema.Int;
 
+/**
+ * The hard run budget a run was started under.
+ *
+ * Written into `RunStarted` so a reader holding only the log can tell which
+ * ceilings were in force. The budget belongs to a root run and is shared by
+ * every descendant loop: each child conversation's `RunStarted` carries the
+ * same `id` and `root`, which is how a reader finds the runs that drew from one
+ * budget without trusting timestamps.
+ *
+ * `limits` is a plain record of limit name to ceiling rather than a struct of
+ * the agent's `RunPolicy.Limits`, because this package must not import the
+ * agent and a limit added later should decode in an older reader. Required on
+ * `RunStarted`: every run records the budget it actually ran under, so a
+ * `RunStarted` without one is malformed rather than a run of unknown ceilings.
+ */
+export const RunBudget = Schema.Struct({
+  /** Unique per root run; shared by the root and every descendant run. */
+  id: Schema.NonEmptyString,
+  /** The conversation of the root run that owns the budget. */
+  root: LogVocabulary.ConversationId,
+  /** Effective ceilings, keyed by `RunPolicy.Limits` field name. */
+  limits: Schema.Record(Schema.String, Count),
+});
+export interface RunBudget extends Schema.Struct.Type<
+  typeof RunBudget.fields
+> {}
+
 const CompletedValue = Schema.Struct({
-  outcome: Schema.optionalKey(Schema.Literals(['success', 'cancelled'])),
+  outcome: Schema.Literals(['success', 'cancelled']),
   text: Schema.String,
   steps: Count,
   usage: Usage,
@@ -62,10 +89,9 @@ const CompletedValue = Schema.Struct({
 });
 
 const ResumeState = Schema.Struct({
-  /** Optional only so legacy records decode and can be rejected deliberately. */
-  formatVersion: Schema.optionalKey(Count),
-  agent: Schema.optionalKey(Schema.String),
-  agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+  formatVersion: Count,
+  agent: Schema.String,
+  agentRevision: LogVocabulary.AgentRevision,
   usage: Usage,
   signalCursor: LogOffset.Offset,
   completed: Schema.optionalKey(CompletedValue),
@@ -107,7 +133,7 @@ export interface SignalBody extends Schema.Struct.Type<
  * One thing that happened in a conversation.
  *
  * `prompt`, `params`, and `result` are held as `Schema.Unknown` because their
- * real schemas belong to `effect/unstable/ai` and to whatever toolkit is in
+ * real schemas belong to `effect/ai` and to whatever toolkit is in
  * play, and re-declaring them here would create a second definition that has
  * to stay in lockstep with one this package does not own.
  */
@@ -115,9 +141,10 @@ export const Record = Schema.TaggedUnion({
   /** A run began against this conversation. */
   RunStarted: {
     agent: Schema.String,
-    /** Optional only so legacy records decode and can be rejected deliberately. */
-    formatVersion: Schema.optionalKey(Count),
-    agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    formatVersion: Count,
+    agentRevision: LogVocabulary.AgentRevision,
+    /** The hard run budget in force. */
+    budget: RunBudget,
     /** Encoded `Prompt.RawInput`, held opaque. */
     prompt: Schema.Unknown,
   },
@@ -129,37 +156,99 @@ export const Record = Schema.TaggedUnion({
     step: Count,
     text: Schema.String,
   },
-  ToolCall: {
+  /**
+   * Model output streamed so far, committed before the turn settled it.
+   *
+   * A durable progress marker, not conversation history: the model has not
+   * finished saying this, so it is never shown to a model again. The
+   * producer appends one per bounded interval of streaming, carrying only the
+   * text that arrived since the previous one (`text` is a chunk, not the
+   * cumulative answer, so a long answer costs linear storage). Contiguous
+   * chunks concatenate per `kind`.
+   *
+   * A group of these is *superseded* when the coalesced `Text` record (or any
+   * other settling record) follows it, which is how a completed turn still
+   * records its text exactly once. A group followed by nothing, a
+   * `RunStarted`, or a `RunSettled` is output the crashed or abandoned run
+   * never finished: readers surface it as aborted output and prompt rebuilds
+   * leave it out, so the resumed turn reruns cleanly.
+   */
+  PartialOutput: {
     step: Count,
-    /** Provider-assigned call id, unique within the conversation. */
+    kind: Schema.Literals(['text', 'reasoning']),
+    text: Schema.String,
+  },
+  /*
+   * Durable steps.
+   *
+   * A step is one effect the agent performs on the model's behalf: a tool
+   * call, or a call a code-mode script makes from inside its `exec` call (a
+   * nested step, which carries `parent`). Every step moves through the same
+   * records, and one fold reads them all:
+   *
+   *   StepOpened ─▶ StepStarted ─▶ StepSettled
+   *   StepOpened ─▶ StepSuspended ─▶ StepResolved ─▶ (StepStarted ─▶) StepSettled
+   *
+   * A step that started and never settled is indeterminate: whether its effect
+   * happened is unknown, and recovery decides from `StepStarted.replay` and
+   * the indeterminate policy, never by re-running it unasked. Only top-level
+   * steps (no `parent`) are model history: `StepOpened` is the tool call the
+   * model made and `StepSettled` the result it is shown.
+   */
+  /** The model, or a code-mode script, asked for a tool call. */
+  StepOpened: {
+    /** The turn that made the call; absent for a nested step. */
+    step: Schema.optionalKey(Count),
+    /**
+     * Provider-assigned call id for a top-level step; for a nested step, its
+     * key within the parent: `#<ordinal>` or `k:<explicit>`.
+     */
     id: LogVocabulary.ToolCallId,
+    /** The `exec` call a nested step belongs to. */
+    parent: Schema.optionalKey(LogVocabulary.ToolCallId),
     name: Schema.String,
     /** Whether the provider executed this call outside Vesper's toolkit. */
     providerExecuted: Schema.optionalKey(Schema.Boolean),
+    /**
+     * SHA-256 of the call's canonical parameters, taken before any recording
+     * policy redacts `params`. Recovery serves a recorded result only to the
+     * same call — same name, id, and digest — because providers reuse ids
+     * across turns.
+     */
+    inputDigest: Schema.String,
     params: Schema.Unknown,
   },
   /**
-   * A real tool or delegation handler is about to be invoked.
+   * A handler is about to run.
    *
-   * Written after interception and recovery substitution, immediately before
-   * entering the handler. Its absence therefore means the call was never
-   * dispatched; its presence without a later `ToolOutcome` means execution is
-   * indeterminate and must not be retried implicitly.
+   * Durable before the handler is entered, however the step got here: first
+   * dispatch, a retry, an approval, or a workflow wait's resumption. Its
+   * presence without a later `StepSettled` means the effect may or may not
+   * have happened.
    */
-  ToolStarted: {
-    /** Provider-assigned call id, unique within the conversation. */
+  StepStarted: {
     id: LogVocabulary.ToolCallId,
+    parent: Schema.optionalKey(LogVocabulary.ToolCallId),
     name: Schema.String,
+    /**
+     * Whether running this handler again is safe, as known when it started:
+     * a tool declared `Replay.safe`, or a workflow wait's replay-safe
+     * re-entry. Recovery re-runs an interrupted step only when this and the
+     * tool's current declaration both say so.
+     */
+    replay: Schema.Literals(['safe', 'unsafe']),
+    /** The durable wait whose resolution this start resumes. */
+    resumes: Schema.optionalKey(Schema.String),
   },
   /**
-   * A tool handler deliberately yielded to an external actor.
+   * A step deliberately yielded to an external actor.
    *
-   * Unlike a bare `ToolStarted`, this is safe to enter again: the workflow
-   * engine owns the handler's replay and returns recorded activity results
-   * until it reaches the named durable wait. `token` addresses that wait and
-   * `request` is the application-owned value presented to the actor.
+   * Workflow waits suspend from inside a replay-safe handler. Native
+   * interactions suspend before any handler and carry their mode in
+   * `interaction`. `token` addresses the wait and `request` is the value
+   * presented to the actor.
    */
-  ToolSuspended: {
+  StepSuspended: {
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
     /** Application-defined stable name of the wait point. */
@@ -168,45 +257,42 @@ export const Record = Schema.TaggedUnion({
     token: Schema.String,
     /** Schema-encoded application request shown outside the agent run. */
     request: Schema.Unknown,
+    /**
+     * Native pre-dispatch interaction semantics. An absent value denotes
+     * either an implicit Effect AI approval or a workflow-owned wait.
+     */
+    interaction: Schema.optionalKey(
+      Schema.Struct({
+        name: Schema.NonEmptyString,
+        mode: Schema.Literals(['dispatch', 'answer']),
+      }),
+    ),
   },
   /**
-   * Effect Workflow deliberately re-entered a previously suspended handler.
+   * An external actor's decision for one suspended step.
    *
-   * This is an audit fact, not a state transition back to indeterminate: until
-   * `ToolOutcome` is durable, another crash remains safe for workflow replay.
+   * `result` is schema-encoded, so typed success and failure decisions stay
+   * auditable without the log package knowing the application's schemas. It
+   * does not settle the step; `StepSettled` does.
    */
-  ToolResumed: {
-    id: LogVocabulary.ToolCallId,
-    name: Schema.String,
-    /** The durable wait whose completion caused this replay. */
-    token: Schema.String,
-  },
-  /**
-   * The durable wait's externally supplied result was observed by its handler.
-   *
-   * `result` is the schema-encoded Effect `Exit`, so both typed success and
-   * typed failure decisions remain auditable without the log package knowing
-   * the application's schemas. This record does not settle the tool call;
-   * only `ToolOutcome` does that.
-   */
-  ToolWaitCompleted: {
+  StepResolved: {
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
     /** Application-defined stable name of the wait point. */
     wait: Schema.String,
-    /** The exact durable wait that supplied this result. */
+    /** The exact durable wait this decision answers. */
     token: Schema.String,
     outcome: Schema.Literals(['success', 'failure']),
-    /** Schema-encoded Effect Exit supplied by the external actor. */
+    /** Schema-encoded value supplied by the external actor. */
     result: Schema.Unknown,
   },
   /**
-   * A branch or fork deliberately chose a new future for a suspended call.
+   * A branch or fork deliberately chose a new future for a suspended step.
    *
-   * Recovery invokes the original provider call as a fresh handler execution;
-   * the old token remains an audit fact but can never resume this new path.
+   * Recovery runs the original call as a fresh handler execution; the old
+   * token remains an audit fact but can never resume this new path.
    */
-  ToolWaitRestarted: {
+  StepRestarted: {
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
     wait: Schema.String,
@@ -214,32 +300,25 @@ export const Record = Schema.TaggedUnion({
     priorToken: Schema.String,
   },
   /**
-   * How a tool call ended.
+   * How a step ended.
    *
-   * The fine-grained case the roadmap flags as the one thing
-   * provider-seam checkpointing covers and a coarse log would not: a crash
-   * between two tool calls mid-turn is recoverable only if each call's
-   * outcome was written down separately.
+   * A crash between two calls mid-turn is recoverable only because each
+   * call's outcome is written down separately.
    */
-  ToolOutcome: {
-    step: Count,
+  StepSettled: {
+    /** The turn that made the call; absent for a nested step. */
+    step: Schema.optionalKey(Count),
     id: LogVocabulary.ToolCallId,
+    parent: Schema.optionalKey(LogVocabulary.ToolCallId),
     name: Schema.String,
     /** Whether the provider, rather than Vesper, supplied this outcome. */
     providerExecuted: Schema.optionalKey(Schema.Boolean),
     outcome: Schema.Literals(['success', 'failure']),
     /**
-     * The tool's result in the form the provider is shown — the toolkit's own
-     * encoding of it, not the decoded value the handler returned.
-     *
-     * This is the field a resuming dispatch reads back, and the encoded form
-     * is the only one that can be read back correctly: `Prompt` builds a
-     * tool-result message from `encodedResult`, so serving a decoded value
-     * would put something else in front of the model. It also removes the
-     * failure mode the roadmap flags against storing decoded values — a
-     * success type that decodes to a `Date` or a `bigint` has already been
-     * encoded to JSON by the time it reaches here, instead of failing the
-     * append.
+     * The result in the form its consumer is shown: the toolkit's own encoding
+     * for a top-level step (the form `Prompt` builds the tool-result message
+     * from, so a resumed prompt is the one the model saw), and the sandbox
+     * response for a nested step.
      */
     result: Schema.Unknown,
   },
@@ -265,10 +344,9 @@ export const Record = Schema.TaggedUnion({
    * resuming reader cannot drift into wrapping it two different ways.
    */
   Compacted: {
-    /** Optional only so legacy records decode and can be rejected deliberately. */
-    formatVersion: Schema.optionalKey(Count),
-    agent: Schema.optionalKey(Schema.String),
-    agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    formatVersion: Count,
+    agent: Schema.String,
+    agentRevision: LogVocabulary.AgentRevision,
     step: Count,
     /** What the summarized history was replaced by. */
     summary: Schema.String,
@@ -334,8 +412,7 @@ export const Record = Schema.TaggedUnion({
   },
 
   Completed: {
-    /** Optional only so records written before terminal outcomes still decode. */
-    outcome: Schema.optionalKey(Schema.Literals(['success', 'cancelled'])),
+    outcome: Schema.Literals(['success', 'cancelled']),
     text: Schema.String,
     steps: Count,
     usage: Usage,
@@ -350,8 +427,15 @@ export const Record = Schema.TaggedUnion({
     value: Schema.Unknown,
   },
 
-  /** Complete JSON scratch state committed by one successful code execution. */
+  /**
+   * Complete JSON scratch state committed by one successful code execution.
+   *
+   * `producer` is the `exec` step that committed it. The state takes effect
+   * only once that step settles, so a crash between the checkpoint and the
+   * step's `StepSettled` leaves the state the retried execution started from.
+   */
   CodeStateCheckpoint: {
+    producer: Schema.optionalKey(LogVocabulary.ToolCallId),
     state: Schema.Record(Schema.String, Schema.Unknown),
   },
 
@@ -370,7 +454,7 @@ export const Record = Schema.TaggedUnion({
    * the same child conversation instead of orphaning the first one.
    */
   ChildSession: {
-    /** The delegation tool call this child answers. Matches `ToolCall.id`. */
+    /** The delegation tool call this child answers. Matches the parent's `StepOpened.id`. */
     toolCallId: LogVocabulary.ToolCallId,
     /** The child agent's name. */
     agent: Schema.String,
@@ -388,7 +472,16 @@ export const Record = Schema.TaggedUnion({
    * producer-fenced so that two runs cannot interleave one history, and a
    * sender appending to it would fence the very run it is trying to steer.
    */
-  Signal: SignalBody.fields,
+  Signal: {
+    ...SignalBody.fields,
+    /**
+     * Caller-chosen idempotency key, unique within the conversation.
+     *
+     * Optional because idempotency is caller opt-in. It lives only on the sent record: `SignalReceived` is a delivery, and the
+     * dedupe decision is made against the signal stream at send time.
+     */
+    requestId: Schema.optionalKey(Schema.String),
+  },
 
   /**
    * A signal the run actually took delivery of, written into the conversation.
@@ -445,6 +538,21 @@ export const Record = Schema.TaggedUnion({
       'interrupted',
     ]),
     detail: Schema.String,
+    /**
+     * The hard run budget limit that ended the run, with the use and ceiling
+     * it reported. Present only on a `failure` caused by budget exhaustion;
+     * the budget audit reads it instead of parsing `detail`.
+     */
+    stoppedBy: Schema.optionalKey(
+      Schema.Struct({
+        /** `RunPolicy.Limit` name, e.g. `input_tokens`. */
+        limit: Schema.String,
+        /** Consumption when the limit tripped. */
+        used: Count,
+        /** The ceiling in force. */
+        ceiling: Count,
+      }),
+    ),
     steps: Count,
     usage: Usage,
     /** Bounded cumulative state used as the sole resume aggregate. */

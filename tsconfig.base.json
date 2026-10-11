@@ -53,6 +53,10 @@
       "@sunfall/vesper-agent/interception": [
         "./packages/agent/src/interception.ts"
       ],
+      "@sunfall/vesper-agent/interaction": [
+        "./packages/agent/src/interaction.ts"
+      ],
+      "@sunfall/vesper-agent/replay": ["./packages/agent/src/replay.ts"],
       "@sunfall/vesper-agent/model-plan": [
         "./packages/agent/src/model-plan.ts"
       ],
@@ -84,6 +88,7 @@
       ],
       "@sunfall/vesper-log/adapter": ["./packages/log/src/adapter.ts"],
       "@sunfall/vesper-log/log-store": ["./packages/log/src/log-store.ts"],
+      "@sunfall/vesper-log/chain": ["./packages/log/src/chain.ts"],
       "@sunfall/vesper-log/tail": ["./packages/log/src/tail.ts"],
       "@sunfall/vesper-log/layer-memory": [
         "./packages/log/src/layer-memory.ts"
@@ -96,11 +101,17 @@
       "@sunfall/vesper-log-sqlite/layer-native": [
         "./packages/log-sqlite/src/layer-native.ts"
       ],
+      "@sunfall/vesper-log-sqlite/layer-cloudflare": [
+        "./packages/log-sqlite/src/layer-cloudflare.ts"
+      ],
       "@sunfall/vesper-workspace/driver": [
         "./packages/workspace/src/driver.ts"
       ],
       "@sunfall/vesper-workspace/agent": ["./packages/workspace/src/agent.ts"],
       "@sunfall/vesper-workspace/glob": ["./packages/workspace/src/glob.ts"],
+      "@sunfall/vesper-workspace/shell-sandbox": [
+        "./packages/workspace/src/shell-sandbox.ts"
+      ],
       "@sunfall/vesper-workspace/layer-local": [
         "./packages/workspace/src/layer-local.ts"
       ],

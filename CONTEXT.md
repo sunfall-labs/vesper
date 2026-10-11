@@ -1,13 +1,13 @@
 # Vesper Vocabulary
 
 Terms used consistently across `@sunfall/vesper-*`. Where a term already has a
-meaning in `effect/unstable/ai`, that meaning wins.
+meaning in `effect/ai`, that meaning wins.
 
 **Turn** — one model call plus the resolution of any tool calls it requested.
 `Chat.generateText` performs exactly one turn.
 
 **Loop** — repeated turns until a `StopCondition` holds. The loop is what
-`effect/unstable/ai` does not provide and `@sunfall/vesper-agent` adds.
+`effect/ai` does not provide and `@sunfall/vesper-agent` adds.
 
 **Incomplete finish** — a provider finish reason of `length`,
 `content-filter`, or `error`. The raw finish and any partial text remain
@@ -23,7 +23,10 @@ it for another turn.
 compaction), delegation count/depth/concurrency, tool concurrency, elapsed
 time, tokens, and signal processing. One run-policy runtime is created for a
 root run and passed by value through every descendant loop. Exhaustion fails
-the run; a steer cannot override it.
+the run; a steer cannot override it. Every recorded run writes its limits into
+`RunStarted.budget` (required), and a budget stop writes a structured
+`RunSettled.stoppedBy`, so `RunPolicy.audit` can recompute spend and judge the
+ceiling from the log alone without parsing messages.
 
 **Agent** — a definition: name, explicit non-empty revision, instructions,
 toolkit, subagents, skills, stop condition. Not a running thing. Reusable and
@@ -66,10 +69,11 @@ than concatenated into the system prompt, so the cacheable prefix stays
 byte-identical across turns. Only the catalog line goes in the prompt.
 
 **Record** — one thing that happened in a conversation, appended to the log:
-`RunStarted`, `Text`, `ToolCall`, `ToolStarted`, `ToolSuspended`, `ToolResumed`,
-`ToolWaitCompleted`, `ToolWaitRestarted`, `ToolOutcome`, `TurnFinished`,
-`StateCheckpoint`, `Compacted`, `BranchedFrom`, `Completed`, `ChildSession`,
-`Signal`, `SignalReceived`, `RunSettled`. The conversation log is the single
+`RunStarted`, `Text`, `PartialOutput`, the six step records (`StepOpened`,
+`StepStarted`, `StepSuspended`, `StepResolved`, `StepRestarted`,
+`StepSettled`), `TurnFinished`, `StateCheckpoint`, `CodeStateCheckpoint`,
+`Compacted`, `BranchedFrom`, `Completed`, `ChildSession`, `Signal`,
+`SignalReceived`, `RunSettled`. The conversation log is the single
 persistence mechanism in this family.
 
 **Conversation format version** — Vesper's version for persisted conversation
@@ -97,10 +101,14 @@ id derived from the parent's id and the tool call id, referenced by one
 `ChildSession` record written into both logs.
 
 **Resumption** — continuing a conversation from its records: the prompt is
-rebuilt from `Text`, `ToolCall`, `ToolOutcome` and the steers that redirected
+rebuilt from `Text`, top-level `StepOpened` and `StepSettled`, and the steers that redirected
 it, and the loop starts the _next_ turn.
 
-**Indeterminate tool call** — a `ToolStarted` with no later `ToolOutcome` in an
+**Step** — one tool call's durable life: opened, perhaps suspended and
+resolved, started, settled. A code-mode call inside `exec` is a step with a
+`parent`. Identified by name, id and `inputDigest`.
+
+**Indeterminate tool call** — a `StepStarted` with no later `StepSettled` in an
 orphaned run. It is never redispatched by default. A dedicated interceptor must
 explicitly Retry or Answer; ordinary `beforeToolCall` continuation is not a
 retry decision.

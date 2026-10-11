@@ -7,19 +7,19 @@ import {
 } from '@sunfall/vesper-log/vocabulary';
 import type { Cause, Crypto, Schedule, SchemaIssue } from 'effect';
 import { Effect, Exit, Layer, Option, Schema, Stream } from 'effect';
-import { AiError, type Prompt, type Tool } from 'effect/unstable/ai';
+import { AiError, type Prompt, type Tool } from 'effect/ai';
 import {
   Activity,
   DurableDeferred,
   Workflow,
   WorkflowEngine,
-} from 'effect/unstable/workflow';
-import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
+} from 'effect/workflow';
 
 import { Agent } from './agent.js';
 import { AgentBranch } from './branch.js';
 import { Conversation } from './conversation.js';
 import * as ToolExecution from './internal/tool-execution.js';
+import * as RecoveryState from './recovery.js';
 
 /** Durable request fields shared by execution, cancellation, and resumption. */
 export const RequestFields = {
@@ -288,11 +288,10 @@ export class PathError extends Schema.TaggedError<PathError>(
 
 const changesPending = (record: ConversationRecord.Record): boolean => {
   switch (record._tag) {
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'ToolOutcome':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'RunSettled':
     case 'Completed':
     case 'BranchedFrom':
@@ -305,8 +304,9 @@ const changesPending = (record: ConversationRecord.Record): boolean => {
     case 'SignalReceived':
     case 'StateCheckpoint':
     case 'Text':
-    case 'ToolCall':
-    case 'ToolStarted':
+    case 'PartialOutput':
+    case 'StepOpened':
+    case 'StepStarted':
     case 'TurnFinished':
       return false;
     default:
@@ -358,7 +358,7 @@ export interface Wait<
     Success['Type'],
     Error['Type'] | AiError.AiError,
     | WorkflowEngine.WorkflowEngine
-    | WorkflowInstance
+    | WorkflowEngine.WorkflowInstance
     | ToolExecution.Current
     | WaitRequest['EncodingServices']
     | Success['EncodingServices']
@@ -415,7 +415,7 @@ export interface WaitOptions<
 /**
  * Define a durable external wait for use inside a tool handler.
  *
- * The request is written to the conversation as `ToolSuspended`; completing
+ * The request is written to the conversation as `StepSuspended`; completing
  * its token wakes the owning Effect Workflow. On replay, Vesper re-enters only
  * the deliberately suspended handler and Effect Workflow restores completed
  * activities before returning the external result here.
@@ -493,7 +493,7 @@ export const wait = <
           );
           yield* execution.session.append([
             {
-              _tag: 'ToolWaitCompleted',
+              _tag: 'StepResolved',
               id: execution.toolCallId,
               name: execution.name,
               wait: options.name,
@@ -511,7 +511,7 @@ export const wait = <
       ).pipe(Effect.mapError(encodeFailure('request', requestValue)));
       yield* execution.session.append([
         {
-          _tag: 'ToolSuspended',
+          _tag: 'StepSuspended',
           id: execution.toolCallId,
           name: execution.name,
           wait: options.name,
@@ -523,13 +523,6 @@ export const wait = <
     });
   };
 
-  type SuspendedEnvelope = Conversation.WaitEnvelope & {
-    readonly record: Extract<
-      Conversation.WaitRecord,
-      { readonly _tag: 'ToolSuspended' }
-    >;
-  };
-
   const projectPending = <A extends Agent.Any, Requires>(
     conversation: Conversation.Instance<A, Requires>,
     stored: ReadonlyArray<ConversationRecord.Envelope>,
@@ -537,76 +530,27 @@ export const wait = <
     ReadonlyArray<PendingWaitFields<WaitRequest['Type']>>,
     Schema.SchemaError,
     WaitRequest['DecodingServices']
-  > => {
-    const actionable = new Map<string, SuspendedEnvelope>();
-
-    for (const envelope of AgentBranch.activePath(stored)) {
-      const { record } = envelope;
-      switch (record._tag) {
-        case 'ToolSuspended':
-          if (record.wait === options.name) {
-            actionable.set(record.token, {
-              // Envelope is a schema-decoded data object. Its declaration-
-              // mergeable public interface shares a name with the schema
-              // value, so the type-aware rule mistakes it for a class.
-              // oxlint-disable-next-line typescript/no-misused-spread
-              ...envelope,
-              record,
-            });
-          }
-          break;
-        case 'ToolResumed':
-        case 'ToolWaitCompleted':
-          actionable.delete(record.token);
-          break;
-        case 'ToolWaitRestarted':
-          actionable.delete(record.priorToken);
-          break;
-        case 'ToolOutcome':
-          for (const [token, suspended] of actionable) {
-            if (suspended.record.id === record.id) {
-              actionable.delete(token);
-            }
-          }
-          break;
-        case 'RunSettled':
-        case 'Completed':
-          actionable.clear();
-          break;
-        case 'BranchedFrom':
-        case 'ChildSession':
-        case 'CodeStateCheckpoint':
-        case 'Compacted':
-        case 'RunStarted':
-        case 'Signal':
-        case 'SignalReceived':
-        case 'StateCheckpoint':
-        case 'Text':
-        case 'ToolCall':
-        case 'ToolStarted':
-        case 'TurnFinished':
-          break;
-        default:
-          break;
-      }
-    }
-
-    return Effect.forEach(actionable.values(), (envelope) =>
-      Schema.decodeUnknownEffect(options.request)(envelope.record.request).pipe(
-        Effect.map(
-          (decodedRequest): PendingWaitFields<WaitRequest['Type']> => ({
-            conversationId: conversation.id,
-            offset: envelope.offset,
-            toolCallId: envelope.record.id,
-            toolName: envelope.record.name,
-            key: keyFor(decodedRequest),
-            token: envelope.record.token,
-            request: decodedRequest,
-          }),
-        ),
+  > =>
+    Effect.forEach(
+      RecoveryState.waits(AgentBranch.activePath(stored)).filter(
+        (entry) =>
+          entry.open && !entry.resolved && entry.record.wait === options.name,
       ),
+      ({ offset, record }) =>
+        Schema.decodeUnknownEffect(options.request)(record.request).pipe(
+          Effect.map(
+            (decodedRequest): PendingWaitFields<WaitRequest['Type']> => ({
+              conversationId: conversation.id,
+              offset,
+              toolCallId: record.id,
+              toolName: record.name,
+              key: keyFor(decodedRequest),
+              token: record.token,
+              request: decodedRequest,
+            }),
+          ),
+        ),
     );
-  };
 
   const snapshot = <A extends Agent.Any, Requires>(
     conversation: Conversation.Instance<A, Requires>,
@@ -747,7 +691,9 @@ export const wait = <
 type WorkflowAgentError<A extends Agent.Any> = Conversation.Error<A>;
 type WorkflowAgentRequirements<A extends Agent.Any> = Exclude<
   Agent.Requires<A>,
-  WorkflowEngine.WorkflowEngine | WorkflowInstance | ToolExecution.Current
+  | WorkflowEngine.WorkflowEngine
+  | WorkflowEngine.WorkflowInstance
+  | ToolExecution.Current
 >;
 
 type BindingRequirements<

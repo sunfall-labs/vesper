@@ -1,10 +1,5 @@
 import { Effect, Layer, Stream } from 'effect';
-import {
-  AiError,
-  LanguageModel,
-  type Prompt,
-  type Response,
-} from 'effect/unstable/ai';
+import { AiError, LanguageModel, type Prompt, type Response } from 'effect/ai';
 
 /** One normalized request observed at Effect's provider seam. */
 export interface Request {
@@ -39,7 +34,7 @@ export type GenerateStep =
 export interface Handle {
   readonly layer: Layer.Layer<LanguageModel.LanguageModel>;
   /** Build the same service directly, for policies that select a later model. */
-  readonly service: Effect.Effect<LanguageModel.Service>;
+  readonly service: Effect.Effect<LanguageModel.LanguageModel>;
   readonly requests: Effect.Effect<ReadonlyArray<Request>>;
   readonly remaining: Effect.Effect<{
     readonly generate: number;
