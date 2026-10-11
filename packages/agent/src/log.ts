@@ -260,6 +260,12 @@ export interface Session {
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
   ) => Option.Option<Recovery>;
+  /** @internal The orphaned run's state for this exact call, if it is one. */
+  readonly prior: (
+    name: string,
+    toolCallId: LogVocabulary.ToolCallId,
+    params: unknown,
+  ) => Option.Option<Recovery>;
 
   /**
    * The state an unsettled earlier run recorded for one code-mode nested call

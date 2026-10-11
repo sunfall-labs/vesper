@@ -62,6 +62,13 @@ fields, and code that exhaustively matches it must handle them.
   `TurnFinished` preceded the answer resume recorded, so the prompt rebuild
   split the call from its answer and dropped both. A finished turn now stays
   open for its outstanding results.
+- An approved handler is now a started call: the batch that resumes it writes
+  `ToolStarted`, so a crash while it runs leaves the call indeterminate and
+  resume asks `onIndeterminateToolCall` instead of running the handler again.
+- A tool call is served from the log only when the previous, crashed run
+  recorded the same name, id, and parameters. Providers reuse ids such as
+  `call_0` across turns; a new call sharing an id was answered with the earlier
+  call's result instead of running.
 - `Conversation.resolveApproval` and `resolveInteraction` now record through
   the conversation's recording policy, so `externalResult` redacts a caller's
   answer like every other persisted value. They previously wrote it unfiltered.

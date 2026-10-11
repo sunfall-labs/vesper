@@ -1,12 +1,13 @@
 import { describe, expect, it } from '@effect/vitest';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Exit, Schema, Stream } from 'effect';
+import { Deferred, Effect, Exit, Fiber, Schema, Stream } from 'effect';
 import { AiError, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { Interaction } from '../src/interaction.js';
+import { Replay } from '../src/replay.js';
 import { ScriptedModel } from '../src/testing.js';
 import {
   callTurn,
@@ -387,6 +388,65 @@ describe('durable tool approval', () => {
           );
         }),
         model,
+      );
+    },
+  );
+
+  // An approved handler is a started call like any other. If the process dies
+  // while it runs, nothing knows whether its effect happened, so resuming must
+  // not run it again on its own: only `onIndeterminateToolCall` may decide.
+  it.effect(
+    'does not run an approved handler again after a crash without consent',
+    () => {
+      const ran = { count: 0 };
+      return provide(
+        Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const hanging = Agent.make({
+            name: 'approval-test',
+            revision: '1',
+            instructions: 'release only through the tool',
+            toolkit: Toolkit.make(release),
+          }).withHandlers({
+            release: () =>
+              Effect.sync(() => {
+                ran.count += 1;
+              }).pipe(
+                Effect.andThen(Deferred.succeed(entered, undefined)),
+                Effect.andThen(Effect.never),
+              ),
+          });
+          const conversation = Conversation.make(hanging, 'approved-crash');
+          yield* conversation.run('release r1');
+          yield* conversation.resolveApproval(CALL_ID, 'approve');
+
+          // The approved handler starts, and the process dies under it.
+          const running = yield* Effect.forkChild(conversation.run());
+          yield* Deferred.await(entered);
+          yield* Fiber.interrupt(running);
+          const afterCrash = tagsOf(yield* recordsOf(conversation));
+          expect(afterCrash).toContain('ToolStarted');
+          expect(afterCrash).not.toContain('ToolOutcome');
+
+          const refused = yield* Effect.exit(conversation.run());
+          expect(Exit.isFailure(refused)).toBe(true);
+          expect(ran.count).toBe(1);
+
+          const answered = yield* Conversation.make(
+            hanging.intercepting(Replay.policy),
+            'approved-crash',
+          ).run();
+          expect(answered.outcome).toBe('success');
+          expect(ran.count).toBe(1);
+          expect(outcomesOf(yield* recordsOf(conversation))).toMatchObject([
+            {
+              id: CALL_ID,
+              outcome: 'failure',
+              result: { type: 'execution-interrupted' },
+            },
+          ]);
+        }),
+        releasing(),
       );
     },
   );

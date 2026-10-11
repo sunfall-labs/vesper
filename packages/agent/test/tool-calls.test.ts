@@ -1,4 +1,5 @@
 import { describe, expect, it } from '@effect/vitest';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Schema, Stream } from 'effect';
 import { Tool, Toolkit } from 'effect/ai';
 
@@ -12,9 +13,13 @@ import {
   promptText,
   provide,
   readRecords,
+  runStarted,
+  seed,
   tagsOf,
   textTurn,
+  toolCalled,
   toolResultsIn,
+  toolStarted,
 } from './tool-fixtures.js';
 
 // Tool-call scenarios: what the model asks for, what the handler receives,
@@ -221,6 +226,82 @@ describe('a tool call the model got wrong', () => {
           });
         }),
         model,
+      );
+    },
+  );
+});
+
+// Providers reuse tool call ids — `call_0` on every turn is common — so an id
+// alone does not identify a call. Only a call the previous, crashed run made,
+// with the same parameters, is served from the log; every other call runs.
+describe('a tool call id the provider reuses', () => {
+  const echo = Tool.make('echo', {
+    description: 'echo a number back, tenfold',
+    parameters: Schema.Struct({ x: Schema.Finite }),
+    success: Schema.Finite,
+  });
+  const echoing = (seen: Array<number>) =>
+    Agent.make({
+      name: 'reuse',
+      revision: '1',
+      instructions: 'echo',
+      toolkit: Toolkit.make(echo),
+    }).withHandlers({
+      echo: ({ x }) =>
+        Effect.sync(() => {
+          seen.push(x);
+          return x * 10;
+        }),
+    });
+
+  it.effect('runs a new call that shares an earlier call’s id', () => {
+    const seen: Array<number> = [];
+    return provide(
+      Effect.gen(function* () {
+        yield* Conversation.make(echoing(seen), 'reused-id').run('go');
+
+        expect(seen).toEqual([1, 2]);
+        expect(
+          outcomesOf(yield* readRecords('reused-id')).map(
+            (record) => record.result,
+          ),
+        ).toEqual([10, 20]);
+      }),
+      ScriptedModel.make([
+        callTurn({ id: 'call_0', name: 'echo', params: { x: 1 } }),
+        callTurn({ id: 'call_0', name: 'echo', params: { x: 2 } }),
+        textTurn('done'),
+      ]),
+    );
+  });
+
+  it.effect(
+    'runs a resumed run’s call that reuses a crashed run’s settled id',
+    () => {
+      const seen: Array<number> = [];
+      return provide(
+        Effect.gen(function* () {
+          yield* seed('reused-after-crash', [
+            runStarted('reuse'),
+            toolCalled('echo', { x: 1 }, 'call_0'),
+            toolStarted('echo', 'call_0'),
+            {
+              _tag: 'ToolOutcome',
+              step: 1,
+              id: LogVocabulary.ToolCallId.make('call_0'),
+              name: 'echo',
+              outcome: 'success',
+              result: 10,
+            },
+          ]);
+          yield* Conversation.make(echoing(seen), 'reused-after-crash').run();
+
+          expect(seen).toEqual([2]);
+        }),
+        ScriptedModel.make([
+          callTurn({ id: 'call_0', name: 'echo', params: { x: 2 } }),
+          textTurn('done'),
+        ]),
       );
     },
   );

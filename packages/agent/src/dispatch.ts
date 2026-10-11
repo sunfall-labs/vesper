@@ -441,14 +441,31 @@ export const resolveIndeterminate = <
 
       yield* Effect.gen(function* () {
         if (recovery.value._tag === 'Suspended') {
-          yield* options.session.append([
-            {
-              _tag: 'ToolResumed',
-              id: call.toolCallId,
-              name: call.name,
-              token: recovery.value.token,
-            },
-          ]);
+          const resumed = {
+            _tag: 'ToolResumed' as const,
+            id: call.toolCallId,
+            name: call.name,
+            token: recovery.value.token,
+          };
+          // An approved native interaction is about to run its handler for
+          // the first time, so it starts like any other call: `ToolStarted`
+          // is durable before the handler runs, in the same batch as the
+          // resumption. A crash from here on is then indeterminate, and only
+          // `onIndeterminateToolCall` may decide to run it again. A workflow
+          // wait is different: its handler re-enters a replay-safe workflow,
+          // which is what the resumption alone records.
+          yield* options.session.append(
+            recovery.value.wait === INTERACTION_WAIT
+              ? [
+                  resumed,
+                  {
+                    _tag: 'ToolStarted',
+                    id: call.toolCallId,
+                    name: call.name,
+                  },
+                ]
+              : [resumed],
+          );
         } else {
           yield* options.session.append([
             {
@@ -861,11 +878,13 @@ export const gate = <
         const prior =
           normalizedToolCallId === undefined || session === undefined
             ? Option.none<AgentLog.Recovery>()
-            : session.recovery(toolName, normalizedToolCallId);
+            : session.prior(toolName, normalizedToolCallId, params);
 
         // Step 1. A call an unsettled earlier run already completed is served
         // from the log and goes no further — not to the interceptor, and not
-        // to the tool. See the ordering note above.
+        // to the tool. See the ordering note above. "The same call" means the
+        // same name, id, and parameters: a provider reusing an id for a new
+        // call gets that call run.
         if (Option.isSome(prior) && prior.value._tag === 'Settled') {
           yield* Observability.recoveredToolCall;
           return yield* answered(

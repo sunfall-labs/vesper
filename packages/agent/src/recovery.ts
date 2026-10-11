@@ -1,6 +1,6 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Option, Ref } from 'effect';
+import { Array as Arr, Effect, Option, Order, Ref } from 'effect';
 
 import { AgentBranch } from './branch.js';
 
@@ -80,6 +80,8 @@ export interface NestedRecovery {
 
 export interface Snapshot {
   readonly recoveries: Map<string, Recovery>;
+  /** The orphaned run's calls, settled or not, by {@link settledKey}. */
+  readonly calls: ReadonlyMap<string, IndeterminateToolCall>;
   /** Nested calls of the orphaned run, by {@link nestedKey}. */
   readonly nested: ReadonlyMap<string, NestedRecovery>;
   readonly completedWaitOutcomes: ReadonlyMap<string, CompletedWait>;
@@ -245,6 +247,7 @@ export const fold = (
 
   return {
     recoveries,
+    calls,
     nested,
     completedWaitOutcomes,
     corruption:
@@ -289,21 +292,55 @@ const settledKey = (
   toolCallId: LogVocabulary.ToolCallId,
 ): string => `${name}\u001f${toolCallId}`;
 
+/** Parameters compared as JSON values, independent of key order. */
+const sameParams = (left: unknown, right: unknown): boolean =>
+  canonical(left) === canonical(right);
+
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, nested: unknown) =>
+    nested !== null && typeof nested === 'object' && !Array.isArray(nested)
+      ? Object.fromEntries(
+          Arr.sort(
+            Object.entries(nested),
+            Order.mapInput(
+              Order.String,
+              ([key]: readonly [string, unknown]) => key,
+            ),
+          ),
+        )
+      : nested,
+  );
+
 const nestedKey = (parent: string, key: string): string =>
   `${parent}\u001f${key}`;
 
 export interface Tracker {
   /**
-   * What an orphaned run recorded for one nested call. Like {@link recovery},
-   * it indexes only what predates this run, so a run never serves itself.
+   * What an orphaned run recorded for one nested call. Like {@link prior}, it
+   * indexes only what predates this run, so a run never serves itself.
    */
   readonly nestedRecovery: (
     parent: LogVocabulary.ToolCallId,
     key: string,
   ) => Option.Option<NestedRecovery>;
+  /** The live state of one call, including what this run has recorded. */
   readonly recovery: (
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
+  ) => Option.Option<Recovery>;
+  /**
+   * The state of a call the orphaned run made, when this is that same call.
+   *
+   * Only a call the previous run recorded, with the same name, id, and
+   * parameters, is the call being recovered. Providers reuse ids across turns
+   * (`call_0` on every turn is common), so an id alone does not identify a
+   * call: a new call that happens to share one must run, not be answered with
+   * another call's result.
+   */
+  readonly prior: (
+    name: string,
+    toolCallId: LogVocabulary.ToolCallId,
+    params: unknown,
   ) => Option.Option<Recovery>;
   readonly pendingToolCalls: ReadonlyArray<IndeterminateToolCall>;
   readonly indeterminateToolCalls: ReadonlyArray<IndeterminateToolCall>;
@@ -504,6 +541,13 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
         Option.fromUndefinedOr(snapshot.nested.get(nestedKey(parent, key))),
       recovery: (name, toolCallId) =>
         Option.fromUndefinedOr(recoveries.get(settledKey(name, toolCallId))),
+      prior: (name, toolCallId, params) => {
+        const key = settledKey(name, toolCallId);
+        const recorded = snapshot.calls.get(key);
+        return recorded !== undefined && sameParams(recorded.params, params)
+          ? Option.fromUndefinedOr(recoveries.get(key))
+          : Option.none();
+      },
       pendingToolCalls: snapshot.pending,
       indeterminateToolCalls: snapshot.indeterminate,
       suspendedToolCalls: snapshot.suspended,

@@ -636,6 +636,7 @@ export const openWith = (
       recorded: orDie(readResumeHistory(store, path)),
       append: trackedAppend,
       recovery: toolRecovery.recovery,
+      prior: toolRecovery.prior,
       nestedRecovery: toolRecovery.nestedRecovery,
       pendingToolCalls: toolRecovery.pendingToolCalls,
       indeterminateToolCalls: toolRecovery.indeterminateToolCalls,
