@@ -1,4 +1,6 @@
 -- Vesper PostgreSQL append-only conversation log schema.
+-- `chain_head` and `batch_digest` hold the hash chain (see
+-- `@sunfall/vesper-log/chain`); every row carries the digest of its batch.
 CREATE SCHEMA IF NOT EXISTS ai_log;
 
 CREATE TABLE IF NOT EXISTS ai_log.streams (
@@ -10,6 +12,7 @@ CREATE TABLE IF NOT EXISTS ai_log.streams (
   next_producer_sequence bigint NOT NULL DEFAULT 0,
   last_fingerprint       text NOT NULL DEFAULT '',
   last_offset            text NOT NULL DEFAULT '-1',
+  chain_head             text NOT NULL DEFAULT '',
   created_at             timestamptz NOT NULL DEFAULT now()
 );
 
@@ -24,6 +27,7 @@ CREATE TABLE IF NOT EXISTS ai_log.records (
   conversation_id   text NOT NULL,
   record_timestamp  bigint NOT NULL,
   record            jsonb NOT NULL,
+  batch_digest      text NOT NULL,
   written_at        timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT ai_log_records_pkey PRIMARY KEY (path, seq)
 );

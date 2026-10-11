@@ -6,12 +6,13 @@ database migration without adding PostgreSQL dependencies to the core package.
 
 ```bash
 npm install @sunfall/vesper-log-pg \
-  @effect/platform-node@4.0.0-rc.109 effect@4.0.0-rc.109
+  @effect/platform-node@4.0.3 effect@4.0.3
 ```
 
-The migration is published as
-`@sunfall/vesper-log-pg/migrations/001-initial.sql`. Copy its statements into
-your migration system; the adapter never migrates at runtime.
+The schema is published as `@sunfall/vesper-log-pg/migrations/001-initial.sql`.
+Copy its statements into your migration system; the adapter never migrates at
+runtime. It includes the hash-chain columns (see `@sunfall/vesper-log`'s
+tamper-evidence section).
 
 ```ts
 import * as NodeServices from '@effect/platform-node/NodeServices';
@@ -30,7 +31,7 @@ const store = LogStorePg.layer({
 `@effect/sql-pg` client from the environment. Both require Effect's `Crypto`
 service while the adapter is constructed.
 
-`VesperPgClient` delegates queries and transactions to the official client and
-corrects only the Effect 4.0.0-rc.109 `LISTEN` connection lifecycle. A standard
-client is also accepted when its listener satisfies the same lifecycle
-contract.
+`VesperPgClient` is the official `@effect/sql-pg` client, unmodified. Its
+`listen` resolves only once PostgreSQL has confirmed `LISTEN`, and a listening
+connection that dies fails the notification queue rather than leaving it
+quiet; `LogStorePg.changes` depends on both.

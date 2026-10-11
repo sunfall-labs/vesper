@@ -1,7 +1,10 @@
+import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Deferred, Effect, Fiber, Option, Stream } from 'effect';
-import type { Layer } from 'effect';
+import { Layer } from 'effect';
+import type { Crypto } from 'effect';
 import { describe, expect, it } from 'vitest';
 
+import { LogChain } from '../src/chain.js';
 import { LogStore } from '../src/log-store.js';
 import { LogOffset } from '../src/offset.js';
 import type { ConversationRecord } from '../src/record.js';
@@ -67,6 +70,9 @@ const texts = (envelopes: ReadonlyArray<ConversationRecord.Envelope>) =>
       : envelope.record._tag,
   );
 
+const headOf = (meta: Option.Option<LogStore.StreamMeta>) =>
+  Option.flatMap(meta, (found) => found.chainHead);
+
 export interface ContractOptions<E> {
   readonly layer: Layer.Layer<LogStore.Service, E>;
   /**
@@ -87,15 +93,18 @@ export interface ContractOptions<E> {
 
 const runIn = <E, A>(
   layer: Layer.Layer<LogStore.Service, E>,
-  effect: Effect.Effect<A, unknown, LogStore.Service>,
-): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(layer)));
+  effect: Effect.Effect<A, unknown, LogStore.Service | Crypto.Crypto>,
+): Promise<A> =>
+  Effect.runPromise(
+    effect.pipe(Effect.provide(Layer.merge(layer, NodeServices.layer))),
+  );
 
 export const logStoreContract = <E>(
   name: string,
   options: ContractOptions<E>,
 ): void => {
   const run = <A>(
-    effect: Effect.Effect<A, unknown, LogStore.Service>,
+    effect: Effect.Effect<A, unknown, LogStore.Service | Crypto.Crypto>,
   ): Promise<A> => runIn(options.layer, effect);
 
   /** A created stream with a producer already holding the current epoch. */
@@ -148,9 +157,20 @@ export const logStoreContract = <E>(
           agent: 'a',
           formatVersion: 1,
           agentRevision,
+          budget: {
+            id: 'budget-1',
+            root: LogVocabulary.ConversationId.make('c'),
+            limits: { maxTurns: 4 },
+          },
           prompt: [{ role: 'user' }],
         },
         Text: { _tag: 'Text', step: 1, text: 'hello' },
+        PartialOutput: {
+          _tag: 'PartialOutput',
+          step: 1,
+          kind: 'text',
+          text: 'hel',
+        },
         ToolCall: {
           _tag: 'ToolCall',
           step: 1,
@@ -223,6 +243,7 @@ export const logStoreContract = <E>(
         },
         Completed: {
           _tag: 'Completed',
+          outcome: 'success',
           text: 'done',
           steps: 2,
           usage: { input: 1, output: 2 },
@@ -253,6 +274,7 @@ export const logStoreContract = <E>(
           _tag: 'RunSettled',
           outcome: 'interrupted',
           detail: 'the run was interrupted',
+          stoppedBy: { limit: 'turns', used: 4, ceiling: 3 },
           steps: 3,
           usage: { input: 9, output: 8 },
           resume: {
@@ -262,6 +284,28 @@ export const logStoreContract = <E>(
             usage: { input: 20, output: 10 },
             signalCursor: LogOffset.fromSeq(7n),
           },
+        },
+        NestedToolCall: {
+          _tag: 'NestedToolCall',
+          parent: toolCallId,
+          key: '#1',
+          name: 'lookup',
+          inputDigest: 'digest',
+          params: { id: 1 },
+        },
+        NestedToolStarted: {
+          _tag: 'NestedToolStarted',
+          parent: toolCallId,
+          key: '#1',
+          name: 'lookup',
+        },
+        NestedToolOutcome: {
+          _tag: 'NestedToolOutcome',
+          parent: toolCallId,
+          key: '#1',
+          name: 'lookup',
+          outcome: 'success',
+          result: { found: true },
         },
         StateCheckpoint: {
           _tag: 'StateCheckpoint',
@@ -1145,6 +1189,138 @@ export const logStoreContract = <E>(
           });
         }
       });
+    });
+
+    // The chained digest is computed under the same lock that orders appends,
+    // so every backend must agree on what the chain commits to.
+    describe('hash chain', () => {
+      it('has no head until a batch is appended, then verifies', () =>
+        run(
+          Effect.gen(function* () {
+            const { store, append } = yield* open('chain-1');
+            const empty = yield* store.meta('chain-1');
+            const emptyVerdict = yield* LogChain.verify('chain-1');
+            yield* append(0, [text('one'), text('two')]);
+            yield* append(1, [text('three')]);
+            const meta = yield* store.meta('chain-1');
+            const verdict = yield* LogChain.verify('chain-1');
+            const pages = yield* store.readBatches('chain-1');
+
+            expect(Option.isNone(headOf(empty))).toBe(true);
+            expect(emptyVerdict).toMatchObject({
+              _tag: 'Valid',
+              batches: 0,
+              head: Option.none(),
+            });
+            expect(Option.isSome(headOf(meta))).toBe(true);
+            expect(verdict).toMatchObject({
+              _tag: 'Valid',
+              batches: 2,
+              records: 3,
+              head: headOf(meta),
+            });
+            expect(pages.batches.map((b) => texts(b.records))).toEqual([
+              ['one', 'two'],
+              ['three'],
+            ]);
+            expect(pages.upToDate).toBe(true);
+            expect(pages.batches.every((b) => b.digest !== '')).toBe(true);
+          }),
+        ));
+
+      it('does not move the head on an idempotent retry', () =>
+        run(
+          Effect.gen(function* () {
+            const { store, append } = yield* open('chain-retry');
+            yield* append(0, [text('one')]);
+            const before = headOf(yield* store.meta('chain-retry'));
+            yield* append(0, [text('one')]);
+            const after = headOf(yield* store.meta('chain-retry'));
+
+            expect(Option.isSome(before)).toBe(true);
+            expect(after).toEqual(before);
+          }),
+        ));
+
+      it('keeps one chain across a producer handover', () =>
+        run(
+          Effect.gen(function* () {
+            const { store, append } = yield* open('chain-handover');
+            yield* append(0, [text('one')]);
+            const next = yield* store.acquire('chain-handover', producer2);
+            yield* store.append({
+              path: 'chain-handover',
+              producerId: next.producerId,
+              epoch: next.epoch,
+              sequence: next.nextSequence,
+              records: [text('two')],
+            });
+
+            expect(yield* LogChain.verify('chain-handover')).toMatchObject({
+              _tag: 'Valid',
+              batches: 2,
+              records: 2,
+            });
+          }),
+        ));
+
+      it('commits to the stream path, so identical content differs', () =>
+        run(
+          Effect.gen(function* () {
+            const a = yield* open('chain-a');
+            yield* a.append(0, [text('same')]);
+            const b = yield* open('chain-b');
+            yield* b.append(0, [text('same')]);
+            const headA = headOf(yield* a.store.meta('chain-a'));
+            const headB = headOf(yield* b.store.meta('chain-b'));
+
+            expect(Option.isSome(headA)).toBe(true);
+            expect(headA).not.toEqual(headB);
+          }),
+        ));
+
+      it('pages batches by batch count and resumes from the cursor', () =>
+        run(
+          Effect.gen(function* () {
+            const { store, append } = yield* open('chain-page');
+            yield* append(0, [text('a'), text('b')]);
+            yield* append(1, [text('c')]);
+            yield* append(2, [text('d'), text('e')]);
+            const first = yield* store.readBatches('chain-page', { limit: 2 });
+            const second = yield* store.readBatches('chain-page', {
+              after: first.cursor,
+              limit: 2,
+            });
+
+            expect(first.batches.map((b) => texts(b.records))).toEqual([
+              ['a', 'b'],
+              ['c'],
+            ]);
+            expect(first.upToDate).toBe(false);
+            expect(second.batches.map((b) => texts(b.records))).toEqual([
+              ['d', 'e'],
+            ]);
+            expect(second.upToDate).toBe(true);
+          }),
+        ));
+
+      it('fails readBatches on a stream that was never created', () =>
+        run(
+          Effect.gen(function* () {
+            const store = yield* LogStore.Service;
+            const outcome = yield* store
+              .readBatches('never')
+              .pipe(Effect.result);
+
+            expect(outcome._tag).toBe('Failure');
+            if (outcome._tag === 'Failure') {
+              expect(outcome.failure).toMatchObject({
+                operation: 'readBatches',
+                reason: 'not_found',
+              });
+            }
+          }),
+        ));
     });
   });
 };

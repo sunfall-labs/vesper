@@ -1,14 +1,12 @@
 import * as NodeServices from '@effect/platform-node/NodeServices';
+import type { PgConnection } from '@effect/sql-pg';
 import { describe, expect, it } from '@effect/vitest';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Fiber, Schema, Stream } from 'effect';
+import { Effect, Queue, Schema, Stream } from 'effect';
+import { SqlError } from 'effect/sql';
 
 import { LogStorePg } from '../src/layer.js';
-import {
-  correctedListen,
-  type ListenerClient,
-} from '../src/internal/pg-listen.js';
 
 const at = <T>(values: ReadonlyArray<T>, index: number): T => {
   const value = values[index];
@@ -19,83 +17,48 @@ const at = <T>(values: ReadonlyArray<T>, index: number): T => {
 };
 
 const inTransaction = <A, E, R>(effect: Effect.Effect<A, E, R>) => effect;
-const unusedListen = () => Stream.die('not used');
-
-class FakeListenerClient implements ListenerClient {
-  endCalls = 0;
-
-  constructor(readonly connectImpl: () => Promise<void>) {}
-
-  on(
-    _event: 'notification' | 'error' | 'end',
-    _listener: ((...args: never[]) => void) | ((error: Error) => void),
-  ): this {
-    return this;
-  }
-
-  off(
-    _event: 'notification' | 'error' | 'end',
-    _listener: ((...args: never[]) => void) | ((error: Error) => void),
-  ): this {
-    return this;
-  }
-
-  connect(): Promise<void> {
-    return this.connectImpl();
-  }
-
-  query(_text: string): Promise<void> {
-    return Promise.resolve();
-  }
-
-  end(): Promise<void> {
-    this.endCalls += 1;
-    return Promise.resolve();
-  }
-}
+const unusedListen = () => Effect.die('not used');
 
 describe('LogStore Postgres SQL', () => {
-  it.effect('closes a listener client when connect fails', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const client = new FakeListenerClient(() =>
-          Promise.reject(new Error('connect failed')),
-        );
-        const outcome = yield* correctedListen(
-          {},
-          () => client,
-        )('failed-connect').pipe(Stream.runDrain, Effect.result);
+  it.effect('opens changes with a tick and fails when the listener dies', () =>
+    Effect.gen(function* () {
+      const notifications = yield* Queue.unbounded<
+        PgConnection.Notification,
+        SqlError.SqlError
+      >();
+      const store = yield* LogStorePg.make({
+        unsafe: () => Effect.die('not used'),
+        withTransaction: inTransaction,
+        listen: () => Effect.succeed(notifications),
+      });
+      yield* Queue.offer(notifications, {
+        processId: 1,
+        channel: 'unused',
+        payload: '',
+      });
+      yield* Queue.fail(
+        notifications,
+        new SqlError.SqlError({
+          reason: new SqlError.ConnectionError({
+            cause: new Error('Connection closed'),
+            message: 'Connection closed',
+            operation: 'listen',
+          }),
+        }),
+      );
 
-        expect(outcome._tag).toBe('Failure');
-        expect(client.endCalls).toBe(1);
-      }),
-    ),
-  );
-
-  it.effect('closes a listener client when connect is interrupted', () =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        let resolveStarted!: () => void;
-        const started = new Promise<void>((resolve) => {
-          resolveStarted = resolve;
-        });
-        const client = new FakeListenerClient(
-          () =>
-            new Promise<void>(() => {
-              resolveStarted();
-            }),
-        );
-        const fiber = yield* correctedListen(
-          {},
-          () => client,
-        )('interrupted-connect').pipe(Stream.runDrain, Effect.forkChild);
-
-        yield* Effect.promise(() => started);
-        yield* Fiber.interrupt(fiber);
-
-        expect(client.endCalls).toBe(1);
-      }),
-    ),
+      const ticks: Array<void> = [];
+      const error = yield* store.changes('stream').pipe(
+        Stream.runForEach((tick) => Effect.sync(() => ticks.push(tick))),
+        Effect.flip,
+      );
+      expect(ticks).toHaveLength(2);
+      expect(error).toMatchObject({
+        _tag: 'LogStoreError',
+        operation: 'changes',
+        reason: 'storage',
+      });
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect(
@@ -117,6 +80,7 @@ describe('LogStore Postgres SQL', () => {
                 next_sequence: '0',
                 next_producer_sequence: '0',
                 last_fingerprint: '',
+                chain_head: '',
                 last_offset: '-1',
               },
             ]);
@@ -157,7 +121,7 @@ describe('LogStore Postgres SQL', () => {
         expect(write.text).toContain('inserted AS');
         expect(write.text).toContain('advanced AS');
         expect(write.text).toContain('pg_notify($11, $12)');
-        expect(write.params).toHaveLength(12);
+        expect(write.params).toHaveLength(13);
         expect(write.params[11]).toBe('');
         const encoded = Schema.decodeUnknownSync(
           Schema.Array(
@@ -255,6 +219,7 @@ describe('LogStore Postgres SQL', () => {
     next_producer_sequence: '0',
     last_fingerprint: '',
     last_offset: '-1',
+    chain_head: '',
   };
 
   it.effect(

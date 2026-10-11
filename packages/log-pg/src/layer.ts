@@ -1,8 +1,11 @@
 import { PgClient } from '@effect/sql-pg';
+import type { PgConnection } from '@effect/sql-pg';
 import { Crypto, Effect, Layer, Option, Schema, Stream } from 'effect';
-import type { SqlError } from 'effect/unstable/sql';
+import type { Queue, Scope } from 'effect';
+import type { SqlError } from 'effect/sql';
 
 import { LogStoreAdapter } from '@sunfall/vesper-log/adapter';
+import { LogChain } from '@sunfall/vesper-log/chain';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { RecordBatch } from '@sunfall/vesper-log/record-batch';
@@ -66,7 +69,14 @@ const asLogStoreError =
   (error: SqlError.SqlError | LogStore.LogStoreError): LogStore.LogStoreError =>
     Schema.is(LogStore.LogStoreError)(error)
       ? error
-      : LogStore.makeError(path, operation, 'storage', error.message);
+      : LogStore.makeError(
+          path,
+          operation,
+          'storage',
+          // The structured reason (UniqueViolation, LockTimeoutError, ...) is
+          // the part an operator acts on; the message alone often omits it.
+          `${error.reason._tag}: ${error.message}`,
+        );
 
 /** The database operations the log store actually uses. */
 export interface Client {
@@ -77,9 +87,17 @@ export interface Client {
   readonly withTransaction: <R, E, A>(
     effect: Effect.Effect<A, E, R>,
   ) => Effect.Effect<A, E | SqlError.SqlError, R>;
+  /**
+   * Resolves once `LISTEN` is registered, and fails the returned queue rather
+   * than ending it when the listening connection dies.
+   */
   readonly listen: (
     channel: string,
-  ) => Stream.Stream<string, SqlError.SqlError>;
+  ) => Effect.Effect<
+    Queue.Dequeue<PgConnection.Notification, SqlError.SqlError>,
+    SqlError.SqlError,
+    Scope.Scope
+  >;
 }
 
 export interface Options {
@@ -193,6 +211,8 @@ interface StreamRow {
   readonly nextProducerSequence: LogVocabulary.ProducerSequence;
   readonly lastFingerprint: string;
   readonly lastOffset: LogOffset.Offset;
+  /** Empty until the first batch is appended. */
+  readonly chainHead: string;
 }
 
 const StreamRowSchema = Schema.Struct({
@@ -234,6 +254,7 @@ const readStreamRow = (row: Row): Effect.Effect<StreamRow, RowDecodeError> =>
       nextSequence,
       lastFingerprint,
       lastOffset,
+      chainHead: yield* asString('chain_head', row['chain_head']),
     };
   }).pipe(
     Effect.mapError((error) =>
@@ -266,7 +287,26 @@ const metaOf = (path: string, row: StreamRow): LogStore.StreamMeta => ({
   // Record sequences start at zero and advance by one per record, so the next
   // one to assign is also how many exist. No counter to keep in step.
   records: Number(row.nextSequence),
+  chainHead: row.chainHead === '' ? Option.none() : Option.some(row.chainHead),
 });
+
+const readStoredRow = (row: Row) =>
+  Effect.gen(function* () {
+    return {
+      envelope: yield* readRecord(row),
+      producerId: yield* Schema.decodeEffect(LogVocabulary.ProducerId)(
+        yield* asString('producer_id', row['producer_id']),
+      ),
+      epoch: yield* Schema.decodeEffect(LogVocabulary.Epoch)(
+        yield* asNumber('producer_epoch', row['producer_epoch']),
+      ),
+      sequence: yield* Schema.decodeEffect(LogVocabulary.ProducerSequence)(
+        yield* asNumber('producer_sequence', row['producer_sequence']),
+      ),
+      batchIndex: yield* asNumber('batch_index', row['batch_index']),
+      digest: yield* asString('batch_digest', row['batch_digest']),
+    } satisfies LogChain.StoredRow;
+  });
 
 export const make = (
   client: Client,
@@ -305,7 +345,8 @@ export const make = (
          VALUES ($1, $2)
          ON CONFLICT (path) DO NOTHING
          RETURNING identity, epoch, producer_id, next_sequence,
-                   next_producer_sequence, last_fingerprint, last_offset`,
+                   next_producer_sequence, last_fingerprint, last_offset,
+                   chain_head`,
           [path, identity],
         )
         .pipe(Effect.mapError(asLogStoreError(path, 'create')));
@@ -434,7 +475,8 @@ export const make = (
             // stream has one writer at a time by construction.
             const locked = yield* client.unsafe(
               `SELECT identity, epoch, producer_id, next_sequence,
-                    next_producer_sequence, last_fingerprint, last_offset
+                    next_producer_sequence, last_fingerprint, last_offset,
+                    chain_head
              FROM ${streams}
              WHERE path = $1
              FOR UPDATE`,
@@ -471,6 +513,17 @@ export const make = (
               return state.lastOffset;
             }
 
+            const digest = yield* LogChain.forAppend({
+              path: input.path,
+              identity: state.identity,
+              head: state.chainHead,
+              firstOffset: LogOffset.fromSeq(state.nextSequence),
+              producerId: validated.producerId,
+              epoch: validated.epoch,
+              sequence: validated.sequence,
+              encoded: decision.prepared.encoded,
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto));
+
             // Everything above rejects without writing. From here the batch
             // either commits whole or the transaction rolls back.
             const sequence =
@@ -496,13 +549,14 @@ export const make = (
                INSERT INTO ${records}
                  (path, seq, record_offset, producer_id, producer_epoch,
                   producer_sequence, batch_index, conversation_id,
-                  record_timestamp, record)
+                  record_timestamp, record, batch_digest)
                SELECT $1,
                       seq,
                       lpad((seq / 10000000000000000)::text, 16, '0') || '_' ||
                         lpad((seq % 10000000000000000)::text, 16, '0'),
                       $3, $4, $5, batch_index, conversation_id,
-                      record_timestamp, record
+                      record_timestamp, record,
+                      $13::text
                FROM input
                ORDER BY seq
                RETURNING 1
@@ -511,7 +565,8 @@ export const make = (
                SET next_sequence = $7,
                    next_producer_sequence = $8,
                    last_fingerprint = $9,
-                   last_offset = $10
+                   last_offset = $10,
+                   chain_head = $13
                WHERE path = $1
                RETURNING last_offset
              )
@@ -530,6 +585,7 @@ export const make = (
                 offset,
                 channelFor(input.path),
                 NOTIFY_PAYLOAD,
+                digest,
               ],
             );
 
@@ -691,11 +747,81 @@ export const make = (
       } satisfies LogStore.BackwardsPage;
     });
 
+    const readBatches = Effect.fn('LogStore.readBatches')(function* (
+      path: string,
+      readOptions?: LogStore.ReadOptions,
+    ) {
+      const { after, limit } = yield* LogStore.normalizeReadOptions(
+        readOptions,
+      ).pipe(
+        Effect.mapError((error) =>
+          failure(path, 'readBatches', 'invalid', error.detail),
+        ),
+      );
+      const present = yield* client
+        .unsafe(`SELECT 1 FROM ${streams} WHERE path = $1`, [path])
+        .pipe(Effect.mapError(asLogStoreError(path, 'readBatches')));
+      if (present[0] === undefined) {
+        return yield* failure(
+          path,
+          'readBatches',
+          'not_found',
+          'no stream at this path',
+        );
+      }
+      // Batch starts bound the page: the start after the last wanted batch is
+      // where the next page begins.
+      const starts = yield* client
+        .unsafe(
+          `SELECT record_offset FROM ${records}
+           WHERE path = $1 AND batch_index = 0
+             AND record_offset COLLATE "C" > $2 COLLATE "C"
+           ORDER BY record_offset COLLATE "C" ASC
+           LIMIT $3`,
+          [path, after, limit + 1],
+        )
+        .pipe(Effect.mapError(asLogStoreError(path, 'readBatches')));
+      const upToDate = starts.length <= limit;
+      const bound = upToDate
+        ? null
+        : (starts[limit]?.['record_offset'] ?? null);
+      const rows = yield* client
+        .unsafe(
+          `SELECT record_offset, conversation_id, record_timestamp, record,
+                  producer_id, producer_epoch, producer_sequence, batch_index,
+                  batch_digest
+           FROM ${records}
+           WHERE path = $1
+             AND record_offset COLLATE "C" > $2 COLLATE "C"
+             AND ($3::text IS NULL OR record_offset COLLATE "C" < $3 COLLATE "C")
+           ORDER BY record_offset COLLATE "C" ASC`,
+          [path, after, bound],
+        )
+        .pipe(Effect.mapError(asLogStoreError(path, 'readBatches')));
+      const batches = yield* Effect.forEach(rows, readStoredRow).pipe(
+        Effect.map(LogChain.groupRows),
+        Effect.mapError((error) =>
+          failure(
+            path,
+            'readBatches',
+            'storage',
+            `stored record does not decode: ${String(error)}`,
+          ),
+        ),
+      );
+      return {
+        batches,
+        cursor: batches.at(-1)?.records.at(-1)?.offset ?? after,
+        upToDate,
+      } satisfies LogStore.BatchPage;
+    });
+
     const meta = Effect.fn('LogStore.meta')(function* (path: string) {
       const rows = yield* client
         .unsafe(
           `SELECT identity, epoch, producer_id, next_sequence,
-                next_producer_sequence, last_fingerprint, last_offset
+                next_producer_sequence, last_fingerprint, last_offset,
+                chain_head
          FROM ${streams}
          WHERE path = $1`,
           [path],
@@ -722,15 +848,19 @@ export const make = (
           );
     });
 
-    // The corrected listener's first element is its readiness handshake: LISTEN
-    // has completed before this opening wake-up can be observed.
+    // `listen` resolves only after LISTEN is registered, so the opening tick
+    // emitted after it is the readiness proof `changes` promises.
     const changes = (
       path: string,
     ): Stream.Stream<void, LogStore.LogStoreError> =>
-      client.listen(channelFor(path)).pipe(
-        Stream.map(() => undefined),
-        Stream.mapError(asLogStoreError(path, 'changes')),
-      );
+      Stream.unwrap(
+        Effect.map(client.listen(channelFor(path)), (notifications) =>
+          Stream.concat(
+            Stream.succeed(undefined),
+            Stream.fromQueue(notifications).pipe(Stream.map(() => undefined)),
+          ),
+        ),
+      ).pipe(Stream.mapError(asLogStoreError(path, 'changes')));
 
     return LogStore.Service.of({
       create,
@@ -738,6 +868,7 @@ export const make = (
       append,
       read,
       readBackwards,
+      readBatches,
       meta,
       changes,
     });

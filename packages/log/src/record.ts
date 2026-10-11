@@ -52,8 +52,35 @@ const Count = Schema.Natural;
 /** Epoch milliseconds may predate Unix epoch, but must be finite integers. */
 const Timestamp = Schema.Int;
 
+/**
+ * The hard run budget a run was started under.
+ *
+ * Written into `RunStarted` so a reader holding only the log can tell which
+ * ceilings were in force. The budget belongs to a root run and is shared by
+ * every descendant loop: each child conversation's `RunStarted` carries the
+ * same `id` and `root`, which is how a reader finds the runs that drew from one
+ * budget without trusting timestamps.
+ *
+ * `limits` is a plain record of limit name to ceiling rather than a struct of
+ * the agent's `RunPolicy.Limits`, because this package must not import the
+ * agent and a limit added later should decode in an older reader. Required on
+ * `RunStarted`: every run records the budget it actually ran under, so a
+ * `RunStarted` without one is malformed rather than a run of unknown ceilings.
+ */
+export const RunBudget = Schema.Struct({
+  /** Unique per root run; shared by the root and every descendant run. */
+  id: Schema.NonEmptyString,
+  /** The conversation of the root run that owns the budget. */
+  root: LogVocabulary.ConversationId,
+  /** Effective ceilings, keyed by `RunPolicy.Limits` field name. */
+  limits: Schema.Record(Schema.String, Count),
+});
+export interface RunBudget extends Schema.Struct.Type<
+  typeof RunBudget.fields
+> {}
+
 const CompletedValue = Schema.Struct({
-  outcome: Schema.optionalKey(Schema.Literals(['success', 'cancelled'])),
+  outcome: Schema.Literals(['success', 'cancelled']),
   text: Schema.String,
   steps: Count,
   usage: Usage,
@@ -62,10 +89,9 @@ const CompletedValue = Schema.Struct({
 });
 
 const ResumeState = Schema.Struct({
-  /** Optional only so legacy records decode and can be rejected deliberately. */
-  formatVersion: Schema.optionalKey(Count),
-  agent: Schema.optionalKey(Schema.String),
-  agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+  formatVersion: Count,
+  agent: Schema.String,
+  agentRevision: LogVocabulary.AgentRevision,
   usage: Usage,
   signalCursor: LogOffset.Offset,
   completed: Schema.optionalKey(CompletedValue),
@@ -107,7 +133,7 @@ export interface SignalBody extends Schema.Struct.Type<
  * One thing that happened in a conversation.
  *
  * `prompt`, `params`, and `result` are held as `Schema.Unknown` because their
- * real schemas belong to `effect/unstable/ai` and to whatever toolkit is in
+ * real schemas belong to `effect/ai` and to whatever toolkit is in
  * play, and re-declaring them here would create a second definition that has
  * to stay in lockstep with one this package does not own.
  */
@@ -115,9 +141,10 @@ export const Record = Schema.TaggedUnion({
   /** A run began against this conversation. */
   RunStarted: {
     agent: Schema.String,
-    /** Optional only so legacy records decode and can be rejected deliberately. */
-    formatVersion: Schema.optionalKey(Count),
-    agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    formatVersion: Count,
+    agentRevision: LogVocabulary.AgentRevision,
+    /** The hard run budget in force. */
+    budget: RunBudget,
     /** Encoded `Prompt.RawInput`, held opaque. */
     prompt: Schema.Unknown,
   },
@@ -127,6 +154,28 @@ export const Record = Schema.TaggedUnion({
    */
   Text: {
     step: Count,
+    text: Schema.String,
+  },
+  /**
+   * Model output streamed so far, committed before the turn settled it.
+   *
+   * A durable progress marker, not conversation history: the model has not
+   * finished saying this, so it is never shown to a model again. The
+   * producer appends one per bounded interval of streaming, carrying only the
+   * text that arrived since the previous one (`text` is a chunk, not the
+   * cumulative answer, so a long answer costs linear storage). Contiguous
+   * chunks concatenate per `kind`.
+   *
+   * A group of these is *superseded* when the coalesced `Text` record (or any
+   * other settling record) follows it, which is how a completed turn still
+   * records its text exactly once. A group followed by nothing, a
+   * `RunStarted`, or a `RunSettled` is output the crashed or abandoned run
+   * never finished: readers surface it as aborted output and prompt rebuilds
+   * leave it out, so the resumed turn reruns cleanly.
+   */
+  PartialOutput: {
+    step: Count,
+    kind: Schema.Literals(['text', 'reasoning']),
     text: Schema.String,
   },
   ToolCall: {
@@ -253,6 +302,54 @@ export const Record = Schema.TaggedUnion({
      */
     result: Schema.Unknown,
   },
+  /**
+   * A tool call a code-mode script made from inside its parent `exec` call.
+   *
+   * Nested calls are recorded beside the conversation, never in the model's
+   * history: the model sees one `exec` call and its result, so history
+   * rebuilding ignores all three `NestedTool*` cases. Their identity is
+   * `(parent, key)`, where `parent` is the `exec` tool-call id and `key` is
+   * the script's explicit key or its call ordinal within that execution — see
+   * `agent/src/code-mode.ts`. A re-execution of the same `exec` call finds
+   * its earlier nested calls by that identity.
+   */
+  NestedToolCall: {
+    /** The `exec` tool call that owns this nested call. */
+    parent: LogVocabulary.ToolCallId,
+    /** Deterministic key within the parent: `#<ordinal>` or `k:<explicit>`. */
+    key: Schema.String,
+    /** The hidden tool the script called. */
+    name: Schema.String,
+    /**
+     * Digest of the call's input, so a re-execution can tell the same logical
+     * call from a different one that landed on the same key without the log
+     * having to keep the input in a form a recording policy redacts.
+     */
+    inputDigest: Schema.String,
+    params: Schema.Unknown,
+  },
+  /**
+   * A nested call's handler is about to be invoked; the nested counterpart of
+   * `ToolStarted`. Without a later `NestedToolOutcome` its execution is
+   * indeterminate.
+   */
+  NestedToolStarted: {
+    parent: LogVocabulary.ToolCallId,
+    key: Schema.String,
+    name: Schema.String,
+  },
+  /** How a nested call ended, in the form the script was shown. */
+  NestedToolOutcome: {
+    parent: LogVocabulary.ToolCallId,
+    key: Schema.String,
+    name: Schema.String,
+    outcome: Schema.Literals(['success', 'failure']),
+    /**
+     * The sandbox-facing result: the tool's encoded value on success, or the
+     * `{ code, message, value? }` failure the script's `ToolCallError` carries.
+     */
+    result: Schema.Unknown,
+  },
   TurnFinished: {
     step: Count,
     /** Cumulative across the run, not just this turn. */
@@ -275,10 +372,9 @@ export const Record = Schema.TaggedUnion({
    * resuming reader cannot drift into wrapping it two different ways.
    */
   Compacted: {
-    /** Optional only so legacy records decode and can be rejected deliberately. */
-    formatVersion: Schema.optionalKey(Count),
-    agent: Schema.optionalKey(Schema.String),
-    agentRevision: Schema.optionalKey(LogVocabulary.AgentRevision),
+    formatVersion: Count,
+    agent: Schema.String,
+    agentRevision: LogVocabulary.AgentRevision,
     step: Count,
     /** What the summarized history was replaced by. */
     summary: Schema.String,
@@ -344,8 +440,7 @@ export const Record = Schema.TaggedUnion({
   },
 
   Completed: {
-    /** Optional only so records written before terminal outcomes still decode. */
-    outcome: Schema.optionalKey(Schema.Literals(['success', 'cancelled'])),
+    outcome: Schema.Literals(['success', 'cancelled']),
     text: Schema.String,
     steps: Count,
     usage: Usage,
@@ -398,7 +493,16 @@ export const Record = Schema.TaggedUnion({
    * producer-fenced so that two runs cannot interleave one history, and a
    * sender appending to it would fence the very run it is trying to steer.
    */
-  Signal: SignalBody.fields,
+  Signal: {
+    ...SignalBody.fields,
+    /**
+     * Caller-chosen idempotency key, unique within the conversation.
+     *
+     * Optional because idempotency is caller opt-in. It lives only on the sent record: `SignalReceived` is a delivery, and the
+     * dedupe decision is made against the signal stream at send time.
+     */
+    requestId: Schema.optionalKey(Schema.String),
+  },
 
   /**
    * A signal the run actually took delivery of, written into the conversation.
@@ -455,6 +559,21 @@ export const Record = Schema.TaggedUnion({
       'interrupted',
     ]),
     detail: Schema.String,
+    /**
+     * The hard run budget limit that ended the run, with the use and ceiling
+     * it reported. Present only on a `failure` caused by budget exhaustion;
+     * the budget audit reads it instead of parsing `detail`.
+     */
+    stoppedBy: Schema.optionalKey(
+      Schema.Struct({
+        /** `RunPolicy.Limit` name, e.g. `input_tokens`. */
+        limit: Schema.String,
+        /** Consumption when the limit tripped. */
+        used: Count,
+        /** The ceiling in force. */
+        ceiling: Count,
+      }),
+    ),
     steps: Count,
     usage: Usage,
     /** Bounded cumulative state used as the sole resume aggregate. */

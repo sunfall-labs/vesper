@@ -12,6 +12,7 @@ import {
   Fiber,
   Layer,
   ManagedRuntime,
+  Queue,
   Redacted,
   Stream,
 } from 'effect';
@@ -58,7 +59,7 @@ describeIntegration('LogStore Postgres backend', () => {
 
   logStoreContract('postgres', { layer: storeLayer });
 
-  describe('corrected official PgClient behavior', () => {
+  describe('official PgClient behavior', () => {
     it(
       'delivers notifications across independent client instances',
       { timeout: 30_000 },
@@ -138,8 +139,10 @@ describeIntegration('LogStore Postgres backend', () => {
             Effect.scoped(
               Effect.gen(function* () {
                 const sql = yield* PgClient.PgClient;
-                const fiber = yield* sql.listen('vesper_listener_failure').pipe(
-                  Stream.tap(() => Effect.void),
+                const notifications = yield* sql.listen(
+                  'vesper_listener_failure',
+                );
+                const fiber = yield* Stream.fromQueue(notifications).pipe(
                   Stream.runDrain,
                   Effect.result,
                   Effect.forkChild,
@@ -182,19 +185,14 @@ describeIntegration('LogStore Postgres backend', () => {
             Effect.scoped(
               Effect.gen(function* () {
                 const sql = yield* PgClient.PgClient;
-                const listener = yield* sql
-                  .listen('vesper_payloads')
-                  .pipe(Stream.take(3), Stream.runCollect, Effect.forkChild);
-
-                // The first element is emitted only after LISTEN is established.
-                yield* Effect.promise(() =>
-                  waitForListener(database, 'vesper_payloads'),
-                );
+                // `listen` resolves only after LISTEN is established, so a
+                // notify issued straight after it cannot be missed.
+                const notifications = yield* sql.listen('vesper_payloads');
                 yield* sql.notify('vesper_payloads', '');
                 yield* sql.notify('vesper_payloads', 'value');
 
-                expect(Array.from(yield* Fiber.join(listener))).toEqual([
-                  '',
+                const received = yield* Queue.takeN(notifications, 2);
+                expect(received.map(({ payload }) => payload)).toEqual([
                   '',
                   'value',
                 ]);
@@ -212,21 +210,16 @@ describeIntegration('LogStore Postgres backend', () => {
           database.runtime.runPromise(
             Effect.gen(function* () {
               const sql = yield* PgClient.PgClient;
-              yield* Effect.scoped(
-                sql.listen('vesper_reconnect').pipe(Stream.runHead),
-              );
+              yield* Effect.scoped(sql.listen('vesper_reconnect'));
 
-              const listener = yield* sql
-                .listen('vesper_reconnect')
-                .pipe(Stream.take(2), Stream.runCollect, Effect.forkChild);
-              yield* Effect.promise(() =>
-                waitForListener(database, 'vesper_reconnect'),
+              const notification = yield* Effect.scoped(
+                Effect.gen(function* () {
+                  const notifications = yield* sql.listen('vesper_reconnect');
+                  yield* sql.notify('vesper_reconnect', 'again');
+                  return yield* Queue.take(notifications);
+                }),
               );
-              yield* sql.notify('vesper_reconnect', 'again');
-              expect(Array.from(yield* Fiber.join(listener))).toEqual([
-                '',
-                'again',
-              ]);
+              expect(notification.payload).toBe('again');
             }),
           ),
         ),
@@ -288,24 +281,24 @@ describeIntegration('LogStore Postgres backend', () => {
             Effect.gen(function* () {
               const sql = yield* PgClient.PgClient;
               const received = yield* Deferred.make<string>();
-              const listener = yield* sql
-                .listen('vesper_transactional_notify')
-                .pipe(
-                  Stream.drop(1),
-                  Stream.runHead,
-                  Effect.flatMap((value) =>
-                    value._tag === 'Some'
-                      ? Deferred.succeed(received, value.value)
-                      : Effect.void,
-                  ),
-                  Effect.forkChild,
-                );
-              yield* Effect.promise(() =>
-                waitForListener(database, 'vesper_transactional_notify'),
+              const notifications = yield* sql.listen(
+                'vesper_transactional_notify',
+              );
+              const listener = yield* Queue.take(notifications).pipe(
+                Effect.flatMap(({ payload }) =>
+                  Deferred.succeed(received, payload),
+                ),
+                Effect.forkChild,
               );
               yield* sql.withTransaction(
                 Effect.gen(function* () {
-                  yield* sql.notify('vesper_transactional_notify', 'committed');
+                  // `sql.notify` borrows its own pool connection and so
+                  // ignores the ambient transaction; appends issue
+                  // `pg_notify` inside theirs, which is what this pins.
+                  yield* sql.unsafe('SELECT pg_notify($1, $2)', [
+                    'vesper_transactional_notify',
+                    'committed',
+                  ]);
                   expect(yield* Deferred.isDone(received)).toBe(false);
                 }),
               );

@@ -1,27 +1,18 @@
 import { PgClient } from '@effect/sql-pg';
-import { Effect } from 'effect';
 import type { Layer } from 'effect';
-import type { SqlClient } from 'effect/unstable/sql/SqlClient';
-import type { SqlError } from 'effect/unstable/sql/SqlError';
-
-import { correctedListen } from './internal/pg-listen.js';
+import type { SqlClient, SqlError } from 'effect/sql';
 
 /**
- * Constructs the official Effect PgClient with corrected rc.109 LISTEN
- * lifecycle semantics. SQL queries and transactions remain the unmodified
- * `@effect/sql-pg` implementation; only `PgClient.listen` is replaced.
+ * Constructs the official Effect PgClient. Since `@effect/sql-pg` 4.0.0 its
+ * `listen` registers LISTEN before resolving and fails its queue when the
+ * connection dies, so no part of the client is replaced.
  */
-export const make = Effect.fn('VesperPgClient.make')(function* (
-  config: PgClient.PgPoolConfig,
-) {
-  const client = yield* PgClient.make(config);
-  return Object.assign(client, { listen: correctedListen(config) });
-});
+export const make = (config: PgClient.PgPoolConfig) => PgClient.make(config);
 
 /** Provides both official `PgClient.PgClient` and generic `SqlClient`. */
 export const layer = (
   config: PgClient.PgPoolConfig,
-): Layer.Layer<PgClient.PgClient | SqlClient, SqlError> =>
-  PgClient.layerFrom(make(config));
+): Layer.Layer<PgClient.PgClient | SqlClient.SqlClient, SqlError.SqlError> =>
+  PgClient.layer(config);
 
 export * as VesperPgClient from './client.js';

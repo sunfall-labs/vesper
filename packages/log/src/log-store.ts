@@ -58,6 +58,7 @@ export class LogStoreError extends Schema.TaggedError<LogStoreError>(
     'append',
     'read',
     'readBackwards',
+    'readBatches',
     'meta',
     'changes',
   ]),
@@ -121,6 +122,11 @@ export interface StreamMeta {
   /** Offset of the last record written, or {@link LogOffset.START} if none. */
   readonly head: LogOffset.Offset;
   readonly records: number;
+  /**
+   * Chained digest of the newest batch: the value an outsider pins to detect
+   * later tampering (see `./chain.ts`). None while the stream is empty.
+   */
+  readonly chainHead: Option.Option<string>;
 }
 
 /** A producer's right to write to a stream, for as long as its epoch holds. */
@@ -199,6 +205,30 @@ export interface Page {
  */
 export interface BackwardsPage {
   readonly records: ReadonlyArray<ConversationRecord.Envelope>;
+  readonly cursor: LogOffset.Offset;
+  readonly upToDate: boolean;
+}
+
+/**
+ * One appended batch as stored, with the chained digest written with it.
+ *
+ * Producer fields are part of what the digest covers, so they are returned
+ * verbatim.
+ */
+export interface StoredBatch {
+  readonly producerId: LogVocabulary.ProducerId;
+  readonly epoch: LogVocabulary.Epoch;
+  readonly sequence: LogVocabulary.ProducerSequence;
+  readonly records: ReadonlyArray<ConversationRecord.Envelope>;
+  readonly digest: string;
+}
+
+/**
+ * Whole batches in offset order. `cursor` is the last offset returned (the
+ * supplied `after` when empty); `upToDate` is true when no batch follows.
+ */
+export interface BatchPage {
+  readonly batches: ReadonlyArray<StoredBatch>;
   readonly cursor: LogOffset.Offset;
   readonly upToDate: boolean;
 }
@@ -330,6 +360,18 @@ export interface Interface {
     path: string,
     options?: ReadBackwardsOptions,
   ) => Effect.Effect<BackwardsPage, LogStoreError>;
+
+  /**
+   * Page history as whole batches, the shape the chain verifier needs.
+   *
+   * `after` is exclusive and should be a batch boundary (a previous page's
+   * `cursor`, or {@link LogOffset.START}); the first batch returned starts
+   * after it. `limit` counts batches, not records.
+   */
+  readonly readBatches: (
+    path: string,
+    options?: ReadOptions,
+  ) => Effect.Effect<BatchPage, LogStoreError>;
 
   readonly meta: (
     path: string,

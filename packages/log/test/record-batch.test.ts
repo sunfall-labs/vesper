@@ -83,26 +83,27 @@ describe('record batch', () => {
         conversationId: 'conversation-1',
         timestamp: 1_700_000_000_000,
         record: {
-          _tag: 'RunStarted',
-          agent: 'assistant',
-          prompt: [],
+          _tag: 'Signal',
+          kind: 'steer',
+          text: 'go left',
+          source: 'user',
         },
       });
 
-      if (result.record._tag !== 'RunStarted') {
-        throw new Error(`expected RunStarted, got ${result.record._tag}`);
+      if (result.record._tag !== 'Signal') {
+        throw new Error(`expected Signal, got ${result.record._tag}`);
       }
-      expect(result.record.formatVersion).toBeUndefined();
-      expect(result.record.agentRevision).toBeUndefined();
+      expect(result.record.requestId).toBeUndefined();
 
       const explicitUndefined = yield* RecordBatch.decodeEntry({
         conversationId: 'conversation-1',
         timestamp: 1_700_000_000_000,
         record: {
-          _tag: 'RunStarted',
-          agent: 'assistant',
-          formatVersion: undefined,
-          prompt: [],
+          _tag: 'Signal',
+          kind: 'steer',
+          text: 'go left',
+          source: 'user',
+          requestId: undefined,
         },
       }).pipe(Effect.result);
 
