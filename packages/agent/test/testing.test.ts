@@ -6,7 +6,7 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { ScriptedModel } from '../src/testing.js';

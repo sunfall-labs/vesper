@@ -1,5 +1,5 @@
 import { Cause, Clock, Effect, Exit, Schema, Stream } from 'effect';
-import type { Prompt, Tool } from 'effect/unstable/ai';
+import type { Prompt, Tool } from 'effect/ai';
 
 import type { Agent } from './agent.js';
 import type { AgentEvents } from './event.js';

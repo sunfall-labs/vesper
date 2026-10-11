@@ -15,12 +15,7 @@ import {
   Schema,
   Stream,
 } from 'effect';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
@@ -244,9 +239,9 @@ describe('recording a run', () => {
 
       expect(tags(written)).toEqual([
         'RunStarted',
-        'ToolStarted',
         'Text',
         'ToolCall',
+        'ToolStarted',
         'ToolOutcome',
         'TurnFinished',
         'Text',
@@ -254,6 +249,21 @@ describe('recording a run', () => {
         'Completed',
         'RunSettled',
       ]);
+    }),
+  );
+
+  it.effect('leaves a conversation log whose hash chain verifies', () =>
+    Effect.gen(function* () {
+      const verdict = yield* run(
+        Effect.gen(function* () {
+          yield* Conversation.make(agent, CONVERSATION)
+            .run('hi')
+            .pipe(Effect.orDie);
+          return yield* AgentLog.verify(CONVERSATION);
+        }),
+      );
+
+      expect(verdict).toMatchObject({ _tag: 'Valid' });
     }),
   );
 
@@ -407,6 +417,7 @@ describe('recording a run', () => {
 
       expect(observed.written[0]?.record).toMatchObject({
         _tag: 'RunStarted',
+        budget: { root: CONVERSATION },
         agent: 'test',
         formatVersion: 1,
         agentRevision: '1',
@@ -478,12 +489,9 @@ describe('recording a run', () => {
           }),
         );
 
-        expect(atToolCall).toEqual([
-          'RunStarted',
-          'ToolStarted',
-          'Text',
-          'ToolCall',
-        ]);
+        // The call is durable before its handler starts: the agent runs a
+        // turn's calls only after the response that made them has finished.
+        expect(atToolCall).toEqual(['RunStarted', 'Text', 'ToolCall']);
       }),
   );
 });
@@ -554,9 +562,9 @@ describe('Conversation.records', () => {
 
       expect(tags(replayed)).toEqual([
         'RunStarted',
-        'ToolStarted',
         'Text',
         'ToolCall',
+        'ToolStarted',
         'ToolOutcome',
         'TurnFinished',
         'Text',

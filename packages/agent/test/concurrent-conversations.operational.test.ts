@@ -3,7 +3,7 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Stream } from 'effect';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { LanguageModel, type Response, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';

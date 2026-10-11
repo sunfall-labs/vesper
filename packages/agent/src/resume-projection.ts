@@ -1,6 +1,6 @@
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Schema } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 import { AgentBranch } from './branch.js';
 import type { Stop } from './stop.js';
@@ -49,7 +49,7 @@ export const update = (
           text: record.text,
           steps: record.steps,
           usage: record.usage,
-          outcome: record.outcome ?? 'success',
+          outcome: record.outcome,
           ...(record.response === undefined
             ? {}
             : { response: decodeResponse(record.response) }),
@@ -81,7 +81,7 @@ export const update = (
                     text: record.resume.completed.text,
                     steps: record.resume.completed.steps,
                     usage: record.resume.completed.usage,
-                    outcome: record.resume.completed.outcome ?? 'success',
+                    outcome: record.resume.completed.outcome,
                     ...(record.resume.completed.response === undefined
                       ? {}
                       : {
@@ -93,12 +93,16 @@ export const update = (
             latestTurnUsage: record.resume.latestTurnUsage,
           };
     case 'Text':
+    case 'PartialOutput':
     case 'ToolCall':
     case 'ToolStarted':
     case 'ToolSuspended':
     case 'ToolResumed':
     case 'ToolWaitCompleted':
     case 'ToolWaitRestarted':
+    case 'NestedToolCall':
+    case 'NestedToolStarted':
+    case 'NestedToolOutcome':
     case 'ToolOutcome':
     case 'BranchedFrom':
     case 'StateCheckpoint':
@@ -139,12 +143,16 @@ export const updateState = (
         : current;
     case 'RunStarted':
     case 'Text':
+    case 'PartialOutput':
     case 'ToolCall':
     case 'ToolStarted':
     case 'ToolSuspended':
     case 'ToolResumed':
     case 'ToolWaitCompleted':
     case 'ToolWaitRestarted':
+    case 'NestedToolCall':
+    case 'NestedToolStarted':
+    case 'NestedToolOutcome':
     case 'ToolOutcome':
     case 'TurnFinished':
     case 'Compacted':
@@ -189,12 +197,16 @@ export const updateCodeState = (
         : { _tag: 'CodeStateCheckpoint', state: record.resume.codeState };
     case 'RunStarted':
     case 'Text':
+    case 'PartialOutput':
     case 'ToolCall':
     case 'ToolStarted':
     case 'ToolSuspended':
     case 'ToolResumed':
     case 'ToolWaitCompleted':
     case 'ToolWaitRestarted':
+    case 'NestedToolCall':
+    case 'NestedToolStarted':
+    case 'NestedToolOutcome':
     case 'ToolOutcome':
     case 'TurnFinished':
     case 'Compacted':

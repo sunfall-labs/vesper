@@ -2,9 +2,11 @@ import { AttachmentStore } from '@sunfall/vesper-attachments/attachment-store';
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import { RecordBatch } from '@sunfall/vesper-log/record-batch';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import {
   Clock,
+  Crypto,
   Effect,
   Exit,
   Option,
@@ -13,7 +15,6 @@ import {
   Stream,
   SynchronizedRef,
 } from 'effect';
-import type { Crypto } from 'effect';
 
 import {
   DurabilityError,
@@ -34,6 +35,7 @@ import { PromptTransport } from '../prompt-transport.js';
 import * as RecoveryState from '../recovery.js';
 import { ResumeProjection } from '../resume-projection.js';
 import * as AgentSignals from './signal-store.js';
+import { RecordingPolicy } from '../recording-policy.js';
 import * as RecordingSink from '../recording-sink.js';
 import {
   compatibilityError,
@@ -608,20 +610,33 @@ export const openWith = (
         }),
       );
 
+    const crypto = yield* Crypto.Crypto;
+
     return {
       [SessionTypeId]: SessionTypeId,
       conversationId,
       compatibility: options.compatibility,
+      sha256: (text) =>
+        RecordBatch.sha256(text).pipe(
+          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.orDie,
+        ),
+      idGenerator: {
+        generateId: () => crypto.randomULID.pipe(Effect.orDie),
+      },
       inheritedUsage,
       usage: opened.usage,
       latestTurnUsage: initialResume.latestTurnUsage,
       completed: initialResume.completed,
       settlementTimeoutMillis: RecordingSink.SETTLEMENT_TIMEOUT_MILLIS,
+      partialOutputIntervalMillis:
+        RecordingPolicy.DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS,
       history,
       stateHistory: projectionHistory,
       recorded: orDie(readResumeHistory(store, path)),
       append: trackedAppend,
       recovery: toolRecovery.recovery,
+      nestedRecovery: toolRecovery.nestedRecovery,
       pendingToolCalls: toolRecovery.pendingToolCalls,
       indeterminateToolCalls: toolRecovery.indeterminateToolCalls,
       suspendedToolCalls: toolRecovery.suspendedToolCalls,

@@ -10,7 +10,7 @@ import {
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Fiber, Layer, Redacted, Stream } from 'effect';
 import { TestClock } from 'effect/testing';
-import { type Response as AiResponse, Tool, Toolkit } from 'effect/unstable/ai';
+import { type Response as AiResponse, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { DynamicToolkit } from '@sunfall/vesper-agent/dynamic-toolkit';

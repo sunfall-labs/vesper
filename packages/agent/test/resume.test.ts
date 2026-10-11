@@ -13,7 +13,7 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
@@ -22,6 +22,7 @@ import { AgentEvents } from '../src/event.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
 import * as AgentLog from '../src/log.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -256,9 +257,9 @@ describe('resuming a crashed run', () => {
         // The crashed run got one turn's worth of records and no `Completed`.
         expect(observed.afterCrash).toEqual([
           'RunStarted',
-          'ToolStarted',
           'Text',
           'ToolCall',
+          'ToolStarted',
           'ToolOutcome',
           'RunSettled',
         ]);
@@ -318,9 +319,9 @@ describe('resuming a crashed run', () => {
 
       expect(tags).toEqual([
         'RunStarted',
-        'ToolStarted',
         'Text',
         'ToolCall',
+        'ToolStarted',
         'ToolOutcome',
         'RunSettled',
         'RunStarted',
@@ -536,6 +537,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -579,6 +581,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -623,6 +626,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -652,6 +656,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -678,6 +683,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -687,6 +693,7 @@ describe('rebuilding a prompt from records', () => {
         { _tag: 'TurnFinished', step: 1, usage: { input: 1, output: 1 } },
         {
           _tag: 'Completed',
+          outcome: 'success',
           text: 'done',
           steps: 1,
           usage: { input: 1, output: 1 },
@@ -713,6 +720,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -728,6 +736,7 @@ describe('rebuilding a prompt from records', () => {
         },
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -752,6 +761,7 @@ describe('rebuilding a prompt from records', () => {
       envelopes([
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           agent: 'test',
           formatVersion: 1,
           agentRevision: LogVocabulary.AgentRevision.make('1'),

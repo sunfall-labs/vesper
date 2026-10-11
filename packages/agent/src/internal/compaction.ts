@@ -1,5 +1,5 @@
 import { Effect, Ref } from 'effect';
-import { AiError, LanguageModel, Prompt, type Chat } from 'effect/unstable/ai';
+import { AiError, LanguageModel, Prompt, type Chat } from 'effect/ai';
 
 import { Compaction } from '../compaction.js';
 import { ContextWindow } from '../context-window.js';
@@ -139,7 +139,7 @@ export const summaryMessage = (summary: string): Prompt.Message =>
  * summarize.
  */
 export const compact = Effect.fn('Agent.compact')(function* (
-  chat: Chat.Service,
+  chat: Chat.Chat,
   policy: Compaction.Policy = Compaction.defaultPolicy,
 ) {
   const history = yield* Ref.get(chat.history);
@@ -214,7 +214,7 @@ export const compact = Effect.fn('Agent.compact')(function* (
  * would just spend model calls discovering that repeatedly.
  */
 export const withCompaction =
-  (chat: Chat.Service, policy: Compaction.Policy = Compaction.defaultPolicy) =>
+  (chat: Chat.Chat, policy: Compaction.Policy = Compaction.defaultPolicy) =>
   <A, R>(
     turn: Effect.Effect<A, AiError.AiError, R>,
   ): Effect.Effect<A, AiError.AiError, R | LanguageModel.LanguageModel> =>

@@ -13,12 +13,7 @@ import {
   Schema,
   Stream,
 } from 'effect';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, type Response, Tool, Toolkit } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -170,7 +165,105 @@ const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
     envelope.record._tag === 'RunSettled' ? [envelope.record] : [],
   );
 
+const signalsOf = (id: LogVocabulary.ConversationId) =>
+  Effect.gen(function* () {
+    const store = yield* LogStore.Service;
+    const page = yield* store.read(AgentSignals.pathFor(id));
+    return page.records.flatMap((envelope) =>
+      envelope.record._tag === 'Signal' ? [envelope.record] : [],
+    );
+  });
+
 describe('steering', () => {
+  describe('requestId idempotency', () => {
+    it.effect('acknowledges a retry with the same key without appending', () =>
+      Effect.gen(function* () {
+        const id = LogVocabulary.ConversationId.make('keyed-retry');
+        const signal = {
+          kind: 'steer',
+          text: 'once',
+          source: 'op',
+          requestId: 'req-1',
+        } as const;
+        const bound = Conversation.make(agent, id);
+        yield* bound.send(signal);
+        yield* bound.send(signal);
+        // A fresh binding stands in for a restarted process: the decision
+        // comes from the durable stream, not from handle state.
+        yield* Conversation.make(agent, id).send(signal);
+        expect(yield* signalsOf(id)).toHaveLength(1);
+        expect((yield* signalsOf(id))[0]?.requestId).toBe('req-1');
+      }).pipe(Effect.provide(testLogLayer)),
+    );
+
+    it.effect('fails with a typed conflict when the payload differs', () =>
+      Effect.gen(function* () {
+        const id = LogVocabulary.ConversationId.make('keyed-conflict');
+        const bound = Conversation.make(agent, id);
+        yield* bound.send({
+          kind: 'steer',
+          text: 'a',
+          source: 'op',
+          requestId: 'req-1',
+        });
+        const error = yield* bound
+          .send({ kind: 'steer', text: 'b', source: 'op', requestId: 'req-1' })
+          .pipe(Effect.flip);
+        expect(error._tag).toBe('SignalRequestConflictError');
+        expect(yield* signalsOf(id)).toHaveLength(1);
+      }).pipe(Effect.provide(testLogLayer)),
+    );
+
+    it.effect('keeps keys scoped to their conversation', () =>
+      Effect.gen(function* () {
+        const signal = {
+          kind: 'steer',
+          text: 'a',
+          source: 'op',
+          requestId: 'shared',
+        } as const;
+        const first = LogVocabulary.ConversationId.make('keyed-scope-a');
+        const second = LogVocabulary.ConversationId.make('keyed-scope-b');
+        yield* Conversation.make(agent, first).send(signal);
+        yield* Conversation.make(agent, second).send(signal);
+        expect(yield* signalsOf(first)).toHaveLength(1);
+        expect(yield* signalsOf(second)).toHaveLength(1);
+      }).pipe(Effect.provide(testLogLayer)),
+    );
+
+    it.effect('dedupes concurrent submitters of one key', () =>
+      Effect.gen(function* () {
+        const id = LogVocabulary.ConversationId.make('keyed-race');
+        const signal = {
+          kind: 'steer',
+          text: 'race',
+          source: 'op',
+          requestId: 'req-race',
+        } as const;
+        yield* Effect.all(
+          Array.from({ length: 8 }, () =>
+            Conversation.make(agent, id).send(signal),
+          ),
+          { concurrency: 'unbounded' },
+        );
+        expect(yield* signalsOf(id)).toHaveLength(1);
+      }).pipe(Effect.provide(testLogLayer)),
+    );
+
+    it.effect('appends every unkeyed send', () =>
+      Effect.gen(function* () {
+        const id = LogVocabulary.ConversationId.make('unkeyed-repeat');
+        const bound = Conversation.make(agent, id);
+        const signal = { kind: 'steer', text: 'x', source: 'op' } as const;
+        yield* bound.send(signal);
+        yield* bound.send(signal);
+        const records = yield* signalsOf(id);
+        expect(records).toHaveLength(2);
+        expect(records.every((r) => r.requestId === undefined)).toBe(true);
+      }).pipe(Effect.provide(testLogLayer)),
+    );
+  });
+
   it.effect('acknowledges a signal only after its receipt is durable', () => {
     const id = LogVocabulary.ConversationId.make('durable-signal-ack');
     const bound = Conversation.make(agent, id);
@@ -1125,61 +1218,69 @@ describe('a signal that arrives while the run is in flight', () => {
     }),
   );
 
-  it.effect(
-    'preempts a stalled provider after dispatch commits and its outcome is durable',
+  it.live(
+    'preempts a stalled provider without starting the call it already made',
     () =>
       Effect.gen(function* () {
-        const scripted: Model = {
-          prompts: [],
-          layer: Layer.effect(
+        // The agent runs a turn's calls once the response has finished. A
+        // provider that emits a call and then stalls has not finished, so a
+        // cancel that arrives meanwhile ends the turn with that call never
+        // started: no handler ran, so there is nothing indeterminate to leave.
+        const ran = { count: 0 };
+        const result = yield* Effect.gen(function* () {
+          const entered = yield* Deferred.make<void>();
+          const stalled = Layer.succeed(
             LanguageModel.LanguageModel,
-            LanguageModel.make({
+            yield* LanguageModel.make({
               generateText: () =>
                 Effect.succeed<Response.PartEncoded[]>([finish()]),
-              streamText: (options) => {
-                scripted.prompts.push(JSON.stringify(options.prompt));
-                return Stream.concat(
+              streamText: () =>
+                Stream.concat(
                   Stream.make(CALL('call-1', 'work')),
-                  Stream.never,
-                );
-              },
+                  Stream.concat(
+                    Stream.fromEffect(
+                      Deferred.succeed(entered, undefined),
+                    ).pipe(Stream.drain),
+                    Stream.never,
+                  ),
+                ),
             }),
-          ),
-        };
+          );
+          const counting = Agent.make({
+            name: 'test',
+            revision: '1',
+            instructions: 'be terse',
+            toolkit: Toolkit.make(work),
+          }).withHandlers({
+            work: () =>
+              Effect.sync(() => {
+                ran.count += 1;
+                return { ok: true };
+              }),
+          });
+          const stalledConversation = Conversation.make(counting, CONVERSATION);
 
-        const observed = yield* run(
-          Effect.gen(function* () {
-            const signalling = signallingAgent(
-              new Map([
-                [
-                  1,
-                  {
-                    kind: 'cancel',
-                    text: 'stop after work',
-                    source: 'ui',
-                  } satisfies Signal,
-                ],
-              ]),
-            );
-            const result = yield* Conversation.make(
-              signalling,
-              CONVERSATION,
-            ).run('hi');
-            return { result, records: yield* readAll() };
-          }),
-          scripted,
-        );
+          const running = yield* Effect.forkChild(
+            stalledConversation.run('hi').pipe(Effect.provide(stalled)),
+          );
+          yield* Deferred.await(entered);
+          yield* stalledConversation
+            .send({ kind: 'cancel', text: 'stop now', source: 'ui' })
+            .pipe(Effect.orDie);
 
-        expect(observed.result.steps).toBe(1);
-        const tags = observed.records.map(({ record }) => record._tag);
-        expect(tags.indexOf('ToolOutcome')).toBeLessThan(
-          tags.indexOf('SignalReceived'),
-        );
-        expect(settlement(observed.records)).toMatchObject([
+          const completed = yield* Fiber.join(running);
+          return { completed, records: yield* readAll() };
+        }).pipe(Effect.provide(testLogLayer));
+
+        expect(result.completed.outcome).toBe('cancelled');
+        expect(ran.count).toBe(0);
+        const tags = result.records.map(({ record }) => record._tag);
+        expect(tags).not.toContain('ToolStarted');
+        expect(tags).not.toContain('ToolOutcome');
+        expect(settlement(result.records)).toMatchObject([
           { outcome: 'cancelled' },
         ]);
       }),
-    2_000,
   );
 
   it.effect('leaves the run alone when nothing is sent mid-flight', () =>

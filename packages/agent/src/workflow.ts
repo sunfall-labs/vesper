@@ -7,14 +7,13 @@ import {
 } from '@sunfall/vesper-log/vocabulary';
 import type { Cause, Crypto, Schedule, SchemaIssue } from 'effect';
 import { Effect, Exit, Layer, Option, Schema, Stream } from 'effect';
-import { AiError, type Prompt, type Tool } from 'effect/unstable/ai';
+import { AiError, type Prompt, type Tool } from 'effect/ai';
 import {
   Activity,
   DurableDeferred,
   Workflow,
   WorkflowEngine,
-} from 'effect/unstable/workflow';
-import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
+} from 'effect/workflow';
 
 import { Agent } from './agent.js';
 import { AgentBranch } from './branch.js';
@@ -305,7 +304,11 @@ const changesPending = (record: ConversationRecord.Record): boolean => {
     case 'SignalReceived':
     case 'StateCheckpoint':
     case 'Text':
+    case 'PartialOutput':
     case 'ToolCall':
+    case 'NestedToolCall':
+    case 'NestedToolStarted':
+    case 'NestedToolOutcome':
     case 'ToolStarted':
     case 'TurnFinished':
       return false;
@@ -358,7 +361,7 @@ export interface Wait<
     Success['Type'],
     Error['Type'] | AiError.AiError,
     | WorkflowEngine.WorkflowEngine
-    | WorkflowInstance
+    | WorkflowEngine.WorkflowInstance
     | ToolExecution.Current
     | WaitRequest['EncodingServices']
     | Success['EncodingServices']
@@ -582,7 +585,11 @@ export const wait = <
         case 'SignalReceived':
         case 'StateCheckpoint':
         case 'Text':
+        case 'PartialOutput':
         case 'ToolCall':
+        case 'NestedToolCall':
+        case 'NestedToolStarted':
+        case 'NestedToolOutcome':
         case 'ToolStarted':
         case 'TurnFinished':
           break;
@@ -747,7 +754,9 @@ export const wait = <
 type WorkflowAgentError<A extends Agent.Any> = Conversation.Error<A>;
 type WorkflowAgentRequirements<A extends Agent.Any> = Exclude<
   Agent.Requires<A>,
-  WorkflowEngine.WorkflowEngine | WorkflowInstance | ToolExecution.Current
+  | WorkflowEngine.WorkflowEngine
+  | WorkflowEngine.WorkflowInstance
+  | ToolExecution.Current
 >;
 
 type BindingRequirements<

@@ -2,14 +2,15 @@ import { LogOffset } from '@sunfall/vesper-log/offset';
 import { FORMAT_VERSION } from '@sunfall/vesper-log/record';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Cause, Effect, Exit, Option, Schema, Stream } from 'effect';
-import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
+import { Cause, Clock, Effect, Exit, Option, Schema, Stream } from 'effect';
+import { Prompt, type Response, type Tool } from 'effect/ai';
 
 import { AgentEvents } from './event.js';
 import { ToolDispatch } from './dispatch.js';
 import { AgentHistory } from './internal/history.js';
 import { DurabilityError } from './conversation-error.js';
 import type { Session } from './log.js';
+import { RunPolicy } from './run-policy.js';
 import type { Stop } from './stop.js';
 
 // The sink turns the loop's events into durable records while emitting the
@@ -17,6 +18,18 @@ import type { Stop } from './stop.js';
 // complete before the corresponding event reaches the consumer. Text is
 // coalesced at semantic boundaries so rebuilt prompts preserve what the model
 // said before it called a tool, received a result, consumed a signal, or ended.
+//
+// Coalescing alone would lose a whole answer to a crash mid-stream, since the
+// `Text` record only exists once the turn reaches a boundary. So a long-running
+// stream also commits `PartialOutput` progress: at most one append per
+// `partialOutputIntervalMillis`, carrying only the chunk since the previous
+// one, written from the same tap as every other record so it shares their
+// ordering, fencing, and failure surface. The check runs when a delta arrives
+// rather than on a timer fiber: a second writer would race the settlement
+// append for the producer sequence, and the text a stalled stream has not yet
+// produced is not text there is anything to lose. Progress never changes what
+// a completed turn records — `Text` still carries the whole answer exactly
+// once and supersedes the chunks before it.
 
 /** Record a run's events into the session's conversation. */
 export const record = <Tools extends Record<string, Tool.Any>, E, R>(
@@ -28,6 +41,9 @@ export const record = <Tools extends Record<string, Tool.Any>, E, R>(
       const pending: Pending = {
         step: 0,
         text: '',
+        committedText: 0,
+        reasoning: '',
+        dirtySince: undefined,
         steps: 0,
         usage: { input: 0, output: 0 },
         completed: false,
@@ -35,13 +51,85 @@ export const record = <Tools extends Record<string, Tool.Any>, E, R>(
         toolCalls: new Map(),
       };
 
-      return Stream.tap(events, (event) =>
-        event._tag === 'Compacted'
-          ? compaction(session, pending, event)
-          : session.append(recordsFor(pending, event)),
-      ).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
+      return Stream.tap(events, (event) => {
+        if (event._tag === 'Compacted') {
+          return compaction(session, pending, event);
+        }
+        if (
+          event._tag === 'Part' &&
+          event.part.type === 'tool-result' &&
+          'resultSource' in event.part &&
+          event.part.resultSource === 'recovered'
+        ) {
+          // Recovery appended this outcome before rebuilding the prompt. The
+          // event exists for live consumers only; persisting it here would
+          // turn one settled call into two durable outcomes.
+          return session.append(flush(pending));
+        }
+        const records = recordsFor(pending, event);
+        return isStreamedDelta(event)
+          ? Effect.flatMap(progress(session, pending), (partial) =>
+              session.append([...records, ...partial]),
+            )
+          : session.append(records);
+      }).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
     }),
   );
+
+const isStreamedDelta = <Tools extends Record<string, Tool.Any>>(
+  event: AgentEvents.Event<Tools>,
+): boolean =>
+  event._tag === 'Part' &&
+  (event.encodedPart.type === 'text-delta' ||
+    event.encodedPart.type === 'reasoning-delta');
+
+/**
+ * The `PartialOutput` records due now, if the oldest uncommitted delta has
+ * waited out the session's interval.
+ *
+ * Text is committed as the suffix of `pending.text` past `committedText`, so
+ * the in-memory coalescing the final `Text` record relies on is untouched.
+ * Reasoning is never recorded as history, so its buffer holds only what is not
+ * yet committed.
+ */
+const progress = (
+  session: Session,
+  pending: Pending,
+): Effect.Effect<ReadonlyArray<ConversationRecord.Record>> =>
+  Effect.gen(function* () {
+    const interval = session.partialOutputIntervalMillis;
+    const uncommitted =
+      pending.text.length > pending.committedText || pending.reasoning !== '';
+    if (interval === undefined || !uncommitted) {
+      return [];
+    }
+    const now = yield* Clock.currentTimeMillis;
+    pending.dirtySince ??= now;
+    if (now - pending.dirtySince < interval) {
+      return [];
+    }
+    const records: Array<ConversationRecord.Record> = [];
+    if (pending.reasoning !== '') {
+      records.push({
+        _tag: 'PartialOutput',
+        step: pending.step,
+        kind: 'reasoning',
+        text: pending.reasoning,
+      });
+    }
+    if (pending.text.length > pending.committedText) {
+      records.push({
+        _tag: 'PartialOutput',
+        step: pending.step,
+        kind: 'text',
+        text: pending.text.slice(pending.committedText),
+      });
+    }
+    pending.reasoning = '';
+    pending.committedText = pending.text.length;
+    pending.dirtySince = undefined;
+    return records;
+  });
 
 /** Write down that history was replaced, and what it was replaced by. */
 const compaction = (
@@ -155,14 +243,35 @@ const settle = (
     );
   });
 
+const isRunPolicyExhausted = Schema.is(RunPolicy.RunPolicyExhausted);
+
 const outcomeOf = (
   pending: Pending,
   exit: Exit.Exit<unknown, unknown>,
-): { readonly outcome: SettledOutcome; readonly detail: string } => {
+): Pick<
+  ConversationRecord.RecordOf<'RunSettled'>,
+  'outcome' | 'detail' | 'stoppedBy'
+> => {
   if (Exit.isFailure(exit)) {
-    return Cause.hasInterrupts(exit.cause)
-      ? { outcome: 'interrupted', detail: 'the run was interrupted' }
-      : { outcome: 'failure', detail: Cause.pretty(exit.cause) };
+    if (Cause.hasInterrupts(exit.cause)) {
+      return { outcome: 'interrupted', detail: 'the run was interrupted' };
+    }
+    const detail = Cause.pretty(exit.cause);
+    const exhausted = Option.filter(
+      Cause.findErrorOption(exit.cause),
+      isRunPolicyExhausted,
+    );
+    return Option.isSome(exhausted)
+      ? {
+          outcome: 'failure',
+          detail,
+          stoppedBy: {
+            limit: exhausted.value.limit,
+            used: exhausted.value.used,
+            ceiling: exhausted.value.maximum,
+          },
+        }
+      : { outcome: 'failure', detail };
   }
   if (pending.cancelled) {
     return { outcome: 'cancelled', detail: 'a cancel signal ended the run' };
@@ -176,11 +285,15 @@ const outcomeOf = (
   };
 };
 
-type SettledOutcome = ConversationRecord.RecordOf<'RunSettled'>['outcome'];
-
 interface Pending {
   step: number;
   text: string;
+  /** Length of the `text` prefix already committed as `PartialOutput`. */
+  committedText: number;
+  /** Reasoning streamed since the last `PartialOutput` commit. */
+  reasoning: string;
+  /** When the oldest delta not yet committed as progress arrived. */
+  dirtySince: number | undefined;
   steps: number;
   usage: Stop.Usage;
   completed: boolean;
@@ -199,6 +312,13 @@ interface Pending {
 }
 
 const flush = (pending: Pending): ReadonlyArray<ConversationRecord.Record> => {
+  // Whatever was committed as progress is superseded by the record below (or,
+  // for reasoning, by the turn having moved on), so the next window starts
+  // clean. A `Text` always carries the whole turn text, committed prefix
+  // included, which is what keeps completed history identical to before.
+  pending.committedText = 0;
+  pending.reasoning = '';
+  pending.dirtySince = undefined;
   if (pending.text === '') {
     return [];
   }
@@ -367,10 +487,13 @@ const partRecords = (
         },
       ];
     }
+    case 'reasoning-delta':
+      pending.step = step;
+      pending.reasoning += encoded.delta;
+      return [];
     case 'text-start':
     case 'text-end':
     case 'reasoning-start':
-    case 'reasoning-delta':
     case 'reasoning-end':
     case 'tool-params-start':
     case 'tool-params-delta':

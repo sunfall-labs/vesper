@@ -1,10 +1,5 @@
 import { Effect, Layer, Stream, type ExecutionPlan, type Schema } from 'effect';
-import {
-  AiError,
-  LanguageModel,
-  type Response,
-  type Tool,
-} from 'effect/unstable/ai';
+import { AiError, LanguageModel, type Tool } from 'effect/ai';
 
 /**
  * An Effect execution plan whose steps provide a language model.
@@ -29,18 +24,21 @@ type AttemptResult<A, E> =
   | { readonly _tag: 'Value'; readonly value: A }
   | { readonly _tag: 'Bypass'; readonly error: E };
 
-type GenerateTextWithoutToolkit = Omit<
-  LanguageModel.GenerateTextOptions<Record<never, never>>,
-  'toolkit'
-> & {
-  readonly toolkit?: undefined;
-};
+type TextRequest =
+  | (Omit<
+      LanguageModel.GenerateTextOptions<Record<never, never>>,
+      'toolkit'
+    > & {
+      readonly toolkit?: undefined;
+    })
+  | (LanguageModel.GenerateTextOptions<Record<string, Tool.Any>> & {
+      readonly toolkit: LanguageModel.ToolkitInput<Record<string, Tool.Any>>;
+    });
 
-type GenerateTextWithToolkit = LanguageModel.GenerateTextOptions<
-  Record<string, Tool.Any>
-> & {
-  readonly toolkit: LanguageModel.ToolkitInput<Record<string, Tool.Any>>;
-};
+type ObjectRequest = LanguageModel.GenerateObjectOptions<
+  Record<string, Tool.Any>,
+  Schema.Encoder<Record<string, unknown>, unknown>
+>;
 
 /** Contextually type a native ExecutionPlan `while` predicate as an AiError. */
 export function when<R>(
@@ -119,122 +117,64 @@ export const layer = <Provides, AdditionalAcceptedInput, PlanR>(
           ),
         );
 
-      function generateText<
-        Request extends LanguageModel.GenerateTextOptions<
-          Record<never, never>
-        > & {
-          readonly toolkit?: undefined;
-        },
-      >(
-        request: Request,
-      ): Effect.Effect<
-        LanguageModel.GenerateTextResponse<Record<never, never>>,
-        LanguageModel.ExtractError<Request>,
-        LanguageModel.ExtractServices<Request>
-      >;
-      function generateText<
-        Tools extends Record<string, Tool.Any>,
-        Request extends LanguageModel.GenerateTextOptions<Tools> & {
-          readonly toolkit: LanguageModel.ToolkitInput<Tools>;
-        },
-      >(
-        request: Request,
-      ): Effect.Effect<
-        LanguageModel.GenerateTextResponse<Tools>,
-        LanguageModel.ExtractError<Request>,
-        LanguageModel.ExtractServices<Request>
-      >;
-      function generateText(
-        request: GenerateTextWithoutToolkit | GenerateTextWithToolkit,
-      ) {
-        return execute(
-          Effect.flatMap(LanguageModel.LanguageModel, (model) =>
-            request.toolkit === undefined
-              ? model.generateText(request)
-              : model.generateText(request),
-          ),
-          request.toolkit === undefined ||
-            request.disableToolCallResolution === true,
-        );
-      }
+      // Each operation forwards its request unchanged to whichever model the
+      // plan selected, so its full overload set is the service's own. The
+      // implementations below are asserted to the interface members rather
+      // than restating those overloads, which track Effect's internal option
+      // types and would drift on every release.
+      //
+      // The two branches of each ternary below read the same, and are not
+      // redundant: each narrows `request` to one side of `TextRequest` so the
+      // call resolves to one of `LanguageModel`'s overloads. A union request
+      // matches none of them.
+      const generateText = (request: TextRequest) =>
+        request.toolkit === undefined
+          ? execute(
+              Effect.flatMap(LanguageModel.LanguageModel, (model) =>
+                model.generateText(request),
+              ),
+              true,
+            )
+          : execute(
+              Effect.flatMap(LanguageModel.LanguageModel, (model) =>
+                model.generateText(request),
+              ),
+              request.disableToolCallResolution === true,
+            );
 
-      function generateObject<
-        ObjectEncoded extends Record<string, unknown>,
-        StructuredOutputSchema extends Schema.Encoder<ObjectEncoded, unknown>,
-        Tools extends Record<string, Tool.Any>,
-        Request extends LanguageModel.GenerateObjectOptions<
-          Tools,
-          StructuredOutputSchema
-        >,
-      >(
-        request: Request,
-      ): Effect.Effect<
-        LanguageModel.GenerateObjectResponse<
-          Tools,
-          StructuredOutputSchema['Type']
-        >,
-        LanguageModel.ExtractError<Request>,
-        | LanguageModel.ExtractServices<Request>
-        | StructuredOutputSchema['DecodingServices']
-      >;
-      function generateObject(
-        request: LanguageModel.GenerateObjectOptions<
-          Record<string, Tool.Any>,
-          Schema.Encoder<Record<string, unknown>, unknown>
-        >,
-      ) {
-        return execute(
+      const generateObject = (request: ObjectRequest) =>
+        execute(
           Effect.flatMap(LanguageModel.LanguageModel, (model) =>
             model.generateObject(request),
           ),
           request.toolkit === undefined ||
             request.disableToolCallResolution === true,
         );
-      }
 
-      function streamText<
-        Request extends LanguageModel.GenerateTextOptions<
-          Record<never, never>
-        > & {
-          readonly toolkit?: undefined;
-        },
-      >(
-        request: Request,
-      ): Stream.Stream<
-        Response.StreamPart<Record<never, never>>,
-        LanguageModel.ExtractError<Request>,
-        LanguageModel.ExtractServices<Request>
-      >;
-      function streamText<
-        Tools extends Record<string, Tool.Any>,
-        Request extends LanguageModel.GenerateTextOptions<Tools> & {
-          readonly toolkit: LanguageModel.ToolkitInput<Tools>;
-        },
-      >(
-        request: Request,
-      ): Stream.Stream<
-        Response.StreamPart<Tools>,
-        LanguageModel.ExtractError<Request>,
-        LanguageModel.ExtractServices<Request>
-      >;
-      function streamText(
-        request: GenerateTextWithoutToolkit | GenerateTextWithToolkit,
-      ) {
-        return executeStream(
-          Stream.unwrap(
-            Effect.map(LanguageModel.LanguageModel, (model) =>
-              request.toolkit === undefined
-                ? model.streamText(request)
-                : model.streamText(request),
-            ),
-          ),
-        );
-      }
+      const streamText = (request: TextRequest) =>
+        request.toolkit === undefined
+          ? executeStream(
+              Stream.unwrap(
+                Effect.map(LanguageModel.LanguageModel, (model) =>
+                  model.streamText(request),
+                ),
+              ),
+            )
+          : executeStream(
+              Stream.unwrap(
+                Effect.map(LanguageModel.LanguageModel, (model) =>
+                  model.streamText(request),
+                ),
+              ),
+            );
 
       return LanguageModel.LanguageModel.of({
-        generateText,
-        generateObject,
-        streamText,
+        [LanguageModel.TypeId]: LanguageModel.TypeId,
+        generateText:
+          generateText as LanguageModel.LanguageModel['generateText'],
+        generateObject:
+          generateObject as LanguageModel.LanguageModel['generateObject'],
+        streamText: streamText as LanguageModel.LanguageModel['streamText'],
       });
     }),
   );

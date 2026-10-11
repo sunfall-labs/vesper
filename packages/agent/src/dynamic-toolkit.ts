@@ -1,5 +1,5 @@
 import { Effect, type Scope } from 'effect';
-import { AiError, type Tool, type Toolkit } from 'effect/unstable/ai';
+import { AiError, type Tool, type Toolkit } from 'effect/ai';
 
 const ResourcesTypeId: unique symbol = Symbol.for(
   '@sunfall/vesper-agent/DynamicToolkit/Resources',

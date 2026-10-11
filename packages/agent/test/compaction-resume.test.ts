@@ -1,11 +1,14 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import type { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import {
+  type ConversationRecord,
+  FORMAT_VERSION,
+} from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Effect, Layer, Stream, type Crypto } from 'effect';
-import { Prompt, Toolkit, type LanguageModel } from 'effect/unstable/ai';
+import { Prompt, Toolkit, type LanguageModel } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -13,6 +16,7 @@ import { Conversation } from '../src/conversation.js';
 import { fakeProvider, turnOf } from './compaction-fixtures.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -95,6 +99,9 @@ const compacted = (
   firstKept: LogOffset.Offset,
 ): ConversationRecord.Record => ({
   _tag: 'Compacted',
+  formatVersion: FORMAT_VERSION,
+  agent: 'test',
+  agentRevision: LogVocabulary.AgentRevision.make('1'),
   step: 1,
   summary,
   firstKept,
@@ -104,6 +111,7 @@ const compacted = (
 
 const started = (prompt: string): ConversationRecord.Record => ({
   _tag: 'RunStarted',
+  budget: testBudget,
   agent: 'test',
   formatVersion: 1,
   agentRevision: LogVocabulary.AgentRevision.make('1'),

@@ -7,6 +7,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Option } from 'effect';
 
 import * as Recovery from '../src/recovery.js';
+import { testBudget } from './budget-fixture.js';
 
 const conversationId = LogVocabulary.ConversationId.make('recovery-test');
 const toolCallId = LogVocabulary.ToolCallId.make('call-1');
@@ -27,6 +28,7 @@ const orphan = (records: ReadonlyArray<ConversationRecord.Record>) =>
 
 const started = {
   _tag: 'RunStarted' as const,
+  budget: testBudget,
   agent: 'test',
   formatVersion: FORMAT_VERSION,
   agentRevision: LogVocabulary.AgentRevision.make('1'),

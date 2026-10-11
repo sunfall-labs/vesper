@@ -1,6 +1,6 @@
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Schema } from 'effect';
-import { Prompt, type AiError, type Tool } from 'effect/unstable/ai';
+import { Prompt, type AiError, type Tool } from 'effect/ai';
 
 import type { Stop } from './stop.js';
 
@@ -168,7 +168,14 @@ export interface ToolCallContext extends Run {
 }
 
 /** A prior run entered this handler but recorded no outcome. */
-export interface IndeterminateToolCallContext extends ToolCallContext {}
+export interface IndeterminateToolCallContext extends ToolCallContext {
+  /**
+   * The tool the call names, or `undefined` when the current toolkit no longer
+   * has it. Present so a policy can read the tool's annotations — see
+   * `Replay` — without being handed the toolkit.
+   */
+  readonly tool: Tool.Any | undefined;
+}
 
 /**
  * What an interceptor decided about a turn.

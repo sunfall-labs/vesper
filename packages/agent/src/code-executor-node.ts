@@ -101,7 +101,8 @@ const isEvent = (value: unknown): value is CodeExecutor.Event => {
         typeof value.id === 'string' &&
         'name' in value &&
         typeof value.name === 'string' &&
-        'input' in value
+        'input' in value &&
+        (!('key' in value) || typeof value.key === 'string')
       );
     case 'Output':
       return 'value' in value && typeof value.value === 'string';

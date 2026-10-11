@@ -22,6 +22,6 @@ describe('approval CLI wrapper', () => {
     expect(command).toBe(
       'node --experimental-strip-types examples/approval-cli/src/main.ts',
     );
-    expect(command).not.toContain('nub run');
+    expect(command).not.toContain('bun run');
   });
 });

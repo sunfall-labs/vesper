@@ -15,7 +15,7 @@ channel, included by `Conversation.Error<A>` alongside the agent and store
 failures for that bound definition.
 
 ```bash
-npm install @sunfall/vesper-agent effect@4.0.0-rc.109
+npm install @sunfall/vesper-agent effect@4.0.3
 ```
 
 Node.js 22.13.0 or newer is required. The snippets below assume the application
@@ -51,7 +51,7 @@ stop only after the terminal handler succeeds:
 
 ```ts
 import { Effect, Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Stop } from '@sunfall/vesper-agent/stop';
 
@@ -89,7 +89,7 @@ resolution before emitting its deferred finish part, so this check cannot
 retract a tool handler that already started.
 
 Handlers attach as a method rather than a `Definition` field, mirroring
-`toolkit.toLayer(handlers)` in `effect/unstable/ai`. Calling `withHandlers`
+`toolkit.toLayer(handlers)` in `effect/ai`. Calling `withHandlers`
 twice replaces the handlers rather than stacking a second set beneath them,
 which is also how `intercepting` behaves. Two interceptors that should both
 run are joined first with `Interception.compose`, which fixes their order
@@ -100,7 +100,7 @@ one combined value, so attachment is still a single replace.
 
 `stopWhen` owns termination. `nextTurn` is the smaller seam that may supply one
 more Effect AI `Prompt.RawInput` after seeing the complete turn, or select an
-Effect `LanguageModel.Service` for later turns. Returning
+Effect `LanguageModel.LanguageModel` for later turns. Returning
 `TurnControl.keep` preserves the stop decision; returning
 `TurnControl.continueWith(...)` continues. The state includes `wouldStop`, so a
 policy can act only when the model would otherwise be done.
@@ -110,7 +110,7 @@ not hide a mutable message array:
 
 ```ts
 import { Effect, Queue } from 'effect';
-import { Toolkit } from 'effect/unstable/ai';
+import { Toolkit } from 'effect/ai';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { TurnControl } from '@sunfall/vesper-agent/turn-control';
 
@@ -159,6 +159,52 @@ whether a turn will fit a budget before making it — so a run can overshoot
 either ceiling by up to one turn's usage before the check after it fails the
 run. The limits bound cumulative spend; they do not cap any single request.
 
+### Auditing a budget from the log
+
+Every recorded run writes its effective limits into `RunStarted.budget`, along
+with the budget's id and the conversation that owns it; every subagent run
+under the same root carries the same budget, and a `RunStarted` without one is
+malformed. When the budget ends a run, the `RunSettled` record carries a
+structured `stoppedBy: { limit, used, ceiling }`. `RunPolicy.audit(envelopes)`
+(or `RunPolicy.auditStored(conversationId)`, which reads a conversation and
+follows its `ChildSession` links) recomputes consumption from `TurnFinished`,
+`RunSettled`, and `ChildSession` records and judges it against those ceilings.
+
+```ts
+import { RunPolicy } from '@sunfall/vesper-agent/run-policy';
+
+const report = yield * RunPolicy.auditStored(conversationId);
+// report.verdict: 'compliant' | 'breached' | 'unprovable'
+for (const run of report.runs) {
+  for (const limit of run.limits) {
+    // limit.ceiling, limit.used, limit.overshoot, limit.status
+  }
+  // run.gaps lists missing evidence; run.stoppedBy names the limits that
+  // stopped the run.
+}
+```
+
+Turns, input and output tokens, and delegated tasks are audited. A limit is
+`within` when recomputed use is at or under its ceiling. Turns and delegations
+are refused before they happen, so they never overshoot. Token ceilings are
+checked after a turn, so a run stopped by one ends above it: that is `stopped`,
+not `violated`, only when a `RunSettled.stoppedBy` names the limit and the
+overshoot is no larger than the sum, across the budget's conversations, of each
+conversation's largest single-turn usage (at most one turn per conversation is
+in flight when the ceiling is crossed). Anything else above a ceiling is
+`violated`.
+
+Missing evidence is never compliance. A linked child conversation that was not
+supplied, a run that never settled, runs of one budget that disagree about its
+ceilings, a budget that names no ceiling for an audited limit, or a recorded
+stop reporting more usage than the log holds yields `unprovable` with the gap
+named. Model calls, the deadline, and signal
+limits are listed in `unaudited` because the log does not carry their
+consumption. The audit shows the log is consistent with the ceiling; it does
+not show the log is genuine. Combine it with a tamper-evident (hash-chained)
+log, which commits to every record in order, to make it a proof a third party
+can check.
+
 Requested tool concurrency, including `unbounded`, is clamped to
 `maxToolConcurrency`, which covers the complete pull-based lifetime of each
 leaf-tool handler stream, including recovery retries, and is shared by parent
@@ -198,9 +244,34 @@ metered. The `exec` result separates streamed text from structured data as
 
 Declared tool failures and broker validation failures reject the nested call
 with a model-visible `ToolCallError`. Its `code` is `tool_failure`,
-`dispatch_failed`, or `approval_required`; `tool` identifies the nested tool,
+`dispatch_failed`, `approval_required`, or `indeterminate`; `tool` identifies the nested tool,
 and `value` preserves a declared failure value when one exists. Scripts can
 catch that class and branch without parsing an error string.
+
+### Durable nested calls
+
+When the run is recorded, each nested call is written to the conversation as
+`NestedToolCall`, `NestedToolStarted`, and `NestedToolOutcome` records, keyed
+by the parent `exec` call id and a key within it: the nth call the script made
+without a key (`#1`, `#2`, ...), or `k:<key>` when the script names it with
+`tools.charge(input, { key: 'charge-order-7' })`. Keyless ordinals are stable
+because the same source replays the same calls in the same order; a script
+whose calls depend on time or randomness should pass explicit keys. These
+records are an audit trail beside the conversation. The model-facing prompt
+still contains only the `exec` call and its result.
+
+They are also what makes a re-execution safe. If a run crashes inside `exec`,
+the call is indeterminate like any other, and `onIndeterminateToolCall` may
+answer `Retry`. The retried `exec` re-runs the script, but a nested call whose
+outcome is already durable is served from the log without running its handler,
+interception, or metering again. A nested call that was started but never
+settled is not re-run, since it may have committed: the script sees a
+`ToolCallError` with code `indeterminate`. A call whose name or input differs
+from what the log holds under its key fails with `dispatch_failed` instead of
+being served a stale answer. Using a key twice in one execution is also
+`dispatch_failed`. Runs without a session behave as before and record
+nothing; a `Policy.toolParameters` or `toolResult` recording policy redacts
+nested records exactly as it does top-level ones.
 
 Enabling code mode puts
 `CodeExecutor.Service` on the agent's requirement channel, so a missing
@@ -543,7 +614,7 @@ Vesper vocabulary.
 
 ```ts
 import { ScriptedModel } from '@sunfall/vesper-agent/testing';
-import type { Response } from 'effect/unstable/ai';
+import type { Response } from 'effect/ai';
 
 const turn = [
   { type: 'text-start', id: 'answer' },
@@ -682,6 +753,29 @@ discarding, a second decision. Asking again before it is resolved (another
 `run` call) re-surfaces the same `pendingInteractions` rather than calling the
 model with an unanswered tool call.
 
+### Idempotent submission
+
+Durable submissions that a caller can safely retry after an ambiguous
+transport failure:
+
+- `conversation.send({ ..., requestId })` is idempotent by the caller-chosen
+  `requestId`, unique within the conversation. A retry with the same key and
+  payload acknowledges the original signal without appending another; the same
+  key with a different `kind`, `text`, or `source` fails with typed
+  `Conversation.SignalRequestConflictError`. The key is stored on the durable
+  `Signal` record, so the check holds across process restarts and across
+  processes sharing a store. The check covers the conversation's most recent
+  1,024 signals, newest first, so its cost does not grow with the
+  conversation; a retry follows its failure closely, and a key reused further
+  back is treated as new. Without `requestId`, every call appends.
+- `resolveApproval` and `resolveInteraction` are already keyed by the
+  suspension's wait token: a second call for the same `toolCallId` never
+  appends and fails with a typed `already_resolved` error, so no extra key is
+  needed.
+- Workflow submissions are keyed by their `submissionId`/execution id.
+- `run`/`stream` are continuations, not queued submissions: recovery resumes
+  the recorded run rather than re-appending, so they take no key.
+
 For typed input rather than authorization, make the external answer the tool
 result:
 
@@ -725,7 +819,7 @@ the wait.
 
 ## Effect Workflow
 
-`AgentWorkflow.make` binds an agent to `effect/unstable/workflow` without
+`AgentWorkflow.make` binds an agent to `effect/workflow` without
 introducing another workflow abstraction:
 
 ```ts
@@ -773,7 +867,7 @@ provider prompt cannot reconstruct.
 
 ```ts
 import { Match, Schema } from 'effect';
-import type { Prompt } from 'effect/unstable/ai';
+import type { Prompt } from 'effect/ai';
 
 const RoomInput = Schema.TaggedUnion({
   ParticipantMessage: {
@@ -1079,6 +1173,38 @@ authoritative; hiding a definition is not a security mechanism. Use
 `dynamicTools` only when schemas genuinely must be discovered at the beginning
 of a run, such as an MCP catalog.
 
+### Resuming without a human (`Replay`)
+
+By default a crash between `ToolStarted` and `ToolOutcome` fails the resume,
+because the handler may already have committed. `Replay` is the explicit
+opt-in for toolkits that can say what re-execution costs. Declare the tools
+that are idempotent, then attach the policy:
+
+```ts
+import { Replay } from '@sunfall/vesper-agent/replay';
+
+const lookup = Replay.safe(
+  Tool.make('lookup', {
+    /* ... */
+  }),
+); // may rerun
+const send = Tool.make('send', {
+  /* ... */
+}); //                    never reruns
+
+const resilient = agent.intercepting(Replay.policy);
+```
+
+After a crash, `lookup` is retried and its outcome recorded as usual. `send`
+is not run again: the call is answered with Effect's native
+`{ type: 'execution-interrupted', reason }` failure, recorded as an ordinary
+failed `ToolOutcome`, and the model sees it on its next request and the run
+continues. Without `Replay.policy` (or another `onIndeterminateToolCall`) the
+resume still fails. `Replay.onIndeterminateToolCall` is the same decision as a
+function, for use as the fallback inside a hand-written policy that handles
+some tools itself; the context carries the resolved `tool`, so a policy can
+read annotations. The annotation alone changes nothing.
+
 ### When the log and an interceptor disagree
 
 Both have a view of a tool call, so the order is fixed: a completed recovery
@@ -1116,6 +1242,14 @@ The short version:
   `Agent.Requires`. The separate incoming signal stream is explicitly raw so
   a resumed run can deliver the same value; transform signals before `send`
   when required.
+- Streamed model text and reasoning are committed while a turn is still
+  running: a delta waits at most 200 ms (`RecordingPolicy.Policy.partialOutput`
+  tunes it, `false` turns it off) before being appended as a `PartialOutput`
+  chunk. A crash mid-answer therefore loses at most that window.
+  `AgentHistory.abortedOutputFrom(records)` reads back output no turn ever
+  settled, for display or audit; it is never part of `AgentHistory.messagesFrom`,
+  so the rerun turn is not shown it. A finished turn still records its `Text`
+  exactly once.
 - Steers remain turn-boundary input, and a valid cancel can interrupt an
   in-flight provider stream before any real tool or delegation handler has
   started in that turn. The boundary drain remains the sole cursor, budget,
@@ -1125,7 +1259,11 @@ The short version:
   to explicitly Retry or Answer after application-specific reconciliation,
   and recovered results must decode through the current tool result schema —
   decode failure is an actionable `AiError`, never an unknown value presented
-  as typed success.
+  as typed success. `agent.intercepting(Replay.policy)` is the one-line opt-in
+  for crash-and-continue: tools declared `Replay.safe(tool)` are retried, and
+  every other indeterminate call is answered with an `execution-interrupted`
+  failure the model sees (see
+  [Resuming without a human](#resuming-without-a-human-replay)).
 - Settled runs write a bounded resume aggregate into `RunSettled`, so a
   compacted resume pages backwards only through its live active suffix, and
   existing history is compatibility-validated before producer acquisition.

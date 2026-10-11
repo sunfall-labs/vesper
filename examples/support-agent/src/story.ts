@@ -5,8 +5,8 @@ import { AgentEval } from '@sunfall/vesper-agent/eval';
 import { ScriptedModel } from '@sunfall/vesper-agent/testing';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { Console, Effect, Layer, Stream } from 'effect';
-import type { Response } from 'effect/unstable/ai';
-import { WorkflowEngine } from 'effect/unstable/workflow';
+import type { Response } from 'effect/ai';
+import { WorkflowEngine } from 'effect/workflow';
 
 import {
   OrderRepo,

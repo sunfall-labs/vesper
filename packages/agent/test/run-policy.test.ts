@@ -1,12 +1,7 @@
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Ref, Schema, Stream } from 'effect';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { RunPolicy } from '../src/run-policy.js';

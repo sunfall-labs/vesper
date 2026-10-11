@@ -1,4 +1,5 @@
-import { Crypto, Effect, Encoding, Schema } from 'effect';
+import { Crypto, Effect, Schema } from 'effect';
+import { Hex } from 'effect/encoding';
 
 // A content address for one blob of bytes.
 //
@@ -74,7 +75,7 @@ export interface Ref extends Schema.Struct.Type<typeof Ref.fields> {}
 export const digestOf = Effect.fnUntraced(function* (bytes: Uint8Array) {
   const crypto = yield* Crypto.Crypto;
   const hash = yield* crypto.digest(DIGEST_ALGORITHM, bytes).pipe(Effect.orDie);
-  return Digest.make(`${DIGEST_PREFIX}:${Encoding.encodeHex(hash)}`);
+  return Digest.make(`${DIGEST_PREFIX}:${Hex.encode(hash)}`);
 });
 
 /**

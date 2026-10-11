@@ -1,5 +1,5 @@
 import { Effect, Metric } from 'effect';
-import type { Response } from 'effect/unstable/ai';
+import type { Response } from 'effect/ai';
 
 /**
  * Agent-level metrics deliberately have no dynamic attributes. Conversation,

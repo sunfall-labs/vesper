@@ -130,6 +130,45 @@ describe('node code executor', () => {
     }).pipe(Effect.provide(NodeCodeExecutor.layer())),
   );
 
+  it.effect('carries an explicit nested-call key and rejects a bad one', () =>
+    Effect.gen(function* () {
+      const executor = yield* CodeExecutor.Service;
+      const execution = yield* executor.start(
+        request(`
+          await tools.echo({ n: 1 }, { key: "first" })
+          await tools.echo({ n: 2 })
+          try {
+            await tools.echo({ n: 3 }, { key: "" })
+          } catch (error) {
+            text(String(error.message))
+          }
+        `),
+      );
+      const events = yield* execution.events.pipe(
+        Stream.tap((event) =>
+          event._tag === 'ToolCall'
+            ? execution.respond({
+                id: event.id,
+                outcome: 'success',
+                value: event.input,
+              })
+            : Effect.void,
+        ),
+        Stream.runCollect,
+      );
+      const calls = Array.from(events).flatMap((event) =>
+        event._tag === 'ToolCall' ? [event] : [],
+      );
+
+      expect(calls.map(({ key }) => key)).toEqual(['first', undefined]);
+      expect(Array.from(events)).toContainEqual({
+        _tag: 'Output',
+        value:
+          'Tool call key must be a non-empty string of at most 256 characters',
+      });
+    }).pipe(Effect.provide(NodeCodeExecutor.layer())),
+  );
+
   it.effect('rejects TypeScript syntax that requires transformation', () =>
     Effect.gen(function* () {
       const executor = yield* CodeExecutor.Service;

@@ -5,7 +5,7 @@ tool is exposed to the model as `mcp__<server>__<tool>`, with unsupported name
 characters replaced by `_`, so tools from different servers remain distinct.
 
 ```bash
-npm install @sunfall/vesper-mcp @sunfall/vesper-agent effect@4.0.0-rc.109
+npm install @sunfall/vesper-mcp @sunfall/vesper-agent effect@4.0.3
 ```
 
 Node.js 22 or newer is required. `getLinearToken()` below is an
@@ -16,7 +16,7 @@ not put a raw token in source.
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Mcp } from '@sunfall/vesper-mcp/mcp';
 import { Redacted } from 'effect';
-import { Toolkit } from 'effect/unstable/ai';
+import { Toolkit } from 'effect/ai';
 
 const linear = Mcp.remote({
   name: 'linear',

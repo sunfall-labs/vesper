@@ -18,17 +18,13 @@ import {
   SchemaTransformation,
   Stream,
 } from 'effect';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import * as AgentLog from '../src/log.js';
 import { AgentState } from '../src/state.js';
+import { testBudget } from './budget-fixture.js';
 
 const compatibility = {
   agent: 'state-test',
@@ -57,7 +53,7 @@ const OffsetState = AgentState.make({
   schema: Schema.String.pipe(
     Schema.decodeTo(
       Schema.Finite,
-      SchemaTransformation.transformOrFail<
+      SchemaTransformation.transformEffect<
         number,
         string,
         StateCodecService,
@@ -78,7 +74,7 @@ const EncodeFailureState = AgentState.make({
   schema: Schema.String.pipe(
     Schema.decodeTo(
       Schema.Finite,
-      SchemaTransformation.transformOrFail<number, string>({
+      SchemaTransformation.transformEffect<number, string>({
         decode: (value) => Effect.succeed(Number(value)),
         encode: () =>
           Effect.fail(
@@ -106,6 +102,7 @@ const open = Effect.fnUntraced(function* () {
   if (session.history.length === 0 && (yield* session.recorded).length === 0) {
     yield* AgentLog.start(session, {
       agent: compatibility.agent,
+      budget: testBudget,
       revision: compatibility.revision,
       input: 'state test',
     });
@@ -564,6 +561,7 @@ describe('recorded agent state', () => {
         },
         {
           _tag: 'RunStarted',
+          budget: testBudget,
           formatVersion: 1,
           agent: compatibility.agent,
           agentRevision: compatibility.revision,

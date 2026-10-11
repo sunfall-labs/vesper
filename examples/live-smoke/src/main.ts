@@ -49,8 +49,8 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
-import { Command, Flag } from 'effect/unstable/cli';
+} from 'effect/ai';
+import { Command, Flag } from 'effect/cli';
 
 // The workspace toolkit is an application dependency, not something the agent
 // package composes automatically.
@@ -74,10 +74,10 @@ import { WorkspaceTools } from '@sunfall/vesper-workspace/tools';
 //
 // It costs real money and needs a real API key:
 //
-//   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase all
-//   OPENROUTER_API_KEY=... nub run example:live-smoke --provider openrouter --phase log
-//   ANTHROPIC_API_KEY=... OPENAI_API_KEY=... nub run example:live-smoke --fallback-provider openai --phase log
-//   ANTHROPIC_API_KEY=... nub run example:live-smoke --phase compaction-reactive
+//   ANTHROPIC_API_KEY=... bun run example:live-smoke --phase all
+//   OPENROUTER_API_KEY=... bun run example:live-smoke --provider openrouter --phase log
+//   ANTHROPIC_API_KEY=... OPENAI_API_KEY=... bun run example:live-smoke --fallback-provider openai --phase log
+//   ANTHROPIC_API_KEY=... bun run example:live-smoke --phase compaction-reactive
 //
 const PROVIDERS = ['anthropic', 'openai', 'openrouter'] as const;
 type Provider = (typeof PROVIDERS)[number];
@@ -95,7 +95,7 @@ const DEFAULT_MODELS = {
 
 const modelFor = (provider: Provider, model: string) =>
   Effect.gen(function* () {
-    const apiKey = yield* Config.redacted(
+    const apiKey = yield* Config.Redacted(
       provider === 'anthropic'
         ? 'ANTHROPIC_API_KEY'
         : provider === 'openrouter'
@@ -905,7 +905,7 @@ const logPhase = Effect.gen(function* () {
 const durabilityPhase = Effect.gen(function* () {
   yield* heading('durability — resume through a fresh Postgres pool');
 
-  const databaseUrl = yield* Config.redacted('VESPER_DATABASE_URL');
+  const databaseUrl = yield* Config.Redacted('VESPER_DATABASE_URL');
   const conversationId = `smoke-durable-${yield* Clock.currentTimeMillis}`;
   const storeLayer = () =>
     LogStorePg.layer().pipe(
@@ -1449,42 +1449,45 @@ const summarize = (
 const command = Command.make(
   'live-smoke',
   {
-    phase: Flag.choice('phase', ['all', ...PHASES]).pipe(
+    phase: Flag.Literals('phase', ['all', ...PHASES]).pipe(
       Flag.withDescription(
         'Run one phase, or "all" for everything except durability and ' +
           'compaction-reactive.',
       ),
       Flag.withDefault('all'),
     ),
-    model: Flag.string('model').pipe(
+    model: Flag.String('model').pipe(
       Flag.withDescription(
         'Model id within the provider; defaults per provider.',
       ),
       Flag.withDefault('default'),
     ),
-    fallbackModel: Flag.string('fallback-model').pipe(
+    fallbackModel: Flag.String('fallback-model').pipe(
       Flag.withDescription(
         'Fallback model id; defaults within --fallback-provider.',
       ),
       Flag.withDefault('default'),
     ),
-    fallbackProvider: Flag.choice('fallback-provider', FALLBACK_PROVIDERS).pipe(
+    fallbackProvider: Flag.Literals(
+      'fallback-provider',
+      FALLBACK_PROVIDERS,
+    ).pipe(
       Flag.withDescription(
         'Optional provider used when the primary fails before output.',
       ),
       Flag.withDefault('none'),
     ),
-    provider: Flag.choice('provider', PROVIDERS).pipe(
+    provider: Flag.Literals('provider', PROVIDERS).pipe(
       Flag.withDescription('Effect AI provider.'),
       Flag.withDefault(DEFAULT_PROVIDER),
     ),
-    inputUsd: Flag.string('input-usd').pipe(
+    inputUsd: Flag.String('input-usd').pipe(
       Flag.withDescription(
         'Input price per million tokens, for the cost line only.',
       ),
       Flag.withDefault('1'),
     ),
-    outputUsd: Flag.string('output-usd').pipe(
+    outputUsd: Flag.String('output-usd').pipe(
       Flag.withDescription('Output price per million tokens.'),
       Flag.withDefault('5'),
     ),

@@ -5,7 +5,7 @@ What Vesper is, what it borrows, and what it deliberately does not build.
 [`CONTEXT.md`](CONTEXT.md) is the vocabulary; this file is the reasoning
 behind the shape.
 
-Vesper is an agent loop over `effect/unstable/ai`, which supplies
+Vesper is an agent loop over `effect/ai`, which supplies
 `LanguageModel`, `Tool`, `Toolkit`, `Prompt`, `Response`, and `Chat`, and
 stops one round trip short of an agent. Two decisions carry the rest of the
 design:
@@ -27,7 +27,7 @@ adapter here would duplicate that work and lag the same API it targets.
 
 Applications provide `LanguageModel` directly from official packages such as
 `@effect/ai-anthropic` and `@effect/ai-openai`. Vesper's loop sees only
-`effect/unstable/ai`; provider choice therefore changes application wiring, not
+`effect/ai`; provider choice therefore changes application wiring, not
 the loop or a Vesper registry.
 
 This also keeps provider-specific capabilities where they can evolve:
@@ -278,10 +278,16 @@ they are values you import and call. Until something serves agents remotely,
 routing adds indirection without buying anything. Do not build it
 speculatively.
 
-**A Cloudflare Durable Objects runtime.** It is a plausible home for an agent
-loop, and it is also a second durability story with its own semantics to keep
-aligned with the log's. Postgres already answers the question it would answer,
-and the section above is the argument it has to beat.
+**A Cloudflare Durable Objects runtime.** A Durable Object's SQLite storage is
+synchronous SQLite, the same shape as the native driver, so the log runs there
+as a storage adapter: `@sunfall/vesper-log-sqlite/layer-cloudflare` adapts
+`ctx.storage.sql` and `transactionSync` to the existing `SqlClient` and
+`LogStoreSqlite`. That is not a second durability story, because the log, its
+fencing, and resume stay Vesper's own, and an alarm just calls
+`conversation.run()` to resume an orphan. What stays declined is a runtime
+with its own durability semantics: a Durable Object scheduler, state model, or
+replay engine to keep aligned with the log. The adapter is verified against a
+`node:sqlite` stand-in, not workerd.
 
 **Another fold checkpoint over the log.** Settled runs already carry bounded
 resume aggregates, and compacted prompts page only their live suffix. Legacy,

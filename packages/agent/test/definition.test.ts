@@ -1,10 +1,5 @@
 import { Effect, Layer, Ref, Schema, Stream } from 'effect';
-import {
-  LanguageModel,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, type Response, Tool, Toolkit } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';

@@ -110,4 +110,6 @@ export const make = (limits: Partial<Limits> = {}): Limits => {
   return Object.freeze(merged);
 };
 
+export * from './run-policy-audit.js';
+
 export * as RunPolicy from './run-policy.js';

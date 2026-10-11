@@ -1,16 +1,20 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import {
+  type ConversationRecord,
+  FORMAT_VERSION,
+} from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Fiber, Layer, Stream } from 'effect';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { LanguageModel, type Response, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import * as AgentLog from '../src/log.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -53,16 +57,15 @@ const definition = (name = 'test', revision = '1') =>
 
 const started = (
   agent = 'test',
-  revision: string | undefined = '1',
-  formatVersion: number | undefined = 1,
+  revision = '1',
+  formatVersion = FORMAT_VERSION,
 ): ConversationRecord.Record => {
   return {
     _tag: 'RunStarted',
     agent,
-    ...(revision === undefined
-      ? {}
-      : { agentRevision: LogVocabulary.AgentRevision.make(revision) }),
-    ...(formatVersion === undefined ? {} : { formatVersion }),
+    agentRevision: LogVocabulary.AgentRevision.make(revision),
+    formatVersion,
+    budget: testBudget,
     prompt: [],
   };
 };
@@ -195,11 +198,6 @@ describe('durable compatibility', () => {
     ['revision mismatch', started('test', 'old'), 'revision "old"'],
     ['agent-name mismatch', started('other'), 'agent "other"'],
     ['future format', started('test', '1', 2), 'format 2 is unsupported'],
-    [
-      'legacy metadata',
-      { _tag: 'RunStarted', agent: 'test', prompt: [] },
-      'predates',
-    ],
   ] as const)('rejects %s before a model call', ([, record, message]) =>
     Effect.gen(function* () {
       const calls = { count: 0 };

@@ -47,7 +47,7 @@ import { WorkspaceLocal } from '@sunfall/vesper-workspace/layer-local';
 import { WorkspaceTools } from '@sunfall/vesper-workspace/tools';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { Effect, Layer } from 'effect';
-import { Toolkit } from 'effect/unstable/ai';
+import { Toolkit } from 'effect/ai';
 
 const workspace = WorkspaceAgent.compose(Toolkit.make(lookupIssue));
 // Use WorkspaceAgent.standard instead when there are no application tools.

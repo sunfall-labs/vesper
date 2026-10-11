@@ -1,13 +1,15 @@
+import { LogChain } from '@sunfall/vesper-log/chain';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Tail } from '@sunfall/vesper-log/tail';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Stream } from 'effect';
+import type { Crypto } from 'effect';
 
 // Stream addressing for conversations: where a conversation's records live,
 // how they are read back, and how a child's stream is named. `log.ts`
-// re-exports all four, so `AgentLog.pathFor` remains the one public spelling.
+// re-exports them, so `AgentLog.pathFor` remains the one public spelling.
 
 /**
  * Where a conversation's stream lives.
@@ -58,6 +60,21 @@ export const snapshot = (
       return page(after);
     }),
   );
+
+/**
+ * Recompute a conversation's hash chain from its stored batches.
+ *
+ * Resolves to `Valid` with the head to pin, or to the first break; see
+ * `@sunfall/vesper-log/chain` for what the chain covers and its limits.
+ */
+export const verify = (
+  conversationId: LogVocabulary.ConversationId,
+  options?: LogChain.VerifyOptions,
+): Effect.Effect<
+  LogChain.Result,
+  LogStore.LogStoreError,
+  LogStore.Service | Crypto.Crypto
+> => LogChain.verify(pathFor(conversationId), options);
 
 /**
  * A conversation id for a child, derived rather than minted.

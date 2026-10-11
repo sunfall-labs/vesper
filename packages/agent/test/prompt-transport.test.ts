@@ -1,17 +1,21 @@
 import { AttachmentStoreMemory } from '@sunfall/vesper-attachments/layer-memory';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import {
+  type ConversationRecord,
+  FORMAT_VERSION,
+} from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Cause, Context, Effect, Exit, Layer, Option } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 import { AgentHistory } from '../src/history.js';
 import * as AgentLog from '../src/log.js';
 import { PromptTransport } from '../src/prompt-transport.js';
 import { RecordingPolicyRuntime } from '../src/recording-policy-runtime.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -38,7 +42,14 @@ const runStarted = (
     offset: LogOffset.fromSeq(1n),
     conversationId: LogVocabulary.ConversationId.make('transport'),
     timestamp: 0,
-    record: { _tag: 'RunStarted', agent: 'test', prompt },
+    record: {
+      _tag: 'RunStarted',
+      agent: 'test',
+      formatVersion: FORMAT_VERSION,
+      agentRevision: LogVocabulary.AgentRevision.make('1'),
+      budget: testBudget,
+      prompt,
+    },
   },
 ];
 
@@ -62,6 +73,7 @@ const persist = (input: Prompt.RawInput) =>
     );
     yield* AgentLog.start(session, {
       agent: 'test',
+      budget: testBudget,
       revision: LogVocabulary.AgentRevision.make('1'),
       input,
     });
@@ -107,6 +119,7 @@ describe('prompt transport', () => {
       );
       yield* AgentLog.start(source, {
         agent: 'test',
+        budget: testBudget,
         revision: LogVocabulary.AgentRevision.make('1'),
         input: filePrompt(bytes),
       });
@@ -212,6 +225,7 @@ describe('prompt transport', () => {
           );
           yield* AgentLog.start(session, {
             agent: 'test',
+            budget: testBudget,
             revision: LogVocabulary.AgentRevision.make('1'),
             input: filePrompt(bytes),
           });
@@ -295,6 +309,7 @@ describe('prompt transport', () => {
         yield* session.append([
           {
             _tag: 'RunStarted',
+            budget: testBudget,
             agent: 'test',
             formatVersion: 1,
             agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -315,12 +330,4 @@ describe('prompt transport', () => {
         }
       }).pipe(Effect.provide(testLogLayer)),
   );
-
-  it('continues to rebuild legacy unwrapped prompts', () => {
-    const legacy = Prompt.make('legacy prompt').content;
-
-    expect(AgentHistory.messagesFrom(runStarted(legacy)).content).toEqual(
-      legacy,
-    );
-  });
 });

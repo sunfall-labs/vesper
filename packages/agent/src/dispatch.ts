@@ -9,9 +9,10 @@ import {
   SubscriptionRef,
 } from 'effect';
 import type { Context } from 'effect';
-import { AiError, type Tool, type Toolkit } from 'effect/unstable/ai';
+import { AiError, Response, Tool, type Toolkit } from 'effect/ai';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
+import type { AgentEvents } from './event.js';
 import type { Interception } from './interception.js';
 import type * as AgentLog from './log.js';
 import * as Observability from './internal/observability.js';
@@ -20,8 +21,56 @@ import { INTERACTION_WAIT } from './recovery.js';
 import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
+import * as ToolLookup from './internal/tool-lookup.js';
 
 type RunError = AiError.AiError | RunPolicy.RunPolicyExhausted;
+
+/** One already-durable result that recovery must replay to live observers. */
+export interface RecoveredToolCall {
+  readonly _tag: 'Part';
+  readonly step: number;
+  readonly part: AgentEvents.RecoveredToolResult;
+  readonly encodedPart: Response.ToolResultPartEncoded;
+}
+
+const recoveredToolCall = (
+  call: AgentLog.IndeterminateToolCall,
+  result: unknown,
+  encodedResult: unknown,
+  isFailure: boolean,
+): RecoveredToolCall => {
+  const base = {
+    id: call.toolCallId,
+    name: call.name,
+    result,
+    encodedResult,
+    providerExecuted: false,
+    preliminary: false,
+  };
+  const part: AgentEvents.RecoveredToolResult = isFailure
+    ? {
+        ...Response.toolResultPart({ ...base, isFailure: true }),
+        resultSource: 'recovered',
+      }
+    : {
+        ...Response.toolResultPart({ ...base, isFailure: false }),
+        resultSource: 'recovered',
+      };
+  return {
+    _tag: 'Part',
+    step: call.step,
+    part,
+    encodedPart: {
+      type: 'tool-result',
+      id: call.toolCallId,
+      name: call.name,
+      result: encodedResult,
+      isFailure,
+      providerExecuted: false,
+      preliminary: false,
+    },
+  };
+};
 
 /**
  * The reserved `ToolSuspended.wait` name for native pre-handler interactions.
@@ -56,7 +105,7 @@ const settleRejectedCall = (
   call: AgentLog.IndeterminateToolCall,
   recovery: Exclude<AgentLog.Recovery, { readonly _tag: 'Settled' }>,
   error: AiError.AiError,
-): Effect.Effect<void, AgentLog.DurabilityError> =>
+): Effect.Effect<RecoveredToolCall, AgentLog.DurabilityError> =>
   Effect.gen(function* () {
     const encodedError = yield* Schema.encodeUnknownEffect(AiError.AiError)(
       error,
@@ -81,6 +130,7 @@ const settleRejectedCall = (
         result: encodedError,
       },
     ]);
+    return recoveredToolCall(call, error, encodedError, true);
   });
 
 // The tool-dispatch seam: consult the log before running a tool.
@@ -189,7 +239,11 @@ export const resolveIndeterminate = <
     readonly session: AgentLog.Session;
     readonly arbitration: TurnArbitration;
   },
-): Effect.Effect<void, RunError, ToolkitRequires | InterceptorRequires> =>
+): Effect.Effect<
+  ReadonlyArray<RecoveredToolCall>,
+  RunError,
+  ToolkitRequires | InterceptorRequires
+> =>
   Effect.gen(function* () {
     if (options.session.recoveryCorruption !== undefined) {
       return yield* recoveryCorruptionError(options.session.recoveryCorruption);
@@ -199,7 +253,7 @@ export const resolveIndeterminate = <
       return Option.isSome(recovery) && recovery.value._tag !== 'Settled';
     });
     if (pending.length === 0) {
-      return yield* Effect.void;
+      return [];
     }
     const resolve = options.interceptor?.onIndeterminateToolCall;
     const unresolved = pending.find((call) => {
@@ -212,6 +266,7 @@ export const resolveIndeterminate = <
 
     const resolved = yield* toolkit;
     const services = yield* capturedContext;
+    const results: Array<RecoveredToolCall> = [];
     for (const call of pending) {
       const recovery = options.session.recovery(call.name, call.toolCallId);
       if (Option.isNone(recovery) || recovery.value._tag === 'Settled') {
@@ -239,6 +294,13 @@ export const resolveIndeterminate = <
         // handler. Approval's dispatch mode deliberately falls through: a
         // successful decision authorizes the ordinary handler to run.
         if (recovery.value.interaction?.mode === 'answer') {
+          const decoded = yield* decodeResult(
+            resolved,
+            services,
+            call.name,
+            decided.value.result,
+            decided.value.outcome === 'failure',
+          );
           yield* options.session.append([
             {
               _tag: 'ToolResumed',
@@ -255,9 +317,24 @@ export const resolveIndeterminate = <
               result: decided.value.result,
             },
           ]);
+          results.push(
+            recoveredToolCall(
+              call,
+              decoded,
+              decided.value.result,
+              decided.value.outcome === 'failure',
+            ),
+          );
           continue;
         }
         if (decided.value.outcome === 'failure') {
+          const decoded = yield* decodeResult(
+            resolved,
+            services,
+            call.name,
+            decided.value.result,
+            true,
+          );
           yield* options.session.append([
             {
               _tag: 'ToolResumed',
@@ -274,6 +351,9 @@ export const resolveIndeterminate = <
               result: decided.value.result,
             },
           ]);
+          results.push(
+            recoveredToolCall(call, decoded, decided.value.result, true),
+          );
           continue;
         }
       }
@@ -294,11 +374,14 @@ export const resolveIndeterminate = <
           name: call.name,
           toolCallId: call.toolCallId,
           params: call.params,
+          tool: ToolLookup.isToolName(resolved.tools, call.name)
+            ? resolved.tools[call.name]
+            : undefined,
         }).pipe(Effect.provide(services));
       }
 
       if (decision._tag === 'Answer') {
-        yield* decodeResult(
+        const decoded = yield* decodeResult(
           resolved,
           services,
           call.name,
@@ -315,18 +398,23 @@ export const resolveIndeterminate = <
             result: decision.result,
           },
         ]);
+        results.push(
+          recoveredToolCall(call, decoded, decision.result, decision.isFailure),
+        );
         continue;
       }
 
-      if (!hasTool(resolved.tools, call.name)) {
-        yield* settleRejectedCall(
-          options.session,
-          call,
-          recovery.value,
-          unknownModelToolError(
-            call.name,
-            Object.keys(resolved.tools),
-            'resolveIndeterminateToolCall',
+      if (!ToolLookup.isToolName(resolved.tools, call.name)) {
+        results.push(
+          yield* settleRejectedCall(
+            options.session,
+            call,
+            recovery.value,
+            unknownModelToolError(
+              call.name,
+              Object.keys(resolved.tools),
+              'resolveIndeterminateToolCall',
+            ),
           ),
         );
         continue;
@@ -336,18 +424,19 @@ export const resolveIndeterminate = <
         decodeParameters(resolved, services, call.name, call.params),
       );
       if (Result.isFailure(decodedParams)) {
-        yield* settleRejectedCall(
-          options.session,
-          call,
-          recovery.value,
-          decodedParams.failure,
+        results.push(
+          yield* settleRejectedCall(
+            options.session,
+            call,
+            recovery.value,
+            decodedParams.failure,
+          ),
         );
         continue;
       }
-      const params = decodedParams.success;
       const permit = yield* options.arbitration.commit;
       if (Option.isNone(permit)) {
-        return yield* Effect.void;
+        return results;
       }
 
       yield* Effect.gen(function* () {
@@ -374,14 +463,24 @@ export const resolveIndeterminate = <
           name: call.name,
           toolCallId: call.toolCallId,
         };
-        const invoke = resolved.handle(call.name, params, call.toolCallId).pipe(
-          Effect.provideService(ToolExecution.Current, execution),
-          Effect.map((stream) =>
-            stream.pipe(
-              Stream.provideService(ToolExecution.Current, execution),
+        // The decode above only decides whether the stored call is runnable.
+        // `handle` decodes for itself, so it gets the stored value as the
+        // model wrote it: handing it the decoded one would run a transforming
+        // schema such as DateFromString a second time, over a `Date`.
+        const invoke = resolved
+          .handle(
+            call.name,
+            call.params as Tool.ParametersEncoded<Tools[keyof Tools]>,
+            call.toolCallId,
+          )
+          .pipe(
+            Effect.provideService(ToolExecution.Current, execution),
+            Effect.map((stream) =>
+              stream.pipe(
+                Stream.provideService(ToolExecution.Current, execution),
+              ),
             ),
-          ),
-        );
+          );
         const metered =
           options.runtime === undefined ||
           options.unmeteredToolNames?.has(call.name) === true
@@ -431,10 +530,18 @@ export const resolveIndeterminate = <
             result: result.value.encodedResult,
           },
         ]);
+        results.push(
+          recoveredToolCall(
+            call,
+            result.value.result,
+            result.value.encodedResult,
+            result.value.isFailure,
+          ),
+        );
         return yield* Effect.void;
       }).pipe(Effect.ensuring(permit.value.settle));
     }
-    return yield* Effect.void;
+    return results;
   }).pipe(
     Effect.catchTag('DurabilityError', (error) =>
       Effect.fail(durabilityAiError(error)),
@@ -465,9 +572,7 @@ export const decodeSuspendedRequest = <
 ): Effect.Effect<unknown, never, ToolkitRequires> =>
   Effect.gen(function* () {
     const resolved = yield* toolkit;
-    const tool = Object.hasOwn(resolved.tools, name)
-      ? resolved.tools[name]
-      : undefined;
+    const tool = ToolLookup.toolNamed(resolved.tools, name);
     if (tool === undefined) {
       return request;
     }
@@ -479,11 +584,6 @@ export const decodeSuspendedRequest = <
       Effect.catch(() => Effect.succeed(request)),
     );
   });
-
-const hasTool = <Tools extends Record<string, Tool.Any>>(
-  tools: Tools,
-  name: string,
-): name is Extract<keyof Tools, string> => Object.hasOwn(tools, name);
 
 const decodeUnknownToolValue = (
   schema: Schema.Constraint | undefined,
@@ -505,19 +605,27 @@ const decodeResult = (
   result: unknown,
   isFailure: boolean,
 ): Effect.Effect<unknown, AiError.AiError> => {
-  const tool = Object.hasOwn(toolkit.tools, name)
-    ? toolkit.tools[name]
-    : undefined;
-  const schema =
-    tool === undefined
-      ? undefined
-      : isFailure
-        ? Schema.Union([tool.failureSchema, AiError.AiError])
-        : tool.successSchema;
-  return decodeUnknownToolValue(schema, result, services, (detail) =>
-    toolResultDecodeError(name, detail),
+  const tool = ToolLookup.toolNamed(toolkit.tools, name);
+  return decodeUnknownToolValue(
+    tool === undefined ? undefined : resultSchema(tool, isFailure),
+    result,
+    services,
+    (detail) => toolResultDecodeError(name, detail),
   );
 };
+
+/**
+ * The schema a recorded result decodes against.
+ *
+ * A failure uses `Tool.failureResultSchema`, the union `Toolkit` itself encodes
+ * failures with: `AiError`, the tool's declared failure, and Effect's
+ * `ExecutionFailure` (a denied or interrupted execution). It applies whatever
+ * the tool's `failureMode`, because the handler is not the only source of a
+ * recorded failure: `resolveIndeterminate`'s `Answer`, a durable denial, and
+ * a parameter rejection all settle a call as a failure on their own.
+ */
+const resultSchema = (tool: Tool.Any, isFailure: boolean): Schema.Constraint =>
+  isFailure ? Tool.failureResultSchema(tool) : tool.successSchema;
 
 const decodeParameters = <
   Tools extends Record<string, Tool.Any>,
@@ -527,8 +635,9 @@ const decodeParameters = <
   services: Context.Context<never>,
   name: Name,
   params: unknown,
-): Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError> =>
-  !Object.hasOwn(toolkit.tools, name) || toolkit.tools[name] === undefined
+): Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError> => {
+  const tool = ToolLookup.toolNamed(toolkit.tools, String(name));
+  return tool === undefined
     ? Effect.fail(
         unknownModelToolError(
           String(name),
@@ -536,14 +645,13 @@ const decodeParameters = <
           'decodeToolParameters',
         ),
       )
-    : (Schema.decodeUnknownEffect(toolkit.tools[name].parametersSchema)(
-        params,
-      ).pipe(
+    : (Schema.decodeUnknownEffect(tool.parametersSchema)(params).pipe(
         Effect.provide(services),
         Effect.mapError((error) =>
-          toolParameterDecodeError(String(name), params, String(error)),
+          toolParameterDecodeError(String(name), String(error)),
         ),
       ) as Effect.Effect<Tool.Parameters<Tools[Name]>, AiError.AiError>);
+};
 
 interface ArbitrationState {
   readonly cancelled: boolean;
@@ -655,39 +763,17 @@ export const gate = <
     const services = yield* capturedContext;
     const decoders = new Map<string, Decode>();
 
-    const decoderFor = (name: string): Decode => {
-      const cached = decoders.get(name);
+    const decoderFor = (name: string, isFailure: boolean): Decode => {
+      const key = `${isFailure ? 'failure' : 'success'}:${name}`;
+      const cached = decoders.get(key);
       if (cached !== undefined) {
         return cached;
       }
 
-      const tool = Object.hasOwn(resolved.tools, name)
-        ? resolved.tools[name]
-        : undefined;
+      const tool = ToolLookup.toolNamed(resolved.tools, name);
 
-      // Mirrors `Toolkit`'s own `resultSchema`: with `failureMode: 'return'`
-      // a failure comes back as a value, so the recorded result may be a
-      // success, a declared failure, or an `AiError`.
-      //
-      // A tool without `failureMode: 'return'` still accepts `AiError` as a
-      // fallback, because its own handler is not the only source of a
-      // recorded failure: `resolveIndeterminate`'s `Answer` decision and a
-      // durably denied `needsApproval` gate can both settle a call with
-      // `outcome: 'failure'` regardless of the tool's own failure mode, and
-      // both settle it as an `AiError`, mirroring how `failureMode: 'return'`
-      // already surfaces framework-level failures. Widening here is what lets
-      // a served-from-log answer decode a result substituted by either of
-      // them, not only one the handler itself produced.
       const schema =
-        tool === undefined
-          ? undefined
-          : tool.failureMode === 'return'
-            ? Schema.Union([
-                tool.successSchema,
-                tool.failureSchema,
-                AiError.AiError,
-              ])
-            : Schema.Union([tool.successSchema, AiError.AiError]);
+        tool === undefined ? undefined : resultSchema(tool, isFailure);
 
       const decode: Decode = (stored: unknown) =>
         // A spilled result decodes against its own pointer shape rather than
@@ -711,7 +797,7 @@ export const gate = <
               toolResultDecodeError(name, detail),
             );
 
-      decoders.set(name, decode);
+      decoders.set(key, decode);
       return decode;
     };
 
@@ -735,8 +821,11 @@ export const gate = <
     > =>
       Effect.map(
         requireDecoded
-          ? decoderFor(String(name))(encoded)
-          : decoderFor(String(name))(encoded).pipe(
+          ? decoderFor(String(name), isFailure)(encoded)
+          : decoderFor(
+              String(name),
+              isFailure,
+            )(encoded).pipe(
               // Only a typed schema failure gets the encoded fallback. Defects
               // and interruption are control-flow signals and must survive.
               Effect.catch(() => Effect.succeed(encoded)),
@@ -750,18 +839,18 @@ export const gate = <
             encodedResult: encoded,
             isFailure,
             preliminary: false,
-            // `LanguageModel` spreads handler results into the emitted part.
-            // This discriminant keeps an encoded fallback from masquerading as
-            // a schema-decoded tool success in the public event stream.
+            // `ToolResolution` carries this onto the tool-result part, so an
+            // encoded fallback never masquerades as a schema-decoded tool
+            // success in the public event stream.
             resultSource: 'substituted' as const,
           }),
       );
 
-    const handle = (
-      name: keyof Tools,
-      params: unknown,
-      toolCallId?: string,
-    ): ReturnType<Toolkit.WithHandler<Tools>['handle']> => {
+    const handle: Toolkit.WithHandler<Tools>['handle'] = (
+      name,
+      params,
+      toolCallId,
+    ) => {
       const toolName = String(name);
       return Effect.gen(function* () {
         yield* Observability.toolCall;
@@ -797,19 +886,30 @@ export const gate = <
 
         // Provider tool arguments are untrusted input. Validate them before
         // interception, arbitration, or ToolStarted; the inner Toolkit
-        // validates again at the final handler boundary. Passing the original
-        // value inward avoids decoding schema transformations twice.
+        // validates again at the final handler boundary, which receives the
+        // original encoded value.
         const decodedParams = yield* Effect.result(
           decodeParameters(resolved, services, name, params),
         );
         if (Result.isFailure(decodedParams)) {
+          // A whole `AiError`, the shape Effect's Toolkit gives a parameter
+          // failure and `Tool.failureResultSchema` decodes, so the model sees
+          // one wire shape for every failure the agent answers in a tool's
+          // place.
           const encodedError = yield* Schema.encodeUnknownEffect(
             AiError.AiError,
           )(
             new AiError.AiError({
-              module: decodedParams.failure.module,
-              method: 'dispatchToolCall',
-              reason: decodedParams.failure.reason,
+              module: 'Agent',
+              method: 'dispatchTool',
+              reason: new AiError.ToolParameterValidationError({
+                toolName,
+                description:
+                  decodedParams.failure.reason._tag ===
+                  'ToolParameterValidationError'
+                    ? decodedParams.failure.reason.description
+                    : decodedParams.failure.message,
+              }),
             }),
           ).pipe(Effect.orDie);
           return yield* answered(name, encodedError, true, false);
@@ -880,6 +980,16 @@ export const gate = <
               session.onToolSettled(toolName, normalizedToolCallId, settle);
             }
           }
+          // A code-mode nested call has no session of its own here; its
+          // owning `exec` handler supplies the durable start instead.
+          const nestedStart = yield* Effect.serviceOption(
+            ToolExecution.NestedStart,
+          );
+          if (Option.isSome(nestedStart)) {
+            yield* nestedStart.value.started.pipe(
+              Effect.mapError(durabilityAiError),
+            );
+          }
           const execution: ToolExecution.Execution | undefined =
             session === undefined || normalizedToolCallId === undefined
               ? undefined
@@ -948,7 +1058,7 @@ export const gate = <
     return {
       tools: resolved.tools,
       handle,
-    };
+    } satisfies Toolkit.WithHandler<Tools>;
   });
 
 /** A decoder for one tool's substituted encoded result. */
@@ -1049,7 +1159,6 @@ const toolResultDecodeError = (name: string, detail: string): AiError.AiError =>
 
 const toolParameterDecodeError = (
   name: string,
-  params: unknown,
   detail: string,
 ): AiError.AiError =>
   new AiError.AiError({
@@ -1057,7 +1166,6 @@ const toolParameterDecodeError = (
     method: 'resolveIndeterminateToolCall',
     reason: new AiError.ToolParameterValidationError({
       toolName: name,
-      toolParams: params,
       description: detail,
     }),
   });

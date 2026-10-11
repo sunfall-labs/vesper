@@ -82,6 +82,20 @@ Two properties worth knowing before reading records:
   a turn, flushed at a tool call, a tool result, a turn boundary, or
   completion. The log is for rebuilding a conversation, not for replaying the
   provider's wire format.
+- **Streamed output is committed in bounded windows.** Coalescing alone would
+  lose a whole answer to a crash mid-stream, so while a response streams, text
+  and reasoning deltas are appended as `PartialOutput` chunks (only what is new
+  since the previous chunk) once the oldest uncommitted delta is
+  `partialOutput.intervalMillis` old (default 200; `partialOutput: false` in the
+  recording policy disables it). The check runs as deltas arrive, in the same
+  tap and append path as every other record, so a failed progress append fails
+  the run like any other recording failure. A `Text` record (or any other
+  record that flushes text) supersedes the chunks before it, so a finished turn
+  records its text exactly once. Chunks left at the end of the log, before a
+  later `RunStarted`, or before a `RunSettled` are output a crashed or
+  abandoned run never finished: `AgentHistory.abortedOutputFrom` returns them,
+  and `AgentHistory.messagesFrom` and every resume projection ignore them, so
+  the turn reruns from the same prompt it would have had without them.
 - **The append lands before the event reaches the consumer.** Records are
   written with `Stream.tap`, so nothing downstream can act on something the log
   does not already contain.
@@ -101,9 +115,28 @@ authoritative DDL is published as `packages/log-pg/migrations/001-initial.sql`;
 the integration harness applies that same asset. Wake-ups cross processes
 through `LISTEN`/`NOTIFY`, and its `changes` stream fails rather than going
 quiet, because a dead feed that looks healthy is indistinguishable from a
-conversation where nothing is happening. `VesperPgClient.layer` corrects the
-RC.109 driver's listener readiness and failure propagation while still
-providing the official `PgClient` and generic `SqlClient` services.
+conversation where nothing is happening. `VesperPgClient.layer` provides the official
+`PgClient` and generic `SqlClient` services; since Effect 4.0 the official
+client's `listen` resolves only once `LISTEN` is registered and fails its
+queue when the connection dies, which is what `changes` relies on.
+
+## Tamper evidence
+
+Each batch the log appends is stored with a chained SHA-256 digest committing
+to the batch before it, and `LogStore.meta` reports the newest as `chainHead`.
+`AgentLog.verify(conversationId, { expectedHead })` recomputes the chain from
+the stored batches and returns `Valid` with the head, or the first offset that
+fails and why (content edited, a batch removed, inserted or reordered, history
+truncated). The digest covers each record's body, conversation id and
+timestamp, its offset, and the producer id, epoch, and sequence of its batch;
+the genesis digest covers the stream path and identity.
+
+This makes the log tamper-_evident_ to anyone who holds a head pinned outside
+the runtime and database. It does not make the runtime trustworthy: a writer
+can still record untrue things, and without a pinned head a party who can
+rewrite the whole store can rewrite the chain with it. Every batch is
+chained from genesis. See
+`packages/log/README.md` for the exact definition.
 
 ## Resuming a conversation
 
@@ -121,7 +154,7 @@ starts it. `conversation.stream` is the streaming form of that exact operation.
 The terminal `usage` is cumulative across the whole conversation rather than
 the latest run alone.
 
-**This is what makes the log a durability mechanism and not an audit trail.** A
+**This is what makes the log a durability mechanism and not a full audit trail** (it is tamper-evident, above, but it records what the runtime chose to write). A
 run that crashed mid-conversation resumes without re-asking the provider for
 turns it completed and without re-running the tool calls those turns made.
 `resume.test.ts` states both as numbers — the provider counts the prompts it
@@ -153,17 +186,14 @@ reader that has records and no agent. Two rules in it are worth knowing:
 Every `Agent.make` definition requires a non-empty application revision. Vesper
 persists that revision, the agent name, and its conversation-format version in
 `RunStarted` and bounded resume aggregates. Resume, branch, fork, and child
-session entry reject missing, unsupported, or mismatched metadata before a
-model or tool call. Bump the revision whenever instructions, tools, schemas, or
-other behavior make existing durable history unsafe; old unrevisioned history
-must be migrated explicitly rather than adopted silently.
+session entry reject unsupported or mismatched metadata before a model or tool
+call. Bump the revision whenever instructions, tools, schemas, or other
+behavior make existing durable history unsafe.
 
 Existing history is compatibility-validated before producer acquisition, so an
 incompatible resume, branch, or fork cannot fence a live compatible session.
 The claim is compare-and-acquire bound to the validated epoch and head; a race
 re-reads and revalidates in a small bounded retry loop before any epoch bump.
-Old records remain schema-decodable so rejection is actionable, but missing
-compatibility metadata is not silently self-upgraded.
 [Design.md](../Design.md) has the reasoning behind the explicit compatibility
 identity.
 
@@ -264,10 +294,20 @@ the delivered value transformed as well.
 
 Delivery is resumable and at-least-once. `SignalReceived` records the offset it
 consumed, so a signal queued before a run began is still delivered and one
-already acted on is not delivered twice during recovery. `send` does not take
-an idempotency key, so retrying after an ambiguous caller-side failure may
-append the same logical signal at a new offset; deduplicate at the application
-boundary when that matters.
+already acted on is not delivered twice during recovery.
+
+`send` is idempotent when given a `requestId`. After an ambiguous caller-side
+failure, retry with the same key: the original signal is found in the signal
+stream and acknowledged without a new append, and the same key with a different
+`kind`, `text`, or `source` fails with `SignalRequestConflictError`. The key is
+persisted on the `Signal` record, so it survives restarts. The check covers the
+most recent 1,024 signals, so its cost is bounded. It runs after
+the sender acquires the signal stream's producer epoch, so a concurrent sender
+from another process is fenced and its retry observes the winner rather than
+both appending. A scan of the signal stream is only paid by keyed sends; an
+unkeyed `send` always appends. `resolveApproval` and `resolveInteraction` need
+no key: the wait token already makes a second resolution a typed
+`already_resolved` error.
 
 The drain is one bounded read from a cursor, deliberately. A production system
 this design came out of built the same mechanism twice on a durable workflow
@@ -285,7 +325,10 @@ dedicated `onIndeterminateToolCall` interceptor must explicitly return
 `Interception.retry`, `Interception.reconcile(result)`, or
 `Interception.reconcileFailure(result)`; without it the run fails safely and
 remains orphaned. Ordinary `beforeToolCall` dispatch permission is not a retry
-decision. Nothing in `LanguageModel` had to change: its `toolkit`
+decision. `agent.intercepting(Replay.policy)` is the built-in explicit
+opt-in: tools declared `Replay.safe` are retried and every other indeterminate
+call is answered with an `execution-interrupted` failure (a failed
+`ToolOutcome` in Effect's `ExecutionFailure` shape) so the run continues. Nothing in `LanguageModel` had to change: its `toolkit`
 option already accepts an `Effect` producing a resolved toolkit, which is what
 a `Toolkit` is.
 

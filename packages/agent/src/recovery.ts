@@ -9,7 +9,7 @@ import { AgentBranch } from './branch.js';
  * as opposed to an application-defined `AgentWorkflow.wait`.
  *
  * A native interaction never runs `AgentWorkflow.wait`'s handler-resumption
- * replay: the call is suspended by `effect/unstable/ai`'s `LanguageModel`
+ * replay: the call is suspended by `effect/ai`'s `LanguageModel`
  * *before* any handler is entered, so its `ToolSuspended` has no matching
  * `ToolStarted` — the one shape {@link fold} otherwise treats as corruption.
  * Resuming it means either dispatching the handler for the first time
@@ -66,8 +66,22 @@ export interface SuspendedToolCall extends IndeterminateToolCall {
   readonly request: unknown;
 }
 
+/**
+ * What an orphaned run durably established about one code-mode nested call,
+ * keyed by its parent `exec` call and the call's key within it.
+ */
+export interface NestedRecovery {
+  readonly name: string;
+  readonly inputDigest: string;
+  /** Whether the handler was entered (`NestedToolStarted` is durable). */
+  readonly started: boolean;
+  readonly settled?: Settled;
+}
+
 export interface Snapshot {
   readonly recoveries: Map<string, Recovery>;
+  /** Nested calls of the orphaned run, by {@link nestedKey}. */
+  readonly nested: ReadonlyMap<string, NestedRecovery>;
   readonly completedWaitOutcomes: ReadonlyMap<string, CompletedWait>;
   readonly pending: ReadonlyArray<IndeterminateToolCall>;
   readonly indeterminate: ReadonlyArray<IndeterminateToolCall>;
@@ -96,6 +110,7 @@ export const fold = (
   >();
   const order: string[] = [];
   const completedWaitOutcomes = new Map<string, CompletedWait>();
+  const nested = new Map<string, NestedRecovery>();
   let running = false;
 
   const foldRecord = ConversationRecord.Record.match({
@@ -107,6 +122,7 @@ export const fold = (
       calls.clear();
       starts.clear();
       completedWaitOutcomes.clear();
+      nested.clear();
       order.length = 0;
       running = false;
     },
@@ -168,7 +184,34 @@ export const fold = (
         });
       }
     },
+    NestedToolCall: (record) => {
+      if (running) {
+        nested.set(nestedKey(record.parent, record.key), {
+          name: record.name,
+          inputDigest: record.inputDigest,
+          started: false,
+        });
+      }
+    },
+    NestedToolStarted: (record) => {
+      const key = nestedKey(record.parent, record.key);
+      const call = nested.get(key);
+      if (running && call !== undefined) {
+        nested.set(key, { ...call, started: true });
+      }
+    },
+    NestedToolOutcome: (record) => {
+      const key = nestedKey(record.parent, record.key);
+      const call = nested.get(key);
+      if (running && call !== undefined) {
+        nested.set(key, {
+          ...call,
+          settled: { outcome: record.outcome, result: record.result },
+        });
+      }
+    },
     Text: () => {},
+    PartialOutput: () => {},
     ToolResumed: () => {},
     TurnFinished: () => {},
     Compacted: () => {},
@@ -202,6 +245,7 @@ export const fold = (
 
   return {
     recoveries,
+    nested,
     completedWaitOutcomes,
     corruption:
       unmatchedSuspension !== undefined
@@ -245,7 +289,18 @@ const settledKey = (
   toolCallId: LogVocabulary.ToolCallId,
 ): string => `${name}\u001f${toolCallId}`;
 
+const nestedKey = (parent: string, key: string): string =>
+  `${parent}\u001f${key}`;
+
 export interface Tracker {
+  /**
+   * What an orphaned run recorded for one nested call. Like {@link recovery},
+   * it indexes only what predates this run, so a run never serves itself.
+   */
+  readonly nestedRecovery: (
+    parent: LogVocabulary.ToolCallId,
+    key: string,
+  ) => Option.Option<NestedRecovery>;
   readonly recovery: (
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
@@ -335,7 +390,11 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       },
       RunStarted: () => {},
       Text: () => {},
+      PartialOutput: () => {},
       ToolCall: () => {},
+      NestedToolCall: () => {},
+      NestedToolStarted: () => {},
+      NestedToolOutcome: () => {},
       ToolResumed: () => {},
       TurnFinished: () => {},
       Compacted: () => {},
@@ -364,7 +423,11 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
           return;
         case 'RunStarted':
         case 'Text':
+        case 'PartialOutput':
         case 'ToolCall':
+        case 'NestedToolCall':
+        case 'NestedToolStarted':
+        case 'NestedToolOutcome':
         case 'ToolResumed':
         case 'ToolWaitCompleted':
         case 'TurnFinished':
@@ -396,7 +459,11 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       },
       RunStarted: () => Effect.void,
       Text: () => Effect.void,
+      PartialOutput: () => Effect.void,
       ToolCall: () => Effect.void,
+      NestedToolCall: () => Effect.void,
+      NestedToolStarted: () => Effect.void,
+      NestedToolOutcome: () => Effect.void,
       ToolStarted: () => Effect.void,
       ToolSuspended: () => Effect.void,
       ToolResumed: () => Effect.void,
@@ -433,6 +500,8 @@ export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
       });
 
     return {
+      nestedRecovery: (parent, key) =>
+        Option.fromUndefinedOr(snapshot.nested.get(nestedKey(parent, key))),
       recovery: (name, toolCallId) =>
         Option.fromUndefinedOr(recoveries.get(settledKey(name, toolCallId))),
       pendingToolCalls: snapshot.pending,

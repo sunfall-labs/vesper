@@ -1,17 +1,23 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, type Context } from 'effect';
 
-import type { RecordingPolicy } from './recording-policy.js';
+import { RecordingPolicy } from './recording-policy.js';
 
 /** Compiled policy carried by a session; it no longer has a requirement channel. */
 export interface Runtime {
   readonly filter: (
     record: ConversationRecord.Record,
   ) => Effect.Effect<ConversationRecord.Record>;
+  readonly partialOutputIntervalMillis: number | undefined;
 }
 
 /** Explicit default: records are persisted raw. */
-export const raw: Runtime = { filter: Effect.succeed };
+export const raw: Runtime = {
+  filter: Effect.succeed,
+  partialOutputIntervalMillis:
+    RecordingPolicy.DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS,
+};
 
 type CompiledFilter<R> = (
   record: ConversationRecord.Record,
@@ -24,6 +30,11 @@ export const compile = <R>(
   const compiled = compileFilter(policy);
   return {
     filter: (record) => compiled(record).pipe(Effect.provide(context)),
+    partialOutputIntervalMillis:
+      policy.partialOutput === false
+        ? undefined
+        : (policy.partialOutput?.intervalMillis ??
+          RecordingPolicy.DEFAULT_PARTIAL_OUTPUT_INTERVAL_MILLIS),
   };
 };
 
@@ -60,6 +71,43 @@ const compileFilter = <R>(
             }),
           ),
     ToolStarted: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    // A nested call is a tool call and gets the same redaction as one. The
+    // hooks take a `ToolCall`/`ToolOutcome` record, so each nested record
+    // is shown to them as the tool call it stands for, under its nested
+    // identity, `<parent>/<key>`.
+    NestedToolCall: (record) =>
+      policy.toolParameters === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.toolParameters(record.params, {
+              _tag: 'ToolCall',
+              step: 0,
+              id: LogVocabulary.ToolCallId.make(
+                `${record.parent}/${record.key}`,
+              ),
+              name: record.name,
+              params: record.params,
+            }),
+            (params): ConversationRecord.Record => ({ ...record, params }),
+          ),
+    NestedToolStarted: (record) =>
+      Effect.succeed<ConversationRecord.Record>(record),
+    NestedToolOutcome: (record) =>
+      policy.toolResult === undefined
+        ? Effect.succeed<ConversationRecord.Record>(record)
+        : Effect.map(
+            policy.toolResult(record.result, {
+              _tag: 'ToolOutcome',
+              step: 0,
+              id: LogVocabulary.ToolCallId.make(
+                `${record.parent}/${record.key}`,
+              ),
+              name: record.name,
+              outcome: record.outcome,
+              result: record.result,
+            }),
+            (result): ConversationRecord.Record => ({ ...record, result }),
+          ),
     ToolSuspended: (record) =>
       policy.externalRequest === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
@@ -118,6 +166,8 @@ const compileFilter = <R>(
             }),
           ),
     Text: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    PartialOutput: (record) =>
+      Effect.succeed<ConversationRecord.Record>(record),
     TurnFinished: (record) => Effect.succeed<ConversationRecord.Record>(record),
     Compacted: (record) => Effect.succeed<ConversationRecord.Record>(record),
     BranchedFrom: (record) => Effect.succeed<ConversationRecord.Record>(record),

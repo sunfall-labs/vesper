@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Ref, Schema, Stream } from 'effect';
-import { AiError, type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { DynamicToolkit } from '../src/dynamic-toolkit.js';

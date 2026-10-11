@@ -8,12 +8,15 @@ import {
   Stream,
   SynchronizedRef,
 } from 'effect';
-import { AiError, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, Tool, Toolkit } from 'effect/ai';
+import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import { CodeExecutor } from './code-executor.js';
 import { renderCodeSdk } from './code-sdk.js';
+import * as ToolExecution from './internal/tool-execution.js';
 import type * as AgentLog from './log.js';
 import { ResumeProjection } from './resume-projection.js';
+import * as ToolLookup from './internal/tool-lookup.js';
 
 export const TOOL_NAME = 'exec' as const;
 
@@ -342,12 +345,7 @@ const failedToolResponse = (
   error,
 });
 
-const hasTool = <Tools extends Record<string, Tool.Any>>(
-  tools: Tools,
-  name: string,
-): name is keyof Tools & string => Object.hasOwn(tools, name);
-
-const invoke = <Tools extends Record<string, Tool.Any>>(
+const invokeOnce = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
   event: CodeExecutor.ToolCall,
 ): Effect.Effect<
@@ -356,19 +354,12 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
   Tool.HandlerServices<Tools[keyof Tools]>
 > =>
   Effect.gen(function* () {
-    const requestedName: string = event.name;
-    if (!hasTool(toolkit.tools, requestedName)) {
+    const name: string = event.name;
+    const tool = ToolLookup.toolNamed(toolkit.tools, name);
+    if (tool === undefined || !ToolLookup.isToolName(toolkit.tools, name)) {
       return yield* aiError(
         'nestedToolCall',
-        `Unknown code-mode tool "${String(requestedName)}"`,
-      );
-    }
-    const name = requestedName;
-    const tool = toolkit.tools[name];
-    if (tool === undefined) {
-      return yield* aiError(
-        'nestedToolCall',
-        `Code-mode tool "${name}" has no runtime definition`,
+        `Unknown code-mode tool "${name}"`,
       );
     }
     if (tool.needsApproval !== undefined && tool.needsApproval !== false) {
@@ -377,7 +368,13 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
         message: `Tool "${event.name}" requires provider-mediated approval and cannot run inside code mode; move it to the agent toolkit and add it to codeMode.except`,
       });
     }
-    const stream = yield* toolkit.handle(name, event.input, event.id);
+    // Sandbox input is untyped JSON; `handle` decodes it against the tool's
+    // parameter schema before anything runs.
+    const stream = yield* toolkit.handle(
+      name,
+      event.input as Tool.ParametersEncoded<Tools[typeof name]>,
+      event.id,
+    );
     const result = yield* Stream.runLast(stream);
     if (Option.isNone(result)) {
       return yield* aiError(
@@ -408,6 +405,187 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
           }),
     ),
   );
+
+// ## Nested calls are durable, keyed, and served from the log
+//
+// A script's tool calls used to leave no trace: the hidden gate has no session,
+// so after a crash the `exec` call was indeterminate and whatever its nested
+// calls had done was invisible. When `exec` runs under a recording gate, each
+// nested call now writes `NestedToolCall`, `NestedToolStarted` and
+// `NestedToolOutcome` records — the same three-step life a top-level call has —
+// identified by `(parent, key)`. `parent` is the `exec` tool-call id; `key` is
+// `k:<name>` when the script passed `{ key }` and otherwise `#<n>`, the nth
+// keyless call this execution made. Keyless ordinals are stable across a
+// re-execution because the sandbox is deterministic for the same source, and
+// the recorded name and input digest turn a script that drifts from its
+// earlier run into a loud failure instead of a wrong answer served from the
+// log. Scripts that branch on time or randomness should pass explicit keys.
+//
+// These records stay out of the model's prompt: the model sees one `exec`
+// call and its result, and history rebuilding ignores all three.
+//
+// The rules mirror `dispatch.ts`'s, applied at the sandbox boundary:
+//
+//   1. a nested call an unsettled earlier run settled is served from the log,
+//      before interception and metering — it already ran, and metering counts
+//      real executions once;
+//   2. one that was started but never settled is indeterminate. There is no
+//      replay-safe nested tool, so it is not re-run: the script sees a
+//      `ToolCallError` with code `indeterminate`;
+//   3. otherwise the call goes to the hidden gate, whose interceptor and
+//      metering run exactly as before, with `NestedToolStarted` appended where
+//      `ToolStarted` would be — after interception, before the handler.
+//
+// Like top-level recovery, the lookup indexes only what an *earlier* run wrote.
+// The serving only matters when the same `exec` call id is entered again,
+// which is `onIndeterminateToolCall` answering Retry.
+
+/** The identity-bearing input of one nested call, as the text its digest covers. */
+export const inputMaterial = (
+  name: string,
+  input: CodeExecutor.JsonValue,
+): string => JSON.stringify([name, input]);
+
+const StoredFailure = Schema.Struct({
+  code: Schema.Literals([
+    'tool_failure',
+    'approval_required',
+    'dispatch_failed',
+    'indeterminate',
+  ]),
+  message: Schema.String,
+  value: Schema.optionalKey(Schema.Json),
+});
+const decodeStoredFailure = Schema.decodeUnknownOption(StoredFailure);
+
+const servedResponse = (
+  event: CodeExecutor.ToolCall,
+  settled: AgentLog.Settled,
+): CodeExecutor.ToolResponse => {
+  if (settled.outcome === 'success') {
+    return {
+      id: event.id,
+      outcome: 'success',
+      value: jsonValue(settled.result),
+    };
+  }
+  const failure = decodeStoredFailure(settled.result);
+  return failedToolResponse(
+    event,
+    Option.isSome(failure)
+      ? failure.value
+      : {
+          code: 'dispatch_failed',
+          message: `Recorded failure of nested call "${event.name}" is unreadable`,
+        },
+  );
+};
+
+/** The `exec` call whose nested calls are being recorded. */
+interface NestedOwner {
+  readonly session: AgentLog.Session;
+  readonly parent: LogVocabulary.ToolCallId;
+  /** Keys this execution has used, so a duplicate cannot alias another call. */
+  readonly seen: Set<string>;
+}
+
+const invoke = <Tools extends Record<string, Tool.Any>>(
+  toolkit: Toolkit.WithHandler<Tools>,
+  event: CodeExecutor.ToolCall,
+  key: string,
+  owner: NestedOwner | undefined,
+): Effect.Effect<
+  CodeExecutor.ToolResponse,
+  AiError.AiError | AgentLog.DurabilityError,
+  Tool.HandlerServices<Tools[keyof Tools]>
+> => {
+  if (owner === undefined) {
+    return invokeOnce(toolkit, event);
+  }
+  const { session, parent, seen } = owner;
+  return Effect.gen(function* () {
+    if (seen.has(key)) {
+      return failedToolResponse(event, {
+        code: 'dispatch_failed',
+        message: `Nested call key "${key}" was used twice in one execution`,
+      });
+    }
+    seen.add(key);
+
+    const digest = yield* session.sha256(
+      inputMaterial(event.name, event.input),
+    );
+    const prior = session.nestedRecovery(parent, key);
+    if (Option.isSome(prior)) {
+      if (
+        prior.value.name !== event.name ||
+        prior.value.inputDigest !== digest
+      ) {
+        return failedToolResponse(event, {
+          code: 'dispatch_failed',
+          message: `Nested call "${key}" differs from the one a earlier execution recorded under that key (${prior.value.name}); pass explicit keys if the script is not deterministic`,
+        });
+      }
+      if (prior.value.settled !== undefined) {
+        return servedResponse(event, prior.value.settled);
+      }
+      if (prior.value.started) {
+        return failedToolResponse(event, {
+          code: 'indeterminate',
+          message: `Nested call "${event.name}" (${key}) started in an earlier execution and never settled; it is not re-run because it may have committed`,
+        });
+      }
+    } else {
+      yield* session.append([
+        {
+          _tag: 'NestedToolCall',
+          parent,
+          key,
+          name: event.name,
+          inputDigest: digest,
+          params: event.input,
+        },
+      ]);
+    }
+
+    let started = false;
+    const response = yield* invokeOnce(toolkit, event).pipe(
+      Effect.provideService(ToolExecution.NestedStart, {
+        // Once only: the context also reaches any gate inside the handler
+        // (a delegated child agent's tools), and those are not this call.
+        started: Effect.suspend(() => {
+          if (started) {
+            return Effect.void;
+          }
+          started = true;
+          return session.append([
+            { _tag: 'NestedToolStarted', parent, key, name: event.name },
+          ]);
+        }),
+      }),
+    );
+    // A dispatch failure is unsettled on purpose: past `NestedToolStarted` the
+    // handler may have run, and before it a retry is harmless either way.
+    if (
+      response.outcome === 'failure' &&
+      response.error.code === 'dispatch_failed'
+    ) {
+      return response;
+    }
+    yield* session.append([
+      {
+        _tag: 'NestedToolOutcome',
+        parent,
+        key,
+        name: event.name,
+        outcome: response.outcome,
+        result:
+          response.outcome === 'success' ? response.value : response.error,
+      },
+    ]);
+    return response;
+  });
+};
 
 const catalogDescription = <Tools extends Record<string, Tool.Any>>(
   toolkit: Toolkit.WithHandler<Tools>,
@@ -500,7 +678,7 @@ export const merge = <
   const exceptedHandle = excepted.handle as AnyHandle;
   const visibleHandle = visible.handle as AnyHandle;
   const route: AnyHandle = (name, params, toolCallId) =>
-    Object.hasOwn(excepted.tools, name)
+    ToolLookup.isToolName(excepted.tools, name)
       ? exceptedHandle(name, params, toolCallId)
       : visibleHandle(name, params, toolCallId);
   return { tools, handle: route as Toolkit.WithHandler<Merged>['handle'] };
@@ -535,6 +713,17 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                       aiError('execute', error.message),
                     ),
                   );
+                const owning = yield* Effect.serviceOption(
+                  ToolExecution.Current,
+                );
+                const owner: NestedOwner | undefined = Option.isSome(owning)
+                  ? {
+                      session: owning.value.session,
+                      parent: owning.value.toolCallId,
+                      seen: new Set(),
+                    }
+                  : undefined;
+                let ordinal = 0;
                 const output: string[] = [];
                 let completed = false;
                 let nextState:
@@ -545,13 +734,20 @@ export const toolkit = <Tools extends Record<string, Tool.Any>>(
                   Stream.mapEffect(
                     (event) => {
                       switch (event._tag) {
-                        case 'ToolCall':
+                        case 'ToolCall': {
+                          // Assigned here, synchronously in event order, not
+                          // inside the concurrent effect that follows.
+                          const key =
+                            event.key === undefined
+                              ? `#${String((ordinal += 1))}`
+                              : `k:${event.key}`;
                           return Effect.flatMap(
-                            invoke(hidden, event).pipe(
+                            invoke(hidden, event, key, owner).pipe(
                               Effect.provide(services),
                             ),
                             execution.respond,
                           );
+                        }
                         case 'Output':
                           return Effect.sync(() => {
                             output.push(event.value);

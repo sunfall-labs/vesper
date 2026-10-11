@@ -1,31 +1,25 @@
 import { Effect, Schema } from 'effect';
-import { AiError, Response, type Tool } from 'effect/unstable/ai';
+import { AiError, Response, type Tool, Toolkit } from 'effect/ai';
 
+import type * as ToolResolution from './tool-resolution.js';
+
+/**
+ * A part as the agent loop sees it: the model's response, read with deferred
+ * validation, and the results and approval requests the agent resolves for it.
+ */
+type ModelPart<PartTools extends Record<string, Tool.Any>> =
+  | Response.StreamPart<PartTools, 'deferred'>
+  | ToolResolution.Resolution<PartTools>;
+type EncodableToolCall<PartTools extends Record<string, Tool.Any>> = Extract<
+  ModelPart<PartTools>,
+  { readonly type: 'tool-call' }
+>;
 type EncodableToolResult<PartTools extends Record<string, Tool.Any>> = Extract<
-  Response.ModelStreamPart<PartTools>,
+  ModelPart<PartTools>,
   { readonly type: 'tool-result' }
 >;
-type EncodableFile<PartTools extends Record<string, Tool.Any>> = Extract<
-  Response.StreamPart<PartTools>,
-  { readonly type: 'file' }
->;
-const StandardPart = Schema.Union([
-  Response.TextStartPart,
-  Response.TextDeltaPart,
-  Response.TextEndPart,
-  Response.ReasoningStartPart,
-  Response.ReasoningDeltaPart,
-  Response.ReasoningEndPart,
-  Response.ToolParamsStartPart,
-  Response.ToolParamsDeltaPart,
-  Response.ToolParamsEndPart,
-  Response.ToolApprovalRequestPart,
-  Response.DocumentSourcePart,
-  Response.UrlSourcePart,
-  Response.ResponseMetadataPart,
-  Response.FinishPart,
-  Response.ErrorPart,
-]);
+// Every part that carries no tool-specific schema.
+const StandardPart = Response.StreamPart(Toolkit.empty);
 type StandardPart = typeof StandardPart.Type;
 
 const encodePartError = (error: Schema.SchemaError): AiError.AiError =>
@@ -42,9 +36,12 @@ const encodeStandardPart = (
     Effect.mapError(encodePartError),
   );
 
-const encodeToolCall = (
-  part: Response.ToolCallPart<string, unknown>,
-): Effect.Effect<Response.StreamPartEncoded> =>
+const encodeToolCall = <PartTools extends Record<string, Tool.Any>>(
+  part: EncodableToolCall<PartTools>,
+): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
+  // Parameters are opaque: the model-authored value, which is already the
+  // provider-facing form. Re-encoding through the tool schema would run a
+  // transformation such as DateFromString backwards over a string.
   Effect.succeed({
     type: 'tool-call',
     id: part.id,
@@ -69,20 +66,13 @@ const encodeToolResult = <PartTools extends Record<string, Tool.Any>>(
     preliminary: part.preliminary,
   });
 
-const encodeFile = <PartTools extends Record<string, Tool.Any>>(
-  part: EncodableFile<PartTools>,
-): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> =>
-  Schema.encodeEffect(Response.FilePart)(part).pipe(
-    Effect.mapError(encodePartError),
-  );
-
 const assertPartEncodingStrategy = (part: never): never => {
   throw new Error(`Unhandled response part encoding strategy: ${String(part)}`);
 };
 
 /** Preserve a model part in its provider-facing form for persistence. */
 export const encodePart = <PartTools extends Record<string, Tool.Any>>(
-  part: Response.ModelStreamPart<PartTools>,
+  part: ModelPart<PartTools>,
 ): Effect.Effect<Response.StreamPartEncoded, AiError.AiError> => {
   switch (part.type) {
     case 'tool-call':
@@ -90,7 +80,6 @@ export const encodePart = <PartTools extends Record<string, Tool.Any>>(
     case 'tool-result':
       return encodeToolResult(part);
     case 'file':
-      return encodeFile(part);
     case 'text-start':
     case 'text-delta':
     case 'text-end':

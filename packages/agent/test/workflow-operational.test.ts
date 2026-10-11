@@ -1,10 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Exit, Layer, Option, Ref, Schema } from 'effect';
-import {
-  DurableDeferred,
-  Workflow,
-  WorkflowEngine,
-} from 'effect/unstable/workflow';
+import { DurableDeferred, Workflow, WorkflowEngine } from 'effect/workflow';
 
 /**
  * Operational boundary for this suite:

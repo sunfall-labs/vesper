@@ -5,7 +5,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Context, Effect, Layer, Stream } from 'effect';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { LanguageModel, type Response, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';

@@ -1,5 +1,5 @@
 import { Context, type Crypto, Effect, type Layer, Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';

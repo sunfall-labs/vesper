@@ -1,5 +1,5 @@
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
-import { LanguageModel, type Response, Toolkit } from 'effect/unstable/ai';
+import { LanguageModel, type Response, Toolkit } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';

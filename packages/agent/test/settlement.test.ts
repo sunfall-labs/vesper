@@ -15,12 +15,7 @@ import {
   Ref,
   Stream,
 } from 'effect';
-import {
-  AiError,
-  LanguageModel,
-  type Response,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { AiError, LanguageModel, type Response, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
@@ -28,6 +23,7 @@ import { protocolOf } from '../src/internal/protocol.js';
 import * as AgentLog from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
@@ -352,6 +348,7 @@ describe('orphans', () => {
                   timestamp: 1_700_000_000_000,
                   record: {
                     _tag: 'RunStarted',
+                    budget: testBudget,
                     agent: 'test',
                     formatVersion: 1,
                     agentRevision: LogVocabulary.AgentRevision.make('1'),

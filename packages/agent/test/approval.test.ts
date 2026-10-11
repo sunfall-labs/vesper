@@ -12,16 +12,17 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
 import { ToolDispatch } from '../src/dispatch.js';
 import * as AgentLog from '../src/log.js';
+import { testBudget } from './budget-fixture.js';
 
 // Durable tool approval, without Effect WorkflowEngine.
 //
-// `effect/unstable/ai`'s `LanguageModel` already suspends a call marked
+// `effect/ai`'s `LanguageModel` already suspends a call marked
 // `Tool.setNeedsApproval` before its handler is ever entered — its own
 // dispatch wrapper checks `needsApproval` and emits a `tool-approval-request`
 // part instead of dispatching. What this suite proves is Vesper's own half:
@@ -200,16 +201,14 @@ const expectMalformedParameterOutcome = (
     throw new Error('expected release_optional ToolOutcome');
   }
   expect(outcome.outcome).toBe('failure');
-  const error = Schema.decodeUnknownSync(AiError.AiError)(outcome.result);
-  expect(error.reason._tag).toBe('ToolParameterValidationError');
-  if (error.reason._tag !== 'ToolParameterValidationError') {
+  const reason = Schema.decodeUnknownSync(AiError.AiError)(
+    outcome.result,
+  ).reason;
+  expect(reason._tag).toBe('ToolParameterValidationError');
+  if (reason._tag !== 'ToolParameterValidationError') {
     throw new Error('expected ToolParameterValidationError');
   }
-  expect(error.reason.toolName).toBe('release_optional');
-  expect(error.reason.toolParams).toEqual({
-    id: 'r1',
-    environment: null,
-  });
+  expect(reason.toolName).toBe('release_optional');
 };
 
 /** A model that fails a test the moment it is asked anything. */
@@ -281,6 +280,7 @@ const seed = Effect.fn('test.seed')(function* (
 
 const started: ConversationRecord.Record = {
   _tag: 'RunStarted',
+  budget: testBudget,
   agent: 'approval-test',
   formatVersion: 1,
   agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -346,6 +346,7 @@ describe('durable tool approval', () => {
             [
               {
                 _tag: 'RunStarted',
+                budget: testBudget,
                 agent: 'approval-parameter-test',
                 formatVersion: 1,
                 agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -461,10 +462,33 @@ describe('durable tool approval', () => {
         // No new input: the decision is what there is to act on, so the
         // continuation runs from durable state alone rather than appending a
         // second user message the person never said.
-        const result = yield* conversation.run();
+        const events = yield* conversation.stream().pipe(Stream.runCollect);
+        const result = Array.from(events).find(
+          (event) => event._tag === 'Completed',
+        );
 
         expect(ran.count).toBe(1);
-        expect(result.outcome).toBe('success');
+        expect(result).toMatchObject({ outcome: 'success' });
+        expect(
+          Array.from(events).find(
+            (event) =>
+              event._tag === 'Part' &&
+              event.part.type === 'tool-result' &&
+              event.part.id === CALL_ID,
+          ),
+        ).toMatchObject({
+          _tag: 'Part',
+          step: 1,
+          part: {
+            type: 'tool-result',
+            id: CALL_ID,
+            name: 'release',
+            result: { released: true },
+            encodedResult: { released: true },
+            isFailure: false,
+            resultSource: 'recovered',
+          },
+        });
 
         const records = yield* conversation.records().pipe(Stream.runCollect);
         const outcomes = Array.from(records).flatMap((envelope) =>
@@ -493,10 +517,33 @@ describe('durable tool approval', () => {
 
         yield* conversation.run('release r1');
         yield* conversation.resolveApproval(CALL_ID, 'deny', 'not this week');
-        const result = yield* conversation.run('release r1');
+        const events = yield* conversation
+          .stream('release r1')
+          .pipe(Stream.runCollect);
+        const result = Array.from(events).find(
+          (event) => event._tag === 'Completed',
+        );
 
         expect(ran.count).toBe(0);
-        expect(result.outcome).toBe('success');
+        expect(result).toMatchObject({ outcome: 'success' });
+        expect(
+          Array.from(events).find(
+            (event) =>
+              event._tag === 'Part' &&
+              event.part.type === 'tool-result' &&
+              event.part.id === CALL_ID,
+          ),
+        ).toMatchObject({
+          _tag: 'Part',
+          step: 1,
+          part: {
+            type: 'tool-result',
+            id: CALL_ID,
+            name: 'release',
+            isFailure: true,
+            resultSource: 'recovered',
+          },
+        });
 
         const records = yield* conversation.records().pipe(Stream.runCollect);
         const tags = Array.from(records).map(
@@ -517,17 +564,17 @@ describe('durable tool approval', () => {
           outcome: 'failure',
         });
 
-        // The refusal is a genuine, decodable `AiError` — the same shape
-        // `failureMode: 'return'` already uses for a framework-level
-        // failure — not an ad hoc shape only this feature understands.
+        // The refusal is Effect's own `Tool.ExecutionFailure`, the shape
+        // `LanguageModel` gives an in-band denial — not an ad hoc shape only
+        // this feature understands.
         if (refusal === undefined) {
           throw new Error('expected one durable refusal outcome');
         }
-        const decoded = yield* Schema.decodeUnknownEffect(AiError.AiError)(
-          refusal.result,
-        );
-        expect(decoded._tag).toBe('AiError');
-        expect(decoded.reason.message).toContain('not this week');
+        const decoded = yield* Schema.decodeUnknownEffect(
+          Tool.ExecutionFailure,
+        )(refusal.result);
+        expect(decoded.type).toBe('execution-denied');
+        expect(decoded.reason).toContain('not this week');
       }),
     ),
   );

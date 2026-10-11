@@ -11,7 +11,7 @@ import {
   Prompt,
   type Response,
   Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -21,6 +21,7 @@ import * as AgentLog from '../src/log.js';
 import { RunPolicy } from '../src/run-policy.js';
 import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
 import { MAX_DEPTH } from '../src/subagent.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
@@ -494,6 +495,7 @@ describe('a recorded delegation', () => {
           yield* parent.append([
             {
               _tag: 'RunStarted',
+              budget: testBudget,
               agent: supervisor.name,
               formatVersion: 1,
               agentRevision: LogVocabulary.AgentRevision.make('1'),

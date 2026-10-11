@@ -9,11 +9,11 @@ deliberately missing, [`../CONTEXT.md`](../CONTEXT.md) is the vocabulary.
 ## The gate
 
 ```bash
-npx @nubjs/nub@0.7.5 install   # first time; see "Getting nub" below
-nub run verify
+bun install   # see "Getting Bun" below
+bun run verify
 ```
 
-`nub run verify` is what CI runs and what to run before opening a pull request.
+`bun run verify` is what CI runs and what to run before opening a pull request.
 The build goes first, because the static gates after it resolve cross-package
 imports against built declarations; format, lint, and typecheck then run
 concurrently with Knip, because they are independent and a contributor waiting
@@ -22,23 +22,23 @@ on four serial passes stops running the gate at all. Tests are last.
 Every lane is also a script of its own, so a failure is reproducible with one
 shorter command. `concurrently` groups and labels each lane's output so four
 tools do not write an unreadable stream to the terminal. Use
-`nub run verify:serial` when sequential output is more useful.
+`bun run verify:serial` when sequential output is more useful.
 
 | Command                                   | What it runs                                |
 | ----------------------------------------- | ------------------------------------------- |
-| `nub run build`                           | `tsdown`, plus package/type validation      |
-| `nub run test`                            | `vitest run` over every `test/`             |
-| `nub run typecheck`                       | non-emitting package/type checks            |
-| `nub run typecheck:types`                 | tests, benchmarks, and examples             |
-| `nub run lint` / `nub run lint:fix`       | strict type-aware `oxlint`, warnings denied |
-| `nub run format` / `nub run format:check` | `oxfmt`                                     |
-| `nub run knip`                            | unused files, exports, and dependencies     |
-| `nub run benchmark`                       | the suite in `benchmarks/`                  |
+| `bun run build`                           | `tsdown`, plus package/type validation      |
+| `bun run test`                            | `vitest run` over every `test/`             |
+| `bun run typecheck`                       | non-emitting package/type checks            |
+| `bun run typecheck:types`                 | tests, benchmarks, and examples             |
+| `bun run lint` / `bun run lint:fix`       | strict type-aware `oxlint`, warnings denied |
+| `bun run format` / `bun run format:check` | `oxfmt`                                     |
+| `bun run knip`                            | unused files, exports, and dependencies     |
+| `bun run benchmark`                       | the suite in `benchmarks/`                  |
 
 Oxlint enables the stable correctness, suspicious, and performance categories,
 the upstream strict type-checked TypeScript rules, and the strict Effect preset.
 Existing findings are recorded in `oxlint-suppressions.json`; any new finding
-fails the gate. After resolving suppressed findings, run `nub run lint:prune`
+fails the gate. After resolving suppressed findings, run `bun run lint:prune`
 to remove obsolete baseline entries.
 
 The strict Effect rules have one narrow contextual exception: the lint config
@@ -59,45 +59,36 @@ The shared TypeScript configuration also rejects implicit switch fallthrough,
 implicit overrides and returns, unchecked side-effect imports, index-signature
 dot access, unreachable code, and unused labels.
 
-`ANTHROPIC_API_KEY=... nub run example:compliance-relay "your prompt"` and
-`nub run example:live-smoke` run the two programs under `examples/`. Both reach
+`ANTHROPIC_API_KEY=... bun run example:compliance-relay "your prompt"` and
+`bun run example:live-smoke` run the two programs under `examples/`. Both reach
 a real provider and need an API key in the environment; nothing else does, and
 tests use scripted `LanguageModel`s.
 
-`nub run typecheck` checks every package and the type-level test projects
+`bun run typecheck` checks every package and the type-level test projects
 without emitting. tsdown is the only artifact producer; a typecheck can never
 overwrite or leave stale files in `dist`. Per-package `typecheck` scripts remain
 the faster loop while editing one package.
 
-### Getting nub
+### Getting Bun
 
-Nub is pinned as an ordinary devDependency, `@nubjs/nub` at **0.7.5**, so the
-lockfile records the exact version and every nested `nub` a script invokes is
-that one. Bootstrapping needs one command that does not depend on having nub
-yet:
+Bun is the package manager and script runner. The root `package.json` pins it
+through `packageManager` (`bun@1.4.3`), `mise.toml` installs the same version
+for anyone using mise, and CI reads the pin through `setup-bun`. Install it
+from [bun.sh](https://bun.sh), then `bun install` from the repository root.
+The lockfile is `bun.lock`; CI installs with `--frozen-lockfile`.
 
-```bash
-npx @nubjs/nub@0.7.5 install
-```
-
-After that `node_modules/.bin/nub` exists, and `npm install -g @nubjs/nub@0.7.5`
-(or [nubjs.com/install.sh](https://nubjs.com/install.sh)) is the convenience of
-having `nub` on `PATH` for daily use. CI uses the pinned official `setup-nub`
-action with the same CLI version and caches against `nub.lock`.
-
-The repository declares Nub as its package manager through
-`devEngines.packageManager`, keeps workspace configuration in the root
-`package.json`, and commits `nub.lock`. The exact executable version is also a
-dev dependency so nested scripts use the same Nub that bootstrapped the
-workspace. Run `nub pm which` to inspect the active package-manager identity.
+Bun runs the scripts, but the code under test runs on Node: `vitest`, `tsc`,
+and the other tools keep their Node shebangs, so a local run exercises the
+same runtime as a consumer. `bun run test:runtime:bun` is the one deliberate
+exception, which checks the code executor under Bun itself.
 
 The root workspace catalog owns development-time Effect family versions, so an
-RC upgrade is one policy edit for the root, examples, benchmarks, and package
-development dependencies. Published runtime and peer ranges remain concrete:
-Nub 0.7.5 preserves `catalog:` and `workspace:*` in packed manifests instead of
-rewriting them to npm ranges. For the same reason, publishable packages use an
-exact version for a sibling Vesper dependency; private examples and benchmarks
-can safely retain `workspace:*`.
+Effect upgrade is one policy edit for the root, examples, benchmarks, and
+package development dependencies. `bun pm pack` rewrites `catalog:` and
+`workspace:*` to concrete versions in packed manifests, and the
+packed-consumer check fails if either protocol survives into a tarball.
+Publishable packages still use an exact version for a sibling Vesper
+dependency so the published graph is explicit in source.
 
 Node.js 22 or newer is required locally; CI runs Node 22 and 24, and publishing
 uses Node 24. See [the release procedure](releasing.md) for versioning and
@@ -117,7 +108,7 @@ publishing policy.
 
 ## Tests
 
-`nub run test` runs every package's `test/` directory as a single vitest project,
+`bun run test` runs every package's `test/` directory as a single vitest project,
 from the repository root. There is no per-package `test` script, and running
 vitest from inside a package is not a supported shortcut.
 
@@ -131,9 +122,9 @@ Are the types wrong? during every build.
 
 Type-level assertions are load-bearing here — several tools pin their service
 requirements as assertions that fail at compile rather than at run time — and
-`vitest run` does not check them. `nub run typecheck:types` is what compiles
+`vitest run` does not check them. `bun run typecheck:types` is what compiles
 `packages/*/test`, `benchmarks/`, and `examples/*/src`. A test that only
-asserts a type will pass `nub run test` while failing the gate.
+asserts a type will pass `bun run test` while failing the gate.
 
 ### The Postgres suite
 
@@ -142,17 +133,19 @@ asserts a type will pass `nub run test` while failing the gate.
 backend cannot demonstrate: that the schema the test harness creates is the
 schema the layer actually queries, and that a `LISTEN` connection dying
 reaches the consumer as a failure rather than as a tail that looks healthy and
-delivers nothing. Queries and transactions run through Effect SQL's official
-`PgClient`; the suite also pins the corrected RC.109 listener readiness,
-transaction rollback, timeout isolation, and cross-client notification
-semantics.
+delivers nothing. Queries, transactions, and `LISTEN` all run through Effect
+SQL's official `PgClient`, unmodified since `@effect/sql-pg` 4.0.0 replaced
+`pg` with its own driver; the suite pins the driver behaviour the adapter
+relies on: `listen` resolving only after `LISTEN` is registered, a killed
+listener backend failing its queue, transaction rollback, timeout isolation,
+`pg_notify` delivering only on commit, and cross-client notification.
 
 It is skipped unless opted into, because a suite that silently needs a
 container runtime is a suite that fails for a contributor who has not been
 told:
 
 ```bash
-RUN_POSTGRES_INTEGRATION=1 nub run test
+RUN_POSTGRES_INTEGRATION=1 bun run test
 ```
 
 It provisions and drops a database through testcontainers, so a container
@@ -170,10 +163,11 @@ the finished packages with publint and Are the types wrong?. Packages publish
 `./dist/*.d.ts`: sources are not published, and a module absent from `exports`
 is unreachable to a consumer however it got into `dist`.
 
-`nub run publish:npm:dry-run` previews the alpha release, and
-`nub run publish:npm` publishes it. Nub selects the publishable Vesper packages,
-orders their workspace graph, attaches provenance, and skips versions already
-on the registry, so re-running a half-finished release finishes it. The release
+`bun run publish:npm:dry-run` previews the alpha release, and
+`bun run publish:npm` publishes it. `scripts/publish-packages.mjs` selects the
+publishable Vesper packages, orders their workspace graph, packs each with
+Bun, uploads with npm so provenance attaches, and skips versions already on
+the registry, so re-running a half-finished release finishes it. The release
 workflow selects beta, next, or latest when the tag or manual input calls for
 another dist-tag.
 
@@ -182,7 +176,7 @@ another dist-tag.
 ```
 agent       -> effect, @sunfall/vesper-log, @sunfall/vesper-attachments
 log         -> effect
-log-pg      -> effect, @sunfall/vesper-log, @effect/sql-pg, pg
+log-pg      -> effect, @sunfall/vesper-log, @effect/sql-pg
 workspace   -> effect
 attachments -> effect
 mcp         -> effect, @sunfall/vesper-agent, @sunfall/vesper-log
@@ -284,7 +278,7 @@ watching. Model typed errors that cross that boundary with
 
 The three `Schema.Unknown` fields — `RunStarted.prompt`, `ToolCall.params`,
 `ToolOutcome.result` — are the exception, held that way because their real
-schemas belong to `effect/unstable/ai` and to whatever toolkit is in play.
+schemas belong to `effect/ai` and to whatever toolkit is in play.
 `ToolOutcome.result` stores the toolkit's **encoding** of a result rather than
 the decoded value, which is both what a resuming dispatch can serve back and
 what `AgentHistory` puts in front of the model.

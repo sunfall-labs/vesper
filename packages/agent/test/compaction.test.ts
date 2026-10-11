@@ -1,11 +1,5 @@
 import { Effect, Layer, Logger, Ref, Stream } from 'effect';
-import {
-  AiError,
-  Chat,
-  LanguageModel,
-  Prompt,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { AiError, Chat, LanguageModel, Prompt, Toolkit } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -67,9 +61,7 @@ const seeded = Prompt.make([
 
 /** Run against a fresh fake provider and hand back what it was asked. */
 const run = <A, E>(
-  build: (
-    chat: Chat.Service,
-  ) => Effect.Effect<A, E, LanguageModel.LanguageModel>,
+  build: (chat: Chat.Chat) => Effect.Effect<A, E, LanguageModel.LanguageModel>,
   history: Prompt.Prompt,
 ): Effect.Effect<
   {
@@ -539,6 +531,22 @@ describe('isContextOverflow', () => {
     });
 
     expect(isContextOverflow(error)).toBe(true);
+  });
+
+  // A throttle shares the overflow vocabulary. Compacting in answer to one
+  // would rewrite history because the provider was busy.
+  it.each([
+    'Request too large for model: too many tokens per minute (TPM). Limit 6000, Requested 9000',
+    'Rate limit reached: too many tokens, please slow down',
+    'ThrottlingException: Too many tokens, please wait before trying again (quota exceeded)',
+  ])('does not treat a throughput limit as overflow: %s', (description) => {
+    const error = new AiError.AiError({
+      module: 'test',
+      method: 'generateText',
+      reason: new AiError.InvalidRequestError({ description }),
+    });
+
+    expect(isContextOverflow(error)).toBe(false);
   });
 
   it('does not treat other request errors as overflow', () => {

@@ -1,5 +1,5 @@
 import { Schema } from 'effect';
-import { Prompt, type Response, type Tool } from 'effect/unstable/ai';
+import { Prompt, type Response, type Tool } from 'effect/ai';
 
 import { Stop } from './stop.js';
 
@@ -177,16 +177,45 @@ export type SubstitutedToolResult<
   readonly isFailure: Failure;
 };
 
+/** A settled result replayed from durable recovery into the live stream. */
+export type RecoveredToolResult<
+  Name extends string = string,
+  Failure extends boolean = boolean,
+> = Response.ToolResultPart<Name, unknown, unknown> & {
+  /** Recording sinks must not persist this already-durable result again. */
+  readonly resultSource: 'recovered';
+  readonly isFailure: Failure;
+};
+
+/**
+ * The failed result the agent gives a call to a tool the turn did not offer.
+ * Its `name` is whatever the model wrote, and its result is an encoded
+ * `AiError` with a `ToolNotFoundError` reason.
+ */
+export type UndeclaredToolResult = Response.ToolResultPart<
+  string,
+  unknown,
+  unknown
+>;
+
+/**
+ * A part as Vesper streams it. Tool-call parameters are `deferred`: the
+ * model-authored value, which Toolkit validates before a handler runs, and a
+ * call may name any tool, including one the turn did not offer. The agent
+ * answers every call itself, so its result parts follow the response.
+ */
 export type StreamPart<Tools extends Record<string, Tool.Any>> =
-  | Response.ModelStreamPart<Tools>
-  | SubstitutedToolResult<keyof Tools & string>;
+  | Response.StreamPart<Tools, 'deferred'>
+  | SubstitutedToolResult<keyof Tools & string>
+  | RecoveredToolResult
+  | UndeclaredToolResult;
 
 export type Event<Tools extends Record<string, Tool.Any>> =
   | Lifecycle
   | {
       readonly _tag: 'Part';
       readonly step: number;
-      readonly part: Response.ModelStreamPart<Tools>;
+      readonly part: StreamPart<Tools>;
       /**
        * The provider-facing representation of `part`.
        *

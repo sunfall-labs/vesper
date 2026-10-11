@@ -5,7 +5,7 @@ import {
   LanguageModel,
   type Prompt,
   type Response,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { Compaction } from '../src/compaction.js';
 import { ContextWindow } from '../src/context-window.js';

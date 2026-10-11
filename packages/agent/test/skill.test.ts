@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect } from 'effect';
-import { Tool } from 'effect/unstable/ai';
+import { Tool } from 'effect/ai';
 
 import { catalog, loader, TOOL_NAME, type Skill } from '../src/skill.js';
 

@@ -4,7 +4,7 @@ import { AgentState } from '@sunfall/vesper-agent/state';
 import { Stop } from '@sunfall/vesper-agent/stop';
 import { AgentWorkflow } from '@sunfall/vesper-agent/workflow';
 import { Context, Effect, Schema } from 'effect';
-import { Tool, Toolkit } from 'effect/unstable/ai';
+import { Tool, Toolkit } from 'effect/ai';
 
 /** An ordinary application service. Nothing here is AI-specific. */
 export class OrderRepo extends Context.Service<

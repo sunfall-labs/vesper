@@ -1,5 +1,5 @@
 import { Effect, Option, Queue } from 'effect';
-import { Prompt, type LanguageModel, type Tool } from 'effect/unstable/ai';
+import { Prompt, type LanguageModel, type Tool } from 'effect/ai';
 
 import type { Stop } from './stop.js';
 
@@ -13,13 +13,13 @@ export interface State<
 /**
  * Input and model selection for one more turn.
  *
- * A returned model is Effect's `LanguageModel.Service`, not a Vesper model
+ * A returned model is Effect's `LanguageModel.LanguageModel`, not a Vesper model
  * registry entry. Provider-specific reasoning and request configuration stay
  * at the official provider seam and apply to this and later turns.
  */
 export interface Continuation {
   readonly input: Prompt.RawInput;
-  readonly model?: LanguageModel.Service | undefined;
+  readonly model?: LanguageModel.LanguageModel | undefined;
 }
 
 /** An effectful policy evaluated on complete turn information. */
@@ -33,7 +33,7 @@ export const keep: Option.Option<Continuation> = Option.none();
 /** Continue, optionally adding input or selecting the model for later turns. */
 export const continueWith = (
   input: Prompt.RawInput,
-  options?: { readonly model?: LanguageModel.Service | undefined },
+  options?: { readonly model?: LanguageModel.LanguageModel | undefined },
 ): Option.Option<Continuation> =>
   Option.some({
     input,

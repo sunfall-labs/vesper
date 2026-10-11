@@ -1,4 +1,4 @@
-import type { AiError } from 'effect/unstable/ai';
+import type { AiError } from 'effect/ai';
 
 /** Policy for proactive and reactive conversation compaction. */
 export interface Policy {
@@ -55,12 +55,27 @@ export const defaultPolicy: Policy = {
 /** Provider constraint used for a prompt that no longer fits. */
 export const CONTEXT_OVERFLOW = 'context-window';
 
+const OVERFLOW_TEXT =
+  /(?:context(?: length| window)?(?: is)?(?: exceeded| too long)|maximum context length|model_context_window_exceeded|prompt is too long|too many tokens|input is too long)/i;
+
+// Throughput limits share the vocabulary of an overflow ("request too large:
+// too many tokens per minute") but say nothing about the prompt. Treating one
+// as an overflow would compact — rewrite history — in answer to a throttle.
+const THROUGHPUT_TEXT =
+  /(?:per (?:minute|min|second|sec|hour|day)|\b[TR]P[MSD]\b|rate.?limit|throttl|quota)/i;
+
+/**
+ * True when a provider's error text describes a prompt that does not fit the
+ * context window. Unrecognised text is not an overflow: reactive compaction is
+ * destructive, so it runs only on a positive match.
+ */
+export const describesContextOverflow = (description: string): boolean =>
+  OVERFLOW_TEXT.test(description) && !THROUGHPUT_TEXT.test(description);
+
 /** True when an Effect AI failure reports a context-window overflow. */
 export const isContextOverflow = (error: AiError.AiError): boolean =>
   error.reason._tag === 'InvalidRequestError' &&
   (error.reason.constraint === CONTEXT_OVERFLOW ||
-    /(?:context(?: length| window)?(?: is)?(?: exceeded| too long)|maximum context length|model_context_window_exceeded|prompt is too long|too many tokens|input is too long)/i.test(
-      error.reason.description ?? '',
-    ));
+    describesContextOverflow(error.reason.description ?? ''));
 
 export * as Compaction from './compaction.js';

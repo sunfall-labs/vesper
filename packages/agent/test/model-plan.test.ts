@@ -14,7 +14,7 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 
 import { ModelPlan } from '../src/model-plan.js';
 

@@ -1,18 +1,15 @@
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
+import {
+  type ConversationRecord,
+  FORMAT_VERSION,
+} from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { beforeEach, describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Ref, Schema, Stream, type Crypto } from 'effect';
-import {
-  LanguageModel,
-  Prompt,
-  type Response,
-  Tool,
-  Toolkit,
-} from 'effect/unstable/ai';
+import { LanguageModel, Prompt, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { AgentBranch } from '../src/branch.js';
@@ -20,6 +17,7 @@ import { Conversation } from '../src/conversation.js';
 import { AgentHistory } from '../src/history.js';
 import { AgentHistory as AgentHistoryRuntime } from '../src/internal/history.js';
 import * as AgentLog from '../src/log.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -202,6 +200,7 @@ const at = (index: number) => LogOffset.fromSeq(BigInt(index));
 
 const started = (text: string): ConversationRecord.Record => ({
   _tag: 'RunStarted',
+  budget: testBudget,
   agent: 'test',
   formatVersion: 1,
   agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -357,6 +356,9 @@ describe('rebuilding a branched conversation', () => {
         turn, // 2
         {
           _tag: 'Compacted',
+          formatVersion: FORMAT_VERSION,
+          agent: 'test',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           step: 1,
           summary: 'summary of the abandoned turn',
           firstKept: LogOffset.START,
@@ -390,6 +392,9 @@ describe('rebuilding a branched conversation', () => {
         turn, // 4
         {
           _tag: 'Compacted',
+          formatVersion: FORMAT_VERSION,
+          agent: 'test',
+          agentRevision: LogVocabulary.AgentRevision.make('1'),
           step: 1,
           summary: 'summary of everything so far',
           firstKept: LogOffset.START,

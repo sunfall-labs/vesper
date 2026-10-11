@@ -8,6 +8,7 @@ import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer } from 'effect';
 
 import * as AgentLog from '../src/log.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -205,6 +206,7 @@ describe('long conversation open structure', () => {
             settled(),
             {
               _tag: 'RunStarted',
+              budget: testBudget,
               agent: 'test',
               formatVersion: 1,
               agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -281,6 +283,7 @@ describe('long conversation open structure', () => {
           yield* seed('no-aggregate', [
             {
               _tag: 'RunStarted',
+              budget: testBudget,
               agent: 'test',
               formatVersion: 1,
               agentRevision: LogVocabulary.AgentRevision.make('1'),
@@ -331,35 +334,5 @@ describe('long conversation open structure', () => {
         expect(result.second.records).toBeGreaterThan(19_000);
         expect(result.after).toBe(result.before);
       }),
-  );
-
-  it.effect('rejects unrevisioned history instead of self-upgrading it', () =>
-    Effect.gen(function* () {
-      const reads = { calls: 0, records: 0 };
-      const failure = yield* Effect.gen(function* () {
-        yield* seed('legacy', [
-          { _tag: 'RunStarted', agent: 'test', prompt: [] },
-          ...Array.from({ length: 9_990 }, (_, index) => text(index)),
-          {
-            _tag: 'RunSettled',
-            outcome: 'success',
-            detail: '',
-            steps: 1,
-            usage: { input: 10, output: 5 },
-          },
-        ]);
-        reset(reads);
-        yield* AgentLog.open(LogVocabulary.ConversationId.make('legacy'), {
-          compatibility: {
-            agent: 'test',
-            revision: LogVocabulary.AgentRevision.make('1'),
-          },
-        });
-      }).pipe(Effect.provide(counted(reads)), Effect.flip);
-      expect(failure.message).toContain(
-        'predates explicit compatibility metadata',
-      );
-      expect(reads.records).toBeGreaterThan(9_000);
-    }),
   );
 });

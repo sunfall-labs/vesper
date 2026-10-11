@@ -11,9 +11,9 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
-import { Command, Flag, Prompt } from 'effect/unstable/cli';
-import { WorkflowEngine } from 'effect/unstable/workflow';
+} from 'effect/ai';
+import { Command, Flag, Prompt } from 'effect/cli';
+import { WorkflowEngine } from 'effect/workflow';
 
 // This is deliberately a story, not a real deployment. The scripted model
 // makes the example deterministic and keeps the approval API visible instead
@@ -198,7 +198,7 @@ const AppLive = binding.layer.pipe(
 const choose = (mode: DecisionMode) =>
   mode === 'ask'
     ? Prompt.run(
-        Prompt.select({
+        Prompt.Select({
           message: 'What should happen?',
           choices: [
             {
@@ -280,7 +280,7 @@ const runStory = (mode: DecisionMode) =>
 const command = Command.make(
   'approval-story',
   {
-    decision: Flag.choice('decision', ['ask', 'approve', 'deny']).pipe(
+    decision: Flag.Literals('decision', ['ask', 'approve', 'deny']).pipe(
       Flag.withDescription(
         'Prompt interactively, or choose a branch non-interactively.',
       ),

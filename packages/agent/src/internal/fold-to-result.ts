@@ -1,5 +1,5 @@
 import { Effect, Stream } from 'effect';
-import type { Tool } from 'effect/unstable/ai';
+import type { Tool } from 'effect/ai';
 
 import type { Agent } from '../agent.js';
 import type { AgentEvents } from '../event.js';

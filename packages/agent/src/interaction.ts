@@ -1,5 +1,5 @@
 import { Context, Effect, Option, Schema } from 'effect';
-import type { Tool } from 'effect/unstable/ai';
+import type { Tool } from 'effect/ai';
 
 /** Metadata persisted when a tool pauses for an external interaction. */
 export const Metadata = Schema.Struct({

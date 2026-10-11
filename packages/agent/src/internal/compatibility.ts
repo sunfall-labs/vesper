@@ -43,37 +43,16 @@ export const validateCompatibility = (
   }
 
   // A newly-created stream, or a child stream containing only links/signals,
-  // has no definition identity to compare yet. Any actual conversation state
-  // without one is legacy history and must not be adopted silently.
-  if (identities.length === 0) {
-    const hasConversationState = history.some(
-      ({ record }) =>
-        record._tag !== 'ChildSession' && record._tag !== 'Signal',
-    );
-    return hasConversationState
-      ? Effect.fail(
-          compatibilityError(
-            expected,
-            {},
-            'history predates explicit compatibility metadata',
-          ),
-        )
-      : Effect.void;
-  }
-
+  // has no definition identity to compare yet, so there is nothing to reject.
   for (const persisted of identities) {
     const problem =
-      persisted.formatVersion === undefined ||
-      persisted.agentRevision === undefined ||
-      persisted.agent === undefined
-        ? 'history predates explicit compatibility metadata'
-        : persisted.formatVersion !== FORMAT_VERSION
-          ? `conversation format ${String(persisted.formatVersion)} is unsupported; this release supports format ${String(FORMAT_VERSION)}`
-          : persisted.agent !== expected.agent
-            ? `history contains contradictory agent "${persisted.agent}", not "${expected.agent}"`
-            : persisted.agentRevision !== expected.revision
-              ? `history contains contradictory revision "${persisted.agentRevision}", not "${expected.revision}"`
-              : undefined;
+      persisted.formatVersion !== FORMAT_VERSION
+        ? `conversation format ${String(persisted.formatVersion)} is unsupported; this release supports format ${String(FORMAT_VERSION)}`
+        : persisted.agent !== expected.agent
+          ? `history contains contradictory agent "${String(persisted.agent)}", not "${expected.agent}"`
+          : persisted.agentRevision !== expected.revision
+            ? `history contains contradictory revision "${String(persisted.agentRevision)}", not "${expected.revision}"`
+            : undefined;
     if (problem !== undefined) {
       return Effect.fail(compatibilityError(expected, persisted, problem));
     }

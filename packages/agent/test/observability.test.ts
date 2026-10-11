@@ -3,7 +3,7 @@ import * as NodeServices from '@effect/platform-node/NodeServices';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, Layer, Metric, Option, Schema, Stream, Tracer } from 'effect';
-import { Tool, Toolkit, type Response } from 'effect/unstable/ai';
+import { Tool, Toolkit, type Response } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -225,12 +225,11 @@ describe('agent observability spans', () => {
 
         // Parent-child structure, cheap to check because the capturing tracer
         // already recorded each span's parent by name: run -> turn -> model.
-        // The tool span nests one level deeper still, under Effect ai's own
-        // `Chat.streamText` span — dispatch happens while that provider
-        // stream is still being pulled, not after `Agent.model` closes.
+        // The tool span is the model span's sibling: the agent runs a turn's
+        // calls after the response that made them has finished.
         expect(turns[0]?.parentName).toBe('Agent.run');
         expect(models[0]?.parentName).toBe('Agent.turn');
-        expect(tool?.parentName).toBe('Chat.streamText');
+        expect(tool?.parentName).toBe('Agent.turn');
       }),
   );
 
@@ -312,8 +311,8 @@ describe('agent observability spans', () => {
           false,
         );
 
-        // The delegating tool call nests under the model's own
-        // `Chat.streamText` span, like any tool call (see the sibling test).
+        // The delegating tool call nests under the turn, like any tool call
+        // (see the sibling test).
         // `Agent.delegate` itself, though, does not nest under that
         // `Agent.tool` span: the dispatch runtime runs tool handlers on a
         // separately forked fiber, so the ambient span when the delegation
@@ -322,7 +321,7 @@ describe('agent observability spans', () => {
         // nest under `Agent.delegate`, which is the parent-child edge that
         // actually matters for reading a delegation trace.
         expect(parentRun?.parentName).toBeUndefined();
-        expect(delegateTool?.parentName).toBe('Chat.streamText');
+        expect(delegateTool?.parentName).toBe('Agent.turn');
         expect(delegate?.parentName).toBe('Agent.run');
         expect(childRun?.parentName).toBe('Agent.delegate');
       }),

@@ -3,7 +3,7 @@ import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Deferred, Effect, Layer, Schema, Stream } from 'effect';
-import { AiError, type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { AiError, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { CodeExecutor } from '../src/code-executor.js';
@@ -320,10 +320,10 @@ describe('code mode tool broker', () => {
         'Execute erasable TypeScript that composes the hidden tools below.',
       );
       expect(execDescription).toContain(
-        'readonly lookup: (input: { readonly id: string }) => Promise<{ readonly status: string }>;',
+        'readonly lookup: (input: { readonly id: string }, options?: ToolCallOptions) => Promise<{ readonly status: string }>;',
       );
       expect(execDescription).toContain(
-        'readonly summarize: (input: { readonly status: string }) => Promise<string>;',
+        'readonly summarize: (input: { readonly status: string }, options?: ToolCallOptions) => Promise<string>;',
       );
       expect(execDescription).toContain(
         'declare function text(value: string | JsonValue): void;',
@@ -570,12 +570,10 @@ describe('code mode tool broker', () => {
         const error = yield* Schema.decodeUnknownEffect(AiError.AiError)(
           response.error.value,
         );
-        expect(error.reason._tag).toBe('ToolParameterValidationError');
-        if (error.reason._tag !== 'ToolParameterValidationError') {
-          throw new Error('expected ToolParameterValidationError');
-        }
-        expect(error.reason.toolName).toBe('lookup');
-        expect(error.reason.toolParams).toEqual({ id: 42 });
+        expect(error.reason).toMatchObject({
+          _tag: 'ToolParameterValidationError',
+          toolName: 'lookup',
+        });
       }),
   );
 

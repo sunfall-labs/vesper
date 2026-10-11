@@ -21,7 +21,7 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
+} from 'effect/ai';
 import { describe, expect, it, test } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -29,6 +29,7 @@ import { Conversation } from '../src/conversation.js';
 import { AgentEvents } from '../src/event.js';
 import { Interception } from '../src/interception.js';
 import * as AgentLog from '../src/log.js';
+import { testBudget } from './budget-fixture.js';
 
 const testLogLayer = Layer.mergeAll(
   LogStoreMemory.layer.pipe(Layer.provide(NodeServices.layer)),
@@ -606,6 +607,7 @@ const outcomesOf = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
 const crashed: ReadonlyArray<ConversationRecord.Record> = [
   {
     _tag: 'RunStarted',
+    budget: testBudget,
     agent: 'test',
     formatVersion: 1,
     agentRevision: LogVocabulary.AgentRevision.make('1'),

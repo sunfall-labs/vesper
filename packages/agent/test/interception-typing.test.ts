@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Schema } from 'effect';
-import { Tool } from 'effect/unstable/ai';
+import { Tool } from 'effect/ai';
 
 import { Interception } from '../src/interception.js';
 

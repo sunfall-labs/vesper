@@ -1,7 +1,7 @@
 import { LogOffset } from '@sunfall/vesper-log/offset';
 import { ConversationRecord } from '@sunfall/vesper-log/record';
 import { Effect, Schema } from 'effect';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 
 import { AgentBranch } from '../branch.js';
 import { PromptTransport } from '../prompt-transport.js';
@@ -37,7 +37,7 @@ import { CompactionRuntime } from './compaction.js';
 // assistant tool call with no matching result. So an unanswered call is
 // dropped. A resumed agent resolves indeterminate starts before rebuilding this
 // prompt, so the active recovery path supplies an outcome first. The filtering
-// remains necessary for malformed/legacy history and non-resuming readers.
+// remains necessary for crashed histories read without a resume (non-resuming readers).
 //
 // ## Compaction is honoured, not ignored
 //
@@ -278,6 +278,13 @@ const fold = (
   // "this message and everything after".
   let assistantAt = LogOffset.START;
   let resultsAt = LogOffset.START;
+  // A turn can finish before every call in it is answered: a truncated turn
+  // interrupts a started handler, and resume answers it afterwards
+  // (`onIndeterminateToolCall`). Its `TurnFinished` then precedes the
+  // answer. Closing the turn there would split each call from its result, and
+  // the rule below would drop both. Instead the turn stays open for its
+  // results, and closes once they are all in or when anything else begins.
+  let awaitingResults = false;
 
   /**
    * Close the turn being accumulated.
@@ -318,6 +325,27 @@ const fold = (
     results = [];
     assistantAt = LogOffset.START;
     resultsAt = LogOffset.START;
+    awaitingResults = false;
+  };
+
+  const unanswered = (): boolean => {
+    const answered = new Set(results.map((result) => result.id));
+    return assistant.some(
+      (part) =>
+        part.type === 'tool-call' &&
+        !part.providerExecuted &&
+        !answered.has(part.id),
+    );
+  };
+
+  /** New model output starts the next turn, so the held one closes first. */
+  const beginAssistant = (): void => {
+    if (awaitingResults) {
+      flush();
+    }
+    if (assistant.length === 0) {
+      assistantAt = currentOffset;
+    }
   };
 
   let currentOffset = LogOffset.START;
@@ -335,16 +363,12 @@ const fold = (
     },
 
     Text: (record) => {
-      if (assistant.length === 0) {
-        assistantAt = currentOffset;
-      }
+      beginAssistant();
       assistant.push(Prompt.makePart('text', { text: record.text }));
     },
 
     ToolCall: (record) => {
-      if (assistant.length === 0) {
-        assistantAt = currentOffset;
-      }
+      beginAssistant();
       assistant.push(
         Prompt.makePart('tool-call', {
           id: record.id,
@@ -371,10 +395,17 @@ const fold = (
           result: record.result,
         }),
       );
+      if (awaitingResults && !unanswered()) {
+        flush();
+      }
     },
 
     TurnFinished: () => {
-      flush();
+      if (unanswered()) {
+        awaitingResults = true;
+      } else {
+        flush();
+      }
     },
 
     SignalReceived: (record) => {
@@ -406,11 +437,17 @@ const fold = (
     // fold and one that did would say nothing about the conversation.
     Compacted: () => {},
     BranchedFrom: () => {},
+    // Progress toward a `Text` the turn never finished: output the model did
+    // not complete is not something it said, so it is never replayed to it.
+    PartialOutput: () => {},
     ToolStarted: () => {},
     ToolSuspended: () => {},
     ToolResumed: () => {},
     ToolWaitCompleted: () => {},
     ToolWaitRestarted: () => {},
+    NestedToolCall: () => {},
+    NestedToolStarted: () => {},
+    NestedToolOutcome: () => {},
     Completed: () => {},
     ChildSession: () => {},
     RunSettled: () => {},
@@ -473,12 +510,16 @@ export const usageFrom = (
       run = { input: 0, output: 0 };
     },
     Text: () => {},
+    PartialOutput: () => {},
     ToolCall: () => {},
     ToolStarted: () => {},
     ToolSuspended: () => {},
     ToolResumed: () => {},
     ToolWaitCompleted: () => {},
     ToolWaitRestarted: () => {},
+    NestedToolCall: () => {},
+    NestedToolStarted: () => {},
+    NestedToolOutcome: () => {},
     ToolOutcome: () => {},
     Compacted: () => {},
     BranchedFrom: () => {},

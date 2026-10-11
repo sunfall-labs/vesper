@@ -1,6 +1,6 @@
 import type { Stop } from '../stop.js';
 import { AgentEvents } from '../event.js';
-import type { Prompt } from 'effect/unstable/ai';
+import type { Prompt } from 'effect/ai';
 
 export const turnStarted = (step: number): AgentEvents.Lifecycle =>
   AgentEvents.Lifecycle.cases.TurnStarted.make({ step });

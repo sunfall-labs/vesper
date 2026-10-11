@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Queue, Ref } from 'effect';
-import { type Response, Toolkit } from 'effect/unstable/ai';
+import { type Response, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { ScriptedModel } from '../src/testing.js';

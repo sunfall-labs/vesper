@@ -1,5 +1,5 @@
 import { ContextWindow } from '@sunfall/vesper-agent/context-window';
-import { Prompt } from 'effect/unstable/ai';
+import { Prompt } from 'effect/ai';
 import { describe, expect, it } from '@effect/vitest';
 
 const conversation = Prompt.make([

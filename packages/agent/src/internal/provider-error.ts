@@ -1,5 +1,5 @@
 import { Predicate } from 'effect';
-import { AiError, type Response } from 'effect/unstable/ai';
+import { AiError, type Response } from 'effect/ai';
 
 import { Compaction } from '../compaction.js';
 import type { AgentEvents } from '../event.js';
@@ -77,15 +77,12 @@ export const normalizeProviderError = (
   return new AiError.AiError({
     module: 'Agent',
     method: 'streamText',
-    reason:
-      /(?:context(?: length| window)?(?: is)?(?: exceeded| too long)|maximum context length|model_context_window_exceeded|prompt is too long|too many tokens|input is too long)/i.test(
-        structured.description,
-      )
-        ? new AiError.InvalidRequestError({
-            ...common,
-            constraint: Compaction.CONTEXT_OVERFLOW,
-          })
-        : new AiError.UnknownError(common),
+    reason: Compaction.describesContextOverflow(structured.description)
+      ? new AiError.InvalidRequestError({
+          ...common,
+          constraint: Compaction.CONTEXT_OVERFLOW,
+        })
+      : new AiError.UnknownError(common),
   });
 };
 

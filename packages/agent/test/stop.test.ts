@@ -1,6 +1,6 @@
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Ref, Schema, Stream } from 'effect';
-import { Prompt, type Response, Tool, Toolkit } from 'effect/unstable/ai';
+import { Prompt, type Response, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { AgentEvents } from '../src/event.js';

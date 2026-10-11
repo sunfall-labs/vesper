@@ -6,7 +6,7 @@ import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
 import { Effect, Layer, Schema, Stream } from 'effect';
-import { type Prompt, Tool, Toolkit } from 'effect/unstable/ai';
+import { type Prompt, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';

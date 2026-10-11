@@ -1,8 +1,7 @@
 import type { Agent } from '@sunfall/vesper-agent/agent';
 import type { Effect, Layer } from 'effect';
-import type { LanguageModel, Tool } from 'effect/unstable/ai';
-import type { WorkflowEngine } from 'effect/unstable/workflow';
-import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
+import type { LanguageModel, Tool } from 'effect/ai';
+import type { WorkflowEngine } from 'effect/workflow';
 
 import type {
   OrderRepo,
@@ -34,13 +33,18 @@ const _refundAuthorizationRequired: Has<RefundAuthorization, RunRequires> =
 const _modelRequired: Has<LanguageModel.LanguageModel, RunRequires> = 'yes';
 const _workflowEngineRequired: Has<WorkflowEngine.WorkflowEngine, RunRequires> =
   'yes';
-const _workflowInstanceRequired: Has<WorkflowInstance, RunRequires> = 'yes';
+const _workflowInstanceRequired: Has<
+  WorkflowEngine.WorkflowInstance,
+  RunRequires
+> = 'yes';
 const _bindingRequiresEngine: Has<
   WorkflowEngine.WorkflowEngine,
   WorkflowRequires
 > = 'yes';
-const _bindingDischargesInstance: Has<WorkflowInstance, WorkflowRequires> =
-  'no';
+const _bindingDischargesInstance: Has<
+  WorkflowEngine.WorkflowInstance,
+  WorkflowRequires
+> = 'no';
 const _stateHandleDischarged: Has<typeof SupportState, RunRequires> = 'no';
 const _handlersDischarged: Has<
   Tool.HandlersFor<Agent.Tools<typeof supportAgent>>,

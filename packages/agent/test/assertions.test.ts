@@ -8,7 +8,7 @@ import {
   SchemaTransformation,
   type Stream,
 } from 'effect';
-import { type LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
+import { type LanguageModel, Tool, Toolkit } from 'effect/ai';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
@@ -215,7 +215,7 @@ const TransformedState = AgentState.make({
   schema: Schema.String.pipe(
     Schema.decodeTo(
       Schema.Finite,
-      SchemaTransformation.transformOrFail<
+      SchemaTransformation.transformEffect<
         number,
         string,
         StateCodecService,

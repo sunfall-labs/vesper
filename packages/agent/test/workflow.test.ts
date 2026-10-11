@@ -23,13 +23,8 @@ import {
   type Response,
   Tool,
   Toolkit,
-} from 'effect/unstable/ai';
-import {
-  DurableDeferred,
-  Workflow,
-  WorkflowEngine,
-} from 'effect/unstable/workflow';
-import type { WorkflowInstance } from 'effect/unstable/workflow/WorkflowEngine';
+} from 'effect/ai';
+import { DurableDeferred, Workflow, WorkflowEngine } from 'effect/workflow';
 import { describe, expect, it } from '@effect/vitest';
 
 import { Agent } from '../src/agent.js';
@@ -87,7 +82,7 @@ const durableLookup = AgentWorkflow.step({
 });
 
 const _stepRequiresWorkflow: Has<
-  WorkflowInstance | WorkflowEngine.WorkflowEngine,
+  WorkflowEngine.WorkflowInstance | WorkflowEngine.WorkflowEngine,
   EffR<ReturnType<typeof durableLookup>>
 > = 'yes';
 
@@ -570,7 +565,7 @@ describe('AgentWorkflow', () => {
         const EncodeFailure = Schema.String.pipe(
           Schema.decodeTo(
             Schema.Finite,
-            SchemaTransformation.transformOrFail<number, string>({
+            SchemaTransformation.transformEffect<number, string>({
               decode: (value) => Effect.succeed(Number(value)),
               encode: () =>
                 Effect.fail(
