@@ -47,25 +47,28 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Setup nub
-        uses: nubjs/setup-nub@47e5e7393d50f4e9544ddaf756aa277972afba2d # v0.4.0
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          nub-version: 0.7.5
           node-version: 24
-          cache-dependency-path: nub.lock
           registry-url: https://registry.npmjs.org
 
+      - name: Setup bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version-file: package.json
+
       - name: Install dependencies
-        run: nub install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Verify
-        run: nub run verify
+        run: bun run verify
 
       - name: Check publish readiness
-        run: nub run check:publish-ready
+        run: bun run check:publish-ready
 
       - name: Audit packed production dependencies
-        run: nub run audit:packed-consumer
+        run: bun run audit:packed-consumer
 
       - name: Publish preflight
         run: |
@@ -73,7 +76,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             expected_version="${GITHUB_REF_NAME#v}"
             for package_dir in packages/*; do
-              package_version="$(nub pkg --dir "$package_dir" get version)"
+              package_version="$(jq -r .version "$package_dir/package.json")"
               if [ "$package_version" != "$expected_version" ]; then
                 echo "::error file=$package_dir/package.json::Tag v$expected_version does not match package version $package_version."
                 exit 1
@@ -95,24 +98,15 @@ jobs:
       - name: Publish
         run: |
           set -euo pipefail
-          args=(
-            --filter '@sunfall/vesper-*'
-            --access public
-            --tag "$DIST_TAG"
-          )
-          # Native Nub's provenance flow is only needed for a real upload;
-          # this also keeps dry-runs usable without an OIDC probe.
+          args=(--tag "$DIST_TAG")
+          # Provenance is only needed for a real upload; this also keeps
+          # dry-runs usable without an OIDC probe.
           if [ "$DRY_RUN" = "true" ]; then
-            args+=(--dry-run --no-git-checks)
+            args+=(--dry-run)
           else
             args+=(--provenance)
-            # GitHub checks out pushed tags detached. The ref preflight above
-            # still gates real releases; this only permits Nub to publish them.
-            if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-              args+=(--no-git-checks)
-            fi
           fi
-          nub publish "${args[@]}"
+          bun scripts/publish-packages.mjs "${args[@]}"
         env:
           DIST_TAG: ${{ env.RELEASE_DIST_TAG }}
           DRY_RUN: ${{ env.RELEASE_DRY_RUN }}

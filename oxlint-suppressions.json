@@ -85,6 +85,9 @@
     }
   },
   "packages/agent/src/code-mode.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 2
+    },
     "effecttsgo/extends-native-error": {
       "count": 1
     },
@@ -98,7 +101,7 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 3
+      "count": 5
     }
   },
   "packages/agent/src/dispatch.ts": {
@@ -112,15 +115,15 @@
       "count": 1
     },
     "typescript/no-unnecessary-condition": {
-      "count": 2
+      "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 4
+      "count": 5
     }
   },
   "packages/agent/src/dynamic-toolkit.ts": {
     "effecttsgo/any-unknown-in-error-context": {
-      "count": 3
+      "count": 4
     }
   },
   "packages/agent/src/interception.ts": {
@@ -138,7 +141,7 @@
       "count": 9
     },
     "effecttsgo/unsafe-effect-type-assertion": {
-      "count": 7
+      "count": 6
     },
     "typescript/consistent-return": {
       "count": 1
@@ -147,7 +150,7 @@
       "count": 1
     },
     "typescript/no-unsafe-type-assertion": {
-      "count": 8
+      "count": 7
     },
     "typescript/switch-exhaustiveness-check": {
       "count": 1
@@ -168,9 +171,23 @@
       "count": 3
     }
   },
+  "packages/agent/src/internal/tool-resolution.ts": {
+    "effecttsgo/any-unknown-in-error-context": {
+      "count": 1
+    },
+    "effecttsgo/unsafe-effect-type-assertion": {
+      "count": 1
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 2
+    }
+  },
   "packages/agent/src/model-plan.ts": {
     "effecttsgo/any-unknown-in-error-context": {
       "count": 2
+    },
+    "typescript/no-unsafe-type-assertion": {
+      "count": 3
     }
   },
   "packages/agent/src/result-overflow.ts": {
@@ -270,9 +287,6 @@
   "packages/agent/test/compatibility.test.ts": {
     "effecttsgo/instance-of-schema": {
       "count": 1
-    },
-    "typescript/no-unnecessary-condition": {
-      "count": 2
     },
     "typescript/no-unsafe-assignment": {
       "count": 1
@@ -508,11 +522,6 @@
       "count": 2
     }
   },
-  "packages/log-pg/src/internal/pg-listen.ts": {
-    "effecttsgo/async-function": {
-      "count": 2
-    }
-  },
   "packages/log-pg/src/layer.ts": {
     "effecttsgo/extends-native-error": {
       "count": 1
@@ -562,9 +571,6 @@
     }
   },
   "packages/log-pg/test/layer.test.ts": {
-    "effecttsgo/new-promise": {
-      "count": 2
-    },
     "effecttsgo/prefer-schema-over-json": {
       "count": 1
     },

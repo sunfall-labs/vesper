@@ -33,22 +33,13 @@ const parseObject = (source, description) => {
   return value;
 };
 
-/** @param {string} source @param {string} description @returns {JsonObject[]} */
-const parseArray = (source, description) => {
-  const value = /** @type {unknown} */ (JSON.parse(source));
-  if (!Array.isArray(value) || !value.every(isObject)) {
-    throw new Error(`${description} must be an array of JSON objects`);
-  }
-  return value;
-};
-
 /**
  * @param {ReadonlyArray<string>} args
- * @param {{ readonly capture?: boolean }} [options]
+ * @param {{ readonly capture?: boolean, readonly cwd?: string }} [options]
  */
 const run = (args, options = {}) =>
-  execFileSync('nub', args, {
-    cwd: root,
+  execFileSync('bun', args, {
+    cwd: options.cwd ?? root,
     encoding: 'utf8',
     stdio: options.capture ? 'pipe' : 'inherit',
   });
@@ -68,143 +59,45 @@ const exportedTarget = (target) => {
 };
 
 /**
- * @param {string} source
- * @param {string} start
- * @param {string} end
- * @param {string} description
- * @returns {string}
+ * The patched Effect family must carry upstream #9008 in both its source and
+ * its built output: `toolCallValidation` on `LanguageModel`, the `deferred`
+ * parameters mode on `Response`, and the Anthropic and OpenAI providers
+ * returning calls to undeclared tools instead of failing them. A patch that
+ * applied to only one of source and build would typecheck against one
+ * behavior and run another.
+ *
+ * @returns {Promise<void>}
  */
-const sectionBetween = (source, start, end, description) => {
-  const from = source.indexOf(start);
-  const to = source.indexOf(end, from + start.length);
-  if (from === -1 || to === -1) {
-    throw new Error(`Unable to locate ${description}`);
-  }
-  return source.slice(from, to);
-};
-
-/** @returns {Promise<void>} */
 const assertEffectPatchSourceContract = async () => {
-  const effectRoot = resolve(root, 'node_modules/effect');
-  const toolkitSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/Toolkit.ts'),
-    'utf8',
-  );
-  const toolkitDeclaration = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/Toolkit.d.ts'),
-    'utf8',
-  );
-  const responseSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/Response.ts'),
-    'utf8',
-  );
-  const responseDeclaration = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/Response.d.ts'),
-    'utf8',
-  );
-  const toolSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/Tool.ts'),
-    'utf8',
-  );
-  const toolDeclaration = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/Tool.d.ts'),
-    'utf8',
-  );
-  const languageModelSource = await readFile(
-    resolve(effectRoot, 'src/unstable/ai/LanguageModel.ts'),
-    'utf8',
-  );
-  const languageModelRuntime = await readFile(
-    resolve(effectRoot, 'dist/unstable/ai/LanguageModel.js'),
-    'utf8',
-  );
-
-  /** @type {ReadonlyArray<readonly [string, string]>} */
-  const toolkitContracts = [
-    ['source', toolkitSource],
-    ['declaration', toolkitDeclaration],
+  /** @type {ReadonlyArray<readonly [string, string, ReadonlyArray<string>]>} */
+  const contracts = [
+    ['effect', 'src/ai/LanguageModel.ts', ['toolCallValidation']],
+    ['effect', 'dist/ai/LanguageModel.js', ['toolCallValidation']],
+    ['effect', 'dist/ai/LanguageModel.d.ts', ['toolCallValidation']],
+    ['effect', 'dist/ai/Response.d.ts', ['"deferred"']],
+    [
+      '@effect/ai-anthropic',
+      'dist/AnthropicLanguageModel.js',
+      ['toolCallValidation'],
+    ],
+    [
+      '@effect/ai-openai',
+      'dist/OpenAiLanguageModel.js',
+      ['toolCallValidation'],
+    ],
   ];
-  for (const [kind, source] of toolkitContracts) {
-    const handlers = sectionBetween(
-      source,
-      'export type HandlersFrom',
-      'export interface WithHandler',
-      `Effect Toolkit ${kind} handler section`,
+  for (const [pkg, file, markers] of contracts) {
+    const source = await readFile(
+      resolve(root, 'node_modules', pkg, file),
+      'utf8',
     );
-    const boundary = sectionBetween(
-      source,
-      'export interface WithHandler',
-      'export type WithHandlerTools',
-      `Effect Toolkit ${kind} boundary section`,
-    );
-    if (!handlers.includes('params: Tool.Parameters<Tools[Name]>')) {
-      throw new Error(`Effect Toolkit ${kind} lost typed application handlers`);
+    for (const marker of markers) {
+      if (!source.includes(marker)) {
+        throw new Error(
+          `Patched ${pkg} ${file} lost ${marker}; the #9008 backport did not apply`,
+        );
+      }
     }
-    if (!boundary.includes('params: unknown')) {
-      throw new Error(
-        `Effect Toolkit ${kind} does not accept untrusted parameters`,
-      );
-    }
-  }
-
-  /** @type {ReadonlyArray<readonly [string, string]>} */
-  const responseContracts = [
-    ['source', responseSource],
-    ['declaration', responseDeclaration],
-  ];
-  for (const [kind, source] of responseContracts) {
-    if (!source.includes('true extends RelaxParams')) {
-      throw new Error(
-        `Effect Response ${kind} unsafely narrows a boolean relaxed codec`,
-      );
-    }
-  }
-
-  /** @type {ReadonlyArray<readonly [string, string]>} */
-  const toolContracts = [
-    ['source', toolSource],
-    ['declaration', toolDeclaration],
-  ];
-  for (const [kind, source] of toolContracts) {
-    const handlerResult = sectionBetween(
-      source,
-      'export type HandlerResult',
-      'export type HandlerOutput',
-      `Effect Tool ${kind} handler result`,
-    );
-    if (
-      !handlerResult.includes('readonly isFailure: false') ||
-      !handlerResult.includes('readonly isFailure: true') ||
-      !handlerResult.includes('FailureResult<Tool>')
-    ) {
-      throw new Error(
-        `Effect Tool ${kind} lost its discriminated framework-failure result`,
-      );
-    }
-  }
-
-  if (
-    !languageModelSource.includes(
-      'Response.StreamPart(toolkit, { relaxParams: true })',
-    ) ||
-    languageModelSource.includes('as ToolResolutionResult<Tools>') ||
-    !languageModelSource.includes('const hasTool =') ||
-    languageModelSource.split('hasTool(toolkit.tools').length - 1 < 2
-  ) {
-    throw new Error(
-      'Effect LanguageModel source lost relaxed streaming or typed tool resolution',
-    );
-  }
-  if (
-    !languageModelRuntime.includes(
-      'Response.StreamPart(toolkit, {\n        relaxParams: true\n      })',
-    ) ||
-    languageModelRuntime.split('Object.hasOwn(toolkit.tools').length - 1 < 2 ||
-    !languageModelRuntime.includes('Response.toolResultPart({')
-  ) {
-    throw new Error(
-      'Effect LanguageModel runtime drifted from the patched source contract',
-    );
   }
 };
 
@@ -258,6 +151,20 @@ try {
   const dependencies = {
     effect: effectVersion,
   };
+  for (const selector of Object.keys(configuredPatches ?? {})) {
+    const separator = selector.lastIndexOf('@');
+    const packageName = separator > 0 ? selector.slice(0, separator) : selector;
+    if (packageName === 'effect') {
+      continue;
+    }
+    const version = isObject(catalog) ? catalog[packageName] : undefined;
+    if (typeof version !== 'string') {
+      throw new Error(
+        `Patched dependency ${packageName} must have a catalog version`,
+      );
+    }
+    dependencies[packageName] = version;
+  }
   /** @type {string[]} */
   const imports = [];
   /** @type {string[]} */
@@ -277,21 +184,10 @@ try {
     if (manifest['private'] === true) {
       continue;
     }
-    const packed = parseArray(
-      run(
-        [
-          '--cwd',
-          directory,
-          'pack',
-          '--json',
-          '--pack-destination',
-          packDirectory,
-        ],
-        { capture: true },
-      ),
-      `${entry.name} pack result`,
-    );
-    const artifact = packed.at(0);
+    const artifact = run(
+      ['pm', 'pack', '--destination', packDirectory, '--quiet'],
+      { capture: true, cwd: directory },
+    ).trim();
     const name = manifest['name'];
     const version = manifest['version'];
     const exports = manifest['exports'];
@@ -300,16 +196,13 @@ try {
       typeof name !== 'string' ||
       typeof version !== 'string' ||
       !isObject(exports) ||
-      artifact === undefined ||
-      typeof artifact['name'] !== 'string' ||
-      typeof artifact['filename'] !== 'string' ||
-      packed.length !== 1 ||
-      artifact['name'] !== name
+      !artifact.endsWith('.tgz') ||
+      relative(packDirectory, artifact).includes('/')
     ) {
       throw new Error(`Unexpected pack result for ${entry.name}`);
     }
 
-    dependencies[name] = `file:${resolve(packDirectory, artifact['filename'])}`;
+    dependencies[name] = `file:${artifact}`;
     packages.push({ name, version });
 
     for (const [subpath, target] of Object.entries(exports)) {
@@ -350,7 +243,7 @@ try {
 import { resolve } from 'node:path';
 import { Agent } from '@sunfall/vesper-agent/agent';
 import { Effect, Layer, Ref, Schema, Stream } from 'effect';
-import { LanguageModel, Tool, Toolkit } from 'effect/unstable/ai';
+import { LanguageModel, Tool, Toolkit } from 'effect/ai';
 
 const imports = ${JSON.stringify(imports)};
 const assets = ${JSON.stringify(assets)};
@@ -454,37 +347,31 @@ console.log(\`Imported \${imports.length} public modules and read \${assets.leng
       .join('\n') + '\n',
   );
 
-  run([
-    '--cwd',
-    consumerDirectory,
-    'install',
-    '--prod',
-    '--ignore-scripts',
-    '--no-frozen-lockfile',
-    '--prefer-offline',
-  ]);
-  run(['--cwd', consumerDirectory, 'run', 'smoke']);
-  run([
-    '--cwd',
-    consumerDirectory,
-    'exec',
-    resolve(root, 'node_modules/typescript/bin/tsc'),
-    '--noEmit',
-    '--strict',
-    '--skipLibCheck',
-    '--target',
-    'ES2022',
-    '--module',
-    'NodeNext',
-    '--moduleResolution',
-    'NodeNext',
-    '--typeRoots',
-    resolve(root, 'node_modules/@types'),
-    'smoke.ts',
-  ]);
+  run(['install', '--production', '--ignore-scripts', '--linker', 'hoisted'], {
+    cwd: consumerDirectory,
+  });
+  run(['run', 'smoke'], { cwd: consumerDirectory });
+  run(
+    [
+      resolve(root, 'node_modules/typescript/bin/tsc'),
+      '--noEmit',
+      '--strict',
+      '--skipLibCheck',
+      '--target',
+      'ES2022',
+      '--module',
+      'NodeNext',
+      '--moduleResolution',
+      'NodeNext',
+      '--typeRoots',
+      resolve(root, 'node_modules/@types'),
+      'smoke.ts',
+    ],
+    { cwd: consumerDirectory },
+  );
 
   if (audit) {
-    run(['--cwd', consumerDirectory, 'audit', '--prod']);
+    run(['audit'], { cwd: consumerDirectory });
   }
 } finally {
   await rm(temporaryRoot, { recursive: true, force: true });

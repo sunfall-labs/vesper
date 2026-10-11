@@ -67,6 +67,10 @@
       "types": "./dist/interaction.d.ts",
       "default": "./dist/interaction.js"
     },
+    "./replay": {
+      "types": "./dist/replay.d.ts",
+      "default": "./dist/replay.js"
+    },
     "./model-plan": {
       "types": "./dist/model-plan.d.ts",
       "default": "./dist/model-plan.js"
@@ -131,7 +135,7 @@
     "@sunfall/vesper-log": "0.1.0-alpha.1"
   },
   "peerDependencies": {
-    "effect": "4.0.0-rc.109"
+    "effect": "^4.0.3"
   },
   "devDependencies": {
     "effect": "catalog:"

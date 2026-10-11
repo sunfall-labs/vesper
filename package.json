@@ -16,16 +16,16 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "build": "tsdown && nub run check:published-types",
-    "benchmark": "nub run --filter @sunfall/vesper-benchmarks bench",
+    "build": "tsdown && bun run check:published-types",
+    "benchmark": "bun run --filter @sunfall/vesper-benchmarks bench",
     "example:approval-cli": "node --experimental-strip-types examples/approval-cli/src/main.ts",
-    "example:compliance-relay": "nub run --filter @sunfall/vesper-example-compliance-relay start",
-    "example:live-smoke": "nub run --filter @sunfall/vesper-example-live-smoke start",
-    "example:support-agent": "nub run --filter @sunfall/vesper-example-support-agent start",
+    "example:compliance-relay": "bun run --filter @sunfall/vesper-example-compliance-relay start",
+    "example:live-smoke": "bun run --filter @sunfall/vesper-example-live-smoke start",
+    "example:support-agent": "bun run --filter @sunfall/vesper-example-support-agent start",
     "test": "vitest run",
-    "test:runtime:bun": "nub run build && bun scripts/check-code-executor-runtime.mjs",
-    "test:runtime:deno": "nub run build && deno run --no-config --no-prompt --unstable-byonm --node-modules-dir=manual --allow-env --allow-run=deno scripts/check-code-executor-runtime.mjs",
-    "typecheck": "nub run check:package-paths && nub run check:unsafe-casts && nub run -r --filter './packages/*' --filter './examples/*' --if-present typecheck && nub run typecheck:types",
+    "test:runtime:bun": "bun run build && bun scripts/check-code-executor-runtime.mjs",
+    "test:runtime:deno": "bun run build && deno run --no-config --no-prompt --unstable-byonm --node-modules-dir=manual --allow-env --allow-run=deno scripts/check-code-executor-runtime.mjs",
+    "typecheck": "bun run check:package-paths && bun run check:unsafe-casts && bun run --filter './packages/*' --filter './examples/*' typecheck && bun run typecheck:types",
     "check:package-paths": "node scripts/check-package-paths.mjs",
     "check:packed-consumer": "node scripts/check-packed-consumer.mjs",
     "check:publish-ready": "node scripts/check-publish-ready.mjs",
@@ -40,11 +40,11 @@
     "lint:fix": "oxlint . --fix --no-error-on-unmatched-pattern",
     "lint:prune": "oxlint . --prune-suppressions --no-error-on-unmatched-pattern && oxfmt oxlint-suppressions.json --write",
     "prepare": "effect-tsgo patch --oxlint",
-    "publish:npm": "nub run check:publish-ready && nub publish --filter \"@sunfall/vesper-*\" --access public --provenance --tag alpha",
-    "publish:npm:dry-run": "nub run check:publish-ready && nub publish --filter \"@sunfall/vesper-*\" --access public --tag alpha --dry-run --no-git-checks",
-    "verify": "nub run build && nub run check:packed-consumer && nub run verify:static && nub run test",
-    "verify:serial": "nub run build && nub run check:packed-consumer && nub run verify:static --max-processes 1 && nub run test",
-    "verify:static": "concurrently --group --timings --names format,lint,typecheck,knip \"nub run format:check\" \"nub run lint\" \"nub run typecheck\" \"nub run knip\""
+    "publish:npm": "bun run check:publish-ready && bun scripts/publish-packages.mjs --tag alpha --provenance",
+    "publish:npm:dry-run": "bun run check:publish-ready && bun scripts/publish-packages.mjs --tag alpha --dry-run",
+    "verify": "bun run build && bun run check:packed-consumer && bun run verify:static && bun run test",
+    "verify:serial": "bun run build && bun run check:packed-consumer && bun run verify:static --max-processes 1 && bun run test",
+    "verify:static": "concurrently --group --timings --names format,lint,typecheck,knip \"bun run format:check\" \"bun run lint\" \"bun run typecheck\" \"bun run knip\""
   },
   "devDependencies": {
     "@arethetypeswrong/core": "0.18.5",
@@ -53,7 +53,6 @@
     "@effect/platform-node": "catalog:",
     "@effect/tsgo": "0.36.5",
     "@effect/vitest": "catalog:",
-    "@nubjs/nub": "0.7.5",
     "@types/node": "^24.0.0",
     "concurrently": "10.0.5",
     "effect": "catalog:",
@@ -65,12 +64,12 @@
     "publint": "0.3.23",
     "tsdown": "0.22.14",
     "typescript": "7.0.2",
-    "vitest": "^4.1.9"
+    "vitest": "^5.0.3"
   },
   "devEngines": {
     "packageManager": {
-      "name": "nub",
-      "version": "^0.7.5",
+      "name": "bun",
+      "version": "^1.4.3",
       "onFail": "ignore"
     }
   },
@@ -81,30 +80,25 @@
       "benchmarks"
     ],
     "catalog": {
-      "@effect/ai-anthropic": "4.0.0-rc.109",
-      "@effect/ai-openai": "4.0.0-rc.109",
-      "@effect/ai-openrouter": "4.0.0-rc.109",
-      "@effect/platform-node": "4.0.0-rc.109",
-      "@effect/vitest": "4.0.0-rc.109",
-      "effect": "4.0.0-rc.109"
+      "@effect/ai-anthropic": "4.0.3",
+      "@effect/ai-openai": "4.0.3",
+      "@effect/ai-openrouter": "4.0.3",
+      "@effect/platform-node": "4.0.3",
+      "@effect/vitest": "4.0.3",
+      "effect": "4.0.3"
     }
   },
   "overrides": {
-    "@effect/platform-node": {
-      "@effect/platform-node-shared": "4.0.0-rc.109"
-    },
-    "effect": "catalog:"
+    "@effect/platform-node-shared": "4.0.3",
+    "effect": "4.0.3"
   },
-  "allowBuilds": {
-    "esbuild": true,
-    "@nubjs/nub": false,
-    "@google/genai": false,
-    "cpu-features": false,
-    "msgpackr-extract": false,
-    "protobufjs": false,
-    "ssh2": false
-  },
+  "packageManager": "bun@1.4.3",
+  "trustedDependencies": [
+    "esbuild"
+  ],
   "patchedDependencies": {
-    "effect@4.0.0-rc.109": "patches/effect@4.0.0-rc.109.patch"
+    "effect@4.0.3": "patches/effect@4.0.3.patch",
+    "@effect/ai-anthropic@4.0.3": "patches/@effect%2Fai-anthropic@4.0.3.patch",
+    "@effect/ai-openai@4.0.3": "patches/@effect%2Fai-openai@4.0.3.patch"
   }
 }
