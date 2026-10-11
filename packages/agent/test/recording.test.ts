@@ -19,6 +19,7 @@ import {
   says,
   tags,
 } from './durability-fixtures.js';
+import { digestOf } from './tool-fixtures.js';
 
 // Recording: what a run leaves in the durable log, and what a consumer can
 // rely on about it. Every scenario drives `Conversation` against a scripted
@@ -54,9 +55,9 @@ describe('recording a run', () => {
         expect(tags(observed.written)).toEqual([
           'RunStarted',
           'Text',
-          'ToolCall',
-          'ToolStarted',
-          'ToolOutcome',
+          'StepOpened',
+          'StepStarted',
+          'StepSettled',
           'TurnFinished',
           'Text',
           'TurnFinished',
@@ -71,14 +72,15 @@ describe('recording a run', () => {
           { _tag: 'Text', step: 2, text: 'done' },
         ]);
         expect(records).toContainEqual({
-          _tag: 'ToolCall',
+          _tag: 'StepOpened',
           step: 1,
           id: 'call-1',
           name: 'lookup',
+          inputDigest: digestOf('lookup', { id: '42' }),
           params: { id: '42' },
         });
         expect(records).toContainEqual({
-          _tag: 'ToolOutcome',
+          _tag: 'StepSettled',
           step: 1,
           id: 'call-1',
           name: 'lookup',
@@ -169,7 +171,7 @@ describe('recording a run', () => {
         expect(live).toEqual([true, false]);
         expect(
           observed.written.filter(
-            ({ record }) => record._tag === 'ToolOutcome',
+            ({ record }) => record._tag === 'StepSettled',
           ),
         ).toHaveLength(1);
       }),
@@ -209,17 +211,17 @@ describe('recording a run', () => {
 
       expect(written.map(({ record }) => record)).toContainEqual(
         expect.objectContaining({
-          _tag: 'ToolCall',
+          _tag: 'StepOpened',
           params: { at: '2026-01-02T03:04:05.000Z' },
         }),
       );
-      // `ToolCall` is written before the handler runs, so it cannot show
+      // `StepOpened` is written before the handler runs, so it cannot show
       // whether the parameters reached the handler decoded exactly once. A
       // transforming schema decoded twice fails validation and the tool
       // answers with an error instead of executing.
       expect(written.map(({ record }) => record)).toContainEqual(
         expect.objectContaining({
-          _tag: 'ToolOutcome',
+          _tag: 'StepSettled',
           outcome: 'success',
           result: { status: 'at:2026-01-02T03:04:05.000Z' },
         }),
@@ -280,7 +282,7 @@ describe('recording a run', () => {
         );
 
         // The call is durable before its handler starts.
-        expect(seen).toEqual(['RunStarted', 'Text', 'ToolCall']);
+        expect(seen).toEqual(['RunStarted', 'Text', 'StepOpened']);
       }),
   );
 });

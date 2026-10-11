@@ -22,6 +22,7 @@ import {
   started,
   testLogLayer,
 } from './durability-fixtures.js';
+import { toolCalled, toolStarted } from './tool-fixtures.js';
 
 // Crash recovery. A run that died after a tool's handler was entered leaves
 // that call indeterminate: the log cannot say whether the side effect
@@ -78,7 +79,7 @@ const replayAgent = (ran: { count: number }) =>
       }),
   });
 
-/** Crash after `ToolStarted`, resume, and report what happened. */
+/** Crash after `StepStarted`, resume, and report what happened. */
 const recordsAfter = (
   name: 'lookup' | 'send' | 'dated',
   withPolicy: boolean,
@@ -91,14 +92,8 @@ const recordsAfter = (
       Effect.gen(function* () {
         yield* seed(ID, [
           started('hi'),
-          {
-            _tag: 'ToolCall',
-            step: 1,
-            id: CALL,
-            name,
-            params: params ?? { id: '42' },
-          },
-          { _tag: 'ToolStarted', id: CALL, name },
+          toolCalled(name, params ?? { id: '42' }, CALL),
+          toolStarted(name, CALL),
         ]);
         const base = replayAgent(ran);
         const exit = yield* Conversation.make(
@@ -126,7 +121,7 @@ describe('Replay after a crash inside a tool', () => {
       expect(result.ran.count).toBe(1);
       expect(result.exit._tag).toBe('Success');
       expect(
-        result.records.filter((record) => record._tag === 'ToolOutcome'),
+        result.records.filter((record) => record._tag === 'StepSettled'),
       ).toMatchObject([{ id: CALL, outcome: 'success', result: 'lookup:42' }]);
       expect(result.asked[0]).toContain('lookup:42');
       expect(result.records.at(-1)).toMatchObject({
@@ -146,7 +141,7 @@ describe('Replay after a crash inside a tool', () => {
 
         expect(result.ran.count).toBe(1);
         expect(
-          result.records.filter((record) => record._tag === 'ToolOutcome'),
+          result.records.filter((record) => record._tag === 'StepSettled'),
         ).toMatchObject([
           { id: CALL, outcome: 'success', result: '2026-08-26T00:00:00.000Z' },
         ]);
@@ -162,7 +157,7 @@ describe('Replay after a crash inside a tool', () => {
         expect(result.ran.count).toBe(0);
         expect(result.exit._tag).toBe('Success');
         expect(
-          result.records.filter((record) => record._tag === 'ToolOutcome'),
+          result.records.filter((record) => record._tag === 'StepSettled'),
         ).toMatchObject([
           {
             id: CALL,
@@ -182,7 +177,7 @@ describe('Replay after a crash inside a tool', () => {
       expect(result.exit._tag).toBe('Failure');
       expect(result.asked).toEqual([]);
       expect(result.records.map((record) => record._tag)).not.toContain(
-        'ToolOutcome',
+        'StepSettled',
       );
     }),
   );
@@ -193,7 +188,7 @@ describe('Replay after a crash inside a tool', () => {
 describe('the recovery state of a reopened conversation', () => {
   const call = lookupCall();
   const suspension = {
-    _tag: 'ToolSuspended',
+    _tag: 'StepSuspended',
     id: CALL,
     name: 'lookup',
     wait: 'review',
@@ -212,12 +207,23 @@ describe('the recovery state of a reopened conversation', () => {
     Effect.gen(function* () {
       expect(yield* stateOf([started(), call, lookupStarted()])).toEqual({
         _tag: 'Indeterminate',
+        replay: 'unsafe',
       });
     }),
   );
 
+  const resolution = {
+    _tag: 'StepResolved',
+    id: CALL,
+    name: 'lookup',
+    wait: 'review',
+    token: 'workflow-token',
+    outcome: 'success',
+    result: { _tag: 'Success', value: { approved: true } },
+  } satisfies ConversationRecord.Record;
+
   it.effect(
-    'keeps an intentionally resumed wait suspended until it has an outcome',
+    'reports a resumed wait as a replay-safe start that names its wait',
     () =>
       Effect.gen(function* () {
         expect(
@@ -226,21 +232,34 @@ describe('the recovery state of a reopened conversation', () => {
             call,
             lookupStarted(),
             suspension,
+            resolution,
             {
-              _tag: 'ToolResumed',
+              _tag: 'StepStarted',
               id: CALL,
               name: 'lookup',
-              token: 'workflow-token',
+              replay: 'safe',
+              resumes: 'workflow-token',
             },
-            {
-              _tag: 'ToolWaitCompleted',
-              id: CALL,
-              name: 'lookup',
-              wait: 'review',
-              token: 'workflow-token',
-              outcome: 'success',
-              result: { _tag: 'Success', value: { approved: true } },
-            },
+          ]),
+        ).toEqual({
+          _tag: 'Indeterminate',
+          replay: 'safe',
+          resumes: 'workflow-token',
+        });
+      }),
+  );
+
+  it.effect(
+    'keeps a resolved wait suspended until its handler starts again',
+    () =>
+      Effect.gen(function* () {
+        expect(
+          yield* stateOf([
+            started(),
+            call,
+            lookupStarted(),
+            suspension,
+            resolution,
           ]),
         ).toEqual({
           _tag: 'Suspended',
@@ -260,7 +279,7 @@ describe('the recovery state of a reopened conversation', () => {
           lookupStarted(),
           suspension,
           {
-            _tag: 'ToolWaitRestarted',
+            _tag: 'StepRestarted',
             id: CALL,
             name: 'lookup',
             wait: 'review',
@@ -310,12 +329,12 @@ describe('the recovery state of a reopened conversation', () => {
     [
       'a durable start without its provider call',
       [started(), lookupStarted()],
-      'no matching ToolCall',
+      'StepStarted has no StepOpened',
     ],
     [
       'a suspension without its durable handler start',
       [started(), call, suspension],
-      'ToolSuspended has no matching ToolStarted',
+      'StepSuspended has no earlier StepStarted',
     ],
   ] as const)('flags %s as corruption', ([, records, why]) =>
     Effect.gen(function* () {

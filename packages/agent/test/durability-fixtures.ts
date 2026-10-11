@@ -12,6 +12,7 @@ import { LanguageModel, Prompt, type Response, Tool, Toolkit } from 'effect/ai';
 import { Agent } from '../src/agent.js';
 import * as AgentLog from '../src/log.js';
 import { testBudget } from './budget-fixture.js';
+import { toolCalled, toolStarted } from './tool-fixtures.js';
 
 // Shared fixtures for the durability scenario suites (recording, resume,
 // settlement, recovery, branch, fork, compatibility). Scenarios drive the
@@ -173,7 +174,7 @@ export const readRecords = Effect.fn('test.readRecords')(function* (
  * Write a previous run's records straight into a conversation's log.
  *
  * A crash has to leave the log in an exact state (a `RunStarted` with no
- * `RunSettled`, a `ToolStarted` with no outcome) that a cleanly interrupted
+ * `RunSettled`, a `StepStarted` with no `StepSettled`) that a cleanly interrupted
  * fiber never produces, because interruption settles the run.
  */
 export const seed = Effect.fn('test.seed')(function* (
@@ -256,25 +257,17 @@ export const settled = (
 
 export const callId = (id: string) => LogVocabulary.ToolCallId.make(id);
 
-export const lookupCall = (id = 'call-1'): ConversationRecord.Record => ({
-  _tag: 'ToolCall',
-  step: 1,
-  id: callId(id),
-  name: 'lookup',
-  params: { id: '42' },
-});
+export const lookupCall = (id = 'call-1'): ConversationRecord.Record =>
+  toolCalled('lookup', { id: '42' }, id);
 
-export const lookupStarted = (id = 'call-1'): ConversationRecord.Record => ({
-  _tag: 'ToolStarted',
-  id: callId(id),
-  name: 'lookup',
-});
+export const lookupStarted = (id = 'call-1'): ConversationRecord.Record =>
+  toolStarted('lookup', id);
 
 export const lookupOutcome = (
   id = 'call-1',
   status = 'from-log',
 ): ConversationRecord.Record => ({
-  _tag: 'ToolOutcome',
+  _tag: 'StepSettled',
   step: 1,
   id: callId(id),
   name: 'lookup',

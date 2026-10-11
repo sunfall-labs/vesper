@@ -36,10 +36,9 @@ export interface AbortedOutput {
  * them.
  */
 const NON_SUPERSEDING = new Set<ConversationRecord.Record['_tag']>([
-  'ToolStarted',
-  'ToolResumed',
-  'ToolWaitCompleted',
-  'ToolWaitRestarted',
+  'StepStarted',
+  'StepResolved',
+  'StepRestarted',
   'StateCheckpoint',
   'CodeStateCheckpoint',
   'ChildSession',

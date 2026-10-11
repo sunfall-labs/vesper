@@ -15,6 +15,7 @@ import {
   RECORDED,
   RECORDED_ISO,
   date,
+  digestOf,
   callTurn,
   outcomesOf,
   promptText,
@@ -217,6 +218,39 @@ describe('a call whose earlier run already settled it', () => {
     },
   );
 
+  // A recording policy may have replaced the recorded parameters. The call is
+  // still the same one: identity is the digest taken before the policy ran.
+  it.effect(
+    'is served even when a recording policy redacted its parameters',
+    () => {
+      const ran = { count: 0 };
+      return resume(
+        [
+          runStarted('test'),
+          {
+            _tag: 'StepOpened',
+            step: 1,
+            id: CALL_ID,
+            name: 'lookup',
+            inputDigest: digestOf('lookup', { id: '42' }),
+            params: { redacted: true },
+          },
+          served('from-log'),
+        ],
+        lookupAgent(ran),
+      ).pipe(
+        Effect.tap(({ records }) =>
+          Effect.sync(() => {
+            expect(ran.count).toBe(0);
+            expect(outcomesOf(records).at(-1)?.result).toMatchObject({
+              status: 'from-log',
+            });
+          }),
+        ),
+      );
+    },
+  );
+
   const rerun = [
     ['the earlier run has settled', [...crashed, served('old'), runSettled]],
     [
@@ -268,7 +302,7 @@ describe('a call that was started but never settled', () => {
     },
   );
 
-  it.effect('fails safely when ToolStarted has no original ToolCall', () => {
+  it.effect('fails safely when StepStarted has no original StepOpened', () => {
     const ran = { count: 0 };
     const asked: string[] = [];
     const model = script();
@@ -284,7 +318,7 @@ describe('a call that was started but never settled', () => {
     ).pipe(
       Effect.tap(({ result }) =>
         Effect.gen(function* () {
-          expect(String(result)).toContain('has no matching ToolCall');
+          expect(String(result)).toContain('StepStarted has no StepOpened');
           expect(asked).toEqual([]);
           expect(ran.count).toBe(0);
           expect(yield* model.requests).toEqual([]);
@@ -294,7 +328,7 @@ describe('a call that was started but never settled', () => {
   });
 
   it.effect(
-    'asks about each orphan in ToolCall order, wherever its ToolStarted sits',
+    'asks about each orphan in StepOpened order, wherever its StepStarted sits',
     () => {
       const seen: string[] = [];
       return resume(
@@ -346,7 +380,7 @@ describe('a call that was started but never settled', () => {
           expect(asked).toEqual([['lookup', CALL_ID, { id: '42' }]]);
           expect(promptText(yield* model.requests, 1)).toContain('fresh:42');
           expect(
-            tagsOf(records).filter((tag) => tag === 'ToolStarted'),
+            tagsOf(records).filter((tag) => tag === 'StepStarted'),
           ).toHaveLength(2);
           expect(tagsOf(records).at(-1)).toBe('RunSettled');
         }),
@@ -433,7 +467,7 @@ describe('a call that was started but never settled', () => {
   });
 
   it.effect(
-    'leaves a crashing dispatch orphaned: ToolStarted is durable before the handler runs',
+    'leaves a crashing dispatch orphaned: StepStarted is durable before the handler runs',
     () => {
       const trackedLookup = Tool.make('lookup', {
         description: 'look an order up',
@@ -451,7 +485,7 @@ describe('a call that was started but never settled', () => {
         lookup: () =>
           Effect.gen(function* () {
             observed.startedFirst = tagsOf(yield* readRecords(ID)).includes(
-              'ToolStarted',
+              'StepStarted',
             );
             observed.mutations += 1;
             return yield* Effect.die(
@@ -464,7 +498,7 @@ describe('a call that was started but never settled', () => {
           yield* Conversation.make(crashing, ID).run('hi').pipe(Effect.exit);
           const tags = tagsOf(yield* readRecords(ID));
           expect(observed).toEqual({ startedFirst: true, mutations: 1 });
-          expect(tags).not.toContain('ToolOutcome');
+          expect(tags).not.toContain('StepSettled');
           expect(tags).not.toContain('RunSettled');
         }),
         script(),
@@ -614,7 +648,7 @@ describe('a dispatch whose durable start cannot be recorded', () => {
     () => {
       const ran = { count: 0 };
       const fault = { active: true };
-      // Fault injection at the public store seam: refuse the batch that holds ToolStarted.
+      // Fault injection at the public store seam: refuse the batch that holds StepStarted.
       const flaky = Layer.effect(
         LogStore.Service,
         Effect.gen(function* () {
@@ -623,13 +657,13 @@ describe('a dispatch whose durable start cannot be recorded', () => {
             ...real,
             append: (input) =>
               fault.active &&
-              input.records.some(({ record }) => record._tag === 'ToolStarted')
+              input.records.some(({ record }) => record._tag === 'StepStarted')
                 ? Effect.fail(
                     new LogStore.LogStoreError({
                       path: input.path,
                       operation: 'append',
                       reason: 'storage',
-                      detail: 'ToolStarted append failed',
+                      detail: 'StepStarted append failed',
                     }),
                   )
                 : real.append(input),
@@ -652,7 +686,7 @@ describe('a dispatch whose durable start cannot be recorded', () => {
         const during = yield* readRecords(ID).pipe(
           Effect.provideContext(context),
         );
-        expect(tagsOf(during)).not.toContain('ToolStarted');
+        expect(tagsOf(during)).not.toContain('StepStarted');
 
         // The permit was released: a cancel is not held back, and a fresh run completes.
         fault.active = false;

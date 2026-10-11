@@ -310,16 +310,16 @@ const suspended = (conversation: Agent.Any, id: string, except?: string) =>
     .pipe(
       Stream.filter(
         ({ record }) =>
-          record._tag === 'ToolSuspended' && record.token !== except,
+          record._tag === 'StepSuspended' && record.token !== except,
       ),
       Stream.runHead,
       Effect.flatMap(
         Option.match({
-          onNone: () => Effect.die('missing ToolSuspended record'),
+          onNone: () => Effect.die('missing StepSuspended record'),
           onSome: (envelope) =>
-            envelope.record._tag === 'ToolSuspended'
+            envelope.record._tag === 'StepSuspended'
               ? Effect.succeed({ envelope, record: envelope.record })
-              : Effect.die('missing ToolSuspended record'),
+              : Effect.die('missing StepSuspended record'),
         }),
       ),
     );
@@ -523,7 +523,7 @@ describe('AgentWorkflow durable tool waits', () => {
       expect(
         [...forkRecords].some(
           ({ record }) =>
-            record._tag === 'ToolWaitCompleted' &&
+            record._tag === 'StepResolved' &&
             record.token === forked.record.token &&
             record.outcome === 'failure',
         ),
@@ -554,27 +554,31 @@ describe('AgentWorkflow durable tool waits', () => {
       );
       const count = (tag: string) =>
         after.filter((record) => record._tag === tag).length;
-      expect([
-        count('ToolSuspended'),
-        count('ToolStarted'),
-        count('ToolResumed'),
-        count('ToolWaitCompleted'),
-      ]).toEqual([1, 1, 1, 1]);
-      expect(after.find((r) => r._tag === 'ToolWaitCompleted')).toMatchObject({
+      expect([count('StepSuspended'), count('StepResolved')]).toEqual([1, 1]);
+      // The handler entered once fresh, and once more resuming the wait: a
+      // replay-safe start, because the workflow replays its own durable steps.
+      const starts = after.flatMap((record) =>
+        record._tag === 'StepStarted' ? [record] : [],
+      );
+      expect(starts.map(({ resumes }) => resumes)).toEqual([
+        undefined,
+        first.record.token,
+      ]);
+      expect(starts[1]?.replay).toBe('safe');
+      expect(after.find((r) => r._tag === 'StepResolved')).toMatchObject({
         wait: 'review-order',
         token: first.record.token,
         outcome: 'success',
       });
-      expect(after.find((r) => r._tag === 'ToolOutcome')).toMatchObject({
+      expect(after.find((r) => r._tag === 'StepSettled')).toMatchObject({
         result: {
           status: expect.stringMatching(/^submitted-by:(alice|mallory)$/),
         },
       });
       const waits = yield* source.waits().pipe(Stream.runCollect);
       expect([...waits].map(({ record }) => record._tag)).toEqual([
-        'ToolSuspended',
-        'ToolResumed',
-        'ToolWaitCompleted',
+        'StepSuspended',
+        'StepResolved',
       ]);
     }).pipe(Effect.provide(Live), Effect.scoped);
   });

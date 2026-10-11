@@ -25,7 +25,7 @@ export class Current extends Context.Service<Current, Execution>()(
  * The durable start of one code-mode nested call, supplied around the hidden
  * gate's `handle` by the `exec` handler that owns the call.
  *
- * The gate invokes it at the same point it would append `ToolStarted` — after
+ * The gate invokes it at the same point it would append `StepStarted` — after
  * interception and arbitration, immediately before the handler — so a nested
  * call is "started" under exactly the rule a top-level call is. The hidden
  * gate has no session of its own; this is how it learns that its caller is
@@ -33,5 +33,9 @@ export class Current extends Context.Service<Current, Execution>()(
  */
 export class NestedStart extends Context.Service<
   NestedStart,
-  { readonly started: Effect.Effect<void, AgentLog.DurabilityError> }
+  {
+    readonly started: (
+      replay: 'safe' | 'unsafe',
+    ) => Effect.Effect<void, AgentLog.DurabilityError>;
+  }
 >()('@sunfall/vesper-agent/internal/NestedToolStart') {}

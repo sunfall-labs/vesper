@@ -578,7 +578,7 @@ const delegatePhase = Effect.gen(function* () {
     yield* check(
       childRecords.some(
         (envelope) =>
-          envelope.record._tag === 'ToolCall' &&
+          envelope.record._tag === 'StepOpened' &&
           envelope.record.name === 'lookup_fact',
       ),
       'the child recorded its own tool call in its own conversation',

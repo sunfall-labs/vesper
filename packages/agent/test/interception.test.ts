@@ -300,7 +300,7 @@ describe('beforeToolCall', () => {
               result: 'lookup is not allowed here',
             }),
           ]);
-          expect(tagsOf(records)).not.toContain('ToolStarted');
+          expect(tagsOf(records)).not.toContain('StepStarted');
           expect(
             events.find(
               (event) =>

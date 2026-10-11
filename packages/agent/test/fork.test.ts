@@ -28,6 +28,7 @@ import {
   textIn,
   turn,
 } from './durability-fixtures.js';
+import { toolCalled, toolStarted } from './tool-fixtures.js';
 
 // Forking: a second conversation, seeded from a prefix of a first.
 //
@@ -98,10 +99,10 @@ describe('suspended workflow boundaries', () => {
       const source = yield* openSession(ANCESTOR);
       yield* source.append([
         started('approve this'),
-        { _tag: 'ToolCall', step: 1, id: call, name: 'approve', params: {} },
-        { _tag: 'ToolStarted', id: call, name: 'approve' },
+        toolCalled('approve', {}, call),
+        toolStarted('approve', call),
         {
-          _tag: 'ToolSuspended',
+          _tag: 'StepSuspended',
           id: call,
           name: 'approve',
           wait: 'human-approval',
@@ -531,7 +532,7 @@ describe('fork seeding recovery', () => {
         // RunStarted was copied physically but is not materialized on open.
         expect(tags(result.records)).toEqual([
           'Text',
-          'ToolStarted',
+          'StepStarted',
           'TurnFinished',
           'Compacted',
           'RunSettled',

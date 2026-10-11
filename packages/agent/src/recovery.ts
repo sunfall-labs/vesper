@@ -1,17 +1,17 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Array as Arr, Effect, Option, Order } from 'effect';
+import { Effect, Option } from 'effect';
 
 import { AgentBranch } from './branch.js';
 
 /**
- * The reserved `ToolSuspended.wait` name for a native pre-handler interaction,
+ * The reserved `StepSuspended.wait` name for a native pre-handler interaction,
  * as opposed to an application-defined `AgentWorkflow.wait`.
  *
  * A native interaction never runs `AgentWorkflow.wait`'s handler-resumption
- * replay: the call is suspended by `effect/ai`'s `LanguageModel`
- * *before* any handler is entered, so its `ToolSuspended` has no matching
- * `ToolStarted` — the one shape {@link fold} otherwise treats as corruption.
+ * replay: the call is suspended *before* any handler is entered, so its
+ * `StepSuspended` has no earlier `StepStarted` — the one shape {@link fold}
+ * otherwise treats as corruption.
  * Resuming it means either dispatching the handler for the first time
  * (approval) or settling the tool directly (answer or denial);
  * see `dispatch.ts`'s `resolveIndeterminate` for where that decision is
@@ -19,6 +19,87 @@ import { AgentBranch } from './branch.js';
  * the fold that has to know about it.
  */
 export const INTERACTION_WAIT = '@sunfall/vesper-agent/interaction';
+
+/** One durable wait, followed across every run that can still see it. */
+export interface Wait {
+  readonly offset: ConversationRecord.Envelope['offset'];
+  readonly record: ConversationRecord.RecordOf<'StepSuspended'>;
+  /** A decision has been recorded for this token. */
+  readonly resolved: boolean;
+  /**
+   * Nothing has closed the wait since: it was not restarted on this path, its
+   * call did not settle, and its run did not end.
+   */
+  readonly open: boolean;
+}
+
+/**
+ * Every wait the given records suspend, in suspension order.
+ *
+ * {@link fold} is scoped to the run a resume must finish, and forgets a wait
+ * once that run settles. Approval and workflow services answer a different
+ * question — whether a token was ever decided, whether it can still be — so
+ * they read the lifecycle of each wait across runs here, from the same step
+ * records. Pass the active path.
+ */
+export const waits = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+): ReadonlyArray<Wait> => {
+  const byToken = new Map<string, Wait>();
+  const close = (keep: (wait: Wait) => boolean) => {
+    for (const [token, wait] of byToken) {
+      if (!keep(wait)) {
+        byToken.set(token, { ...wait, open: false });
+      }
+    }
+  };
+  for (const { offset, record } of history) {
+    switch (record._tag) {
+      case 'StepSuspended':
+        byToken.set(record.token, {
+          offset,
+          record,
+          resolved: false,
+          open: true,
+        });
+        break;
+      case 'StepResolved': {
+        const wait = byToken.get(record.token);
+        if (wait !== undefined) {
+          byToken.set(record.token, { ...wait, resolved: true });
+        }
+        break;
+      }
+      case 'StepRestarted':
+        close((wait) => wait.record.token !== record.priorToken);
+        break;
+      case 'StepSettled':
+        if (record.parent === undefined) {
+          close((wait) => wait.record.id !== record.id);
+        }
+        break;
+      case 'RunSettled':
+      case 'Completed':
+        close(() => false);
+        break;
+      case 'RunStarted':
+      case 'Text':
+      case 'PartialOutput':
+      case 'StepOpened':
+      case 'StepStarted':
+      case 'TurnFinished':
+      case 'Compacted':
+      case 'BranchedFrom':
+      case 'StateCheckpoint':
+      case 'CodeStateCheckpoint':
+      case 'ChildSession':
+      case 'Signal':
+      case 'SignalReceived':
+        break;
+    }
+  }
+  return [...byToken.values()];
+};
 
 /** How a tool call ended, as a previous run recorded it. */
 export interface Settled {
@@ -35,7 +116,13 @@ export interface CompletedWait {
 
 /** What an orphaned run durably established about a tool call. */
 export type Recovery =
-  | { readonly _tag: 'Indeterminate' }
+  | {
+      readonly _tag: 'Indeterminate';
+      /** `StepStarted.replay`: whether re-running was known safe at start. */
+      readonly replay: 'safe' | 'unsafe';
+      /** The wait whose resolution this start resumed, if any. */
+      readonly resumes?: string;
+    }
   | { readonly _tag: 'Restarting' }
   | {
       readonly _tag: 'Suspended';
@@ -57,6 +144,8 @@ export interface IndeterminateToolCall {
   readonly name: string;
   readonly toolCallId: LogVocabulary.ToolCallId;
   readonly params: unknown;
+  /** `StepOpened.inputDigest`: the call's identity beside its name and id. */
+  readonly inputDigest: string;
 }
 
 /** A deliberately suspended call and the external wait that owns its replay. */
@@ -73,8 +162,8 @@ export interface SuspendedToolCall extends IndeterminateToolCall {
 export interface NestedRecovery {
   readonly name: string;
   readonly inputDigest: string;
-  /** Whether the handler was entered (`NestedToolStarted` is durable). */
-  readonly started: boolean;
+  /** Whether the handler was entered, and if so how safely it re-runs. */
+  readonly started?: 'safe' | 'unsafe';
   readonly settled?: Settled;
 }
 
@@ -139,8 +228,15 @@ class StepFold {
       this.nested.clear();
       this.running = false;
     },
-    ToolCall: (record) => {
+    StepOpened: (record) => {
       if (!this.running) {
+        return;
+      }
+      if (record.parent !== undefined) {
+        this.nested.set(nestedKey(record.parent, record.id), {
+          name: record.name,
+          inputDigest: record.inputDigest,
+        });
         return;
       }
       const key = settledKey(record.name, record.id);
@@ -148,21 +244,34 @@ class StepFold {
         this.order.push(key);
       }
       this.calls.set(key, {
-        step: record.step,
+        step: record.step ?? 0,
         name: record.name,
         toolCallId: record.id,
         params: record.params,
+        inputDigest: record.inputDigest,
       });
     },
-    ToolStarted: (record) => {
+    StepStarted: (record) => {
       if (!this.running) {
         return;
       }
+      if (record.parent !== undefined) {
+        const key = nestedKey(record.parent, record.id);
+        const call = this.nested.get(key);
+        if (call !== undefined) {
+          this.nested.set(key, { ...call, started: record.replay });
+        }
+        return;
+      }
       const key = settledKey(record.name, record.id);
-      this.recoveries.set(key, { _tag: 'Indeterminate' });
+      this.recoveries.set(key, {
+        _tag: 'Indeterminate',
+        replay: record.replay,
+        ...(record.resumes === undefined ? {} : { resumes: record.resumes }),
+      });
       this.starts.set(key, { name: record.name, id: record.id });
     },
-    ToolSuspended: (record) => {
+    StepSuspended: (record) => {
       if (!this.running) {
         return;
       }
@@ -176,7 +285,7 @@ class StepFold {
           : { interaction: record.interaction }),
       });
     },
-    ToolWaitCompleted: (record) => {
+    StepResolved: (record) => {
       if (this.running) {
         this.waits.set(record.token, {
           outcome: record.outcome,
@@ -184,51 +293,33 @@ class StepFold {
         });
       }
     },
-    ToolWaitRestarted: (record) => {
+    StepRestarted: (record) => {
       if (this.running) {
         this.recoveries.set(settledKey(record.name, record.id), {
           _tag: 'Restarting',
         });
       }
     },
-    ToolOutcome: (record) => {
-      if (this.running) {
-        this.recoveries.set(settledKey(record.name, record.id), {
-          _tag: 'Settled',
-          outcome: record.outcome,
-          result: record.result,
-        });
+    StepSettled: (record) => {
+      if (!this.running) {
+        return;
       }
-    },
-    NestedToolCall: (record) => {
-      if (this.running) {
-        this.nested.set(nestedKey(record.parent, record.key), {
-          name: record.name,
-          inputDigest: record.inputDigest,
-          started: false,
-        });
+      const settled = { outcome: record.outcome, result: record.result };
+      if (record.parent !== undefined) {
+        const key = nestedKey(record.parent, record.id);
+        const call = this.nested.get(key);
+        if (call !== undefined) {
+          this.nested.set(key, { ...call, settled });
+        }
+        return;
       }
-    },
-    NestedToolStarted: (record) => {
-      const key = nestedKey(record.parent, record.key);
-      const call = this.nested.get(key);
-      if (this.running && call !== undefined) {
-        this.nested.set(key, { ...call, started: true });
-      }
-    },
-    NestedToolOutcome: (record) => {
-      const key = nestedKey(record.parent, record.key);
-      const call = this.nested.get(key);
-      if (this.running && call !== undefined) {
-        this.nested.set(key, {
-          ...call,
-          settled: { outcome: record.outcome, result: record.result },
-        });
-      }
+      this.recoveries.set(settledKey(record.name, record.id), {
+        _tag: 'Settled',
+        ...settled,
+      });
     },
     Text: () => {},
     PartialOutput: () => {},
-    ToolResumed: () => {},
     TurnFinished: () => {},
     Compacted: () => {},
     BranchedFrom: () => {},
@@ -257,9 +348,7 @@ class StepFold {
 
   /** An immutable view of the state as it stands. */
   snapshot(): Snapshot {
-    // Dispatch commits before entering the handler, while ToolCall arrives via
-    // the provider event stream. Diagnose corruption only after the complete
-    // orphan suffix is folded.
+    // Diagnose corruption only after the complete orphan suffix is folded.
     const unmatched = [...this.starts].find(([key]) => {
       const recovery = this.recoveries.get(key);
       return recovery?._tag !== 'Settled' && !this.calls.has(key);
@@ -288,11 +377,11 @@ class StepFold {
       corruption:
         unmatchedSuspension !== undefined
           ? `Cannot recover suspended wait ${unmatchedSuspension.wait}: ` +
-            'durable ToolSuspended has no matching ToolStarted'
+            'durable StepSuspended has no earlier StepStarted'
           : unmatched === undefined
             ? undefined
             : `Cannot recover indeterminate tool ${unmatched.name} (${unmatched.id}): ` +
-              'durable ToolStarted has no matching ToolCall',
+              'durable StepStarted has no StepOpened',
       pending: listed((recovery) => recovery?._tag !== 'Settled'),
       indeterminate: listed((recovery) => recovery?._tag === 'Indeterminate'),
       suspended: this.order.flatMap((key): ReadonlyArray<SuspendedToolCall> => {
@@ -330,25 +419,6 @@ export const fold = (
   return steps.snapshot();
 };
 
-/** Parameters compared as JSON values, independent of key order. */
-const sameParams = (left: unknown, right: unknown): boolean =>
-  canonical(left) === canonical(right);
-
-const canonical = (value: unknown): string =>
-  JSON.stringify(value, (_key, nested: unknown) =>
-    nested !== null && typeof nested === 'object' && !Array.isArray(nested)
-      ? Object.fromEntries(
-          Arr.sort(
-            Object.entries(nested),
-            Order.mapInput(
-              Order.String,
-              ([key]: readonly [string, unknown]) => key,
-            ),
-          ),
-        )
-      : nested,
-  );
-
 export interface Tracker {
   /**
    * What the orphaned run recorded for one nested call. Like {@link prior},
@@ -376,7 +446,7 @@ export interface Tracker {
   readonly prior: (
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
-    params: unknown,
+    inputDigest: string,
   ) => Option.Option<Recovery>;
   /** The orphaned run's open calls, as of open. */
   readonly pendingToolCalls: ReadonlyArray<IndeterminateToolCall>;
@@ -409,7 +479,7 @@ export interface Tracker {
  * {@link Snapshot} is kept beside it as the one source of "what did the
  * previous run do", so serving from the log cannot reach a call this run made.
  * Callbacks here ensure a cancellation waiter is released only after its
- * ToolOutcome is durable.
+ * StepSettled is durable.
  */
 export const make = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
@@ -423,7 +493,7 @@ export const make = (
     const callbacks = new Map<string, Array<Effect.Effect<void>>>();
 
     const notify = (record: ConversationRecord.Record): Effect.Effect<void> => {
-      if (record._tag !== 'ToolOutcome') {
+      if (record._tag !== 'StepSettled' || record.parent !== undefined) {
         return Effect.void;
       }
       const key = settledKey(record.name, record.id);
@@ -449,10 +519,9 @@ export const make = (
         Option.fromUndefinedOr(
           steps.recoveries.get(settledKey(name, toolCallId)),
         ),
-      prior: (name, toolCallId, params) => {
+      prior: (name, toolCallId, inputDigest) => {
         const key = settledKey(name, toolCallId);
-        const recorded = opened.calls.get(key);
-        return recorded !== undefined && sameParams(recorded.params, params)
+        return opened.calls.get(key)?.inputDigest === inputDigest
           ? Option.fromUndefinedOr(steps.recoveries.get(key))
           : Option.none();
       },

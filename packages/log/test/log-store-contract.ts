@@ -171,34 +171,31 @@ export const logStoreContract = <E>(
           kind: 'text',
           text: 'hel',
         },
-        ToolCall: {
-          _tag: 'ToolCall',
+        StepOpened: {
+          _tag: 'StepOpened',
           step: 1,
           id: toolCallId,
           name: 't',
+          inputDigest: 'digest',
           params: { a: 1 },
         },
-        ToolStarted: {
-          _tag: 'ToolStarted',
+        StepStarted: {
+          _tag: 'StepStarted',
           id: toolCallId,
           name: 't',
+          replay: 'unsafe',
+          resumes: 'workflow-token',
         },
-        ToolSuspended: {
-          _tag: 'ToolSuspended',
+        StepSuspended: {
+          _tag: 'StepSuspended',
           id: toolCallId,
           name: 't',
           wait: 'review',
           token: 'workflow-token',
           request: { question: 'continue?' },
         },
-        ToolResumed: {
-          _tag: 'ToolResumed',
-          id: toolCallId,
-          name: 't',
-          token: 'workflow-token',
-        },
-        ToolWaitCompleted: {
-          _tag: 'ToolWaitCompleted',
+        StepResolved: {
+          _tag: 'StepResolved',
           id: toolCallId,
           name: 't',
           wait: 'review',
@@ -206,15 +203,15 @@ export const logStoreContract = <E>(
           outcome: 'success',
           result: { _tag: 'Success', value: { approved: true } },
         },
-        ToolWaitRestarted: {
-          _tag: 'ToolWaitRestarted',
+        StepRestarted: {
+          _tag: 'StepRestarted',
           id: toolCallId,
           name: 't',
           wait: 'review',
           priorToken: 'workflow-token',
         },
-        ToolOutcome: {
-          _tag: 'ToolOutcome',
+        StepSettled: {
+          _tag: 'StepSettled',
           step: 1,
           id: toolCallId,
           name: 't',
@@ -284,28 +281,6 @@ export const logStoreContract = <E>(
             usage: { input: 20, output: 10 },
             signalCursor: LogOffset.fromSeq(7n),
           },
-        },
-        NestedToolCall: {
-          _tag: 'NestedToolCall',
-          parent: toolCallId,
-          key: '#1',
-          name: 'lookup',
-          inputDigest: 'digest',
-          params: { id: 1 },
-        },
-        NestedToolStarted: {
-          _tag: 'NestedToolStarted',
-          parent: toolCallId,
-          key: '#1',
-          name: 'lookup',
-        },
-        NestedToolOutcome: {
-          _tag: 'NestedToolOutcome',
-          parent: toolCallId,
-          key: '#1',
-          name: 'lookup',
-          outcome: 'success',
-          result: { found: true },
         },
         StateCheckpoint: {
           _tag: 'StateCheckpoint',
@@ -925,10 +900,11 @@ export const logStoreContract = <E>(
               conversationId: defaultConversationId,
               timestamp: TIMESTAMP,
               record: {
-                _tag: 'ToolCall',
+                _tag: 'StepOpened',
                 step: 1,
                 id: LogVocabulary.ToolCallId.make('call-1'),
                 name: 'search',
+                inputDigest: 'digest',
                 params: { limit: 1n },
               },
             },
@@ -976,10 +952,11 @@ export const logStoreContract = <E>(
                 conversationId: defaultConversationId,
                 timestamp: TIMESTAMP,
                 record: {
-                  _tag: 'ToolCall',
+                  _tag: 'StepOpened',
                   step: 1,
                   id: LogVocabulary.ToolCallId.make('call-1'),
                   name: 'search',
+                  inputDigest: 'digest',
                   params,
                 },
               },
@@ -1010,10 +987,11 @@ export const logStoreContract = <E>(
               conversationId: defaultConversationId,
               timestamp: TIMESTAMP,
               record: {
-                _tag: 'ToolCall',
+                _tag: 'StepOpened',
                 step: 1,
                 id: LogVocabulary.ToolCallId.make('call-1'),
                 name: 'search',
+                inputDigest: 'digest',
                 params,
               },
             },
@@ -1030,9 +1008,9 @@ export const logStoreContract = <E>(
       if (record === undefined) {
         throw new Error('encoded-clone read returned no record');
       }
-      expect(record._tag).toBe('ToolCall');
+      expect(record._tag).toBe('StepOpened');
       if (
-        record._tag === 'ToolCall' &&
+        record._tag === 'StepOpened' &&
         typeof record.params === 'object' &&
         record.params !== null
       ) {
@@ -1054,10 +1032,11 @@ export const logStoreContract = <E>(
             conversationId: defaultConversationId,
             timestamp: TIMESTAMP,
             record: {
-              _tag: 'ToolCall' as const,
+              _tag: 'StepOpened' as const,
               step: 1,
               id: LogVocabulary.ToolCallId.make('call-1'),
               name: 'search',
+              inputDigest: 'digest',
               params,
             },
           });

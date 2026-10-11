@@ -151,7 +151,7 @@ const crashing = (
 const parentLosesOutcome: Crash = {
   op: 'append',
   after: false,
-  when: ({ path, tags: t, root }) => path === root && t.includes('ToolOutcome'),
+  when: ({ path, tags: t, root }) => path === root && t.includes('StepSettled'),
 };
 
 describe('a recorded delegation', () => {
@@ -350,7 +350,7 @@ describe('a child that crashed partway through its turns', () => {
           op: 'append',
           after: true,
           when: ({ path, tags: t, root }) =>
-            path !== root && t.includes('ToolOutcome'),
+            path !== root && t.includes('StepSettled'),
         },
         parentLosesOutcome,
       );
@@ -387,7 +387,7 @@ describe('a child that crashed partway through its turns', () => {
       expect(out.lookupsAtCrash).toBe(1);
       expect(out.second.text).toBe('parent done');
       expect(runs.lookups).toBe(1);
-      expect(tags(out.child).filter((t) => t === 'ToolCall')).toHaveLength(1);
+      expect(tags(out.child).filter((t) => t === 'StepOpened')).toHaveLength(1);
       expect(tags(out.child).at(-1)).toBe('RunSettled');
       // parent, child tool turn, child final, parent final: nothing repeated.
       expect(seen.prompts).toHaveLength(4);
@@ -465,7 +465,7 @@ describe('delegation depth', () => {
       // fifth conversation was opened.
       expect(childSessions(observed.deepest)).toHaveLength(1);
       const [refusal] = observed.deepest.flatMap(({ record }) =>
-        record._tag === 'ToolOutcome' ? [record] : [],
+        record._tag === 'StepSettled' ? [record] : [],
       );
       expect(refusal).toMatchObject({ name: 'task_sink', outcome: 'failure' });
       expect(show(refusal)).toContain('depth 4');

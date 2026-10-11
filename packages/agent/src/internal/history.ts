@@ -367,7 +367,12 @@ const fold = (
       assistant.push(Prompt.makePart('text', { text: record.text }));
     },
 
-    ToolCall: (record) => {
+    // A step with a parent is a code-mode call inside an `exec` the model
+    // sees as one call; only the `exec` itself reaches the prompt.
+    StepOpened: (record) => {
+      if (record.parent !== undefined) {
+        return;
+      }
       beginAssistant();
       assistant.push(
         Prompt.makePart('tool-call', {
@@ -379,7 +384,10 @@ const fold = (
       );
     },
 
-    ToolOutcome: (record) => {
+    StepSettled: (record) => {
+      if (record.parent !== undefined) {
+        return;
+      }
       if (results.length === 0) {
         resultsAt = currentOffset;
       }
@@ -390,7 +398,7 @@ const fold = (
           isFailure: record.outcome === 'failure',
           providerExecuted: record.providerExecuted ?? false,
           // Already the toolkit's encoding — the form `Prompt` puts in front
-          // of the model — which is why `ToolOutcome.result` stores that and
+          // of the model — which is why `StepSettled.result` stores that and
           // not the decoded value.
           result: record.result,
         }),
@@ -440,14 +448,10 @@ const fold = (
     // Progress toward a `Text` the turn never finished: output the model did
     // not complete is not something it said, so it is never replayed to it.
     PartialOutput: () => {},
-    ToolStarted: () => {},
-    ToolSuspended: () => {},
-    ToolResumed: () => {},
-    ToolWaitCompleted: () => {},
-    ToolWaitRestarted: () => {},
-    NestedToolCall: () => {},
-    NestedToolStarted: () => {},
-    NestedToolOutcome: () => {},
+    StepStarted: () => {},
+    StepSuspended: () => {},
+    StepResolved: () => {},
+    StepRestarted: () => {},
     Completed: () => {},
     ChildSession: () => {},
     RunSettled: () => {},
@@ -511,16 +515,12 @@ export const usageFrom = (
     },
     Text: () => {},
     PartialOutput: () => {},
-    ToolCall: () => {},
-    ToolStarted: () => {},
-    ToolSuspended: () => {},
-    ToolResumed: () => {},
-    ToolWaitCompleted: () => {},
-    ToolWaitRestarted: () => {},
-    NestedToolCall: () => {},
-    NestedToolStarted: () => {},
-    NestedToolOutcome: () => {},
-    ToolOutcome: () => {},
+    StepOpened: () => {},
+    StepStarted: () => {},
+    StepSuspended: () => {},
+    StepResolved: () => {},
+    StepRestarted: () => {},
+    StepSettled: () => {},
     Compacted: () => {},
     BranchedFrom: () => {},
     StateCheckpoint: () => {},

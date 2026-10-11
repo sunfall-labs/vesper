@@ -2,7 +2,14 @@ import type { LogStore } from '@sunfall/vesper-log/log-store';
 import type { LogOffset } from '@sunfall/vesper-log/offset';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Effect, Schema, Stream, type Crypto } from 'effect';
+import {
+  Array as Arr,
+  Effect,
+  Option,
+  Schema,
+  Stream,
+  type Crypto,
+} from 'effect';
 import { type Prompt, Tool } from 'effect/ai';
 
 import type { Agent } from './agent.js';
@@ -26,6 +33,7 @@ import {
   type Signal as SignalType,
 } from './internal/signal-store.js';
 import { protocolOf } from './internal/protocol.js';
+import * as RecoveryState from './recovery.js';
 
 /** Out-of-band input addressed to a durable conversation. */
 export const Signal = SignalSchema;
@@ -39,10 +47,9 @@ export interface PathOptions {
 
 /** Durable external-wait records exposed to approval and worker services. */
 export type WaitRecord =
-  | ConversationRecord.RecordOf<'ToolSuspended'>
-  | ConversationRecord.RecordOf<'ToolResumed'>
-  | ConversationRecord.RecordOf<'ToolWaitCompleted'>
-  | ConversationRecord.RecordOf<'ToolWaitRestarted'>;
+  | ConversationRecord.RecordOf<'StepSuspended'>
+  | ConversationRecord.RecordOf<'StepResolved'>
+  | ConversationRecord.RecordOf<'StepRestarted'>;
 
 /** A conversation envelope statically narrowed to an external-wait record. */
 export type WaitEnvelope = Omit<ConversationRecord.Envelope, 'record'> & {
@@ -54,10 +61,9 @@ export const isWaitEnvelope = (
   envelope: ConversationRecord.Envelope,
 ): envelope is WaitEnvelope => {
   switch (envelope.record._tag) {
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
       return true;
     case 'BranchedFrom':
     case 'ChildSession':
@@ -71,12 +77,9 @@ export const isWaitEnvelope = (
     case 'StateCheckpoint':
     case 'Text':
     case 'PartialOutput':
-    case 'ToolCall':
-    case 'NestedToolCall':
-    case 'NestedToolStarted':
-    case 'NestedToolOutcome':
-    case 'ToolOutcome':
-    case 'ToolStarted':
+    case 'StepOpened':
+    case 'StepSettled':
+    case 'StepStarted':
     case 'TurnFinished':
       return false;
     default:
@@ -86,39 +89,24 @@ export const isWaitEnvelope = (
 
 type ConcreteAgent = Agent.Any;
 
-interface NativeInteractionState {
-  readonly suspended:
-    | { readonly name: string; readonly token: string }
-    | undefined;
-  readonly resolved: boolean;
-}
-
-const nativeInteractionState = (
+/**
+ * The latest native interaction suspension of one call that `accepts` takes,
+ * with whether it was already decided.
+ */
+const nativeInteraction = (
   history: ReadonlyArray<ConversationRecord.Envelope>,
   toolCallId: LogVocabulary.ToolCallId,
-  accepts: (record: ConversationRecord.RecordOf<'ToolSuspended'>) => boolean,
-): NativeInteractionState => {
-  let suspended: NativeInteractionState['suspended'];
-  let resolved = false;
-  for (const { record } of history) {
-    if (
-      record._tag === 'ToolSuspended' &&
-      record.id === toolCallId &&
-      record.wait === ToolDispatch.INTERACTION_WAIT &&
-      accepts(record)
-    ) {
-      suspended = { name: record.name, token: record.token };
-      resolved = false;
-    } else if (
-      suspended !== undefined &&
-      record._tag === 'ToolWaitCompleted' &&
-      record.token === suspended.token
-    ) {
-      resolved = true;
-    }
-  }
-  return { suspended, resolved };
-};
+  accepts: (record: ConversationRecord.RecordOf<'StepSuspended'>) => boolean,
+): RecoveryState.Wait | undefined =>
+  Option.getOrUndefined(
+    Arr.findLast(
+      RecoveryState.waits(history),
+      ({ record }) =>
+        record.id === toolCallId &&
+        record.wait === ToolDispatch.INTERACTION_WAIT &&
+        accepts(record),
+    ),
+  );
 
 /**
  * Overloaded so only a keyed send carries the conflict error: unkeyed callers
@@ -398,9 +386,10 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
       Effect.gen(function* () {
         const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
         const session = yield* openRecorded;
-        // Both lookups scan `session.history` — the resume view that spans
-        // runs back to the latest compaction boundary — rather than the
-        // recovery snapshot (`suspendedToolCalls`/`hasCompletedWait`). The
+        // The lookup reads each wait's lifecycle across `session.history` —
+        // the resume view that spans runs back to the latest compaction
+        // boundary — rather than the recovery snapshot
+        // (`suspendedToolCalls`/`hasCompletedWait`). The
         // snapshot indexes only what the *next run* must resolve, so it
         // empties once the owning run settles: reading it here misreported a
         // resolved-then-dispatched approval as `not_found`, and — worse —
@@ -409,12 +398,12 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
         // suspension. The history keeps both records for as long as the
         // suspension itself is visible, so the two answers cannot go blind
         // independently.
-        const { suspended, resolved } = nativeInteractionState(
+        const suspension = nativeInteraction(
           session.history,
           normalizedId,
           (record) => record.interaction?.mode !== 'answer',
         );
-        if (suspended === undefined) {
+        if (suspension === undefined) {
           return yield* new ApprovalResolutionError({
             message: `No tool call ${normalizedId} is durably waiting for approval in conversation ${id}`,
             conversationId: id,
@@ -422,7 +411,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             reason: 'not_found',
           });
         }
-        if (resolved) {
+        if (suspension.resolved) {
           return yield* new ApprovalResolutionError({
             message: `Tool call ${normalizedId} in conversation ${id} was already resolved`,
             conversationId: id,
@@ -431,7 +420,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
           });
         }
         // A denial's result is what `dispatch.ts`'s `resolveIndeterminate`
-        // copies straight into the refusal `ToolOutcome` the model is shown,
+        // copies straight into the refusal `StepSettled` the model is shown,
         // without ever entering the handler. It is Effect's own
         // `Tool.ExecutionFailure`, the shape `LanguageModel` gives an in-band
         // denial, so it decodes through every tool's failure schema and reads
@@ -450,11 +439,11 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
               }).pipe(Effect.orDie);
         return yield* session.append([
           {
-            _tag: 'ToolWaitCompleted',
+            _tag: 'StepResolved',
             id: normalizedId,
-            name: suspended.name,
+            name: suspension.record.name,
             wait: ToolDispatch.INTERACTION_WAIT,
-            token: suspended.token,
+            token: suspension.record.token,
             outcome: decision === 'approve' ? 'success' : 'failure',
             result,
           },
@@ -476,14 +465,14 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
         )(result);
         const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
         const session = yield* openRecorded;
-        const { suspended, resolved } = nativeInteractionState(
+        const suspension = nativeInteraction(
           session.history,
           normalizedId,
           (record) =>
             record.interaction?.mode === 'answer' &&
             record.interaction.name === interaction.value.name,
         );
-        if (suspended === undefined) {
+        if (suspension === undefined) {
           return yield* new InteractionResolutionError({
             message: `No tool call ${normalizedId} is durably waiting for interaction "${interaction.value.name}" in conversation ${id}`,
             conversationId: id,
@@ -492,7 +481,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
             reason: 'not_found',
           });
         }
-        if (resolved) {
+        if (suspension.resolved) {
           return yield* new InteractionResolutionError({
             message: `Tool call ${normalizedId} in conversation ${id} was already resolved`,
             conversationId: id,
@@ -503,11 +492,11 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
         }
         return yield* session.append([
           {
-            _tag: 'ToolWaitCompleted',
+            _tag: 'StepResolved',
             id: normalizedId,
-            name: suspended.name,
+            name: suspension.record.name,
             wait: ToolDispatch.INTERACTION_WAIT,
-            token: suspended.token,
+            token: suspension.record.token,
             outcome: 'success',
             result: encodedResult,
           },

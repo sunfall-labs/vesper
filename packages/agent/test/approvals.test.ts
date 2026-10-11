@@ -118,8 +118,8 @@ describe('which calls are asked about', () => {
 
             expect(result).toMatchObject({ outcome: 'success', text: 'done' });
             expect(ran.count).toBe(0);
-            expect(tagsOf(records)).not.toContain('ToolSuspended');
-            expect(tagsOf(records)).not.toContain('ToolStarted');
+            expect(tagsOf(records)).not.toContain('StepSuspended');
+            expect(tagsOf(records)).not.toContain('StepStarted');
             expect(outcome?.outcome).toBe('failure');
             expect(
               (yield* Schema.decodeUnknownEffect(AiError.AiError)(
@@ -208,9 +208,9 @@ describe('durable tool approval', () => {
         });
         expect(ran.count).toBe(0);
         const tags = tagsOf(yield* recordsOf(conversation));
-        expect(tags).toContain('ToolSuspended');
-        expect(tags).not.toContain('ToolStarted');
-        expect(tags).not.toContain('ToolOutcome');
+        expect(tags).toContain('StepSuspended');
+        expect(tags).not.toContain('StepStarted');
+        expect(tags).not.toContain('StepSettled');
       }),
       releasing(),
     );
@@ -252,7 +252,7 @@ describe('durable tool approval', () => {
         });
         expect(outcomesOf(yield* recordsOf(conversation))).toEqual([
           {
-            _tag: 'ToolOutcome',
+            _tag: 'StepSettled',
             step: 1,
             id: CALL_ID,
             name: 'release',
@@ -291,7 +291,7 @@ describe('durable tool approval', () => {
         ).toMatchObject({
           part: { id: CALL_ID, isFailure: true, resultSource: 'recovered' },
         });
-        expect(tagsOf(records)).not.toContain('ToolStarted');
+        expect(tagsOf(records)).not.toContain('StepStarted');
         expect(others).toEqual([]);
         expect(refusal).toMatchObject({ id: CALL_ID, outcome: 'failure' });
         // Effect's own in-band denial shape, not one only this feature knows.
@@ -352,7 +352,7 @@ describe('durable tool approval', () => {
             runStarted('approval-test'),
             toolCalled('release_optional', request, CALL_ID),
             {
-              _tag: 'ToolSuspended',
+              _tag: 'StepSuspended',
               id: CALL_ID,
               name: 'release_optional',
               wait: '@sunfall/vesper-agent/interaction',
@@ -360,7 +360,7 @@ describe('durable tool approval', () => {
               request,
             },
             {
-              _tag: 'ToolWaitCompleted',
+              _tag: 'StepResolved',
               id: CALL_ID,
               name: 'release_optional',
               wait: '@sunfall/vesper-agent/interaction',
@@ -382,9 +382,9 @@ describe('durable tool approval', () => {
           });
           expect(ran.count).toBe(0);
           expect(outcomesOf(records).at(-1)?.outcome).toBe('failure');
-          expect(tags).not.toContain('ToolStarted');
-          expect(tags.indexOf('ToolOutcome')).toBe(
-            tags.indexOf('ToolResumed') + 1,
+          expect(tags).not.toContain('StepStarted');
+          expect(tags.indexOf('StepSettled')).toBeGreaterThan(
+            tags.indexOf('StepResolved'),
           );
         }),
         model,
@@ -425,8 +425,8 @@ describe('durable tool approval', () => {
           yield* Deferred.await(entered);
           yield* Fiber.interrupt(running);
           const afterCrash = tagsOf(yield* recordsOf(conversation));
-          expect(afterCrash).toContain('ToolStarted');
-          expect(afterCrash).not.toContain('ToolOutcome');
+          expect(afterCrash).toContain('StepStarted');
+          expect(afterCrash).not.toContain('StepSettled');
 
           const refused = yield* Effect.exit(conversation.run());
           expect(Exit.isFailure(refused)).toBe(true);
@@ -482,7 +482,7 @@ describe('durable tool approval', () => {
           }
           expect(
             tagsOf(yield* recordsOf(conversation)).filter(
-              (tag) => tag === 'ToolWaitCompleted',
+              (tag) => tag === 'StepResolved',
             ),
           ).toHaveLength(1);
         }),
@@ -563,7 +563,7 @@ describe('external interactions', () => {
           text: 'Blue it is.',
         });
         expect(
-          records.find((record) => record._tag === 'ToolSuspended'),
+          records.find((record) => record._tag === 'StepSuspended'),
         ).toMatchObject({ interaction: { name: 'question', mode: 'answer' } });
         expect(outcomesOf(records)).toMatchObject([
           {
@@ -589,7 +589,7 @@ describe('external interactions', () => {
         );
         expect(exit._tag).toBe('Failure');
         expect(tagsOf(yield* recordsOf(conversation))).not.toContain(
-          'ToolWaitCompleted',
+          'StepResolved',
         );
       }),
       asking(),

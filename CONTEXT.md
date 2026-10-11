@@ -69,10 +69,11 @@ than concatenated into the system prompt, so the cacheable prefix stays
 byte-identical across turns. Only the catalog line goes in the prompt.
 
 **Record** — one thing that happened in a conversation, appended to the log:
-`RunStarted`, `Text`, `ToolCall`, `ToolStarted`, `ToolSuspended`, `ToolResumed`,
-`ToolWaitCompleted`, `ToolWaitRestarted`, `ToolOutcome`, `TurnFinished`,
-`StateCheckpoint`, `Compacted`, `BranchedFrom`, `Completed`, `ChildSession`,
-`Signal`, `SignalReceived`, `RunSettled`. The conversation log is the single
+`RunStarted`, `Text`, `PartialOutput`, the six step records (`StepOpened`,
+`StepStarted`, `StepSuspended`, `StepResolved`, `StepRestarted`,
+`StepSettled`), `TurnFinished`, `StateCheckpoint`, `CodeStateCheckpoint`,
+`Compacted`, `BranchedFrom`, `Completed`, `ChildSession`, `Signal`,
+`SignalReceived`, `RunSettled`. The conversation log is the single
 persistence mechanism in this family.
 
 **Conversation format version** — Vesper's version for persisted conversation
@@ -100,10 +101,14 @@ id derived from the parent's id and the tool call id, referenced by one
 `ChildSession` record written into both logs.
 
 **Resumption** — continuing a conversation from its records: the prompt is
-rebuilt from `Text`, `ToolCall`, `ToolOutcome` and the steers that redirected
+rebuilt from `Text`, top-level `StepOpened` and `StepSettled`, and the steers that redirected
 it, and the loop starts the _next_ turn.
 
-**Indeterminate tool call** — a `ToolStarted` with no later `ToolOutcome` in an
+**Step** — one tool call's durable life: opened, perhaps suspended and
+resolved, started, settled. A code-mode call inside `exec` is a step with a
+`parent`. Identified by name, id and `inputDigest`.
+
+**Indeterminate tool call** — a `StepStarted` with no later `StepSettled` in an
 orphaned run. It is never redispatched by default. A dedicated interceptor must
 explicitly Retry or Answer; ordinary `beforeToolCall` continuation is not a
 retry decision.

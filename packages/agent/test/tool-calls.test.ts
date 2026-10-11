@@ -60,7 +60,7 @@ const agentOf = <const Tools extends Record<string, Tool.Any>>(
 
 describe('a tool call that runs', () => {
   it.effect(
-    'is recorded ToolCall, ToolStarted, ToolOutcome in order, stored in the toolkit encoding',
+    'is recorded StepOpened, StepStarted, StepSettled in order, stored in the toolkit encoding',
     () => {
       const ran: string[] = [];
       const agent = agentOf('ordering', Toolkit.make(lookup)).withHandlers({
@@ -84,10 +84,10 @@ describe('a tool call that runs', () => {
 
           const records = yield* readRecords('ordering');
           const tags = tagsOf(records);
-          expect(tags.filter((tag) => tag.startsWith('Tool'))).toEqual([
-            'ToolCall',
-            'ToolStarted',
-            'ToolOutcome',
+          expect(tags.filter((tag) => tag.startsWith('Step'))).toEqual([
+            'StepOpened',
+            'StepStarted',
+            'StepSettled',
           ]);
           expect(tags[0]).toBe('RunStarted');
           expect(tags.at(-1)).toBe('RunSettled');
@@ -286,7 +286,7 @@ describe('a tool call id the provider reuses', () => {
             toolCalled('echo', { x: 1 }, 'call_0'),
             toolStarted('echo', 'call_0'),
             {
-              _tag: 'ToolOutcome',
+              _tag: 'StepSettled',
               step: 1,
               id: LogVocabulary.ToolCallId.make('call_0'),
               name: 'echo',

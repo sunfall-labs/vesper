@@ -251,8 +251,9 @@ catch that class and branch without parsing an error string.
 ### Durable nested calls
 
 When the run is recorded, each nested call is written to the conversation as
-`NestedToolCall`, `NestedToolStarted`, and `NestedToolOutcome` records, keyed
-by the parent `exec` call id and a key within it: the nth call the script made
+the same `StepOpened`, `StepStarted`, and `StepSettled` records a top-level
+call gets, with `parent` set to the `exec` call id and `id` set to a key
+within it: the nth call the script made
 without a key (`#1`, `#2`, ...), or `k:<key>` when the script names it with
 `tools.charge(input, { key: 'charge-order-7' })`. Keyless ordinals are stable
 because the same source replays the same calls in the same order; a script
@@ -265,8 +266,10 @@ the call is indeterminate like any other, and `onIndeterminateToolCall` may
 answer `Retry`. The retried `exec` re-runs the script, but a nested call whose
 outcome is already durable is served from the log without running its handler,
 interception, or metering again. A nested call that was started but never
-settled is not re-run, since it may have committed: the script sees a
-`ToolCallError` with code `indeterminate`. A call whose name or input differs
+settled runs again only if its tool was declared `Replay.safe` when it
+started; any other may have committed, so it is not re-run and the script sees
+a `ToolCallError` with code `indeterminate` — the script is the one place that
+knows whether it can carry on without that result. A call whose name or input differs
 from what the log holds under its key fails with `dispatch_failed` instead of
 being served a stale answer. Using a key twice in one execution is also
 `dispatch_failed`. Runs without a session behave as before and record
@@ -469,11 +472,11 @@ declared tool dependency does, so the application wires a store the same way
 it wires `LanguageModel`.
 
 Only the encoded result crosses the threshold check, so this composes with
-recording exactly as durable state does: `ToolOutcome.result` stores the
+recording exactly as durable state does: `StepSettled.result` stores the
 pointer, not the payload, and a resumed conversation is rebuilt from that
 pointer. Recovering a call an earlier crashed run had already settled
 decodes a spilled result by its pointer shape rather than the tool's own
-schema — the one deliberate exception to "recovered `ToolOutcome` values
+schema — the one deliberate exception to "recovered `StepSettled` values
 must decode through the current tool result schema" (see
 [Durable conversations](#durable-conversations)).
 
@@ -713,13 +716,13 @@ const release = Tool.make('release', {
 
 When the model calls it, `LanguageModel` suspends before the handler is ever
 entered and emits a `tool-approval-request` part instead of dispatching. A
-recorded run turns that into a durable `ToolSuspended` — the same record
+recorded run turns that into a durable `StepSuspended` — the same record
 family `AgentWorkflow.wait` uses below — and ends with `Result.outcome ===
 'suspended'` and `pendingInteractions`. No
 Effect Workflow, no `AgentWorkflow.durable`, and the handler has not run.
 
 Model-emitted arguments cross their schema boundary before approval,
-interception, or durable `ToolStarted`. Invalid arguments and unknown tool
+interception, or durable `StepStarted`. Invalid arguments and unknown tool
 names are framework input failures: they are returned to the model as typed
 `AiError` tool results regardless of the tool handler's `failureMode`. That
 setting controls handler failures; it cannot turn untrusted model output into
@@ -744,7 +747,7 @@ const after = yield * conversation.run('release r1');
 
 `resolveApproval` only records the decision; it does not itself dispatch.
 The next `run` (or `stream`) picks it up: approved genuinely dispatches the
-handler for the first time, denied settles a refusal `ToolOutcome` — an
+handler for the first time, denied settles a refusal `StepSettled` — an
 encoded `AiError`, the same shape `failureMode: 'return'` already uses for a
 framework-level failure — without ever entering the handler. Calling it
 again for the same `toolCallId` fails with typed
@@ -806,7 +809,7 @@ yield * conversation.run();
 `Interaction.answer` brands the tool at the type level, so `resolve` cannot be
 called with an ordinary or approval-only tool. It encodes through the tool's
 success schema before appending anything. The next run records that encoded
-answer as the successful `ToolOutcome` without entering the guard handler.
+answer as the successful `StepSettled` without entering the guard handler.
 
 An unrecorded `agent.run(...)` fails outright with a typed `AiError` instead
 of returning a suspension nothing can ever resolve — approval requires a
@@ -1027,7 +1030,7 @@ const billingAgent = Agent.make({
 });
 ```
 
-The wait appends `ToolSuspended` with its encoded request and completion token,
+The wait appends `StepSuspended` with its encoded request and completion token,
 then suspends the owning Effect Workflow. The definition derives the same
 stable application key when projecting that request, so an approval service
 can wait for one independently keyed instance and complete it:
@@ -1087,17 +1090,18 @@ If durable history contains two different active tokens for that identity,
 `awaitPending` fails with typed `WaitStateError` rather than choosing one by log
 order.
 
-Completion is durable, first-write-wins, and wakes the workflow. Vesper appends
-`ToolResumed`, records the schema-encoded decision as `ToolWaitCompleted`,
-re-enters the same logical handler, and finally records `ToolOutcome`.
+Completion is durable, first-write-wins, and wakes the workflow. Vesper records
+the schema-encoded decision as `StepResolved`, re-enters the same logical
+handler under a `StepStarted` that names the token it resumes, and finally
+records `StepSettled`.
 `RecordingPolicy.externalResult` can redact the persisted decision without
 changing the live value. Re-entry is workflow replay, not a serialized
 JavaScript stack:
 ordinary effects before the wait can run again, so external effects belong in
 `AgentWorkflow.step` or must enforce `AgentWorkflow.idempotencyKey` themselves.
-If replay crashes again, `ToolResumed` leaves the call suspended and safe to
-re-enter; a bare `ToolStarted` without `ToolSuspended` remains indeterminate and
-still requires `onIndeterminateToolCall`.
+If replay crashes again, that start was recorded `replay: 'safe'`, so the next
+resume re-enters the workflow on its own; a start that resumed nothing remains
+indeterminate and still requires `onIndeterminateToolCall`.
 
 A branch or fork cannot silently copy a workflow-owned token. Restart it
 explicitly through the binding; the original provider call and parameters are
@@ -1175,7 +1179,7 @@ of a run, such as an MCP catalog.
 
 ### Resuming without a human (`Replay`)
 
-By default a crash between `ToolStarted` and `ToolOutcome` fails the resume,
+By default a crash between `StepStarted` and `StepSettled` fails the resume,
 because the handler may already have committed. `Replay` is the explicit
 opt-in for toolkits that can say what re-execution costs. Declare the tools
 that are idempotent, then attach the policy:
@@ -1198,7 +1202,7 @@ const resilient = agent.intercepting(Replay.policy);
 After a crash, `lookup` is retried and its outcome recorded as usual. `send`
 is not run again: the call is answered with Effect's native
 `{ type: 'execution-interrupted', reason }` failure, recorded as an ordinary
-failed `ToolOutcome`, and the model sees it on its next request and the run
+failed `StepSettled`, and the model sees it on its next request and the run
 continues. Without `Replay.policy` (or another `onIndeterminateToolCall`) the
 resume still fails. `Replay.onIndeterminateToolCall` is the same decision as a
 function, for use as the fallback inside a hand-written policy that handles
@@ -1217,7 +1221,7 @@ cannot revoke permission for a tool call a crashed run completed. Settling the
 run empties the index; refusing does not.
 
 The other direction is the same rule: a call the interceptor answered is
-recorded as an ordinary `ToolOutcome`, so a later run recovers the substituted
+recorded as an ordinary `StepSettled`, so a later run recovers the substituted
 answer rather than re-asking. What the log says happened is what happened.
 
 An interceptor belongs to the agent it was attached to. A subagent is its own
@@ -1254,8 +1258,8 @@ The short version:
   in-flight provider stream before any real tool or delegation handler has
   started in that turn. The boundary drain remains the sole cursor, budget,
   ordering, and `SignalReceived` authority.
-- Recovery never silently re-runs a tool call. A recorded `ToolStarted`
-  without a `ToolOutcome` requires the `onIndeterminateToolCall` interceptor
+- Recovery never silently re-runs a tool call. A recorded `StepStarted`
+  without a `StepSettled` requires the `onIndeterminateToolCall` interceptor
   to explicitly Retry or Answer after application-specific reconciliation,
   and recovered results must decode through the current tool result schema —
   decode failure is an actionable `AiError`, never an unknown value presented

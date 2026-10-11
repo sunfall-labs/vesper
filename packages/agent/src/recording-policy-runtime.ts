@@ -1,5 +1,4 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 import { Effect, type Context } from 'effect';
 
 import { RecordingPolicy } from './recording-policy.js';
@@ -60,7 +59,9 @@ const compileFilter = <R>(
               prompt,
             }),
           ),
-    ToolCall: (record) =>
+    // A nested code-mode step is a tool call too, and gets the same
+    // redaction; its `parent` tells the hook which `exec` call it belongs to.
+    StepOpened: (record) =>
       policy.toolParameters === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
@@ -70,62 +71,24 @@ const compileFilter = <R>(
               params,
             }),
           ),
-    ToolStarted: (record) => Effect.succeed<ConversationRecord.Record>(record),
-    // A nested call is a tool call and gets the same redaction as one. The
-    // hooks take a `ToolCall`/`ToolOutcome` record, so each nested record
-    // is shown to them as the tool call it stands for, under its nested
-    // identity, `<parent>/<key>`.
-    NestedToolCall: (record) =>
-      policy.toolParameters === undefined
-        ? Effect.succeed<ConversationRecord.Record>(record)
-        : Effect.map(
-            policy.toolParameters(record.params, {
-              _tag: 'ToolCall',
-              step: 0,
-              id: LogVocabulary.ToolCallId.make(
-                `${record.parent}/${record.key}`,
-              ),
-              name: record.name,
-              params: record.params,
-            }),
-            (params): ConversationRecord.Record => ({ ...record, params }),
-          ),
-    NestedToolStarted: (record) =>
-      Effect.succeed<ConversationRecord.Record>(record),
-    NestedToolOutcome: (record) =>
-      policy.toolResult === undefined
-        ? Effect.succeed<ConversationRecord.Record>(record)
-        : Effect.map(
-            policy.toolResult(record.result, {
-              _tag: 'ToolOutcome',
-              step: 0,
-              id: LogVocabulary.ToolCallId.make(
-                `${record.parent}/${record.key}`,
-              ),
-              name: record.name,
-              outcome: record.outcome,
-              result: record.result,
-            }),
-            (result): ConversationRecord.Record => ({ ...record, result }),
-          ),
-    ToolSuspended: (record) =>
+    StepStarted: (record) => Effect.succeed<ConversationRecord.Record>(record),
+    StepSuspended: (record) =>
       policy.externalRequest === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
             policy.externalRequest(record.request, record),
             (request): ConversationRecord.Record => ({ ...record, request }),
           ),
-    ToolResumed: (record) => Effect.succeed<ConversationRecord.Record>(record),
-    ToolWaitCompleted: (record) =>
+    StepResolved: (record) =>
       policy.externalResult === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(
             policy.externalResult(record.result, record),
             (result): ConversationRecord.Record => ({ ...record, result }),
           ),
-    ToolWaitRestarted: (record) =>
+    StepRestarted: (record) =>
       Effect.succeed<ConversationRecord.Record>(record),
-    ToolOutcome: (record) =>
+    StepSettled: (record) =>
       policy.toolResult === undefined
         ? Effect.succeed<ConversationRecord.Record>(record)
         : Effect.map(

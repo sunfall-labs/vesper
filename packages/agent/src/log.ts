@@ -178,6 +178,12 @@ export interface Session {
    */
   readonly sha256: (text: string) => Effect.Effect<string>;
 
+  /**
+   * A step's identity beside its name and id: the digest of its name and
+   * input, taken before the recording policy can redact the input.
+   */
+  readonly inputDigest: (name: string, input: unknown) => Effect.Effect<string>;
+
   /** Usage copied from an ancestor when this conversation was forked. */
   readonly inheritedUsage: Stop.Usage;
 
@@ -264,7 +270,7 @@ export interface Session {
   readonly prior: (
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
-    params: unknown,
+    inputDigest: string,
   ) => Option.Option<Recovery>;
 
   /**
@@ -278,7 +284,7 @@ export interface Session {
     key: string,
   ) => Option.Option<NestedRecovery>;
 
-  /** @internal Orphaned calls in their original durable ToolCall order. */
+  /** @internal Orphaned calls in their original durable StepOpened order. */
   readonly pendingToolCalls: ReadonlyArray<IndeterminateToolCall>;
 
   /** @internal Indeterminate calls requiring an application decision. */

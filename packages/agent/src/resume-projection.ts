@@ -94,16 +94,12 @@ export const update = (
           };
     case 'Text':
     case 'PartialOutput':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'NestedToolCall':
-    case 'NestedToolStarted':
-    case 'NestedToolOutcome':
-    case 'ToolOutcome':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'BranchedFrom':
     case 'StateCheckpoint':
     case 'CodeStateCheckpoint':
@@ -144,16 +140,12 @@ export const updateState = (
     case 'RunStarted':
     case 'Text':
     case 'PartialOutput':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'NestedToolCall':
-    case 'NestedToolStarted':
-    case 'NestedToolOutcome':
-    case 'ToolOutcome':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'TurnFinished':
     case 'Compacted':
     case 'BranchedFrom':
@@ -198,16 +190,12 @@ export const updateCodeState = (
     case 'RunStarted':
     case 'Text':
     case 'PartialOutput':
-    case 'ToolCall':
-    case 'ToolStarted':
-    case 'ToolSuspended':
-    case 'ToolResumed':
-    case 'ToolWaitCompleted':
-    case 'ToolWaitRestarted':
-    case 'NestedToolCall':
-    case 'NestedToolStarted':
-    case 'NestedToolOutcome':
-    case 'ToolOutcome':
+    case 'StepOpened':
+    case 'StepStarted':
+    case 'StepSuspended':
+    case 'StepResolved':
+    case 'StepRestarted':
+    case 'StepSettled':
     case 'TurnFinished':
     case 'Compacted':
     case 'BranchedFrom':

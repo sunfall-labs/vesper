@@ -85,9 +85,9 @@ describe('resuming a crashed run', () => {
         expect(observed.afterCrash).toEqual([
           'RunStarted',
           'Text',
-          'ToolCall',
-          'ToolStarted',
-          'ToolOutcome',
+          'StepOpened',
+          'StepStarted',
+          'StepSettled',
           'RunSettled',
         ]);
         expect(observed.crashed).toEqual({ asked: 1, ran: 1 });
@@ -275,7 +275,7 @@ describe('resuming an ordinary conversation', () => {
       );
 
       expect(
-        records.find(({ record }) => record._tag === 'ToolCall')?.record,
+        records.find(({ record }) => record._tag === 'StepOpened')?.record,
       ).toMatchObject({ providerExecuted: true });
       const assistant = present(models.asked[2]).content.find(
         (message) => message.role === 'assistant',

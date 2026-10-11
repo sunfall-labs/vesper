@@ -767,8 +767,8 @@ describe('a signal that arrives while the run is in flight', () => {
         expect(result.completed.outcome).toBe('cancelled');
         expect(ran.count).toBe(0);
         const tags = tagsOf(result.records);
-        expect(tags).not.toContain('ToolStarted');
-        expect(tags).not.toContain('ToolOutcome');
+        expect(tags).not.toContain('StepStarted');
+        expect(tags).not.toContain('StepSettled');
         expect(settlement(result.records)).toMatchObject([
           { outcome: 'cancelled' },
         ]);

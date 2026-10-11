@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
@@ -11,6 +13,7 @@ import {
   type Response,
 } from 'effect/ai';
 
+import * as InputDigest from '../src/internal/input-digest.js';
 import * as AgentLog from '../src/log.js';
 import type { ScriptedModel } from '../src/testing.js';
 import { testBudget } from './budget-fixture.js';
@@ -172,7 +175,7 @@ export const readRecords = Effect.fn('test.readRecords')(function* (
 });
 
 export const outcomesOf = (records: ReadonlyArray<ConversationRecord.Record>) =>
-  records.flatMap((record) => (record._tag === 'ToolOutcome' ? [record] : []));
+  records.flatMap((record) => (record._tag === 'StepSettled' ? [record] : []));
 
 export const tagsOf = (records: ReadonlyArray<ConversationRecord.Record>) =>
   records.map((record) => record._tag);
@@ -186,25 +189,32 @@ export const runStarted = (agent: string): ConversationRecord.Record => ({
   prompt: [],
 });
 
+/** The `inputDigest` a session records for a step's name and input. */
+export const digestOf = (name: string, input: unknown): string =>
+  createHash('sha256').update(InputDigest.material(name, input)).digest('hex');
+
 export const toolCalled = (
   name: string,
   params: unknown,
   id: string = CALL_ID,
 ): ConversationRecord.Record => ({
-  _tag: 'ToolCall',
+  _tag: 'StepOpened',
   step: 1,
   id: LogVocabulary.ToolCallId.make(id),
   name,
+  inputDigest: digestOf(name, params),
   params,
 });
 
 export const toolStarted = (
   name: string,
   id: string = CALL_ID,
+  replay: 'safe' | 'unsafe' = 'unsafe',
 ): ConversationRecord.Record => ({
-  _tag: 'ToolStarted',
+  _tag: 'StepStarted',
   id: LogVocabulary.ToolCallId.make(id),
   name,
+  replay,
 });
 
 export const toolOutcome = (
@@ -212,7 +222,7 @@ export const toolOutcome = (
   result: unknown,
   outcome: 'success' | 'failure' = 'success',
 ): ConversationRecord.Record => ({
-  _tag: 'ToolOutcome',
+  _tag: 'StepSettled',
   step: 1,
   id: CALL_ID,
   name,

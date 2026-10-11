@@ -22,6 +22,7 @@ import {
   says,
   textIn,
 } from './durability-fixtures.js';
+import { digestOf } from './tool-fixtures.js';
 
 // Recording policy filters what is persisted. It must never change what the
 // model is shown, and it must reach every record family that can carry a
@@ -127,18 +128,22 @@ describe('recording policy', () => {
           written.flatMap(({ record }) =>
             record._tag === tag ? [record] : [],
           );
-        expect(of('ToolCall')).toMatchObject([
-          { params: { redacted: 'params' } },
+        // The identity a resumed run compares is taken before the policy.
+        expect(of('StepOpened')).toMatchObject([
+          {
+            params: { redacted: 'params' },
+            inputDigest: digestOf('question', { question: 'secret question' }),
+          },
         ]);
-        expect(of('ToolSuspended')).toMatchObject([
+        expect(of('StepSuspended')).toMatchObject([
           { request: { redacted: 'external request' } },
         ]);
-        expect(of('ToolOutcome')).toMatchObject([
+        expect(of('StepSettled')).toMatchObject([
           { result: { redacted: 'result' } },
         ]);
         // The caller's answer is written by `resolveInteraction`, outside any
         // run, and still passes through the conversation's policy.
-        expect(of('ToolWaitCompleted')).toMatchObject([
+        expect(of('StepResolved')).toMatchObject([
           { result: { answer: '[redacted answer]' } },
         ]);
         expect(of('SignalReceived')).toMatchObject([

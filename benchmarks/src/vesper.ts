@@ -575,9 +575,10 @@ export const runConformance = async (): Promise<ConformanceResult> => {
           prompt: [],
         },
         {
-          _tag: 'ToolStarted',
+          _tag: 'StepStarted',
           id: LogVocabulary.ToolCallId.make('uncertain'),
           name: TOOL_NAME,
+          replay: 'unsafe',
         },
       ]);
       const recovered = yield* AgentLog.open(recoveryId, {
@@ -734,7 +735,7 @@ export const runConformance = async (): Promise<ConformanceResult> => {
       {
         axis: 'indeterminate tool handling',
         status: 'verified',
-        evidence: 'ToolStarted without ToolOutcome opens as Indeterminate',
+        evidence: 'StepStarted without StepSettled opens as Indeterminate',
       },
       {
         axis: 'revision compatibility',
@@ -1235,9 +1236,10 @@ const runHistoryOpen = async (): Promise<ScenarioResult> => {
               prompt: [],
             },
             {
-              _tag: 'ToolStarted',
+              _tag: 'StepStarted',
               id: LogVocabulary.ToolCallId.make('orphan'),
               name: TOOL_NAME,
+              replay: 'unsafe',
             },
           ]),
         );

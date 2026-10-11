@@ -3,7 +3,7 @@ import type { Tool } from 'effect/ai';
 
 import { Interception } from './interception.js';
 
-// Recovery's default is strict: a `ToolStarted` with no `ToolOutcome` is
+// Recovery's default is strict: a `StepStarted` with no `StepSettled` is
 // indeterminate, the handler may already have committed externally, and with no
 // `onIndeterminateToolCall` configured the resume fails (`dispatch.ts`). This
 // module is the explicit, one-line opt-out of that strictness for toolkits
@@ -62,7 +62,7 @@ export const interruptedFailure = (
 /**
  * Answer an indeterminate call with an `execution-interrupted` failure.
  *
- * Recorded as an ordinary failed `ToolOutcome` and decoded through the tool's
+ * Recorded as an ordinary failed `StepSettled` and decoded through the tool's
  * failure result schema, which always includes `ExecutionFailure`. The handler
  * does not run and the turn continues, so the model can report or work around
  * the gap.

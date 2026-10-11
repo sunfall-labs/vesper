@@ -178,37 +178,77 @@ export const Record = Schema.TaggedUnion({
     kind: Schema.Literals(['text', 'reasoning']),
     text: Schema.String,
   },
-  ToolCall: {
-    step: Count,
-    /** Provider-assigned call id, unique within the conversation. */
+  /*
+   * Durable steps.
+   *
+   * A step is one effect the agent performs on the model's behalf: a tool
+   * call, or a call a code-mode script makes from inside its `exec` call (a
+   * nested step, which carries `parent`). Every step moves through the same
+   * records, and one fold reads them all:
+   *
+   *   StepOpened ─▶ StepStarted ─▶ StepSettled
+   *   StepOpened ─▶ StepSuspended ─▶ StepResolved ─▶ (StepStarted ─▶) StepSettled
+   *
+   * A step that started and never settled is indeterminate: whether its effect
+   * happened is unknown, and recovery decides from `StepStarted.replay` and
+   * the indeterminate policy, never by re-running it unasked. Only top-level
+   * steps (no `parent`) are model history: `StepOpened` is the tool call the
+   * model made and `StepSettled` the result it is shown.
+   */
+  /** The model, or a code-mode script, asked for a tool call. */
+  StepOpened: {
+    /** The turn that made the call; absent for a nested step. */
+    step: Schema.optionalKey(Count),
+    /**
+     * Provider-assigned call id for a top-level step; for a nested step, its
+     * key within the parent: `#<ordinal>` or `k:<explicit>`.
+     */
     id: LogVocabulary.ToolCallId,
+    /** The `exec` call a nested step belongs to. */
+    parent: Schema.optionalKey(LogVocabulary.ToolCallId),
     name: Schema.String,
     /** Whether the provider executed this call outside Vesper's toolkit. */
     providerExecuted: Schema.optionalKey(Schema.Boolean),
+    /**
+     * SHA-256 of the call's canonical parameters, taken before any recording
+     * policy redacts `params`. Recovery serves a recorded result only to the
+     * same call — same name, id, and digest — because providers reuse ids
+     * across turns.
+     */
+    inputDigest: Schema.String,
     params: Schema.Unknown,
   },
   /**
-   * A real tool or delegation handler is about to be invoked.
+   * A handler is about to run.
    *
-   * Written after interception and recovery substitution, immediately before
-   * entering the handler. Its absence therefore means the call was never
-   * dispatched; its presence without a later `ToolOutcome` means execution is
-   * indeterminate and must not be retried implicitly.
+   * Durable before the handler is entered, however the step got here: first
+   * dispatch, a retry, an approval, or a workflow wait's resumption. Its
+   * presence without a later `StepSettled` means the effect may or may not
+   * have happened.
    */
-  ToolStarted: {
-    /** Provider-assigned call id, unique within the conversation. */
+  StepStarted: {
     id: LogVocabulary.ToolCallId,
+    parent: Schema.optionalKey(LogVocabulary.ToolCallId),
     name: Schema.String,
+    /**
+     * Whether running this handler again is safe, as known when it started:
+     * a tool declared `Replay.safe`, or a workflow wait's replay-safe
+     * re-entry. Recovery re-runs an interrupted step only when this and the
+     * tool's current declaration both say so.
+     */
+    replay: Schema.Literals(['safe', 'unsafe']),
+    /** The durable wait whose resolution this start resumes. */
+    resumes: Schema.optionalKey(Schema.String),
   },
   /**
-   * A tool call deliberately yielded to an external actor.
+   * A step deliberately yielded to an external actor.
    *
-   * Workflow waits enter a replay-safe handler before this record. Native
-   * interactions suspend at dispatch before a handler and carry their mode in
+   * Workflow waits suspend from inside a replay-safe handler. Native
+   * interactions suspend before any handler and carry their mode in
    * `interaction`. `token` addresses the wait and `request` is the value
    * presented to the actor.
    */
-  ToolSuspended: {
+  StepSuspended: {
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
     /** Application-defined stable name of the wait point. */
@@ -229,43 +269,30 @@ export const Record = Schema.TaggedUnion({
     ),
   },
   /**
-   * Effect Workflow deliberately re-entered a previously suspended handler.
+   * An external actor's decision for one suspended step.
    *
-   * This is an audit fact, not a state transition back to indeterminate: until
-   * `ToolOutcome` is durable, another crash remains safe for workflow replay.
+   * `result` is schema-encoded, so typed success and failure decisions stay
+   * auditable without the log package knowing the application's schemas. It
+   * does not settle the step; `StepSettled` does.
    */
-  ToolResumed: {
-    id: LogVocabulary.ToolCallId,
-    name: Schema.String,
-    /** The durable wait whose completion caused this replay. */
-    token: Schema.String,
-  },
-  /**
-   * The durable wait's externally supplied result was observed by its handler.
-   *
-   * `result` is the schema-encoded Effect `Exit`, so both typed success and
-   * typed failure decisions remain auditable without the log package knowing
-   * the application's schemas. This record does not settle the tool call;
-   * only `ToolOutcome` does that.
-   */
-  ToolWaitCompleted: {
+  StepResolved: {
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
     /** Application-defined stable name of the wait point. */
     wait: Schema.String,
-    /** The exact durable wait that supplied this result. */
+    /** The exact durable wait this decision answers. */
     token: Schema.String,
     outcome: Schema.Literals(['success', 'failure']),
-    /** Schema-encoded Effect Exit supplied by the external actor. */
+    /** Schema-encoded value supplied by the external actor. */
     result: Schema.Unknown,
   },
   /**
-   * A branch or fork deliberately chose a new future for a suspended call.
+   * A branch or fork deliberately chose a new future for a suspended step.
    *
-   * Recovery invokes the original provider call as a fresh handler execution;
-   * the old token remains an audit fact but can never resume this new path.
+   * Recovery runs the original call as a fresh handler execution; the old
+   * token remains an audit fact but can never resume this new path.
    */
-  ToolWaitRestarted: {
+  StepRestarted: {
     id: LogVocabulary.ToolCallId,
     name: Schema.String,
     wait: Schema.String,
@@ -273,80 +300,25 @@ export const Record = Schema.TaggedUnion({
     priorToken: Schema.String,
   },
   /**
-   * How a tool call ended.
+   * How a step ended.
    *
-   * The fine-grained case the roadmap flags as the one thing
-   * provider-seam checkpointing covers and a coarse log would not: a crash
-   * between two tool calls mid-turn is recoverable only if each call's
-   * outcome was written down separately.
+   * A crash between two calls mid-turn is recoverable only because each
+   * call's outcome is written down separately.
    */
-  ToolOutcome: {
-    step: Count,
+  StepSettled: {
+    /** The turn that made the call; absent for a nested step. */
+    step: Schema.optionalKey(Count),
     id: LogVocabulary.ToolCallId,
+    parent: Schema.optionalKey(LogVocabulary.ToolCallId),
     name: Schema.String,
     /** Whether the provider, rather than Vesper, supplied this outcome. */
     providerExecuted: Schema.optionalKey(Schema.Boolean),
     outcome: Schema.Literals(['success', 'failure']),
     /**
-     * The tool's result in the form the provider is shown — the toolkit's own
-     * encoding of it, not the decoded value the handler returned.
-     *
-     * This is the field a resuming dispatch reads back, and the encoded form
-     * is the only one that can be read back correctly: `Prompt` builds a
-     * tool-result message from `encodedResult`, so serving a decoded value
-     * would put something else in front of the model. It also removes the
-     * failure mode the roadmap flags against storing decoded values — a
-     * success type that decodes to a `Date` or a `bigint` has already been
-     * encoded to JSON by the time it reaches here, instead of failing the
-     * append.
-     */
-    result: Schema.Unknown,
-  },
-  /**
-   * A tool call a code-mode script made from inside its parent `exec` call.
-   *
-   * Nested calls are recorded beside the conversation, never in the model's
-   * history: the model sees one `exec` call and its result, so history
-   * rebuilding ignores all three `NestedTool*` cases. Their identity is
-   * `(parent, key)`, where `parent` is the `exec` tool-call id and `key` is
-   * the script's explicit key or its call ordinal within that execution — see
-   * `agent/src/code-mode.ts`. A re-execution of the same `exec` call finds
-   * its earlier nested calls by that identity.
-   */
-  NestedToolCall: {
-    /** The `exec` tool call that owns this nested call. */
-    parent: LogVocabulary.ToolCallId,
-    /** Deterministic key within the parent: `#<ordinal>` or `k:<explicit>`. */
-    key: Schema.String,
-    /** The hidden tool the script called. */
-    name: Schema.String,
-    /**
-     * Digest of the call's input, so a re-execution can tell the same logical
-     * call from a different one that landed on the same key without the log
-     * having to keep the input in a form a recording policy redacts.
-     */
-    inputDigest: Schema.String,
-    params: Schema.Unknown,
-  },
-  /**
-   * A nested call's handler is about to be invoked; the nested counterpart of
-   * `ToolStarted`. Without a later `NestedToolOutcome` its execution is
-   * indeterminate.
-   */
-  NestedToolStarted: {
-    parent: LogVocabulary.ToolCallId,
-    key: Schema.String,
-    name: Schema.String,
-  },
-  /** How a nested call ended, in the form the script was shown. */
-  NestedToolOutcome: {
-    parent: LogVocabulary.ToolCallId,
-    key: Schema.String,
-    name: Schema.String,
-    outcome: Schema.Literals(['success', 'failure']),
-    /**
-     * The sandbox-facing result: the tool's encoded value on success, or the
-     * `{ code, message, value? }` failure the script's `ToolCallError` carries.
+     * The result in the form its consumer is shown: the toolkit's own encoding
+     * for a top-level step (the form `Prompt` builds the tool-result message
+     * from, so a resumed prompt is the one the model saw), and the sandbox
+     * response for a nested step.
      */
     result: Schema.Unknown,
   },
@@ -475,7 +447,7 @@ export const Record = Schema.TaggedUnion({
    * the same child conversation instead of orphaning the first one.
    */
   ChildSession: {
-    /** The delegation tool call this child answers. Matches `ToolCall.id`. */
+    /** The delegation tool call this child answers. Matches the parent's `StepOpened.id`. */
     toolCallId: LogVocabulary.ToolCallId,
     /** The child agent's name. */
     agent: Schema.String,

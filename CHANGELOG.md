@@ -51,24 +51,38 @@ fields, and code that exhaustively matches it must handle them.
   `execution-interrupted` failure the model sees. Strict failure on an
   indeterminate start remains the default. `IndeterminateToolCallContext`
   carries the resolved `tool`.
-- Code-mode nested tool calls are recorded as `NestedToolCall`,
-  `NestedToolStarted`, and `NestedToolOutcome`, keyed by the parent `exec`
-  call and the call's ordinal or an explicit `tools.name(input, { key })`.
-  Retrying an indeterminate `exec` re-runs the script against the brokered
-  toolkit; settled nested calls are served from the log and a
-  started-but-unsettled one fails closed with `ToolCallError` code
-  `indeterminate`.
+- Every tool call is one durable step, written as six records: `StepOpened`
+  (the model's call, with `inputDigest`), `StepStarted` (just before the
+  handler, with the `replay` policy declared at that moment and, for a
+  resumed wait, the token it `resumes`), `StepSuspended`, `StepResolved`,
+  `StepRestarted`, and `StepSettled`. They replace `ToolCall`, `ToolStarted`,
+  `ToolSuspended`, `ToolResumed`, `ToolWaitCompleted`, `ToolWaitRestarted`,
+  `ToolOutcome`, and the three `NestedTool*` records. One fold over them
+  serves resume at open, the live run, and the approval and workflow
+  services. `RecordingPolicy.toolParameters` receives `StepOpened`.
+- Code-mode nested tool calls are the same steps with `parent` set to the
+  `exec` call and `id` set to the call's ordinal or an explicit
+  `tools.name(input, { key })`. Retrying an indeterminate `exec` re-runs the
+  script against the brokered toolkit; settled nested calls are served from
+  the log, a started-but-unsettled one runs again if its tool was
+  `Replay.safe` when it started, and otherwise fails closed with
+  `ToolCallError` code `indeterminate`.
 - Fixed resume dropping a tool call a truncated turn left running: its
   `TurnFinished` preceded the answer resume recorded, so the prompt rebuild
   split the call from its answer and dropped both. A finished turn now stays
   open for its outstanding results.
-- An approved handler is now a started call: the batch that resumes it writes
-  `ToolStarted`, so a crash while it runs leaves the call indeterminate and
+- An approved handler is now a started call: resuming it writes
+  `StepStarted`, so a crash while it runs leaves the call indeterminate and
   resume asks `onIndeterminateToolCall` instead of running the handler again.
+  A resumed workflow wait is the exception, re-entered on its own because the
+  workflow replays its own durable steps.
 - A tool call is served from the log only when the previous, crashed run
-  recorded the same name, id, and parameters. Providers reuse ids such as
+  recorded the same name, id, and `inputDigest`. Providers reuse ids such as
   `call_0` across turns; a new call sharing an id was answered with the earlier
-  call's result instead of running.
+  call's result instead of running. The digest is taken before the recording
+  policy, so redacting `toolParameters` no longer makes a crashed call run
+  twice. It is a SHA-256 of the unredacted input, which anyone holding the
+  log can test guesses against.
 - `Conversation.resolveApproval` and `resolveInteraction` now record through
   the conversation's recording policy, so `externalResult` redacts a caller's
   answer like every other persisted value. They previously wrote it unfiltered.

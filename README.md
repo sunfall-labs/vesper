@@ -356,8 +356,10 @@ adoption can provide or explicit design constraints:
   cancels may preempt provider streaming but never leapfrog backlog or interrupt
   a tool after its side effect has begun.
 - **Indeterminate external side effects require application reconciliation.**
-  A `ToolStarted` without an outcome cannot prove whether another system
-  committed. The dedicated interceptor must explicitly Answer or Retry.
+  A `StepStarted` without a `StepSettled` cannot prove whether another
+  system committed. The dedicated interceptor must explicitly Answer or Retry;
+  only a start that resumed a workflow wait, which replays its own durable
+  steps, is re-entered on its own.
 - **Legacy, manual, and orphaned histories may require a proportional scan.**
   Successful current runs write the bounded `RunSettled.resume` aggregate, and
   compacted prompts read only their live suffix. Benchmarks keep the remaining

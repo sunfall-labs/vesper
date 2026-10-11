@@ -254,24 +254,26 @@ const runStory = (mode: DecisionMode) =>
     yield* Console.log(`\nAgent\n  ${result.text}`);
 
     const records = yield* conversation.records().pipe(Stream.runCollect);
-    const conversationTrail = Array.from(records)
-      .map(({ record }) => record._tag)
-      .flatMap((tag): ReadonlyArray<string> => {
-        switch (tag) {
-          case 'ToolStarted':
-            return ['handler entered'];
-          case 'ToolSuspended':
+    const conversationTrail = Array.from(records).flatMap(
+      ({ record }): ReadonlyArray<string> => {
+        switch (record._tag) {
+          case 'StepStarted':
+            return [
+              record.resumes === undefined
+                ? 'handler entered'
+                : 'handler re-entered',
+            ];
+          case 'StepSuspended':
             return ['approval requested'];
-          case 'ToolResumed':
-            return ['handler re-entered'];
-          case 'ToolWaitCompleted':
+          case 'StepResolved':
             return ['decision consumed'];
-          case 'ToolOutcome':
+          case 'StepSettled':
             return ['tool completed'];
           default:
             return [];
         }
-      });
+      },
+    );
     yield* Console.log(
       `\nConversation trail\n  ${conversationTrail.join(' -> ')}\n`,
     );

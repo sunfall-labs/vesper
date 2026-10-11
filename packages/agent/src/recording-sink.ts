@@ -66,15 +66,30 @@ export const record = <Tools extends Record<string, Tool.Any>, E, R>(
           // turn one settled call into two durable outcomes.
           return session.append(flush(pending));
         }
-        const records = recordsFor(pending, event);
-        return isStreamedDelta(event)
-          ? Effect.flatMap(progress(session, pending), (partial) =>
-              session.append([...records, ...partial]),
-            )
-          : session.append(records);
+        return Effect.flatMap(digestOf(session, event), (digest) => {
+          const records = recordsFor(pending, event, digest);
+          return isStreamedDelta(event)
+            ? Effect.flatMap(progress(session, pending), (partial) =>
+                session.append([...records, ...partial]),
+              )
+            : session.append(records);
+        });
       }).pipe(Stream.onExit((exit) => settle(session, pending, exit)));
     }),
   );
+
+/**
+ * A tool call's `StepOpened.inputDigest`, taken here — before `append`
+ * applies the recording policy — so the identity a resumed run compares
+ * against survives a policy that redacts the parameters.
+ */
+const digestOf = <Tools extends Record<string, Tool.Any>>(
+  session: Session,
+  event: AgentEvents.Event<Tools>,
+): Effect.Effect<string | undefined> =>
+  event._tag === 'Part' && event.encodedPart.type === 'tool-call'
+    ? session.inputDigest(event.encodedPart.name, event.encodedPart.params)
+    : Effect.undefined;
 
 const isStreamedDelta = <Tools extends Record<string, Tool.Any>>(
   event: AgentEvents.Event<Tools>,
@@ -303,7 +318,7 @@ interface Pending {
    *
    * A `tool-approval-request` part names only the call it gates, not its
    * name or parameters — those are the co-occurring `tool-call` part's,
-   * tracked here so the `ToolSuspended` record below can carry them.
+   * tracked here so the `StepSuspended` record below can carry them.
    */
   readonly toolCalls: Map<
     string,
@@ -344,6 +359,7 @@ const signalOffset = (offset: string): LogOffset.Offset => {
 const recordsFor = <Tools extends Record<string, Tool.Any>>(
   pending: Pending,
   lifecycleEvent: AgentEvents.Event<Tools>,
+  digest: string | undefined,
 ): ReadonlyArray<ConversationRecord.Record> => {
   if (lifecycleEvent._tag === 'Part') {
     return partRecords(
@@ -351,6 +367,7 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
       lifecycleEvent.step,
       lifecycleEvent.encodedPart,
       lifecycleEvent.interaction,
+      digest,
     );
   }
 
@@ -415,7 +432,7 @@ const recordsFor = <Tools extends Record<string, Tool.Any>>(
       ];
     },
     Compacted: () => [],
-    // The `ToolSuspended` record was already written per-part above, at the
+    // The `StepSuspended` record was already written per-part above, at the
     // `tool-approval-request` that caused this. `Suspended` itself is a
     // live-only terminal marker — see its doc in `event.ts` for why it is
     // not a durable `Completed` record.
@@ -427,7 +444,10 @@ const partRecords = (
   pending: Pending,
   step: number,
   encoded: Response.StreamPartEncoded,
-  interaction?: { readonly name: string; readonly mode: 'dispatch' | 'answer' },
+  interaction:
+    | { readonly name: string; readonly mode: 'dispatch' | 'answer' }
+    | undefined,
+  digest: string | undefined,
 ): ReadonlyArray<ConversationRecord.Record> => {
   switch (encoded.type) {
     case 'text-delta':
@@ -435,6 +455,9 @@ const partRecords = (
       pending.text += encoded.delta;
       return [];
     case 'tool-call':
+      if (digest === undefined) {
+        throw new Error(`Tool call ${encoded.id} reached the log undigested`);
+      }
       pending.toolCalls.set(encoded.id, {
         name: encoded.name,
         params: encoded.params,
@@ -442,13 +465,14 @@ const partRecords = (
       return [
         ...flush(pending),
         {
-          _tag: 'ToolCall',
+          _tag: 'StepOpened',
           step,
           id: LogVocabulary.ToolCallId.make(encoded.id),
           name: encoded.name,
           ...(encoded.providerExecuted === true
             ? { providerExecuted: true }
             : {}),
+          inputDigest: digest,
           params: encoded.params,
         },
       ];
@@ -461,7 +485,7 @@ const partRecords = (
       return [
         ...flush(pending),
         {
-          _tag: 'ToolOutcome',
+          _tag: 'StepSettled',
           step,
           id: LogVocabulary.ToolCallId.make(encoded.id),
           name: encoded.name,
@@ -477,7 +501,7 @@ const partRecords = (
       return [
         ...flush(pending),
         {
-          _tag: 'ToolSuspended',
+          _tag: 'StepSuspended',
           id: LogVocabulary.ToolCallId.make(encoded.toolCallId),
           name: call?.name ?? '',
           wait: ToolDispatch.INTERACTION_WAIT,

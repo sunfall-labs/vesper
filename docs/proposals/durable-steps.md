@@ -1,6 +1,7 @@
 # Proposal: one durable-step protocol inside the log
 
-Status: proposed. Nothing here is implemented.
+Status: implemented, phases 0–4. The sections below keep the original
+argument; **As built** records where the implementation chose differently.
 
 ## Recommendation
 
@@ -16,9 +17,6 @@ task rows, a scheduler, and documents beside the transcript — a second
 persistence semantics, which `Design.md` ("Why there is one persistence
 mechanism") already argues against, and one built on pi's single-writer
 assumption that Vesper's producer fencing exists to avoid.
-
-Phase 0 below — two dispatch bugs this investigation found — is done; the rest
-is proposed.
 
 ## Why
 
@@ -213,6 +211,64 @@ and `CodeStateCheckpoint` (snapshots, not steps), and `PartialOutput`
 `DurableDeferred` token and replay-safe re-entry; they fit as a wait kind with
 an implicit `safe` policy, but only after the native paths have moved.
 
+## As built
+
+**Identity** is a step's name, its `id`, and `inputDigest`: a SHA-256 of
+canonical JSON `[name, input]` (object keys sorted), computed by
+`Session.inputDigest` before the recording policy runs. Phase 0 compared
+parameters instead, which a `toolParameters` redaction broke: the redacted
+record no longer matched the live call, so a crashed, settled call ran again.
+A nested step's `id` is its key within the `exec` call and `parent` is that
+call's id; there is no `kind` field, because every step is a tool call.
+
+The digest is of the unredacted input, so anyone holding the log can test a
+guess against it. That is the price of recognising a redacted call; the
+`toolParameters` hook documents it. Code mode's nested digest already worked
+this way.
+
+**Records** are six, not five: a restart is not a resolution.
+
+| Record          | Carries                                                               | Replaces                                          |
+| --------------- | --------------------------------------------------------------------- | ------------------------------------------------- |
+| `StepOpened`    | step, id, parent?, name, providerExecuted?, inputDigest, params       | `ToolCall`, `NestedToolCall`                      |
+| `StepStarted`   | id, parent?, name, replay (`safe` \| `unsafe`), resumes? (wait token) | `ToolStarted`, `NestedToolStarted`, `ToolResumed` |
+| `StepSuspended` | id, name, wait, token, request, interaction?                          | `ToolSuspended`                                   |
+| `StepResolved`  | id, name, wait, token, outcome, result                                | `ToolWaitCompleted`                               |
+| `StepRestarted` | id, name, wait, priorToken                                            | `ToolWaitRestarted`                               |
+| `StepSettled`   | step?, id, parent?, name, providerExecuted?, outcome, result          | `ToolOutcome`, `NestedToolOutcome`                |
+
+**Replay is recorded, not derived** (the second open question). `StepStarted`
+stores the tool's `Replay.safe` declaration as it stood when the handler was
+entered. It decides on its own in two places only:
+
+- a top-level start that `resumes` a workflow wait is recorded `safe` and
+  re-entered without asking — the workflow replays its own durable steps;
+- a nested step recorded `safe` runs again when its `exec` is retried.
+
+Every other top-level start still goes to `onIndeterminateToolCall`.
+Re-running a tool unattended stays an opt-in of the agent's owner
+(`Replay.policy`), which reads the tool's current declaration.
+
+**Nested steps do not get `onIndeterminateToolCall`.** An unsafe nested step
+that never settled returns `ToolCallError` code `indeterminate` to the
+script. The script sits between the crash and the model and is the one place
+that knows whether it can go on without that value; an interceptor decision
+per nested call would answer for it with no context.
+
+**One fold, two views.** `StepFold` in `recovery.ts` is the run-scoped state
+machine that resume and the live run share. `waits(history)` follows each
+wait across runs — whether its token was ever decided, whether anything has
+closed it since — and serves both `Conversation.resolveApproval`/
+`resolveInteraction` and `AgentWorkflow`'s pending waits. The two views stay
+separate on purpose: the approval services must still answer
+`already_resolved` after the owning run settles, which the run-scoped
+snapshot cannot.
+
+**Native interactions** keep their `Interaction` paths in `dispatch.ts`; an
+answer or denial writes `StepSettled` directly, and an approval writes
+`StepStarted` before its handler. They share the records and the fold rather
+than a separate step runner.
+
 ## Invariants it must keep
 
 - A call is durable before it starts; a start is durable before its handler.
@@ -230,37 +286,31 @@ an implicit `safe` policy, but only after the native paths have moved.
 
 ## Plan
 
-No backwards compatibility is required, so each phase replaces rather than
-adapts.
+No backwards compatibility is required, so each phase replaced rather than
+adapted.
 
-0. **Done.** An approved handler writes `ToolStarted` in the batch that resumes
-   it, so a crash while it runs is indeterminate like any other started call.
-   Dispatch serves a call from the log only when the previous run recorded the
-   same name, id, and parameters (`Tracker.prior`), so reused provider ids run.
-   Both have scenarios that fail without the fix.
+0. **Done.** An approved handler starts like any other call, so a crash while
+   it runs is indeterminate. Dispatch serves a call from the log only when the
+   previous run recorded the same call (`Tracker.prior`), so reused provider
+   ids run. Both have scenarios that fail without the fix.
 1. **Done.** One `StepFold` in `recovery.ts` applies every record, both when a
    session opens and as the run appends. The open-time snapshot is the only
    source of "what did the previous run do", so serving from the log cannot
    reach the current run's calls by construction.
-2. **Steps for nested calls and native interactions.** Introduce the five step
-   records; route code mode and native approvals/answers through one step
-   runner shared with `dispatch.ts`. Nested calls gain the indeterminate policy.
-3. **Top-level tool calls.** Move `dispatch.ts`, the recording sink, and the
-   history projection onto steps; delete the `Tool*` and `NestedTool*` kinds
-   and their policy hooks.
-4. **Optional: workflow waits** as a step wait kind, retiring the third
-   "pending wait" computation in `workflow.ts`.
-
-Phases 0 and 1 stand on their own value. Proceed to 2 only if 1 shows the fold
-generalizes cleanly; 3 is the large one and should follow a working 2.
+2. **Done.** Nested calls and native interactions write step records.
+3. **Done.** Top-level calls, the recording sink, the history projection, and
+   the recording policy moved onto steps; the `Tool*` and `NestedTool*` kinds
+   are gone. Identity moved from parameters to `inputDigest`.
+4. **Done.** Workflow waits and the approval services read `waits(history)`
+   instead of their own pending-wait folds.
 
 ## Costs and risks
 
 - Phase 3 touches the most delicate code in the repository (dispatch ordering,
   the sink, the prompt projection). The scenario suite covers these paths
   end to end, which is what makes the migration reviewable.
-- A generic record is less self-describing in a raw log dump than `ToolOutcome`.
-  Step kinds and names keep it readable.
+- A generic record is less self-describing in a raw log dump than
+  `ToolOutcome` was. Names, `parent`, and `resumes` keep it readable.
 - Per-kind differences do not vanish: keys, policies, and redaction still vary
   by kind. The protocol makes them parameters of one machine rather than
   separate machines; it does not remove them.
@@ -270,8 +320,5 @@ generalizes cleanly; 3 is the large one and should follow a working 2.
 - Should `CodeStateCheckpoint` become part of the `exec` step's settlement, so
   a crash cannot advance code state while `exec` is still indeterminate (today
   it can)?
-- Should replay policy be recorded per step (as pi does) or derived from the
-  current tool annotation at recovery (as today)? Recording it protects against
-  a tool's policy changing between crash and resume.
 - Does delegation become a step whose settlement is the child's `Completed`,
   retiring `ChildSession`'s parent-side copy?

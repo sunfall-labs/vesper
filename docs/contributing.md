@@ -276,9 +276,9 @@ caught at the append rather than months later during a recovery nobody is
 watching. Model typed errors that cross that boundary with
 `Schema.TaggedError`; errors that never cross one may use `Data.TaggedError`.
 
-The three `Schema.Unknown` fields — `RunStarted.prompt`, `ToolCall.params`,
-`ToolOutcome.result` — are the exception, held that way because their real
+The three `Schema.Unknown` fields — `RunStarted.prompt`, `StepOpened.params`,
+`StepSettled.result` — are the exception, held that way because their real
 schemas belong to `effect/ai` and to whatever toolkit is in play.
-`ToolOutcome.result` stores the toolkit's **encoding** of a result rather than
+`StepSettled.result` stores the toolkit's **encoding** of a result rather than
 the decoded value, which is both what a resuming dispatch can serve back and
 what `AgentHistory` puts in front of the model.

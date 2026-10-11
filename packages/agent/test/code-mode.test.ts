@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import type { ConversationRecord } from '@sunfall/vesper-log/record';
@@ -17,6 +16,7 @@ import { Interception } from '../src/interception.js';
 import * as AgentLog from '../src/log.js';
 import { ScriptedModel } from '../src/testing.js';
 import { testBudget } from './budget-fixture.js';
+import { digestOf } from './tool-fixtures.js';
 
 const finish = (reason: 'stop' | 'tool-calls' = 'stop') => ({
   type: 'finish' as const,
@@ -818,13 +818,14 @@ describe('code mode durable nested calls', () => {
       prompt: [],
     },
     {
-      _tag: 'ToolCall',
+      _tag: 'StepOpened',
       step: 1,
       id: EXEC,
       name: 'exec',
+      inputDigest: digestOf('exec', { source: 'compose' }),
       params: { source: 'compose' },
     },
-    { _tag: 'ToolStarted', id: EXEC, name: 'exec' },
+    { _tag: 'StepStarted', id: EXEC, name: 'exec', replay: 'unsafe' },
   ];
 
   /** The persisted records of one nested call, up to the given stage. */
@@ -834,34 +835,43 @@ describe('code mode durable nested calls', () => {
     input: CodeExecutor.JsonValue,
     stage: 'called' | 'started' | 'settled',
     result?: unknown,
-  ): ReadonlyArray<ConversationRecord.Record> => [
-    {
-      _tag: 'NestedToolCall',
-      parent: EXEC,
-      key,
-      name,
-      // The persisted identity: sha256 over the JSON of `[name, input]`.
-      inputDigest: createHash('sha256')
-        .update(JSON.stringify([name, input]))
-        .digest('hex'),
-      params: input,
-    },
-    ...(stage === 'called'
-      ? []
-      : [{ _tag: 'NestedToolStarted', parent: EXEC, key, name } as const]),
-    ...(stage === 'settled'
-      ? [
-          {
-            _tag: 'NestedToolOutcome',
-            parent: EXEC,
-            key,
-            name,
-            outcome: 'success',
-            result,
-          } as const,
-        ]
-      : []),
-  ];
+    replay: 'safe' | 'unsafe' = 'unsafe',
+  ): ReadonlyArray<ConversationRecord.Record> => {
+    const id = LogVocabulary.ToolCallId.make(key);
+    return [
+      {
+        _tag: 'StepOpened',
+        id,
+        parent: EXEC,
+        name,
+        inputDigest: digestOf(name, input),
+        params: input,
+      },
+      ...(stage === 'called'
+        ? []
+        : [
+            {
+              _tag: 'StepStarted',
+              id,
+              parent: EXEC,
+              name,
+              replay,
+            } as const,
+          ]),
+      ...(stage === 'settled'
+        ? [
+            {
+              _tag: 'StepSettled',
+              id,
+              parent: EXEC,
+              name,
+              outcome: 'success',
+              result,
+            } as const,
+          ]
+        : []),
+    ];
+  };
 
   it.effect('records nested calls durably without touching the prompt', () =>
     Effect.gen(function* () {
@@ -876,12 +886,12 @@ describe('code mode durable nested calls', () => {
 
       yield* conversation.run('go').pipe(Effect.provide(durable.layer));
       yield* agentWith(newCounts()).run('go').pipe(Effect.provide(plain.layer));
-      const written = (yield* recordsOf(conversation)).filter((record) =>
-        record._tag.startsWith('NestedTool'),
+      const written = (yield* recordsOf(conversation)).filter(
+        (record) => 'parent' in record && record.parent !== undefined,
       );
 
       expect(
-        ['NestedToolCall', 'NestedToolStarted', 'NestedToolOutcome'].map(
+        ['StepOpened', 'StepStarted', 'StepSettled'].map(
           (tag) => written.filter((record) => record._tag === tag).length,
         ),
       ).toEqual([2, 2, 2]);
@@ -890,8 +900,8 @@ describe('code mode durable nested calls', () => {
       ).toBe(true);
       expect(
         written.flatMap((record) =>
-          record._tag === 'NestedToolOutcome'
-            ? [[record.key, record.name, record.result]]
+          record._tag === 'StepSettled'
+            ? [[record.id, record.name, record.result]]
             : [],
         ),
       ).toEqual(
@@ -907,7 +917,6 @@ describe('code mode durable nested calls', () => {
           Effect.map((requests) => requests.map(promptOf)),
         );
       expect(yield* prompts(durable)).toEqual(yield* prompts(plain));
-      expect((yield* prompts(durable))[1]).not.toContain('NestedTool');
     }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 
@@ -984,10 +993,50 @@ describe('code mode durable nested calls', () => {
         });
         expect(
           written.some(
-            (record) => record._tag === 'ToolOutcome' && record.id === EXEC,
+            (record) => record._tag === 'StepSettled' && record.id === EXEC,
           ),
         ).toBe(true);
       }).pipe(Effect.provide(logLayer), Effect.scoped),
+  );
+
+  // Recovery's rule for a top-level call, at the sandbox boundary: a start
+  // recorded replay-safe may run again, because running it twice was declared
+  // to leave the world as running it once.
+  it.effect('runs a replay-safe nested call that never settled again', () =>
+    Effect.gen(function* () {
+      const counts = newCounts();
+      yield* seed([
+        ...crashedExec,
+        ...nested('#1', 'lookup', { id: '42' }, 'started', undefined, 'safe'),
+      ]);
+      const r = rig(script(toolCall('n1', 'lookup', { id: '42' })), [
+        answeringTurn,
+      ]);
+      const conversation = Conversation.make(
+        agentWith(counts).intercepting(retry),
+        CONVERSATION,
+      );
+
+      yield* conversation.run('go').pipe(Effect.provide(r.layer));
+      const responses = yield* r.executor.responses;
+      const written = yield* recordsOf(conversation);
+
+      expect(counts.lookup).toBe(1);
+      expect(responses.find((response) => response.id === 'n1')).toMatchObject({
+        outcome: 'success',
+        value: { status: 'fresh:42' },
+      });
+      // The same step, settled: not a second call under the same key.
+      const steps = written.filter(
+        (record) => 'parent' in record && record.parent === EXEC,
+      );
+      expect(steps.map((record) => record._tag)).toEqual([
+        'StepOpened',
+        'StepStarted',
+        'StepStarted',
+        'StepSettled',
+      ]);
+    }).pipe(Effect.provide(logLayer), Effect.scoped),
   );
 
   it.effect(

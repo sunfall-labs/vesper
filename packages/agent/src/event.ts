@@ -52,8 +52,8 @@ export const Lifecycle = Schema.TaggedUnion({
    * than a third `outcome` literal on it: nothing here is a finished
    * answer, and a recording sink that wrote a `Completed` record for this
    * would claim a run had an answer it does not have. A resolved interaction
-   * is not replayed as a second `Suspended` — see `ToolSuspended` and
-   * `ToolWaitCompleted` in `@sunfall/vesper-log/record`, which are what a
+   * is not replayed as a second `Suspended` — see `StepSuspended` and
+   * `StepResolved` in `@sunfall/vesper-log/record`, which are what a
    * resumed conversation actually recovers from.
    *
    * Only reachable from a recorded `Conversation`; an unrecorded run fails

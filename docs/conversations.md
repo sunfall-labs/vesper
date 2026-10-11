@@ -165,7 +165,7 @@ reader that has records and no agent. Two rules in it are worth knowing:
 
 - **An unanswered tool call is dropped from the prompt, but not forgotten by
   dispatch.** Providers reject an assistant tool call with no matching result.
-  A `ToolStarted` without `ToolOutcome` records that its handler may already
+  A `StepStarted` without `StepSettled` records that its handler may already
   have committed; recovery refuses to dispatch it unless
   `onIndeterminateToolCall` explicitly returns `Retry`, or reconciles it with
   an explicit answer.
@@ -318,9 +318,20 @@ A read from a cursor has no such count.
 
 ## Resuming a tool call after a crash
 
-When a session opens, it indexes both tool outcomes and unresolved
-`ToolStarted` records from orphaned runs. Completed outcomes are served instead
-of re-running the tool. An unresolved start is never dispatched silently: the
+Every tool call is one durable step: `StepOpened` when the model asks for it,
+`StepStarted` immediately before its handler runs, and `StepSettled` with its
+result. A call that waits for someone outside the run adds `StepSuspended`,
+`StepResolved` when the decision arrives, or `StepRestarted` when a branch
+chooses a new future for it. Code-mode calls inside an `exec` are the same
+steps with `parent` set to the `exec` call.
+
+A step is identified by its name, its id, and `inputDigest` — a SHA-256 of its
+name and parameters taken before any recording policy runs, so a redacted log
+still recognises the call. Providers reuse ids such as `call_0` from turn to
+turn; only the same name, id and digest is the same call.
+
+When a session opens, it folds the orphaned run's steps once. Settled steps are
+served instead of re-running the tool. An unresolved start is never dispatched silently: the
 dedicated `onIndeterminateToolCall` interceptor must explicitly return
 `Interception.retry`, `Interception.reconcile(result)`, or
 `Interception.reconcileFailure(result)`; without it the run fails safely and
@@ -328,7 +339,7 @@ remains orphaned. Ordinary `beforeToolCall` dispatch permission is not a retry
 decision. `agent.intercepting(Replay.policy)` is the built-in explicit
 opt-in: tools declared `Replay.safe` are retried and every other indeterminate
 call is answered with an `execution-interrupted` failure (a failed
-`ToolOutcome` in Effect's `ExecutionFailure` shape) so the run continues. Nothing in `LanguageModel` had to change: its `toolkit`
+`StepSettled` in Effect's `ExecutionFailure` shape) so the run continues. Nothing in `LanguageModel` had to change: its `toolkit`
 option already accepts an `Effect` producing a resolved toolkit, which is what
 a `Toolkit` is.
 
@@ -353,7 +364,7 @@ suspended by `LanguageModel` before its handler is ever entered — that
 primitive is upstream, not Vesper's. Vesper's half is making the suspension
 durable: in a recorded conversation the run ends with `outcome: 'suspended'`
 and surfaces `pendingInteractions` (kind, tool name, call id, decoded request), the
-suspension is recorded with the same `ToolSuspended`/`ToolWaitCompleted`
+suspension is recorded with the same `StepSuspended`/`StepResolved`
 family every durable wait uses, and `resolveApproval` records the decision —
 from this process or any other holding the same log. The API walkthrough,
 with the approve/deny code, is the agent guide's

@@ -10,6 +10,7 @@ import {
 } from 'effect';
 import type { Context } from 'effect';
 import { AiError, Response, Tool, type Toolkit } from 'effect/ai';
+import type { ConversationRecord } from '@sunfall/vesper-log/record';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import type { AgentEvents } from './event.js';
@@ -18,6 +19,7 @@ import type * as AgentLog from './log.js';
 import * as Observability from './internal/observability.js';
 import * as ToolExecution from './internal/tool-execution.js';
 import { INTERACTION_WAIT } from './recovery.js';
+import { Replay } from './replay.js';
 import { ResultOverflow } from './result-overflow.js';
 import { RunPolicy } from './run-policy.js';
 import { RunPolicyRuntime } from './run-policy-runtime.js';
@@ -73,7 +75,7 @@ const recoveredToolCall = (
 };
 
 /**
- * The reserved `ToolSuspended.wait` name for native pre-handler interactions.
+ * The reserved `StepSuspended.wait` name for native pre-handler interactions.
  * Declared in `recovery.ts` — see its doc for why — and re-exported
  * here because this is where `resolveIndeterminate` uses it.
  */
@@ -100,10 +102,46 @@ const preserveRunPolicy = <T extends Tool.Any, E, R>(
       : Effect.succeed(result),
   );
 
+/**
+ * Whether resuming an unsettled call needs `onIndeterminateToolCall`.
+ *
+ * A suspended call never ran its handler, and a restarted wait re-enters it
+ * from the start on purpose. A started one re-runs on its own only when it
+ * resumed a workflow wait: the workflow replays its own durable steps, which
+ * its `StepStarted` records as `replay: 'safe'` with the token it resumed.
+ * Every other start is the agent owner's decision, which {@link Replay.policy}
+ * makes from the tool's declaration.
+ */
+const needsDecision = (recovery: AgentLog.Recovery): boolean =>
+  recovery._tag === 'Indeterminate' &&
+  !(recovery.replay === 'safe' && recovery.resumes !== undefined);
+
+/** The `StepStarted` that enters an unsettled call's handler again. */
+const startOf = (
+  call: AgentLog.IndeterminateToolCall,
+  recovery: Exclude<AgentLog.Recovery, { readonly _tag: 'Settled' }>,
+  tool: Tool.Any | undefined,
+): ConversationRecord.RecordOf<'StepStarted'> => {
+  const declared: 'safe' | 'unsafe' = Replay.isSafe(tool) ? 'safe' : 'unsafe';
+  const resumed =
+    recovery._tag === 'Suspended' && recovery.wait !== INTERACTION_WAIT
+      ? { replay: 'safe' as const, resumes: recovery.token }
+      : recovery._tag === 'Indeterminate' && recovery.resumes !== undefined
+        ? { replay: recovery.replay, resumes: recovery.resumes }
+        : // An approved interaction runs its handler for the first time: a
+          // crash from here on is indeterminate like any other start.
+          { replay: declared };
+  return {
+    _tag: 'StepStarted',
+    id: call.toolCallId,
+    name: call.name,
+    ...resumed,
+  };
+};
+
 const settleRejectedCall = (
   session: AgentLog.Session,
   call: AgentLog.IndeterminateToolCall,
-  recovery: Exclude<AgentLog.Recovery, { readonly _tag: 'Settled' }>,
   error: AiError.AiError,
 ): Effect.Effect<RecoveredToolCall, AgentLog.DurabilityError> =>
   Effect.gen(function* () {
@@ -111,18 +149,8 @@ const settleRejectedCall = (
       error,
     ).pipe(Effect.orDie);
     yield* session.append([
-      ...(recovery._tag === 'Suspended'
-        ? [
-            {
-              _tag: 'ToolResumed' as const,
-              id: call.toolCallId,
-              name: call.name,
-              token: recovery.token,
-            },
-          ]
-        : []),
       {
-        _tag: 'ToolOutcome',
+        _tag: 'StepSettled',
         step: call.step,
         id: call.toolCallId,
         name: call.name,
@@ -143,7 +171,7 @@ const settleRejectedCall = (
 // past where every checkpoint sat. A run that died after tool A and before
 // tool B therefore recovered by replaying the model call for free and
 // **re-running tool A**, with its side effects, a second time. For a while
-// the log did not prevent it either: it had the record — one `ToolOutcome`
+// the log did not prevent it either: it had the record — one `StepSettled`
 // per settled call — and nothing read it back.
 //
 // ## Why this needs no change to the `LanguageModel` contract
@@ -164,7 +192,7 @@ const settleRejectedCall = (
 //
 // ## Recovery has two phases
 //
-// Indeterminate starts are resolved from their recorded ToolCall before the
+// Indeterminate starts are resolved from their recorded StepOpened before the
 // next provider request. Retry uses that call's original name, id, and params;
 // reconciliation validates and records an outcome. The rebuilt prompt then
 // contains the result, so recovery never depends on a provider re-emitting an
@@ -183,7 +211,7 @@ const settleRejectedCall = (
 //   2. during provider dispatch, a completed recovery outcome is served
 //      without interception;
 //   3. `beforeToolCall` may answer a fresh call in the tool's place;
-//   4. immediately after `ToolStarted` is durable, the real handler runs.
+//   4. immediately after `StepStarted` is durable, the real handler runs.
 //
 // A completed recovery wins because the call already ran. An indeterminate
 // start is different: the handler was entered but may or may not have committed.
@@ -196,7 +224,7 @@ const settleRejectedCall = (
 // record empties the index — not to refuse it here.
 //
 // The reverse direction has no such asymmetry. A call the interceptor answers
-// is recorded as an ordinary `ToolOutcome`, so if *this* run then crashes, the
+// is recorded as an ordinary `StepSettled`, so if *this* run then crashes, the
 // substituted answer is what a later run recovers. That is the same rule
 // applied consistently: what the log says happened is what happened.
 
@@ -256,15 +284,19 @@ export const resolveIndeterminate = <
       return [];
     }
     const resolve = options.interceptor?.onIndeterminateToolCall;
+    const resolved = yield* toolkit;
+    const toolOf = (name: string) =>
+      ToolLookup.isToolName(resolved.tools, name)
+        ? resolved.tools[name]
+        : undefined;
     const unresolved = pending.find((call) => {
       const recovery = options.session.recovery(call.name, call.toolCallId);
-      return Option.isSome(recovery) && recovery.value._tag === 'Indeterminate';
+      return Option.isSome(recovery) && needsDecision(recovery.value);
     });
     if (unresolved !== undefined && resolve === undefined) {
       return yield* indeterminateError(unresolved.name, unresolved.toolCallId);
     }
 
-    const resolved = yield* toolkit;
     const services = yield* capturedContext;
     const results: Array<RecoveredToolCall> = [];
     for (const call of pending) {
@@ -303,13 +335,7 @@ export const resolveIndeterminate = <
           );
           yield* options.session.append([
             {
-              _tag: 'ToolResumed',
-              id: call.toolCallId,
-              name: call.name,
-              token: recovery.value.token,
-            },
-            {
-              _tag: 'ToolOutcome',
+              _tag: 'StepSettled',
               step: call.step,
               id: call.toolCallId,
               name: call.name,
@@ -337,13 +363,7 @@ export const resolveIndeterminate = <
           );
           yield* options.session.append([
             {
-              _tag: 'ToolResumed',
-              id: call.toolCallId,
-              name: call.name,
-              token: recovery.value.token,
-            },
-            {
-              _tag: 'ToolOutcome',
+              _tag: 'StepSettled',
               step: call.step,
               id: call.toolCallId,
               name: call.name,
@@ -358,11 +378,9 @@ export const resolveIndeterminate = <
         }
       }
 
-      const replayable =
-        recovery.value._tag === 'Suspended' ||
-        recovery.value._tag === 'Restarting';
+      const tool = toolOf(call.name);
       let decision: Interception.IndeterminateToolDecision;
-      if (replayable) {
+      if (!needsDecision(recovery.value)) {
         decision = { _tag: 'Retry' };
       } else {
         if (resolve === undefined) {
@@ -374,9 +392,7 @@ export const resolveIndeterminate = <
           name: call.name,
           toolCallId: call.toolCallId,
           params: call.params,
-          tool: ToolLookup.isToolName(resolved.tools, call.name)
-            ? resolved.tools[call.name]
-            : undefined,
+          tool,
         }).pipe(Effect.provide(services));
       }
 
@@ -390,7 +406,7 @@ export const resolveIndeterminate = <
         );
         yield* options.session.append([
           {
-            _tag: 'ToolOutcome',
+            _tag: 'StepSettled',
             step: call.step,
             id: call.toolCallId,
             name: call.name,
@@ -409,7 +425,6 @@ export const resolveIndeterminate = <
           yield* settleRejectedCall(
             options.session,
             call,
-            recovery.value,
             unknownModelToolError(
               call.name,
               Object.keys(resolved.tools),
@@ -428,7 +443,6 @@ export const resolveIndeterminate = <
           yield* settleRejectedCall(
             options.session,
             call,
-            recovery.value,
             decodedParams.failure,
           ),
         );
@@ -439,42 +453,9 @@ export const resolveIndeterminate = <
         return results;
       }
 
+      const start = startOf(call, recovery.value, tool);
       yield* Effect.gen(function* () {
-        if (recovery.value._tag === 'Suspended') {
-          const resumed = {
-            _tag: 'ToolResumed' as const,
-            id: call.toolCallId,
-            name: call.name,
-            token: recovery.value.token,
-          };
-          // An approved native interaction is about to run its handler for
-          // the first time, so it starts like any other call: `ToolStarted`
-          // is durable before the handler runs, in the same batch as the
-          // resumption. A crash from here on is then indeterminate, and only
-          // `onIndeterminateToolCall` may decide to run it again. A workflow
-          // wait is different: its handler re-enters a replay-safe workflow,
-          // which is what the resumption alone records.
-          yield* options.session.append(
-            recovery.value.wait === INTERACTION_WAIT
-              ? [
-                  resumed,
-                  {
-                    _tag: 'ToolStarted',
-                    id: call.toolCallId,
-                    name: call.name,
-                  },
-                ]
-              : [resumed],
-          );
-        } else {
-          yield* options.session.append([
-            {
-              _tag: 'ToolStarted',
-              id: call.toolCallId,
-              name: call.name,
-            },
-          ]);
-        }
+        yield* options.session.append([start]);
         const execution: ToolExecution.Execution = {
           session: options.session,
           name: call.name,
@@ -539,7 +520,7 @@ export const resolveIndeterminate = <
         }
         yield* options.session.append([
           {
-            _tag: 'ToolOutcome',
+            _tag: 'StepSettled',
             step: call.step,
             id: call.toolCallId,
             name: call.name,
@@ -569,7 +550,7 @@ export const resolveIndeterminate = <
  * Decode a durably suspended call's stored request back into the tool's
  * typed parameters, for display to whatever resurfaces it.
  *
- * `ToolSuspended.request` is the toolkit's encoding — the only form durable
+ * `StepSuspended.request` is the toolkit's encoding — the only form durable
  * across a resume — so re-surfacing it verbatim would show a caller the
  * provider-facing value instead of the decoded one the model itself sees,
  * which for a parameter schema with a transform (`Schema.DateFromString`, an
@@ -878,12 +859,16 @@ export const gate = <
         const prior =
           normalizedToolCallId === undefined || session === undefined
             ? Option.none<AgentLog.Recovery>()
-            : session.prior(toolName, normalizedToolCallId, params);
+            : session.prior(
+                toolName,
+                normalizedToolCallId,
+                yield* session.inputDigest(toolName, params),
+              );
 
         // Step 1. A call an unsettled earlier run already completed is served
         // from the log and goes no further — not to the interceptor, and not
         // to the tool. See the ordering note above. "The same call" means the
-        // same name, id, and parameters: a provider reusing an id for a new
+        // same name, id, and input digest: a provider reusing an id for a new
         // call gets that call run.
         if (Option.isSome(prior) && prior.value._tag === 'Settled') {
           yield* Observability.recoveredToolCall;
@@ -904,7 +889,7 @@ export const gate = <
         }
 
         // Provider tool arguments are untrusted input. Validate them before
-        // interception, arbitration, or ToolStarted; the inner Toolkit
+        // interception, arbitration, or StepStarted; the inner Toolkit
         // validates again at the final handler boundary, which receives the
         // original encoded value.
         const decodedParams = yield* Effect.result(
@@ -978,6 +963,13 @@ export const gate = <
           return yield* Effect.never;
         }
         const settle = Option.isSome(permit) ? permit.value.settle : undefined;
+        const replay = Replay.isSafe(
+          ToolLookup.isToolName(resolved.tools, toolName)
+            ? resolved.tools[toolName]
+            : undefined,
+        )
+          ? 'safe'
+          : 'unsafe';
         const setup = Effect.gen(function* () {
           if (session !== undefined) {
             if (normalizedToolCallId === undefined) {
@@ -986,14 +978,15 @@ export const gate = <
             yield* session
               .append([
                 {
-                  _tag: 'ToolStarted',
+                  _tag: 'StepStarted',
                   id: normalizedToolCallId,
                   name: toolName,
+                  replay,
                 },
               ])
               .pipe(Effect.mapError(durabilityAiError));
-            // Register only after ToolStarted is durable. The handler cannot
-            // begin before this effect returns, so no ToolOutcome can race the
+            // Register only after StepStarted is durable. The handler cannot
+            // begin before this effect returns, so no StepSettled can race the
             // registration; a failed append leaves no stale callback behind.
             if (settle !== undefined) {
               session.onToolSettled(toolName, normalizedToolCallId, settle);
@@ -1005,9 +998,9 @@ export const gate = <
             ToolExecution.NestedStart,
           );
           if (Option.isSome(nestedStart)) {
-            yield* nestedStart.value.started.pipe(
-              Effect.mapError(durabilityAiError),
-            );
+            yield* nestedStart.value
+              .started(replay)
+              .pipe(Effect.mapError(durabilityAiError));
           }
           const execution: ToolExecution.Execution | undefined =
             session === undefined || normalizedToolCallId === undefined

@@ -9,7 +9,7 @@ import {
   SynchronizedRef,
 } from 'effect';
 import { AiError, Tool, Toolkit } from 'effect/ai';
-import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
+import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
 
 import { CodeExecutor } from './code-executor.js';
 import { renderCodeSdk } from './code-sdk.js';
@@ -411,9 +411,9 @@ const invokeOnce = <Tools extends Record<string, Tool.Any>>(
 // A script's tool calls used to leave no trace: the hidden gate has no session,
 // so after a crash the `exec` call was indeterminate and whatever its nested
 // calls had done was invisible. When `exec` runs under a recording gate, each
-// nested call now writes `NestedToolCall`, `NestedToolStarted` and
-// `NestedToolOutcome` records — the same three-step life a top-level call has —
-// identified by `(parent, key)`. `parent` is the `exec` tool-call id; `key` is
+// nested call writes the same `StepOpened`, `StepStarted` and `StepSettled`
+// records a top-level call does, with `parent` set to the `exec` tool-call id
+// and `id` set to the call's key within that execution. The key is
 // `k:<name>` when the script passed `{ key }` and otherwise `#<n>`, the nth
 // keyless call this execution made. Keyless ordinals are stable across a
 // re-execution because the sandbox is deterministic for the same source, and
@@ -422,29 +422,25 @@ const invokeOnce = <Tools extends Record<string, Tool.Any>>(
 // log. Scripts that branch on time or randomness should pass explicit keys.
 //
 // These records stay out of the model's prompt: the model sees one `exec`
-// call and its result, and history rebuilding ignores all three.
+// call and its result, and history rebuilding ignores any step with a parent.
 //
 // The rules mirror `dispatch.ts`'s, applied at the sandbox boundary:
 //
 //   1. a nested call an unsettled earlier run settled is served from the log,
 //      before interception and metering — it already ran, and metering counts
 //      real executions once;
-//   2. one that was started but never settled is indeterminate. There is no
-//      replay-safe nested tool, so it is not re-run: the script sees a
-//      `ToolCallError` with code `indeterminate`;
+//   2. one that was started but never settled runs again if its start
+//      recorded the tool replay-safe (`Replay.safe`), and is otherwise
+//      indeterminate: the script sees a `ToolCallError` with code
+//      `indeterminate` and decides for itself, because only the script knows
+//      whether it can carry on without that result;
 //   3. otherwise the call goes to the hidden gate, whose interceptor and
-//      metering run exactly as before, with `NestedToolStarted` appended where
-//      `ToolStarted` would be — after interception, before the handler.
+//      metering run exactly as before, with the nested `StepStarted` appended
+//      where a top-level one would be — after interception, before the handler.
 //
 // Like top-level recovery, the lookup indexes only what an *earlier* run wrote.
 // The serving only matters when the same `exec` call id is entered again,
 // which is `onIndeterminateToolCall` answering Retry.
-
-/** The identity-bearing input of one nested call, as the text its digest covers. */
-export const inputMaterial = (
-  name: string,
-  input: CodeExecutor.JsonValue,
-): string => JSON.stringify([name, input]);
 
 const StoredFailure = Schema.Struct({
   code: Schema.Literals([
@@ -512,10 +508,9 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
     }
     seen.add(key);
 
-    const digest = yield* session.sha256(
-      inputMaterial(event.name, event.input),
-    );
-    const prior = session.nestedRecovery(parent, key);
+    const id = LogVocabulary.ToolCallId.make(key);
+    const digest = yield* session.inputDigest(event.name, event.input);
+    const prior = session.nestedRecovery(parent, id);
     if (Option.isSome(prior)) {
       if (
         prior.value.name !== event.name ||
@@ -529,7 +524,7 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
       if (prior.value.settled !== undefined) {
         return servedResponse(event, prior.value.settled);
       }
-      if (prior.value.started) {
+      if (prior.value.started === 'unsafe') {
         return failedToolResponse(event, {
           code: 'indeterminate',
           message: `Nested call "${event.name}" (${key}) started in an earlier execution and never settled; it is not re-run because it may have committed`,
@@ -538,9 +533,9 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
     } else {
       yield* session.append([
         {
-          _tag: 'NestedToolCall',
+          _tag: 'StepOpened',
+          id,
           parent,
-          key,
           name: event.name,
           inputDigest: digest,
           params: event.input,
@@ -553,18 +548,19 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
       Effect.provideService(ToolExecution.NestedStart, {
         // Once only: the context also reaches any gate inside the handler
         // (a delegated child agent's tools), and those are not this call.
-        started: Effect.suspend(() => {
-          if (started) {
-            return Effect.void;
-          }
-          started = true;
-          return session.append([
-            { _tag: 'NestedToolStarted', parent, key, name: event.name },
-          ]);
-        }),
+        started: (replay) =>
+          Effect.suspend(() => {
+            if (started) {
+              return Effect.void;
+            }
+            started = true;
+            return session.append([
+              { _tag: 'StepStarted', id, parent, name: event.name, replay },
+            ]);
+          }),
       }),
     );
-    // A dispatch failure is unsettled on purpose: past `NestedToolStarted` the
+    // A dispatch failure is unsettled on purpose: past its `StepStarted` the
     // handler may have run, and before it a retry is harmless either way.
     if (
       response.outcome === 'failure' &&
@@ -574,9 +570,9 @@ const invoke = <Tools extends Record<string, Tool.Any>>(
     }
     yield* session.append([
       {
-        _tag: 'NestedToolOutcome',
+        _tag: 'StepSettled',
+        id,
         parent,
-        key,
         name: event.name,
         outcome: response.outcome,
         result:

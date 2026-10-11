@@ -329,9 +329,9 @@ describe('a turn the provider truncated', () => {
 
       expect(observed.exit._tag).toBe('Failure');
       expect(ran.count).toBe(0);
-      expect(tags(observed.written)).toContain('ToolCall');
-      expect(tags(observed.written)).not.toContain('ToolStarted');
-      expect(tags(observed.written)).not.toContain('ToolOutcome');
+      expect(tags(observed.written)).toContain('StepOpened');
+      expect(tags(observed.written)).not.toContain('StepStarted');
+      expect(tags(observed.written)).not.toContain('StepSettled');
       expect(observed.written.at(-1)?.record).toMatchObject({
         _tag: 'RunSettled',
         outcome: 'failure',
