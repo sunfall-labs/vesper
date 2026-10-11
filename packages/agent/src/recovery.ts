@@ -1,6 +1,6 @@
 import { ConversationRecord } from '@sunfall/vesper-log/record';
 import type { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Array as Arr, Effect, Option, Order, Ref } from 'effect';
+import { Array as Arr, Effect, Option, Order } from 'effect';
 
 import { AgentBranch } from './branch.js';
 
@@ -79,9 +79,10 @@ export interface NestedRecovery {
 }
 
 export interface Snapshot {
-  readonly recoveries: Map<string, Recovery>;
-  /** The orphaned run's calls, settled or not, by {@link settledKey}. */
+  /** The orphaned run's calls, by {@link settledKey}, in provider order. */
   readonly calls: ReadonlyMap<string, IndeterminateToolCall>;
+  /** What the orphaned run established about each of them. */
+  readonly recoveries: ReadonlyMap<string, Recovery>;
   /** Nested calls of the orphaned run, by {@link nestedKey}. */
   readonly nested: ReadonlyMap<string, NestedRecovery>;
   readonly completedWaitOutcomes: ReadonlyMap<string, CompletedWait>;
@@ -94,92 +95,105 @@ export interface Snapshot {
 /** Why a run cannot be settled while one of its tool calls is still open. */
 export type PendingToolState = 'none' | 'suspended' | 'indeterminate';
 
+const settledKey = (
+  name: string,
+  toolCallId: LogVocabulary.ToolCallId,
+): string => `${name}\u001f${toolCallId}`;
+
+const nestedKey = (parent: string, key: string): string =>
+  `${parent}\u001f${key}`;
+
 /**
- * Fold the active orphan suffix into the state dispatch needs to recover it.
+ * The one state machine over a run's durable step records.
  *
- * Keeping the fold independent of AgentLog means live bookkeeping and
- * recovery reconstruction share one key and one state model without making
- * this module depend on the Session it eventually serves.
+ * Both readers use it: {@link fold} applies the orphaned run's records when a
+ * session opens, and {@link make}'s tracker applies each batch the current run
+ * appends. One `apply` means the two cannot disagree about what a record
+ * means — the property the open-time and live folds used to keep by hand.
+ *
+ * State is scoped to the newest run: `RunSettled` clears it, because a settled
+ * run left nothing to recover.
  */
-export const fold = (
-  history: ReadonlyArray<ConversationRecord.Envelope>,
-): Snapshot => {
-  const recoveries = new Map<string, Recovery>();
-  const calls = new Map<string, IndeterminateToolCall>();
-  const starts = new Map<
+class StepFold {
+  private running = false;
+  readonly calls = new Map<string, IndeterminateToolCall>();
+  readonly recoveries = new Map<string, Recovery>();
+  readonly starts = new Map<
     string,
     { readonly name: string; readonly id: string }
   >();
-  const order: string[] = [];
-  const completedWaitOutcomes = new Map<string, CompletedWait>();
-  const nested = new Map<string, NestedRecovery>();
-  let running = false;
+  readonly order: string[] = [];
+  readonly waits = new Map<string, CompletedWait>();
+  readonly nested = new Map<string, NestedRecovery>();
 
-  const foldRecord = ConversationRecord.Record.match({
+  readonly apply = ConversationRecord.Record.match({
     RunStarted: () => {
-      running = true;
+      this.running = true;
     },
     RunSettled: () => {
-      recoveries.clear();
-      calls.clear();
-      starts.clear();
-      completedWaitOutcomes.clear();
-      nested.clear();
-      order.length = 0;
-      running = false;
+      this.calls.clear();
+      this.recoveries.clear();
+      this.starts.clear();
+      this.order.length = 0;
+      this.waits.clear();
+      this.nested.clear();
+      this.running = false;
     },
     ToolCall: (record) => {
-      if (running) {
-        const key = settledKey(record.name, record.id);
-        if (!calls.has(key)) {
-          order.push(key);
-        }
-        calls.set(key, {
-          step: record.step,
-          name: record.name,
-          toolCallId: record.id,
-          params: record.params,
-        });
+      if (!this.running) {
+        return;
       }
+      const key = settledKey(record.name, record.id);
+      if (!this.calls.has(key)) {
+        this.order.push(key);
+      }
+      this.calls.set(key, {
+        step: record.step,
+        name: record.name,
+        toolCallId: record.id,
+        params: record.params,
+      });
     },
     ToolStarted: (record) => {
-      if (running) {
-        const key = settledKey(record.name, record.id);
-        recoveries.set(key, { _tag: 'Indeterminate' });
-        starts.set(key, { name: record.name, id: record.id });
+      if (!this.running) {
+        return;
       }
+      const key = settledKey(record.name, record.id);
+      this.recoveries.set(key, { _tag: 'Indeterminate' });
+      this.starts.set(key, { name: record.name, id: record.id });
     },
     ToolSuspended: (record) => {
-      if (running) {
-        recoveries.set(settledKey(record.name, record.id), {
-          _tag: 'Suspended',
-          wait: record.wait,
-          token: record.token,
-          request: record.request,
-          ...(record.interaction === undefined
-            ? {}
-            : { interaction: record.interaction }),
-        });
+      if (!this.running) {
+        return;
       }
+      this.recoveries.set(settledKey(record.name, record.id), {
+        _tag: 'Suspended',
+        wait: record.wait,
+        token: record.token,
+        request: record.request,
+        ...(record.interaction === undefined
+          ? {}
+          : { interaction: record.interaction }),
+      });
     },
     ToolWaitCompleted: (record) => {
-      if (running) {
-        completedWaitOutcomes.set(record.token, {
+      if (this.running) {
+        this.waits.set(record.token, {
           outcome: record.outcome,
           result: record.result,
         });
       }
     },
     ToolWaitRestarted: (record) => {
-      if (running) {
-        recoveries.set(settledKey(record.name, record.id), {
+      if (this.running) {
+        this.recoveries.set(settledKey(record.name, record.id), {
           _tag: 'Restarting',
         });
       }
     },
     ToolOutcome: (record) => {
-      if (running) {
-        recoveries.set(settledKey(record.name, record.id), {
+      if (this.running) {
+        this.recoveries.set(settledKey(record.name, record.id), {
           _tag: 'Settled',
           outcome: record.outcome,
           result: record.result,
@@ -187,8 +201,8 @@ export const fold = (
       }
     },
     NestedToolCall: (record) => {
-      if (running) {
-        nested.set(nestedKey(record.parent, record.key), {
+      if (this.running) {
+        this.nested.set(nestedKey(record.parent, record.key), {
           name: record.name,
           inputDigest: record.inputDigest,
           started: false,
@@ -197,16 +211,16 @@ export const fold = (
     },
     NestedToolStarted: (record) => {
       const key = nestedKey(record.parent, record.key);
-      const call = nested.get(key);
-      if (running && call !== undefined) {
-        nested.set(key, { ...call, started: true });
+      const call = this.nested.get(key);
+      if (this.running && call !== undefined) {
+        this.nested.set(key, { ...call, started: true });
       }
     },
     NestedToolOutcome: (record) => {
       const key = nestedKey(record.parent, record.key);
-      const call = nested.get(key);
-      if (running && call !== undefined) {
-        nested.set(key, {
+      const call = this.nested.get(key);
+      if (this.running && call !== undefined) {
+        this.nested.set(key, {
           ...call,
           settled: { outcome: record.outcome, result: record.result },
         });
@@ -225,72 +239,96 @@ export const fold = (
     Signal: () => {},
     SignalReceived: () => {},
   });
-  for (const { record } of AgentBranch.activePath(history)) {
-    foldRecord(record);
+
+  /** Why the run cannot settle while a call is open, from current state. */
+  pendingState(): PendingToolState {
+    let state: PendingToolState = 'none';
+    for (const recovery of this.recoveries.values()) {
+      if (recovery._tag === 'Settled') {
+        continue;
+      }
+      if (recovery._tag !== 'Suspended') {
+        return 'indeterminate';
+      }
+      state = 'suspended';
+    }
+    return state;
   }
 
-  // Dispatch commits before entering the handler, while ToolCall arrives via
-  // the provider event stream. Diagnose corruption only after the complete
-  // orphan suffix is folded.
-  const unmatched = [...starts].find(([key]) => {
-    const recovery = recoveries.get(key);
-    return recovery?._tag !== 'Settled' && !calls.has(key);
-  })?.[1];
-  const unmatchedSuspension = [...recoveries].flatMap(
-    ([key, recovery]): ReadonlyArray<SuspendedRecovery> =>
-      recovery._tag === 'Suspended' &&
-      recovery.wait !== INTERACTION_WAIT &&
-      !starts.has(key)
-        ? [recovery]
-        : [],
-  )[0];
+  /** An immutable view of the state as it stands. */
+  snapshot(): Snapshot {
+    // Dispatch commits before entering the handler, while ToolCall arrives via
+    // the provider event stream. Diagnose corruption only after the complete
+    // orphan suffix is folded.
+    const unmatched = [...this.starts].find(([key]) => {
+      const recovery = this.recoveries.get(key);
+      return recovery?._tag !== 'Settled' && !this.calls.has(key);
+    })?.[1];
+    const unmatchedSuspension = [...this.recoveries].flatMap(
+      ([key, recovery]): ReadonlyArray<SuspendedRecovery> =>
+        recovery._tag === 'Suspended' &&
+        recovery.wait !== INTERACTION_WAIT &&
+        !this.starts.has(key)
+          ? [recovery]
+          : [],
+    )[0];
+    const listed = (keep: (recovery: Recovery | undefined) => boolean) =>
+      this.order.flatMap((key) => {
+        const call = this.calls.get(key);
+        return call !== undefined && keep(this.recoveries.get(key))
+          ? [call]
+          : [];
+      });
 
-  return {
-    recoveries,
-    calls,
-    nested,
-    completedWaitOutcomes,
-    corruption:
-      unmatchedSuspension !== undefined
-        ? `Cannot recover suspended wait ${unmatchedSuspension.wait}: ` +
-          'durable ToolSuspended has no matching ToolStarted'
-        : unmatched === undefined
-          ? undefined
-          : `Cannot recover indeterminate tool ${unmatched.name} (${unmatched.id}): ` +
-            'durable ToolStarted has no matching ToolCall',
-    pending: order.flatMap((key) => {
-      const recovery = recoveries.get(key);
-      const call = calls.get(key);
-      return recovery?._tag !== 'Settled' && call !== undefined ? [call] : [];
-    }),
-    indeterminate: order.flatMap((key) => {
-      const recovery = recoveries.get(key);
-      const call = calls.get(key);
-      return recovery?._tag === 'Indeterminate' && call !== undefined
-        ? [call]
-        : [];
-    }),
-    suspended: order.flatMap((key): ReadonlyArray<SuspendedToolCall> => {
-      const recovery = recoveries.get(key);
-      const call = calls.get(key);
-      return recovery?._tag === 'Suspended' && call !== undefined
-        ? [
-            {
-              ...call,
-              wait: recovery.wait,
-              token: recovery.token,
-              request: recovery.request,
-            },
-          ]
-        : [];
-    }),
-  };
+    return {
+      calls: new Map(this.calls),
+      recoveries: new Map(this.recoveries),
+      nested: new Map(this.nested),
+      completedWaitOutcomes: new Map(this.waits),
+      corruption:
+        unmatchedSuspension !== undefined
+          ? `Cannot recover suspended wait ${unmatchedSuspension.wait}: ` +
+            'durable ToolSuspended has no matching ToolStarted'
+          : unmatched === undefined
+            ? undefined
+            : `Cannot recover indeterminate tool ${unmatched.name} (${unmatched.id}): ` +
+              'durable ToolStarted has no matching ToolCall',
+      pending: listed((recovery) => recovery?._tag !== 'Settled'),
+      indeterminate: listed((recovery) => recovery?._tag === 'Indeterminate'),
+      suspended: this.order.flatMap((key): ReadonlyArray<SuspendedToolCall> => {
+        const recovery = this.recoveries.get(key);
+        const call = this.calls.get(key);
+        return recovery?._tag === 'Suspended' && call !== undefined
+          ? [
+              {
+                ...call,
+                wait: recovery.wait,
+                token: recovery.token,
+                request: recovery.request,
+              },
+            ]
+          : [];
+      }),
+    };
+  }
+}
+
+/**
+ * Fold the active orphan suffix into the state dispatch needs to recover it.
+ *
+ * Keeping the fold independent of AgentLog means live bookkeeping and
+ * recovery reconstruction share one key and one state model without making
+ * this module depend on the Session it eventually serves.
+ */
+export const fold = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+): Snapshot => {
+  const steps = new StepFold();
+  for (const { record } of AgentBranch.activePath(history)) {
+    steps.apply(record);
+  }
+  return steps.snapshot();
 };
-
-const settledKey = (
-  name: string,
-  toolCallId: LogVocabulary.ToolCallId,
-): string => `${name}\u001f${toolCallId}`;
 
 /** Parameters compared as JSON values, independent of key order. */
 const sameParams = (left: unknown, right: unknown): boolean =>
@@ -311,13 +349,10 @@ const canonical = (value: unknown): string =>
       : nested,
   );
 
-const nestedKey = (parent: string, key: string): string =>
-  `${parent}\u001f${key}`;
-
 export interface Tracker {
   /**
-   * What an orphaned run recorded for one nested call. Like {@link prior}, it
-   * indexes only what predates this run, so a run never serves itself.
+   * What the orphaned run recorded for one nested call. Like {@link prior},
+   * it reads only what predates this run, so a run never serves itself.
    */
   readonly nestedRecovery: (
     parent: LogVocabulary.ToolCallId,
@@ -335,13 +370,15 @@ export interface Tracker {
    * parameters, is the call being recovered. Providers reuse ids across turns
    * (`call_0` on every turn is common), so an id alone does not identify a
    * call: a new call that happens to share one must run, not be answered with
-   * another call's result.
+   * another call's result. Identity comes from the open-time snapshot; the
+   * state is live, because recovery may already have settled the call.
    */
   readonly prior: (
     name: string,
     toolCallId: LogVocabulary.ToolCallId,
     params: unknown,
   ) => Option.Option<Recovery>;
+  /** The orphaned run's open calls, as of open. */
   readonly pendingToolCalls: ReadonlyArray<IndeterminateToolCall>;
   readonly indeterminateToolCalls: ReadonlyArray<IndeterminateToolCall>;
   readonly suspendedToolCalls: ReadonlyArray<SuspendedToolCall>;
@@ -367,209 +404,66 @@ export interface Tracker {
 /**
  * Live state for one claimed session's tool recovery.
  *
- * The same state shape serves the recovery snapshot built at open time and the
- * records appended by the current run. Keeping callbacks here ensures a
- * cancellation waiter is released only after its ToolOutcome is durable.
+ * The orphaned run's records are folded once, at open, into {@link StepFold};
+ * the current run's appends go through the same fold. The open-time
+ * {@link Snapshot} is kept beside it as the one source of "what did the
+ * previous run do", so serving from the log cannot reach a call this run made.
+ * Callbacks here ensure a cancellation waiter is released only after its
+ * ToolOutcome is durable.
  */
-export const make = (snapshot: Snapshot): Effect.Effect<Tracker> =>
-  Effect.gen(function* () {
-    const recoveries = new Map(snapshot.recoveries);
-    const pending = yield* Ref.make(
-      new Set(
-        [...recoveries].flatMap(([key, recovery]) =>
-          recovery._tag === 'Indeterminate' ||
-          recovery._tag === 'Suspended' ||
-          recovery._tag === 'Restarting'
-            ? [key]
-            : [],
-        ),
-      ),
-    );
+export const make = (
+  history: ReadonlyArray<ConversationRecord.Envelope>,
+): Effect.Effect<Tracker> =>
+  Effect.sync(() => {
+    const steps = new StepFold();
+    for (const { record } of AgentBranch.activePath(history)) {
+      steps.apply(record);
+    }
+    const opened = steps.snapshot();
     const callbacks = new Map<string, Array<Effect.Effect<void>>>();
-    const completedWaitOutcomes = new Map(snapshot.completedWaitOutcomes);
 
-    // These matchers close over the tracker state, not an individual append,
-    // so build them once per session rather than once per tracked batch.
-    const trackRecord = ConversationRecord.Record.match({
-      ToolStarted: (record) => {
-        recoveries.set(settledKey(record.name, record.id), {
-          _tag: 'Indeterminate',
-        });
-      },
-      ToolSuspended: (record) => {
-        recoveries.set(settledKey(record.name, record.id), {
-          _tag: 'Suspended',
-          wait: record.wait,
-          token: record.token,
-          request: record.request,
-          ...(record.interaction === undefined
-            ? {}
-            : { interaction: record.interaction }),
-        });
-      },
-      ToolWaitCompleted: (record) => {
-        completedWaitOutcomes.set(record.token, {
-          outcome: record.outcome,
-          result: record.result,
-        });
-      },
-      ToolWaitRestarted: (record) => {
-        recoveries.set(settledKey(record.name, record.id), {
-          _tag: 'Restarting',
-        });
-      },
-      ToolOutcome: (record) => {
-        recoveries.set(settledKey(record.name, record.id), {
-          _tag: 'Settled',
-          outcome: record.outcome,
-          result: record.result,
-        });
-      },
-      RunStarted: () => {},
-      Text: () => {},
-      PartialOutput: () => {},
-      ToolCall: () => {},
-      NestedToolCall: () => {},
-      NestedToolStarted: () => {},
-      NestedToolOutcome: () => {},
-      ToolResumed: () => {},
-      TurnFinished: () => {},
-      Compacted: () => {},
-      BranchedFrom: () => {},
-      Completed: () => {},
-      StateCheckpoint: () => {},
-      CodeStateCheckpoint: () => {},
-      ChildSession: () => {},
-      Signal: () => {},
-      SignalReceived: () => {},
-      RunSettled: () => {},
-    });
-
-    const updatePending = (
-      next: Set<string>,
-      record: ConversationRecord.Record,
-    ): void => {
-      switch (record._tag) {
-        case 'ToolStarted':
-        case 'ToolSuspended':
-        case 'ToolWaitRestarted':
-          next.add(settledKey(record.name, record.id));
-          return;
-        case 'ToolOutcome':
-          next.delete(settledKey(record.name, record.id));
-          return;
-        case 'RunStarted':
-        case 'Text':
-        case 'PartialOutput':
-        case 'ToolCall':
-        case 'NestedToolCall':
-        case 'NestedToolStarted':
-        case 'NestedToolOutcome':
-        case 'ToolResumed':
-        case 'ToolWaitCompleted':
-        case 'TurnFinished':
-        case 'Compacted':
-        case 'BranchedFrom':
-        case 'Completed':
-        case 'StateCheckpoint':
-        case 'CodeStateCheckpoint':
-        case 'ChildSession':
-        case 'Signal':
-        case 'SignalReceived':
-        case 'RunSettled':
-          return;
-        default: {
-          const exhaustive: never = record;
-          return exhaustive;
-        }
+    const notify = (record: ConversationRecord.Record): Effect.Effect<void> => {
+      if (record._tag !== 'ToolOutcome') {
+        return Effect.void;
       }
+      const key = settledKey(record.name, record.id);
+      const waiting = callbacks.get(key) ?? [];
+      callbacks.delete(key);
+      return Effect.forEach(waiting, (callback) => callback, {
+        discard: true,
+      });
     };
 
-    const notifyRecord = ConversationRecord.Record.match({
-      ToolOutcome: (record) => {
-        const key = settledKey(record.name, record.id);
-        const waiting = callbacks.get(key) ?? [];
-        callbacks.delete(key);
-        return Effect.forEach(waiting, (callback) => callback, {
-          discard: true,
-        });
-      },
-      RunStarted: () => Effect.void,
-      Text: () => Effect.void,
-      PartialOutput: () => Effect.void,
-      ToolCall: () => Effect.void,
-      NestedToolCall: () => Effect.void,
-      NestedToolStarted: () => Effect.void,
-      NestedToolOutcome: () => Effect.void,
-      ToolStarted: () => Effect.void,
-      ToolSuspended: () => Effect.void,
-      ToolResumed: () => Effect.void,
-      ToolWaitCompleted: () => Effect.void,
-      ToolWaitRestarted: () => Effect.void,
-      TurnFinished: () => Effect.void,
-      Compacted: () => Effect.void,
-      BranchedFrom: () => Effect.void,
-      Completed: () => Effect.void,
-      StateCheckpoint: () => Effect.void,
-      CodeStateCheckpoint: () => Effect.void,
-      ChildSession: () => Effect.void,
-      Signal: () => Effect.void,
-      SignalReceived: () => Effect.void,
-      RunSettled: () => Effect.void,
-    });
-
     const track = (records: ReadonlyArray<ConversationRecord.Record>) =>
-      Effect.gen(function* () {
+      Effect.suspend(() => {
         for (const record of records) {
-          trackRecord(record);
+          steps.apply(record);
         }
-        yield* Ref.update(pending, (current) => {
-          const next = new Set(current);
-          for (const record of records) {
-            updatePending(next, record);
-          }
-          return next;
-        });
-
-        for (const record of records) {
-          yield* notifyRecord(record);
-        }
+        return Effect.forEach(records, notify, { discard: true });
       });
 
     return {
       nestedRecovery: (parent, key) =>
-        Option.fromUndefinedOr(snapshot.nested.get(nestedKey(parent, key))),
+        Option.fromUndefinedOr(opened.nested.get(nestedKey(parent, key))),
       recovery: (name, toolCallId) =>
-        Option.fromUndefinedOr(recoveries.get(settledKey(name, toolCallId))),
+        Option.fromUndefinedOr(
+          steps.recoveries.get(settledKey(name, toolCallId)),
+        ),
       prior: (name, toolCallId, params) => {
         const key = settledKey(name, toolCallId);
-        const recorded = snapshot.calls.get(key);
+        const recorded = opened.calls.get(key);
         return recorded !== undefined && sameParams(recorded.params, params)
-          ? Option.fromUndefinedOr(recoveries.get(key))
+          ? Option.fromUndefinedOr(steps.recoveries.get(key))
           : Option.none();
       },
-      pendingToolCalls: snapshot.pending,
-      indeterminateToolCalls: snapshot.indeterminate,
-      suspendedToolCalls: snapshot.suspended,
-      recoveryCorruption: snapshot.corruption,
-      hasCompletedWait: (token) => completedWaitOutcomes.has(token),
-      completedWait: (token) =>
-        Option.fromNullishOr(completedWaitOutcomes.get(token)),
-      pendingToolState: Effect.map(Ref.get(pending), (current) => {
-        if (current.size === 0) {
-          return 'none';
-        }
-        for (const key of current) {
-          if (recoveries.get(key)?._tag !== 'Suspended') {
-            return 'indeterminate';
-          }
-        }
-        return 'suspended';
-      }),
-      hasPendingToolCalls: Effect.map(
-        Ref.get(pending),
-        (current) => current.size > 0,
-      ),
+      pendingToolCalls: opened.pending,
+      indeterminateToolCalls: opened.indeterminate,
+      suspendedToolCalls: opened.suspended,
+      recoveryCorruption: opened.corruption,
+      hasCompletedWait: (token) => steps.waits.has(token),
+      completedWait: (token) => Option.fromNullishOr(steps.waits.get(token)),
+      pendingToolState: Effect.sync(() => steps.pendingState()),
+      hasPendingToolCalls: Effect.sync(() => steps.pendingState() !== 'none'),
       onToolSettled: (name, toolCallId, effect) => {
         const key = settledKey(name, toolCallId);
         callbacks.set(key, [...(callbacks.get(key) ?? []), effect]);

@@ -383,8 +383,7 @@ export const openWith = (
     // and serving those back would answer questions the resumed run never
     // asked. The signal cursor immediately below is the opposite case, and
     // `branch.ts` says why.
-    const recovered = RecoveryState.fold(opened.aggregateSuffix);
-    const toolRecovery = yield* RecoveryState.make(recovered);
+    const toolRecovery = yield* RecoveryState.make(opened.aggregateSuffix);
     const signalCursor = yield* Ref.make(opened.signalCursor);
 
     const readSignalPage = (

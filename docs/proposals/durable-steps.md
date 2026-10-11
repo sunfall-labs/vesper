@@ -238,9 +238,10 @@ adapts.
    Dispatch serves a call from the log only when the previous run recorded the
    same name, id, and parameters (`Tracker.prior`), so reused provider ids run.
    Both have scenarios that fail without the fix.
-1. **One fold.** Collapse `recovery.ts`'s open-time and live folds into one pure
-   function with an explicit run boundary. No record changes; removes ~200
-   lines.
+1. **Done.** One `StepFold` in `recovery.ts` applies every record, both when a
+   session opens and as the run appends. The open-time snapshot is the only
+   source of "what did the previous run do", so serving from the log cannot
+   reach the current run's calls by construction.
 2. **Steps for nested calls and native interactions.** Introduce the five step
    records; route code mode and native approvals/answers through one step
    runner shared with `dispatch.ts`. Nested calls gain the indeterminate policy.
