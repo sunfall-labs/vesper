@@ -150,13 +150,15 @@ export const readResumeHistory = (
       let jumped = false;
       for (const envelope of page.records) {
         if (envelope.record._tag === 'BranchedFrom') {
-          if (
-            envelope.record.at === LogOffset.START ||
-            !LogOffset.isAfter(envelope.offset, envelope.record.at)
-          ) {
-            if (envelope.record.at === LogOffset.START) {
-              done = true;
-            }
+          // A branch from `START` abandons everything older: stop here, before
+          // the rest of this page is collected.
+          if (envelope.record.at === LogOffset.START) {
+            done = true;
+            break;
+          }
+          // A marker naming a record at or after itself degrades into an
+          // ordinary step backwards.
+          if (!LogOffset.isAfter(envelope.offset, envelope.record.at)) {
             continue;
           }
           before = yield* offsetAfter(envelope.record.at);

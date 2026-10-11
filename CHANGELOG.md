@@ -62,6 +62,12 @@ fields, and code that exhaustively matches it must handle them.
   `TurnFinished` preceded the answer resume recorded, so the prompt rebuild
   split the call from its answer and dropped both. A finished turn now stays
   open for its outstanding results.
+- `Conversation.resolveApproval` and `resolveInteraction` now record through
+  the conversation's recording policy, so `externalResult` redacts a caller's
+  answer like every other persisted value. They previously wrote it unfiltered.
+- A conversation branched from `LogOffset.START` stays started over. The run
+  after the branched one rebuilt its prompt with the abandoned records on the
+  same page as the branch marker; resume now stops at the marker.
 - `RunStarted` requires `formatVersion`, `agentRevision`, and the run's
   `budget`; `Completed` and settled resume state require `outcome`.
 - The agent runs its own tool calls. The model is asked with

@@ -19,6 +19,7 @@ import { Interaction } from './interaction.js';
 import { foldToResult } from './internal/fold-to-result.js';
 import * as AgentLog from './log.js';
 import type { RecordingPolicy } from './recording-policy.js';
+import { RecordingPolicyRuntime } from './recording-policy-runtime.js';
 import {
   append as appendSignal,
   Signal as SignalSchema,
@@ -158,6 +159,7 @@ export type Error<A extends ConcreteAgent> =
 export interface Instance<
   A extends ConcreteAgent,
   Requires = Agent.Requires<A>,
+  PolicyRequires = never,
 > {
   /** Stable durable identity shared by runs, records, and signals. */
   readonly id: LogVocabulary.ConversationId;
@@ -272,7 +274,7 @@ export interface Instance<
     | SuspendedConversationError
     | AgentLog.DurabilityError
     | LogStore.LogStoreError,
-    LogStore.Service | Crypto.Crypto
+    LogStore.Service | Crypto.Crypto | PolicyRequires
   >;
   /**
    * Validate, encode, and durably complete a pre-dispatch interaction with
@@ -294,7 +296,10 @@ export interface Instance<
     | SuspendedConversationError
     | AgentLog.DurabilityError
     | LogStore.LogStoreError,
-    LogStore.Service | Crypto.Crypto | C['success']['EncodingServices']
+    | LogStore.Service
+    | Crypto.Crypto
+    | C['success']['EncodingServices']
+    | PolicyRequires
   >;
 }
 
@@ -302,8 +307,25 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
   agent: A,
   conversationId: string,
   policy?: RecordingPolicy.Policy<PolicyRequires>,
-): Instance<A, Agent.Requires<A> | PolicyRequires> => {
+): Instance<A, Agent.Requires<A> | PolicyRequires, PolicyRequires> => {
   const id = LogVocabulary.ConversationId.make(conversationId);
+  // Resolutions record the caller's answer, so they pass through the same
+  // recording policy every run of this conversation does: an answer must be
+  // redacted on its way into the log exactly as a tool result would be.
+  const openRecorded = Effect.flatMap(
+    AgentLog.open(id, {
+      compatibility: { agent: agent.name, revision: agent.revision },
+    }),
+    (session) =>
+      policy === undefined
+        ? Effect.succeed(session)
+        : Effect.map(Effect.context<PolicyRequires>(), (context) =>
+            AgentLog.withRecordingPolicy(
+              session,
+              RecordingPolicyRuntime.compile(policy, context),
+            ),
+          ),
+  );
   const protocol = protocolOf<
     Agent.Requires<A>,
     Agent.Error<A>,
@@ -375,9 +397,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
     resolveApproval: (toolCallId, decision, reason) =>
       Effect.gen(function* () {
         const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
-        const session = yield* AgentLog.open(id, {
-          compatibility: { agent: agent.name, revision: agent.revision },
-        });
+        const session = yield* openRecorded;
         // Both lookups scan `session.history` — the resume view that spans
         // runs back to the latest compaction boundary — rather than the
         // recovery snapshot (`suspendedToolCalls`/`hasCompletedWait`). The
@@ -455,9 +475,7 @@ const bind = <A extends ConcreteAgent, PolicyRequires = never>(
           tool.successSchema,
         )(result);
         const normalizedId = LogVocabulary.ToolCallId.make(toolCallId);
-        const session = yield* AgentLog.open(id, {
-          compatibility: { agent: agent.name, revision: agent.revision },
-        });
+        const session = yield* openRecorded;
         const { suspended, resolved } = nativeInteractionState(
           session.history,
           normalizedId,
@@ -508,12 +526,20 @@ export function make<A extends ConcreteAgent, const P extends object>(
   agent: A,
   conversationId: string,
   policy: P & RecordingPolicy.Policy<RecordingPolicy.Services<P>>,
-): Instance<A, Agent.Requires<A> | RecordingPolicy.Services<P>>;
+): Instance<
+  A,
+  Agent.Requires<A> | RecordingPolicy.Services<P>,
+  RecordingPolicy.Services<P>
+>;
 export function make<A extends ConcreteAgent, const P extends object>(
   agent: A,
   conversationId: string,
   policy?: P & RecordingPolicy.Policy<RecordingPolicy.Services<P>>,
-): Instance<A, Agent.Requires<A> | RecordingPolicy.Services<P>> {
+): Instance<
+  A,
+  Agent.Requires<A> | RecordingPolicy.Services<P>,
+  RecordingPolicy.Services<P>
+> {
   return bind(agent, conversationId, policy);
 }
 
