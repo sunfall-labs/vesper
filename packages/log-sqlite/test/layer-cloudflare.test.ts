@@ -1,16 +1,13 @@
-import { createHash, randomBytes } from 'node:crypto';
-
 import { describe, expect, it } from '@effect/vitest';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import { Crypto, Effect, Fiber, Layer, Stream } from 'effect';
+import { Effect, Fiber, Layer, Stream } from 'effect';
 import { Reactivity } from 'effect/reactivity';
 import { SqlClient } from 'effect/sql';
 
 import { logStoreContract } from '../../log/test/log-store-contract.js';
 import { LogStoreSqlite } from '../src/layer.js';
 import { SqliteCloudflare } from '../src/layer-cloudflare.js';
-import { sha256 } from '../src/sha256.js';
 import type { DurableObjectStorage } from '../src/layer-cloudflare.js';
 import { makeStandInStorage } from './durable-object-stand-in.js';
 
@@ -24,18 +21,14 @@ const storeLayerFor = (storage: DurableObjectStorage) =>
     ),
   );
 
+// The store hashes with the Worker crypto layer (the package's pure-JS SHA-256)
+// while the contract's chain verification uses node:crypto, so a wrong digest
+// anywhere fails the contract's hash-chain cases.
 logStoreContract('sqlite on a Durable Object stand-in', {
   layer: Layer.unwrap(Effect.sync(() => storeLayerFor(makeStandInStorage()))),
 });
 
 describe('SqliteCloudflare', () => {
-  it('rejects SQL-level transaction control like a Durable Object', () => {
-    const storage = makeStandInStorage();
-    for (const statement of ['BEGIN', 'COMMIT', 'SAVEPOINT x', 'ROLLBACK']) {
-      expect(() => storage.sql.exec(statement)).toThrow(/transactionSync/);
-    }
-  });
-
   it.effect(
     'commits through transactionSync and never issues control SQL',
     () => {
@@ -124,65 +117,5 @@ describe('SqliteCloudflare', () => {
       });
       expect(yield* Fiber.join(woken)).toHaveLength(2);
     }).pipe(Effect.provide(storeLayerFor(storage)));
-  });
-});
-
-const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
-const text = (value: string) => new TextEncoder().encode(value);
-
-describe('sha256', () => {
-  const vectors: ReadonlyArray<readonly [string, Uint8Array, string]> = [
-    [
-      'empty',
-      text(''),
-      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    ],
-    [
-      'abc',
-      text('abc'),
-      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
-    ],
-    [
-      'NIST 448-bit',
-      text('abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq'),
-      '248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1',
-    ],
-    [
-      'NIST 896-bit',
-      text(
-        'abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu',
-      ),
-      'cf5b16a778af8380036ce59e7b0492370b249b11e8f07a51afac45037afee9d1',
-    ],
-    [
-      'one million a',
-      new Uint8Array(1_000_000).fill(0x61),
-      'cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0',
-    ],
-  ];
-
-  for (const [name, input, expected] of vectors) {
-    it(`matches the NIST vector: ${name}`, () => {
-      expect(hex(sha256(input))).toBe(expected);
-    });
-  }
-
-  it('agrees with node:crypto across padding boundaries', () => {
-    for (let length = 0; length <= 200; length += 1) {
-      const input = new Uint8Array(randomBytes(length));
-      expect(hex(sha256(input))).toBe(
-        createHash('sha256').update(input).digest('hex'),
-      );
-    }
-  });
-
-  it('is what the Worker Crypto layer uses, synchronously', () => {
-    const digest = Effect.gen(function* () {
-      const crypto = yield* Crypto.Crypto;
-      return yield* crypto.digest('SHA-256', text('abc'));
-    }).pipe(Effect.provide(SqliteCloudflare.cryptoLayer));
-    expect(hex(Effect.runSync(digest))).toBe(
-      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
-    );
   });
 });

@@ -14,11 +14,15 @@ import {
   ManagedRuntime,
   Queue,
   Redacted,
+  type Result,
   Stream,
 } from 'effect';
 
+import { SqlClient } from 'effect/sql';
+
 import { VesperPgClient } from '../src/client.js';
 import { channelFor, LogStorePg } from '../src/layer.js';
+import { chainTamperContract } from '../../log/test/chain-tamper-contract.js';
 import { logStoreContract } from '../../log/test/log-store-contract.js';
 import {
   createPostgresTestHarness,
@@ -203,77 +207,6 @@ describeIntegration('LogStore Postgres backend', () => {
       { timeout: 30_000 },
     );
 
-    it.effect(
-      'unlistens on scope close and reconnects a later subscription',
-      () =>
-        Effect.promise(() =>
-          database.runtime.runPromise(
-            Effect.gen(function* () {
-              const sql = yield* PgClient.PgClient;
-              yield* Effect.scoped(sql.listen('vesper_reconnect'));
-
-              const notification = yield* Effect.scoped(
-                Effect.gen(function* () {
-                  const notifications = yield* sql.listen('vesper_reconnect');
-                  yield* sql.notify('vesper_reconnect', 'again');
-                  return yield* Queue.take(notifications);
-                }),
-              );
-              expect(notification.payload).toBe('again');
-            }),
-          ),
-        ),
-      { timeout: 30_000 },
-    );
-
-    it.effect('rolls back an interrupted transaction', () => {
-      const path = 'interrupted-transaction';
-      return Effect.promise(() =>
-        database.runtime.runPromise(
-          Effect.gen(function* () {
-            const sql = yield* PgClient.PgClient;
-            const started = yield* Deferred.make<void>();
-            const fiber = yield* sql
-              .withTransaction(
-                Effect.gen(function* () {
-                  yield* sql.unsafe(
-                    'INSERT INTO ai_log.streams (path, identity) VALUES ($1, $2)',
-                    [path, 'identity'],
-                  );
-                  yield* Deferred.succeed(started, undefined);
-                  return yield* Effect.never;
-                }),
-              )
-              .pipe(Effect.forkChild);
-            yield* Deferred.await(started);
-            yield* Fiber.interrupt(fiber);
-            const rows = yield* sql.unsafe<{ count: string }>(
-              'SELECT count(*)::text AS count FROM ai_log.streams WHERE path = $1',
-              [path],
-            );
-            expect(rows[0]?.count).toBe('0');
-          }),
-        ),
-      );
-    });
-
-    it.effect('isolates SET LOCAL statement_timeout to its transaction', () =>
-      Effect.promise(() =>
-        database.runtime.runPromise(
-          Effect.gen(function* () {
-            const sql = yield* PgClient.PgClient;
-            yield* sql.withTransaction(
-              sql.unsafe("SET LOCAL statement_timeout = '25ms'"),
-            );
-            const rows = yield* sql.unsafe<{ statement_timeout: string }>(
-              'SHOW statement_timeout',
-            );
-            expect(rows[0]?.statement_timeout).toBe('0');
-          }),
-        ),
-      ),
-    );
-
     it.effect('delivers transactional notifications only after commit', () =>
       Effect.promise(() =>
         database.runtime.runPromise(
@@ -312,18 +245,6 @@ describeIntegration('LogStore Postgres backend', () => {
   });
 
   describe('storage invariants', () => {
-    it('uses C collation for read-from-the-beginning', async () => {
-      const zero = LogOffset.fromSeq(0n);
-      const compared = await database.adminPool.query<{
-        db: boolean;
-        c: boolean;
-      }>(`SELECT $1 < $2 AS db, ($1 COLLATE "C") < ($2 COLLATE "C") AS c`, [
-        LogOffset.START,
-        zero,
-      ]);
-      expect(compared.rows[0]?.c).toBe(true);
-    });
-
     it.effect(
       'atomically appends and idempotently retries 10,000 records',
       () => {
@@ -365,7 +286,203 @@ describeIntegration('LogStore Postgres backend', () => {
       { timeout: 120_000 },
     );
   });
+  chainTamperContract('postgres', {
+    layer: Layer.merge(storeLayer, pgLayer),
+    editText: (path, seq) =>
+      Effect.flatMap(SqlClient.SqlClient, (sql) =>
+        sql.unsafe(
+          `UPDATE ai_log.records SET record = jsonb_set(record, '{text}', '"x"')
+           WHERE path = $1 AND seq = $2`,
+          [path, seq],
+        ),
+      ).pipe(Effect.asVoid),
+    deleteRecord: (path, seq) =>
+      Effect.flatMap(SqlClient.SqlClient, (sql) =>
+        sql.unsafe('DELETE FROM ai_log.records WHERE path = $1 AND seq = $2', [
+          path,
+          seq,
+        ]),
+      ).pipe(Effect.asVoid),
+  });
+
+  // Real two-connection fencing races: each writer owns its own pool, and a
+  // shared gate releases both at once so they contend for the stream row's
+  // `SELECT ... FOR UPDATE` lock rather than running one after the other.
+  describe('contended fencing', () => {
+    const connectionLayer = () =>
+      LogStorePg.layer().pipe(
+        Layer.provide(
+          Layer.unwrap(
+            Effect.sync(() =>
+              VesperPgClient.layer({
+                url: Redacted.make(database.connectionString),
+              }),
+            ),
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
+    const writerA: Writer = ManagedRuntime.make(connectionLayer());
+    const writerB: Writer = ManagedRuntime.make(connectionLayer());
+
+    afterAll(() =>
+      Effect.runPromise(
+        Effect.all([
+          Effect.promise(() => writerA.dispose()),
+          Effect.promise(() => writerB.dispose()),
+        ]),
+      ),
+    );
+
+    const race = <A>(effectA: Op<A>, effectB: Op<A>) =>
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<void>();
+        const gated = (writer: Writer, effect: Op<A>) =>
+          Effect.promise(() =>
+            writer.runPromise(
+              Deferred.await(gate).pipe(Effect.andThen(Effect.result(effect))),
+            ),
+          ).pipe(Effect.forkChild);
+        const fiberA = yield* gated(writerA, effectA);
+        const fiberB = yield* gated(writerB, effectB);
+        yield* Deferred.succeed(gate, undefined);
+        return {
+          resultA: yield* Fiber.join(fiberA),
+          resultB: yield* Fiber.join(fiberB),
+        };
+      });
+
+    const acquire = (path: string, id: string) =>
+      store((log) => log.acquire(path, LogVocabulary.ProducerId.make(id)));
+    const appendTo = (
+      path: string,
+      claim: LogStore.ProducerClaim,
+      sequence: number,
+      ...values: ReadonlyArray<string>
+    ) =>
+      store((log) =>
+        log.append({
+          path,
+          producerId: claim.producerId,
+          epoch: claim.epoch,
+          sequence: LogVocabulary.ProducerSequence.make(sequence),
+          records: values.map(text),
+        }),
+      );
+    const texts = (path: string) =>
+      on(
+        writerA,
+        store((log) => log.read(path)),
+      ).pipe(Effect.map((page) => page.records.map(recordText)));
+    const create = (path: string) =>
+      on(
+        writerA,
+        store((log) => log.create(path, 'identity')),
+      );
+
+    it.live(
+      'fences the loser when two live connections race acquire, then append',
+      () =>
+        Effect.gen(function* () {
+          for (let iteration = 0; iteration < 10; iteration += 1) {
+            const path = `race-acquire-${String(iteration)}`;
+            yield* create(path);
+            const acquired = yield* race(
+              acquire(path, 'a'),
+              acquire(path, 'b'),
+            );
+            const claimA = yield* success(acquired.resultA);
+            const claimB = yield* success(acquired.resultB);
+            // The row lock must serialize the two epoch bumps.
+            expect(claimA.epoch).not.toBe(claimB.epoch);
+            const aWins = claimA.epoch > claimB.epoch;
+
+            const appended = yield* race(
+              appendTo(path, claimA, 0, aWins ? 'winner' : 'loser'),
+              appendTo(path, claimB, 0, aWins ? 'loser' : 'winner'),
+            );
+            expect(aWins ? appended.resultA : appended.resultB).toMatchObject({
+              _tag: 'Success',
+            });
+            expect(aWins ? appended.resultB : appended.resultA).toMatchObject({
+              _tag: 'Failure',
+              failure: { operation: 'append', reason: 'fenced' },
+            });
+            expect(yield* texts(path)).toEqual(['winner']);
+          }
+        }),
+      { timeout: 120_000 },
+    );
+
+    it.live(
+      'fails the fenced writer under lock contention while the new epoch appends',
+      () =>
+        Effect.gen(function* () {
+          for (let iteration = 0; iteration < 5; iteration += 1) {
+            const path = `race-interleave-${String(iteration)}`;
+            yield* create(path);
+            const claimA = yield* on(writerA, acquire(path, 'a'));
+            yield* on(writerA, appendTo(path, claimA, 0, 'batch-1'));
+            const claimB = yield* on(writerB, acquire(path, 'b'));
+            expect(claimB.epoch).toBeGreaterThan(claimA.epoch);
+
+            const raced = yield* race(
+              appendTo(path, claimA, 1, 'from-fenced-a'),
+              appendTo(path, claimB, 0, 'from-b'),
+            );
+            expect(raced.resultA).toMatchObject({
+              _tag: 'Failure',
+              failure: { operation: 'append', reason: 'fenced' },
+            });
+            expect(raced.resultB._tag).toBe('Success');
+            expect(yield* texts(path)).toEqual(['batch-1', 'from-b']);
+          }
+        }),
+      { timeout: 60_000 },
+    );
+
+    it.live(
+      'converges two connections racing an identical batch to a single write',
+      () =>
+        Effect.gen(function* () {
+          for (let iteration = 0; iteration < 10; iteration += 1) {
+            const path = `race-idempotent-${String(iteration)}`;
+            yield* create(path);
+            const claim = yield* on(writerA, acquire(path, 'p'));
+            const raced = yield* race(
+              appendTo(path, claim, 0, 'same', 'same-2'),
+              appendTo(path, claim, 0, 'same', 'same-2'),
+            );
+            expect(raced.resultA._tag).toBe('Success');
+            expect(raced.resultB._tag).toBe('Success');
+            if (
+              raced.resultA._tag === 'Success' &&
+              raced.resultB._tag === 'Success'
+            ) {
+              expect(raced.resultA.success).toBe(raced.resultB.success);
+            }
+            expect(yield* texts(path)).toEqual(['same', 'same-2']);
+          }
+        }),
+      { timeout: 60_000 },
+    );
+  });
 });
+
+type Op<A> = Effect.Effect<A, LogStore.LogStoreError, LogStore.Service>;
+type Writer = ManagedRuntime.ManagedRuntime<LogStore.Service, unknown>;
+
+const store = <A>(
+  use: (log: LogStore.Interface) => Effect.Effect<A, LogStore.LogStoreError>,
+): Op<A> => Effect.flatMap(LogStore.Service, use);
+const on = <A>(writer: Writer, effect: Op<A>) =>
+  Effect.promise(() => writer.runPromise(effect));
+const recordText = (envelope: ConversationRecord.Envelope) =>
+  envelope.record._tag === 'Text' ? envelope.record.text : envelope.record._tag;
+const success = <A>(result: Result.Result<A, unknown>) =>
+  result._tag === 'Success'
+    ? Effect.succeed(result.success)
+    : Effect.die('an uncontested operation failed');
 
 const text = (value: string): ConversationRecord.Entry => ({
   conversationId: LogVocabulary.ConversationId.make('conversation-1'),

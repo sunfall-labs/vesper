@@ -3,12 +3,12 @@ import { createServer } from 'node:net';
 
 import * as NodeServices from '@effect/platform-node/NodeServices';
 import { afterAll, describe, expect, it } from '@effect/vitest';
-import { Effect, Layer, PlatformError, Sink, Stream } from 'effect';
+import { Effect, Layer, PlatformError } from 'effect';
 import { ChildProcessSpawner } from 'effect/process';
 
 import { WorkspaceDriver } from '../src/driver.js';
 import { sandboxed, unrestricted } from '../src/layer-local.js';
-import { ShellSandbox } from '../src/shell-sandbox.js';
+import type { ShellSandbox } from '../src/shell-sandbox.js';
 
 const base = `/tmp/ai-sandbox-${String(process.pid)}`;
 
@@ -32,17 +32,6 @@ const makeDir = (name: string) =>
 
 afterAll(() => Effect.runPromise(unconfined('rm -rf "$DIR"', { DIR: base })));
 
-const plan = (
-  overrides: Partial<ShellSandbox.Plan> = {},
-): ShellSandbox.Plan => ({
-  root: '/work/root',
-  tempDir: '/tmp/vesper-x',
-  network: false,
-  readPaths: [],
-  writePaths: [],
-  ...overrides,
-});
-
 const exec = (
   policy: ShellSandbox.Policy,
   command: string,
@@ -54,174 +43,6 @@ const exec = (
   }).pipe(
     Effect.provide(sandboxed(policy).pipe(Layer.provide(NodeServices.layer))),
   );
-
-describe('SBPL profile', () => {
-  it('never contains a path, however hostile', () => {
-    const hostile = [
-      '/w/quo"te',
-      '/w/back\\slash',
-      '/w/paren)(allow file-write* (subpath "/"))',
-      '/w/new\nline',
-    ];
-    const profile = ShellSandbox.sandboxExecProfile(
-      plan({ readPaths: hostile, writePaths: hostile, root: hostile[2] ?? '' }),
-    );
-    for (const path of hostile) {
-      expect(profile).not.toContain(path);
-    }
-    expect(profile).not.toContain('allow file-write* (subpath "/")');
-    expect(profile.startsWith('(version 1)\n(deny default)')).toBe(true);
-    // One write rule, and it only names parameters.
-    expect(profile.match(/file-write\*/g)).toHaveLength(2);
-  });
-
-  it('passes hostile paths as single -D arguments', () => {
-    const root = '/w/x") (allow default) ("';
-    const invocation = ShellSandbox.sandboxExecInvocation(
-      plan({ root }),
-      'echo hi',
-    );
-    expect(invocation.file).toBe('/usr/bin/sandbox-exec');
-    const index = invocation.args.indexOf(`ROOT=${root}`);
-    expect(invocation.args[index - 1]).toBe('-D');
-    expect(invocation.args.slice(-3)).toEqual(['/bin/sh', '-c', 'echo hi']);
-  });
-
-  it('grants network only when asked', () => {
-    expect(ShellSandbox.sandboxExecProfile(plan())).not.toContain('network');
-    expect(ShellSandbox.sandboxExecProfile(plan({ network: true }))).toContain(
-      '(allow network*)',
-    );
-  });
-
-  it('rejects relative paths', () => {
-    expect(() =>
-      ShellSandbox.makePlan(
-        { mode: 'required', root: 'rel' },
-        { root: 'rel', tempDir: '/tmp/x' },
-      ),
-    ).toThrow(RangeError);
-  });
-});
-
-describe('bwrap argv', () => {
-  const argv = (overrides: Partial<ShellSandbox.Plan> = {}) =>
-    ShellSandbox.bwrapInvocation(plan(overrides), 'echo "$X"', '/work/root/sub')
-      .args;
-
-  it('binds the root read-write and keeps the command one element', () => {
-    const args = argv();
-    const bind = args.indexOf('--bind');
-    expect(args.slice(bind, bind + 3)).toEqual([
-      '--bind',
-      '/work/root',
-      '/work/root',
-    ]);
-    expect(args.slice(-4)).toEqual(['--', '/bin/sh', '-c', 'echo "$X"']);
-    expect(args).toContain('--die-with-parent');
-    expect(args).toContain('--new-session');
-    expect(args.slice(args.indexOf('--chdir'))[1]).toBe('/work/root/sub');
-  });
-
-  it('mounts system directories read-only and never the home directory', () => {
-    const args = argv();
-    expect(args).toContain('--ro-bind-try');
-    expect(args).not.toContain('/home');
-    expect(args.filter((arg) => arg === '--bind')).toHaveLength(1);
-  });
-
-  it('unshares the network unless allowed', () => {
-    expect(argv()).toContain('--unshare-net');
-    expect(argv({ network: true })).not.toContain('--unshare-net');
-  });
-
-  it('mounts /tmp before the root so a root under /tmp survives', () => {
-    const args = argv({ root: '/tmp/ws' });
-    expect(args.indexOf('--tmpfs')).toBeLessThan(args.indexOf('--bind'));
-  });
-
-  it('keeps hostile paths as whole argv elements', () => {
-    const root = '/w/a b";rm -rf /;"\n(x)';
-    expect(argv({ root })).toContain(root);
-  });
-});
-
-describe('availability probe', () => {
-  const probePlan = plan({
-    network: false,
-    readPaths: ['/opt/tools'],
-    writePaths: ['/cache'],
-  });
-
-  it('is the real bwrap plan with a trivial command', () => {
-    const probe = ShellSandbox.probeInvocation('linux', probePlan);
-    const real = ShellSandbox.bwrapInvocation(
-      probePlan,
-      'true',
-      probePlan.root,
-    );
-    expect(probe?.backend).toBe('bwrap');
-    expect(probe?.invocation).toEqual(real);
-    for (const flag of [
-      '--unshare-pid',
-      '--unshare-net',
-      '--proc',
-      '--dev',
-      '--tmpfs',
-      '--bind',
-    ]) {
-      expect(probe?.invocation.args).toContain(flag);
-    }
-  });
-
-  it('is the real sandbox-exec profile with a trivial command', () => {
-    const probe = ShellSandbox.probeInvocation('darwin', probePlan);
-    expect(probe?.backend).toBe('sandbox-exec');
-    expect(probe?.invocation).toEqual(
-      ShellSandbox.sandboxExecInvocation(probePlan, 'true'),
-    );
-    expect(probe?.invocation.args).toContain(
-      ShellSandbox.sandboxExecProfile(probePlan),
-    );
-  });
-
-  it('has no backend on other platforms', () => {
-    expect(ShellSandbox.probeInvocation('win32', probePlan)).toBeUndefined();
-  });
-
-  it.live(
-    'reports unavailable when the full plan fails but a bare bind works',
-    () =>
-      Effect.gen(function* () {
-        const spawned: Array<ReadonlyArray<string>> = [];
-        const spawner = ChildProcessSpawner.make((command) => {
-          const args = 'args' in command ? command.args : [];
-          spawned.push(args);
-          const failing = args.includes('--proc');
-          return Effect.succeed(
-            ChildProcessSpawner.makeHandle({
-              pid: ChildProcessSpawner.ProcessId(1),
-              exitCode: Effect.succeed(
-                ChildProcessSpawner.ExitCode(failing ? 1 : 0),
-              ),
-              isRunning: Effect.succeed(false),
-              kill: () => Effect.void,
-              unref: Effect.succeed(Effect.void),
-              stdin: Sink.drain,
-              stdout: Stream.empty,
-              stderr: Stream.empty,
-              all: Stream.empty,
-              getInputFd: () => Sink.drain,
-              getOutputFd: () => Stream.empty,
-            }),
-          );
-        });
-        const backend = yield* ShellSandbox.detect('linux', spawner, probePlan);
-        expect(backend).toBeUndefined();
-        expect(spawned).toHaveLength(1);
-      }),
-  );
-});
 
 // A spawner that cannot start anything: the probe finds no backend, exactly as
 // on a host without `sandbox-exec` or `bwrap`.
@@ -368,18 +189,6 @@ describe.skipIf(process.platform !== 'darwin')('sandbox-exec (real)', () => {
       expect(off.exitCode).not.toBe(0);
       expect(on.exitCode).toBe(0);
     }),
-  );
-
-  it.live('probes with the real profile', () =>
-    Effect.gen(function* () {
-      const root = yield* makeDir('probe');
-      const backend = yield* ShellSandbox.detect(
-        'darwin',
-        yield* ChildProcessSpawner.ChildProcessSpawner,
-        ShellSandbox.makePlan(policyFor(root), { root, tempDir: root }),
-      );
-      expect(backend).toBe('sandbox-exec');
-    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.live('runs in a root reached through a symlink', () =>

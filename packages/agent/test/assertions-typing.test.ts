@@ -8,7 +8,10 @@ import {
   SchemaTransformation,
   type Stream,
 } from 'effect';
-import { type LanguageModel, Tool, Toolkit } from 'effect/ai';
+import { type LanguageModel, Tool, Toolkit, type Response } from 'effect/ai';
+
+import { DynamicToolkit } from '../src/dynamic-toolkit.js';
+import { Interaction } from '../src/interaction.js';
 
 import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
@@ -510,8 +513,125 @@ type Substituted = Extract<
 >;
 const _exactSubstitutedResult: Exact<Substituted['result'], unknown> = true;
 
+// --- tool-call boundary types --------------------------------------------
+//
+// Vesper's loop asks the model with resolution disabled and deferred
+// validation: tool-call parameters are the model-authored value and a call may
+// name any tool, including one the turn did not offer.
+
+const datedTool = Tool.make('dated_tool', {
+  parameters: Schema.Struct({ at: Schema.DateFromString }),
+  success: Schema.String,
+});
+type DatedTools = { readonly dated_tool: typeof datedTool };
+
+const loopBoundaryTypeAssertions = (
+  deferred: Response.StreamPart<DatedTools, 'deferred'>,
+  decoded: Response.StreamPart<DatedTools>,
+  encoded: Response.StreamPart<DatedTools, 'encoded'>,
+): void => {
+  if (deferred.type === 'tool-call') {
+    const name: string = deferred.name;
+    const params: unknown = deferred.params;
+    void name;
+    void params;
+  }
+  if (decoded.type === 'tool-call') {
+    const at: Date = decoded.params.at;
+    void at;
+  }
+  if (encoded.type === 'tool-call') {
+    const at: string = encoded.params.at;
+    void at;
+  }
+};
+void loopBoundaryTypeAssertions;
+
+// --- interception requirements ---------------------------------------------
+//
+// `intercepting` erases the interceptor's `R` internally with one cast, which
+// is sound only because it reappears on the agent's requirement channel.
+
+class Policy extends Context.Service<Policy, { readonly allow: boolean }>()(
+  'assertions-test/Policy',
+) {}
+class Reconciler extends Context.Service<
+  Reconciler,
+  { readonly retry: boolean }
+>()('assertions-test/Reconciler') {}
+
+const policed = handled.intercepting({
+  beforeToolCall: () =>
+    Effect.gen(function* () {
+      const policy = yield* Policy;
+      return policy.allow ? Interception.dispatch : Interception.refuse('no');
+    }),
+});
+const recoverable = handled.intercepting({
+  onIndeterminateToolCall: () =>
+    Effect.gen(function* () {
+      const policy = yield* Reconciler;
+      return policy.retry
+        ? Interception.retry
+        : Interception.reconcileFailure('not committed');
+    }),
+});
+const _policyWidened: Has<Policy, EffR<ReturnType<typeof policed.run>>> = 'yes';
+const _policyAdditive: Has<
+  LanguageModel.LanguageModel,
+  EffR<ReturnType<typeof policed.run>>
+> = 'yes';
+const _policyUntaxed: Has<Policy, EffR<ReturnType<typeof handled.run>>> = 'no';
+const _recoveryWidened: Has<
+  Reconciler,
+  EffR<ReturnType<typeof recoverable.run>>
+> = 'yes';
+
+// --- dynamic and interaction tools ---------------------------------------
+
+const remote = Tool.dynamic('mcp__linear__search_issues', {
+  parameters: { type: 'object', properties: {} },
+  success: Schema.String,
+  failure: Schema.String,
+  failureMode: 'return',
+});
+const remoteToolkit = Toolkit.make(remote);
+const dynamicAgent = Agent.make({
+  name: 'typed-dynamic',
+  revision: '1',
+  instructions: 'Use tools.',
+  toolkit: Toolkit.make(),
+  dynamicTools: [
+    DynamicToolkit.make(
+      remoteToolkit.pipe(
+        Effect.provide(
+          remoteToolkit.toLayer({
+            mcp__linear__search_issues: () => Effect.succeed('ok'),
+          }),
+        ),
+      ),
+    ),
+  ],
+});
+const _dynamicNameIsVisible: 'mcp__linear__search_issues' extends keyof Agent.Tools<
+  typeof dynamicAgent
+>
+  ? true
+  : false = true;
+
+const interactionTypeAssertions = () => {
+  const failFastQuestion = Tool.make('fail_fast_question', {
+    parameters: Schema.Struct({ question: Schema.String }),
+    success: Schema.Struct({ answer: Schema.String }),
+  });
+  // @ts-expect-error external interactions must return malformed model input
+  Interaction.answer(failFastQuestion);
+};
+void interactionTypeAssertions;
+
 // Meta-guards ensure `Exact` cannot pass vacuously on poisoned channels.
-const _rejectAny: Exact<any, HandledBase> = false;
+// `JSON.parse` is the one `any` the linter allows to be named.
+const _rejectAny: Exact<ReturnType<typeof JSON.parse>, HandledBase> = false;
 const _rejectNever: Exact<never, HandledBase> = false;
 const _rejectUnknown: Exact<unknown, HandledBase> = false;
 
@@ -520,9 +640,9 @@ describe('the narrowing assertions', () => {
     expect(_makeRun).toBe('yes');
     expect(_handledRun).toBe('yes');
     expect(_dischargedRun).toBe('no');
-    expect(
-      Object.keys(parent.toolkit.tools).sort((a, b) => a.localeCompare(b)),
-    ).toEqual(['own', 'task_child']);
+    expect(new Set(Object.keys(parent.toolkit.tools))).toEqual(
+      new Set(['own', 'task_child']),
+    );
     expect([
       _exactPlain,
       _exactHandled,
@@ -540,6 +660,11 @@ describe('the narrowing assertions', () => {
       _rejectAny,
       _rejectNever,
       _rejectUnknown,
+      _policyWidened,
+      _policyAdditive,
+      _policyUntaxed,
+      _recoveryWidened,
+      _dynamicNameIsVisible,
     ]).toBeDefined();
   });
 });

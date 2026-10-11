@@ -1,87 +1,53 @@
-import { LogStoreMemory } from '@sunfall/vesper-log/layer-memory';
 import { LogStore } from '@sunfall/vesper-log/log-store';
 import { LogOffset } from '@sunfall/vesper-log/offset';
-import type { ConversationRecord } from '@sunfall/vesper-log/record';
-import { LogVocabulary } from '@sunfall/vesper-log/vocabulary';
-import * as NodeCrypto from '@effect/platform-node/NodeCrypto';
-import * as NodeServices from '@effect/platform-node/NodeServices';
 import { describe, expect, it } from '@effect/vitest';
-import {
-  type Crypto,
-  Deferred,
-  Effect,
-  Fiber,
-  Layer,
-  Ref,
-  Stream,
-} from 'effect';
-import { AiError, LanguageModel, type Response, Toolkit } from 'effect/ai';
+import { Deferred, Effect, Fiber, Layer, Ref, Stream } from 'effect';
+import { AiError, LanguageModel, type Response } from 'effect/ai';
+import { TestClock } from 'effect/testing';
 
-import { Agent } from '../src/agent.js';
 import { Conversation } from '../src/conversation.js';
-import { protocolOf } from '../src/internal/protocol.js';
 import * as AgentLog from '../src/log.js';
-import { RunPolicy } from '../src/run-policy.js';
-import { RunPolicyRuntime } from '../src/run-policy-runtime.js';
-import { testBudget } from './budget-fixture.js';
+import {
+  callsLookup,
+  finish,
+  lookupAgent,
+  plainAgent,
+  provider,
+  readRecords,
+  run,
+  says,
+  tags,
+  testLogLayer,
+} from './durability-fixtures.js';
 
-const testLogLayer = Layer.mergeAll(
-  LogStoreMemory.layer.pipe(Layer.provide(NodeCrypto.layer)),
-  NodeServices.layer,
-);
+// Settlement is the durable half of "how did this end". `Exit` covers the
+// in-process half and does not outlive the process that held it: without a
+// record, a conversation whose pod died and one that is still thinking look
+// identical from outside, and it is that distinction resuming tool dispatch is
+// gated on. Every way a run can end is written down; the one way it cannot be
+// leaves the orphan shape (no `RunSettled`) that readers are told to look for.
 
-// Settlement: the durable half of "how did this end".
-//
-// `Exit` covers the in-process half and does not outlive the process that
-// held it. Without a record, a conversation whose pod died and one that is
-// still thinking look identical from the outside — records simply stop
-// arriving — and it is that distinction the resuming tool dispatch is gated
-// on.
-//
-// What these have to prove: every way a run can end is written down, and the
-// one way it cannot be written down leaves the orphan shape a reader is told
-// to look for.
+const ID = 'settling';
+const settlements = (records: Effect.Success<ReturnType<typeof readRecords>>) =>
+  records.flatMap(({ record }) =>
+    record._tag === 'RunSettled' ? [record] : [],
+  );
 
-const finish = () => ({
-  type: 'finish' as const,
-  reason: 'stop' as const,
-  usage: {
-    inputTokens: { total: 5, uncached: 5, cacheRead: 0, cacheWrite: 0 },
-    outputTokens: { total: 2 },
-  },
-});
-
-const answer: Response.StreamPartEncoded[] = [
-  { type: 'text-start' as const, id: 'a' },
-  { type: 'text-delta' as const, id: 'a', delta: 'done' },
-  { type: 'text-end' as const, id: 'a' },
-  finish(),
-];
-
-const answering = Layer.effect(
-  LanguageModel.LanguageModel,
-  LanguageModel.make({
-    generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
-    streamText: () => Stream.fromIterable(answer),
-  }),
-);
-
-const failing = Layer.effect(
-  LanguageModel.LanguageModel,
-  LanguageModel.make({
-    generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
-    streamText: () =>
-      Stream.fail(
-        AiError.make({
-          module: 'test',
-          method: 'streamText',
-          reason: new AiError.InternalProviderError({
-            description: 'the provider fell over',
+const modelFailing = (description: string) =>
+  Layer.effect(
+    LanguageModel.LanguageModel,
+    LanguageModel.make({
+      generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
+      streamText: () =>
+        Stream.fail(
+          AiError.make({
+            module: 'test',
+            method: 'streamText',
+            reason: new AiError.InternalProviderError({ description }),
           }),
-        }),
-      ),
-  }),
-);
+        ),
+    }),
+  );
 
 /** A model that announces it was reached and then never answers. */
 const blocking = (reached: Deferred.Deferred<void>) =>
@@ -91,76 +57,11 @@ const blocking = (reached: Deferred.Deferred<void>) =>
       generateText: () => Effect.succeed<Response.PartEncoded[]>([finish()]),
       streamText: () =>
         Stream.unwrap(
-          Effect.gen(function* () {
-            yield* Deferred.succeed(reached, undefined);
-            return yield* Effect.never;
-          }),
+          Deferred.succeed(reached, undefined).pipe(
+            Effect.andThen(Effect.never),
+          ),
         ),
     }),
-  );
-
-const stallsSettlement = (interrupted: Ref.Ref<boolean>) =>
-  Layer.effect(
-    LogStore.Service,
-    Effect.map(LogStore.Service, (store) =>
-      LogStore.Service.of({
-        ...store,
-        append: (input) =>
-          input.records.some(({ record }) => record._tag === 'RunSettled')
-            ? Effect.never.pipe(
-                Effect.onInterrupt(() => Ref.set(interrupted, true)),
-              )
-            : store.append(input),
-      }),
-    ),
-  ).pipe(Layer.provide(testLogLayer));
-
-const CONVERSATION = LogVocabulary.ConversationId.make('settling-conversation');
-
-const agent = Agent.make({
-  name: 'test',
-  revision: '1',
-  instructions: 'be terse',
-  toolkit: Toolkit.make(),
-});
-
-const readAll = Effect.fn('test.readAll')(function* () {
-  const store = yield* LogStore.Service;
-  const page = yield* store
-    .read(AgentLog.pathFor(CONVERSATION), { limit: 1000 })
-    .pipe(Effect.orDie);
-  return page.records;
-});
-
-const settlement = (records: ReadonlyArray<ConversationRecord.Envelope>) =>
-  records.flatMap((envelope) =>
-    envelope.record._tag === 'RunSettled' ? [envelope.record] : [],
-  );
-
-const run = <A, E>(
-  effect: Effect.Effect<
-    A,
-    E,
-    LogStore.Service | LanguageModel.LanguageModel | Crypto.Crypto
-  >,
-  model: Layer.Layer<LanguageModel.LanguageModel> = answering,
-) =>
-  effect.pipe(Effect.orDie, Effect.provide(Layer.merge(model, testLogLayer)));
-
-const runInSession = <R>(
-  child: Agent.Child<string, R>,
-  session: AgentLog.Session,
-  input: string,
-) =>
-  Effect.flatMap(
-    RunPolicyRuntime.create(RunPolicy.defaultLimits),
-    (runtime) => {
-      const protocol = protocolOf<R, Agent.Error<typeof child>>(child);
-      if (protocol === undefined) {
-        throw new Error('child does not implement the agent protocol');
-      }
-      return protocol.run(runtime, session, input);
-    },
   );
 
 describe('how a run settles', () => {
@@ -168,36 +69,35 @@ describe('how a run settles', () => {
     Effect.gen(function* () {
       const written = yield* run(
         Effect.gen(function* () {
-          yield* Conversation.make(agent, CONVERSATION)
-            .run('hi')
-            .pipe(Effect.orDie);
-          return yield* readAll();
+          yield* Conversation.make(plainAgent, ID).run('hi');
+          return yield* readRecords(ID);
         }),
+        provider([says('done')]).layer,
       );
 
-      expect(settlement(written)).toEqual([
+      expect(settlements(written)).toEqual([
         {
           _tag: 'RunSettled',
           outcome: 'success',
           detail: '',
           steps: 1,
-          usage: { input: 5, output: 2 },
+          usage: { input: 10, output: 4 },
           resume: {
             formatVersion: 1,
             agent: 'test',
-            agentRevision: LogVocabulary.AgentRevision.make('1'),
-            usage: { input: 5, output: 2 },
+            agentRevision: '1',
+            usage: { input: 10, output: 4 },
             signalCursor: LogOffset.START,
             completed: {
               outcome: 'success',
               text: 'done',
               steps: 1,
-              usage: { input: 5, output: 2 },
+              usage: { input: 10, output: 4 },
               response: {
                 content: [{ role: 'assistant', content: 'done', options: {} }],
               },
             },
-            latestTurnUsage: { input: 5, output: 2 },
+            latestTurnUsage: { input: 10, output: 4 },
           },
         },
       ]);
@@ -208,24 +108,23 @@ describe('how a run settles', () => {
 
   it.effect('records a failed run, and does not swallow the failure', () =>
     Effect.gen(function* () {
-      const observed = yield* Effect.gen(function* () {
-        const outcome = yield* Conversation.make(agent, CONVERSATION)
-          .run('hi')
-          .pipe(Effect.result);
-        return { outcome, written: yield* readAll() };
-      }).pipe(
-        Effect.orDie,
-        Effect.provide(failing),
-        Effect.provide(testLogLayer),
+      const observed = yield* run(
+        Effect.gen(function* () {
+          const outcome = yield* Conversation.make(plainAgent, ID)
+            .run('hi')
+            .pipe(Effect.result);
+          return { outcome, written: yield* readRecords(ID) };
+        }),
+        modelFailing('the provider fell over'),
       );
 
       expect(observed.outcome._tag).toBe('Failure');
-      expect(settlement(observed.written)).toMatchObject([
+      expect(settlements(observed.written)).toMatchObject([
         { outcome: 'failure' },
       ]);
       // The cause is rendered into the record rather than reduced to a flag,
       // because "it failed" is not something anyone can act on later.
-      expect(settlement(observed.written)[0]?.detail).toContain(
+      expect(settlements(observed.written)[0]?.detail).toContain(
         'the provider fell over',
       );
     }),
@@ -233,27 +132,23 @@ describe('how a run settles', () => {
 
   it.effect('records an interrupted run as interrupted', () =>
     Effect.gen(function* () {
-      const written = yield* Effect.gen(function* () {
-        const reached = yield* Deferred.make<void>();
+      const reached = yield* Deferred.make<void>();
+      const written = yield* run(
+        Effect.gen(function* () {
+          const running = yield* Conversation.make(plainAgent, ID)
+            .run('hi')
+            .pipe(Effect.forkChild);
+          // Waiting on the model rather than sleeping: by the time it reports
+          // being reached `RunStarted` is written, so the interruption lands
+          // on a run that has genuinely begun.
+          yield* Deferred.await(reached);
+          yield* Fiber.interrupt(running);
+          return yield* readRecords(ID);
+        }),
+        blocking(reached),
+      );
 
-        const running = yield* Conversation.make(agent, CONVERSATION)
-          .run('hi')
-          .pipe(
-            Effect.orDie,
-            Effect.provide(blocking(reached)),
-            Effect.forkChild,
-          );
-
-        // Waiting on the model rather than sleeping: by the time it reports
-        // being reached the session is open and `RunStarted` is written, so
-        // the interruption lands on a run that has genuinely begun.
-        yield* Deferred.await(reached);
-        yield* Fiber.interrupt(running);
-
-        return yield* readAll();
-      }).pipe(Effect.orDie, Effect.provide(testLogLayer));
-
-      expect(settlement(written)).toMatchObject([{ outcome: 'interrupted' }]);
+      expect(settlements(written)).toMatchObject([{ outcome: 'interrupted' }]);
     }),
   );
 
@@ -263,17 +158,17 @@ describe('how a run settles', () => {
       Effect.gen(function* () {
         const written = yield* run(
           Effect.gen(function* () {
-            // A consumer that takes what it wants and walks away. The run did not
-            // finish, and saying "success" here would claim a result nobody got.
-            yield* Conversation.make(agent, CONVERSATION)
+            // A consumer that takes what it wants and walks away. The run did
+            // not finish, and saying "success" would claim a result nobody got.
+            yield* Conversation.make(plainAgent, ID)
               .stream('hi')
-              .pipe(Stream.take(2), Stream.runDrain, Effect.orDie);
-
-            return yield* readAll();
+              .pipe(Stream.take(2), Stream.runDrain);
+            return yield* readRecords(ID);
           }),
+          provider([says('done')]).layer,
         );
 
-        expect(settlement(written)).toMatchObject([
+        expect(settlements(written)).toMatchObject([
           {
             outcome: 'interrupted',
             detail: expect.stringContaining('abandoned'),
@@ -282,94 +177,165 @@ describe('how a run settles', () => {
       }),
   );
 
-  it.live(
-    'bounds a stalled settlement append and leaves an orphan',
-    () =>
-      Effect.gen(function* () {
-        const interrupted = yield* Ref.make(false);
-        const observed = yield* Effect.gen(function* () {
-          const session = yield* AgentLog.open(CONVERSATION, {
-            compatibility: {
-              agent: 'test',
-              revision: LogVocabulary.AgentRevision.make('1'),
-            },
-          });
-          const stalled: AgentLog.Session = {
-            ...session,
-            settlementTimeoutMillis: 10,
-          };
+  // A store that stalls the settlement append must not hold the caller
+  // hostage: the append is abandoned after a bound and the run is left
+  // orphaned, which is exactly the shape a crash leaves.
+  it.effect('bounds a stalled settlement append and leaves an orphan', () =>
+    Effect.gen(function* () {
+      const interrupted = yield* Ref.make(false);
+      const stalled = yield* Deferred.make<void>();
+      const stalls = Layer.effect(
+        LogStore.Service,
+        Effect.map(LogStore.Service, (store) =>
+          LogStore.Service.of({
+            ...store,
+            append: (input) =>
+              input.records.some(({ record }) => record._tag === 'RunSettled')
+                ? Deferred.succeed(stalled, undefined).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.onInterrupt(() => Ref.set(interrupted, true)),
+                  )
+                : store.append(input),
+          }),
+        ),
+      ).pipe(Layer.provide(testLogLayer));
 
-          const result = yield* runInSession(agent, stalled, 'hi').pipe(
-            Effect.timeout(1_000),
-            Effect.orDie,
-          );
-          return {
-            result,
-            written: yield* session.recorded,
-            interrupted: yield* Ref.get(interrupted),
-          };
-        }).pipe(
-          Effect.provide(answering),
-          Effect.provide(stallsSettlement(interrupted)),
-          Effect.provide(NodeCrypto.layer),
-        );
+      const result = yield* Effect.gen(function* () {
+        const running = yield* Conversation.make(plainAgent, ID)
+          .run('hi')
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(stalled);
+        yield* TestClock.adjust(AgentLog.SETTLEMENT_TIMEOUT_MILLIS);
+        return yield* Fiber.join(running);
+      }).pipe(
+        Effect.provide(Layer.merge(provider([says('done')]).layer, stalls)),
+      );
 
-        expect(observed.result.text).toBe('done');
-        expect(observed.interrupted).toBe(true);
-        expect(settlement(observed.written)).toEqual([]);
-        expect(observed.written.map(({ record }) => record._tag)).toContain(
-          'Completed',
-        );
-      }),
-    10_000,
+      expect(result.text).toBe('done');
+      expect(yield* Ref.get(interrupted)).toBe(true);
+    }).pipe(Effect.provide(testLogLayer)),
   );
 });
 
-describe('orphans', () => {
-  it.effect('are a RunStarted with nothing after it', () =>
-    Effect.gen(function* () {
-      const written = yield* run(
-        Effect.gen(function* () {
-          const store = yield* LogStore.Service;
-          const path = AgentLog.pathFor(CONVERSATION);
-          yield* store.create(path, CONVERSATION).pipe(Effect.orDie);
-          const claim = yield* store
-            .acquire(path, LogVocabulary.ProducerId.make('dead-run'))
-            .pipe(Effect.orDie);
-          yield* store
-            .append({
-              path,
-              producerId: claim.producerId,
-              epoch: claim.epoch,
-              sequence: claim.nextSequence,
-              records: [
-                {
-                  conversationId: CONVERSATION,
-                  timestamp: 1_700_000_000_000,
-                  record: {
-                    _tag: 'RunStarted',
-                    budget: testBudget,
-                    agent: 'test',
-                    formatVersion: 1,
-                    agentRevision: LogVocabulary.AgentRevision.make('1'),
-                    prompt: [],
-                  },
-                },
-              ],
-            })
-            .pipe(Effect.orDie);
+const truncated = (reason: Response.FinishReason) => [
+  ...says('the answer was cut').slice(0, -1),
+  finish(reason),
+];
 
-          return yield* readAll();
-        }),
+// A turn the provider cut off at its output cap is not an answer. The raw
+// finish part stays visible to a streaming observer, but the turn must not
+// cross the loop's completion interface as a success, and no `Completed`
+// record may claim the fragment is complete.
+describe('a turn the provider truncated', () => {
+  it.effect('is visible in the live event stream, on the raw finish part', () =>
+    Effect.gen(function* () {
+      const reasons = yield* run(
+        plainAgent.stream('hi').pipe(
+          // The stream then fails on the incomplete finish; stop at the part.
+          Stream.takeUntil(
+            (event) => event._tag === 'Part' && event.part.type === 'finish',
+          ),
+          Stream.flatMap((event) =>
+            event._tag === 'Part' && event.part.type === 'finish'
+              ? Stream.make(event.part.reason)
+              : Stream.empty,
+          ),
+          Stream.runCollect,
+        ),
+        provider([truncated('length')]).layer,
       );
 
-      // Stated as a test because it is the shape every reader of this log is
-      // told to look for, and because it is what a settle-time write failure
-      // leaves behind — the absence is the signal, so it has to be legible.
-      expect(written.map((envelope) => envelope.record._tag)).toEqual([
-        'RunStarted',
-      ]);
-      expect(settlement(written)).toEqual([]);
+      expect(Array.from(reasons)).toEqual(['length']);
+    }),
+  );
+
+  it.effect.each([
+    ['length', 'generation reached its output token limit'],
+    ['content-filter', 'generation was stopped by the provider content filter'],
+    ['error', 'the provider reported a generation error'],
+  ] as const)(
+    'fails instead of returning a partial %s answer',
+    ([reason, why]) =>
+      Effect.gen(function* () {
+        const error = yield* plainAgent
+          .run('hi')
+          .pipe(
+            Effect.provide(provider([truncated(reason)]).layer),
+            Effect.flip,
+          );
+
+        expect(AiError.isAiError(error)).toBe(true);
+        expect(error).toMatchObject({
+          reason: {
+            _tag: 'InvalidOutputError',
+            description: `Model output was incomplete because ${why}`,
+            metadata: { finishReason: reason },
+          },
+        });
+      }),
+  );
+
+  it.effect(
+    'settles as failed, without claiming the fragment is complete',
+    () =>
+      Effect.gen(function* () {
+        const observe = (reason: Response.FinishReason) =>
+          run(
+            Effect.gen(function* () {
+              const exit = yield* Conversation.make(plainAgent, ID)
+                .run('hi')
+                .pipe(Effect.exit);
+              return { exit, written: yield* readRecords(ID) };
+            }),
+            provider([reason === 'stop' ? says('done') : truncated(reason)])
+              .layer,
+          );
+        const cut = yield* observe('length');
+        const whole = yield* observe('stop');
+
+        expect(cut.exit._tag).toBe('Failure');
+        expect(tags(cut.written)).toEqual([
+          'RunStarted',
+          'Text',
+          'TurnFinished',
+          'RunSettled',
+        ]);
+        expect(settlements(cut.written)).toMatchObject([
+          { outcome: 'failure' },
+        ]);
+        expect(whole.exit._tag).toBe('Success');
+        expect(tags(whole.written)).toContain('Completed');
+      }),
+  );
+
+  // The agent runs a turn's calls only after the response that made them has
+  // finished, and a response the provider cut off is not resolved. So nothing
+  // about the call is left to guess at: its handler never ran, and a
+  // synthesized `execution-interrupted` answer never becomes a durable outcome
+  // for a call that might have been entered.
+  it.effect('never starts a call from a truncated response', () =>
+    Effect.gen(function* () {
+      const { agent, ran } = lookupAgent();
+      const cut = [...callsLookup().slice(0, -1), finish('length')];
+      const observed = yield* run(
+        Effect.gen(function* () {
+          const exit = yield* Conversation.make(agent, ID)
+            .run('look it up')
+            .pipe(Effect.exit);
+          return { exit, written: yield* readRecords(ID) };
+        }),
+        provider([cut]).layer,
+      );
+
+      expect(observed.exit._tag).toBe('Failure');
+      expect(ran.count).toBe(0);
+      expect(tags(observed.written)).toContain('ToolCall');
+      expect(tags(observed.written)).not.toContain('ToolStarted');
+      expect(tags(observed.written)).not.toContain('ToolOutcome');
+      expect(observed.written.at(-1)?.record).toMatchObject({
+        _tag: 'RunSettled',
+        outcome: 'failure',
+      });
     }),
   );
 });

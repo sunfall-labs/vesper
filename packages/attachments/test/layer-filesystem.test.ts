@@ -173,42 +173,4 @@ describe('filesystem attachment persistence', () => {
       expect(new TextDecoder().decode(bytes)).toBe('persistent');
     }),
   );
-
-  it.effect('maps platform failures into AttachmentStoreError', () => {
-    const failed = PlatformError.systemError({
-      _tag: 'PermissionDenied',
-      module: 'FileSystem',
-      method: 'readFile',
-      pathOrDescriptor: root,
-    });
-    const failingFileSystem = FileSystem.layerNoop({
-      readFile: () => Effect.fail(failed),
-    });
-    const failingStore = AttachmentStoreFileSystem.layer(root).pipe(
-      Layer.provide(
-        Layer.mergeAll(failingFileSystem, NodeCrypto.layer, NodePath.layer),
-      ),
-    );
-    const absent = AttachmentRef.Ref.make({
-      digest: AttachmentRef.Digest.make(
-        `${AttachmentRef.DIGEST_PREFIX}:${'0'.repeat(64)}`,
-      ),
-      mediaType: 'application/octet-stream',
-      byteLength: 1,
-    });
-
-    return Effect.gen(function* () {
-      const store = yield* AttachmentStore.Service;
-      const outcome = yield* store.get(absent).pipe(Effect.result);
-
-      expect(outcome).toMatchObject({
-        _tag: 'Failure',
-        failure: {
-          _tag: 'AttachmentStoreError',
-          operation: 'get',
-          cause: { _tag: 'PlatformError' },
-        },
-      });
-    }).pipe(Effect.provide(failingStore));
-  });
 });

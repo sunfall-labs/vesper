@@ -108,111 +108,72 @@ const _policyRequirements: Exact<
 > = true;
 
 describe('Conversation', () => {
-  it.effect('keeps storage failures typed while opening a run', () =>
-    Effect.gen(function* () {
-      const failing = failingStore(() => ({
-        meta: (path) => Effect.fail(storageFailure('meta', path)),
-      }));
-      const error = yield* Conversation.make(agent, 'storage-failure')
-        .run('hello')
-        .pipe(
-          Effect.provide(Layer.mergeAll(model, failing, NodeCrypto.layer)),
-          Effect.flip,
-        );
-      expect(error).toMatchObject({ reason: 'storage' });
-    }),
-  );
-
   it.effect(
-    'reports failed durable appends without turning them into defects',
+    'keeps storage failures typed across open, continue, read, signal',
     () =>
       Effect.gen(function* () {
-        const failing = failingStore(() => ({
-          append: ({ path }) => Effect.fail(storageFailure('append', path)),
+        const failMeta = failingStore(() => ({
+          meta: (path) => Effect.fail(storageFailure('meta', path)),
         }));
-        const result = yield* Conversation.make(agent, 'append-failure')
-          .run('hello')
-          .pipe(
-            Effect.provide(Layer.mergeAll(model, failing, NodeCrypto.layer)),
-            Effect.result,
+        const failRead = failingStore(() => ({
+          read: (path) => Effect.fail(storageFailure('read', path)),
+        }));
+        const failCreate = failingStore(() => ({
+          create: (path) => Effect.fail(storageFailure('create', path)),
+        }));
+        const conversation = Conversation.make(agent, 'storage-failure');
+        const withStore = <A, E, R>(
+          operation: Effect.Effect<A, E, R>,
+          store: Layer.Layer<LogStore.Service>,
+        ) =>
+          operation.pipe(
+            Effect.provide(Layer.mergeAll(model, store, NodeCrypto.layer)),
+            Effect.flip,
           );
-
-        expect(result._tag).toBe('Failure');
-        if (result._tag === 'Failure') {
-          expect(result.failure).toMatchObject({
-            _tag: 'DurabilityError',
-            source: 'log',
-            operation: 'append',
-            reason: 'storage',
-          });
+        const cases = [
+          withStore(conversation.run('hello'), failMeta),
+          withStore(
+            conversation.branchFrom(LogOffset.START, 'branch'),
+            failMeta,
+          ),
+          withStore(
+            conversation.forkFrom(LogOffset.START, 'fork-failure', 'fork'),
+            failRead,
+          ),
+          withStore(conversation.records().pipe(Stream.runDrain), failRead),
+          withStore(conversation.follow().pipe(Stream.runDrain), failRead),
+          withStore(
+            conversation.send({ kind: 'cancel', text: 'stop', source: 'test' }),
+            failCreate,
+          ),
+        ];
+        for (const error of yield* Effect.all(cases)) {
+          expect(error).toMatchObject({ reason: 'storage' });
         }
       }),
   );
 
-  it.effect('keeps continuation storage failures typed', () =>
-    Effect.gen(function* () {
-      const failingOpen = failingStore(() => ({
-        meta: (path) => Effect.fail(storageFailure('meta', path)),
-      }));
-      const failingFork = failingStore(() => ({
-        read: (path) => Effect.fail(storageFailure('read', path)),
-      }));
-      const conversation = Conversation.make(agent, 'continue-failure');
-      const cases = [
-        { operation: conversation.run('resume'), store: failingOpen },
-        {
-          operation: conversation.branchFrom(LogOffset.START, 'branch'),
-          store: failingOpen,
-        },
-        {
-          operation: conversation.forkFrom(
-            LogOffset.START,
-            'fork-failure',
-            'fork',
-          ),
-          store: failingFork,
-        },
-      ];
-
-      for (const { operation, store } of cases) {
-        const error = yield* operation.pipe(
-          Effect.provide(Layer.mergeAll(model, store, NodeCrypto.layer)),
-          Effect.flip,
-        );
-        expect(error).toMatchObject({ reason: 'storage' });
-      }
-    }),
-  );
-
-  it.effect('keeps snapshot and follow read failures typed', () =>
+  it.effect('reports failed durable appends as typed DurabilityError', () =>
     Effect.gen(function* () {
       const failing = failingStore(() => ({
-        read: (path) => Effect.fail(storageFailure('read', path)),
+        append: ({ path }) => Effect.fail(storageFailure('append', path)),
       }));
-      const conversation = Conversation.make(agent, 'read-failure');
-      const snapshotError = yield* conversation
-        .records()
-        .pipe(Stream.runDrain, Effect.provide(failing), Effect.flip);
-      const followError = yield* conversation
-        .follow()
-        .pipe(Stream.runDrain, Effect.provide(failing), Effect.flip);
-      expect(snapshotError).toMatchObject({ reason: 'storage' });
-      expect(followError).toMatchObject({ reason: 'storage' });
-    }),
-  );
-
-  it.effect('keeps signal write failures typed', () =>
-    Effect.gen(function* () {
-      const failing = failingStore(() => ({
-        create: (path) => Effect.fail(storageFailure('create', path)),
-      }));
-      const error = yield* Conversation.make(agent, 'signal-failure')
-        .send({ kind: 'cancel', text: 'stop', source: 'test' })
+      const result = yield* Conversation.make(agent, 'append-failure')
+        .run('hello')
         .pipe(
-          Effect.provide(Layer.mergeAll(failing, NodeCrypto.layer)),
-          Effect.flip,
+          Effect.provide(Layer.mergeAll(model, failing, NodeCrypto.layer)),
+          Effect.result,
         );
-      expect(error).toMatchObject({ reason: 'storage' });
+
+      expect(result._tag).toBe('Failure');
+      if (result._tag === 'Failure') {
+        expect(result.failure).toMatchObject({
+          _tag: 'DurabilityError',
+          source: 'log',
+          operation: 'append',
+          reason: 'storage',
+        });
+      }
     }),
   );
 
